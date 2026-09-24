@@ -92,6 +92,18 @@ impl TileBuffer {
 		bytemuck_cast_u16(&self.bytes)
 	}
 
+	/// Mutable 16-bit view of an `Rgba16`/`Gray16` buffer. Panics for 8-bit
+	/// formats. (Added for mip generation, M1-T05.)
+	pub fn as_u16_mut(&mut self) -> &mut [u16] {
+		assert_eq!(self.format.bytes_per_channel(), 2, "as_u16_mut on an 8-bit tile");
+		let bytes = &mut self.bytes;
+		assert!(bytes.as_ptr().align_offset(std::mem::align_of::<u16>()) == 0, "tile buffer not 2-aligned");
+		// SAFETY: alignment checked above, length is even for 16-bit formats,
+		// u16 has no invalid bit patterns, and the exclusive borrow of `self`
+		// makes this the only view of the bytes while it lives.
+		unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<u16>(), bytes.len() / 2) }
+	}
+
 	/// If every pixel has the same value, return it. Used to collapse tiles
 	/// into [`crate::TileSlot::Empty`] / [`crate::TileSlot::Solid`] before
 	/// inserting them. Must be fast: it runs on every tile an operation writes.
