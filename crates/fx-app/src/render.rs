@@ -5,9 +5,11 @@
 //! `WgpuExecutor` and its Vello overlay stage removed (`docs/GRAPHITE.md` §2
 //! says drop both; overlays become part of the engine's viewport texture).
 //!
-//! Until M0-T04 there is no viewport texture: the pass samples a 1 × 1
-//! transparent one, so the shader's "outside the viewport" branch fills the
-//! workspace with the background colour while the UI composites on top.
+//! The viewport texture is drawn inside the rectangle the UI reports with
+//! `viewport_bounds` (the transparent hole in the page); outside it, and
+//! wherever the viewport texture is transparent, the background colour shows.
+//! Until the engine renders the document (M0-T06) the viewport texture is a
+//! flat test fill ([`viewport_test_pixels`]).
 
 use anyhow::Result;
 
@@ -32,6 +34,34 @@ struct Immediates {
 /// The colour of everything the UI does not paint. `#282828`.
 const BACKGROUND: [f32; 4] = [0x28 as f32 / 0xff as f32, 0x28 as f32 / 0xff as f32, 0x28 as f32 / 0xff as f32, 1.0];
 
+/// Test fill of the viewport until M0-T06: `#3a3a3a`, opaque.
+const VIEWPORT_FILL: [u8; 4] = [0x3a, 0x3a, 0x3a, 0xff];
+/// 1 px frame around the test fill, so misplacement by a single pixel shows.
+const VIEWPORT_BORDER: [u8; 4] = [0xff, 0x00, 0x00, 0xff];
+
+/// The viewport rectangle in physical window pixels, as reported by the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ViewportBounds {
+	pub(crate) x: u32,
+	pub(crate) y: u32,
+	pub(crate) width: u32,
+	pub(crate) height: u32,
+}
+
+impl ViewportBounds {
+	/// Round the UI's floating-point rectangle to whole physical pixels.
+	/// Negative or non-finite values are clamped to zero.
+	pub(crate) fn from_physical(x: f64, y: f64, width: f64, height: f64) -> Self {
+		let px = |v: f64| if v.is_finite() && v > 0.0 { v.round() as u32 } else { 0 };
+		Self {
+			x: px(x),
+			y: px(y),
+			width: px(width),
+			height: px(height),
+		}
+	}
+}
+
 /// Surface, composite pipeline and the textures it samples.
 pub(crate) struct RenderState {
 	surface: wgpu_sync::Surface,
@@ -39,11 +69,15 @@ pub(crate) struct RenderState {
 	queue: wgpu_sync::Queue,
 	config: wgpu::SurfaceConfiguration,
 	pipeline: wgpu::RenderPipeline,
-	/// Stand-in for the viewport and overlay textures until M0-T04 binds real ones.
+	/// Bound in place of a texture that does not exist yet (overlays; the
+	/// viewport before the UI reports its rectangle).
 	transparent: wgpu::Texture,
 	sampler: wgpu::Sampler,
 	desired_width: u32,
 	desired_height: u32,
+	/// Where the viewport hole is; `None` until the UI reports it.
+	viewport_bounds: Option<ViewportBounds>,
+	viewport_texture: Option<wgpu::Texture>,
 	ui_texture: Option<wgpu::Texture>,
 	bind_group: Option<wgpu::BindGroup>,
 	outdated: bool,
@@ -171,6 +205,8 @@ impl RenderState {
 			sampler,
 			desired_width: size.width,
 			desired_height: size.height,
+			viewport_bounds: None,
+			viewport_texture: None,
 			ui_texture: None,
 			bind_group: None,
 			outdated: true,
@@ -188,6 +224,56 @@ impl RenderState {
 		self.desired_width = width;
 		self.desired_height = height;
 		self.outdated = true;
+	}
+
+	/// Move the viewport to `bounds` (physical window pixels). The test
+	/// texture is rebuilt when the size changes; a pure move only changes the
+	/// composite's offset.
+	pub(crate) fn set_viewport_bounds(&mut self, bounds: ViewportBounds) {
+		if self.viewport_bounds == Some(bounds) {
+			return;
+		}
+		let resized = self.viewport_bounds.is_none_or(|old| old.width != bounds.width || old.height != bounds.height);
+		self.viewport_bounds = Some(bounds);
+		self.outdated = true;
+		if resized {
+			self.viewport_texture = (bounds.width > 0 && bounds.height > 0).then(|| self.create_viewport_test_texture(bounds.width, bounds.height));
+			self.update_bind_group();
+		}
+	}
+
+	/// A `width × height` viewport texture holding the test fill.
+	///
+	/// `Rgba8Unorm`, not sRGB: the composite shader treats the viewport's
+	/// values as sRGB-encoded itself, the same contract M0-T06's engine
+	/// texture follows.
+	fn create_viewport_test_texture(&self, width: u32, height: u32) -> wgpu::Texture {
+		let size = wgpu::Extent3d {
+			width,
+			height,
+			depth_or_array_layers: 1,
+		};
+		let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("viewport_test"),
+			size,
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: wgpu::TextureFormat::Rgba8Unorm,
+			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		self.queue.write_texture(
+			texture.as_image_copy(),
+			&viewport_test_pixels(width, height),
+			wgpu::TexelCopyBufferLayout {
+				offset: 0,
+				bytes_per_row: Some(width * 4),
+				rows_per_image: Some(height),
+			},
+			size,
+		);
+		texture
 	}
 
 	/// Composite the newest UI frame.
@@ -261,14 +347,13 @@ impl RenderState {
 				multiview_mask: None,
 			});
 
+			let (viewport_offset, viewport_scale) = self.viewport_transform();
 			pass.set_pipeline(&self.pipeline);
 			pass.set_immediates(
 				0,
 				bytemuck::bytes_of(&Immediates {
-					// The viewport covers the whole window until M0-T04 reports
-					// its real rectangle and M0-T06 fills it with the document.
-					viewport_scale: [1.0, 1.0],
-					viewport_offset: [0.0, 0.0],
+					viewport_scale,
+					viewport_offset,
 					ui_scale: ui_scale.unwrap_or([1.0, 1.0]),
 					_pad: [0.0, 0.0],
 					background_color: BACKGROUND,
@@ -297,12 +382,33 @@ impl RenderState {
 		Ok(())
 	}
 
+	/// The shader's viewport mapping, `(offset, scale)`: window texture
+	/// coordinates `t` map to viewport coordinates `(t - offset) * scale`.
+	/// Computed from the *current* window size, so a window resize that
+	/// arrives before the UI's next `viewport_bounds` keeps the hole in place.
+	/// Without bounds the viewport spans the window (and is transparent).
+	fn viewport_transform(&self) -> ([f32; 2], [f32; 2]) {
+		match self.viewport_bounds {
+			Some(bounds) if bounds.width > 0 && bounds.height > 0 && self.desired_width > 0 && self.desired_height > 0 => {
+				let (window_w, window_h) = (self.desired_width as f32, self.desired_height as f32);
+				(
+					[bounds.x as f32 / window_w, bounds.y as f32 / window_h],
+					[window_w / bounds.width as f32, window_h / bounds.height as f32],
+				)
+			}
+			_ => ([0.0, 0.0], [1.0, 1.0]),
+		}
+	}
+
 	/// Rebuild the bind group from the current viewport, overlay and UI textures.
 	fn update_bind_group(&mut self) {
 		self.outdated = true;
-		// The viewport and overlay textures become real in M0-T04/T06; until then
-		// both slots read as fully transparent.
-		let viewport = self.transparent.create_view(&wgpu::TextureViewDescriptor::default());
+		let viewport = match &self.viewport_texture {
+			Some(texture) => texture.create_view(&wgpu::TextureViewDescriptor::default()),
+			None => self.transparent.create_view(&wgpu::TextureViewDescriptor::default()),
+		};
+		// Overlays are drawn into the engine's viewport texture (GRAPHITE.md §2),
+		// so this slot stays transparent.
 		let overlays = self.transparent.create_view(&wgpu::TextureViewDescriptor::default());
 		let ui = match &self.ui_texture {
 			Some(texture) => texture.create_view(&wgpu::TextureViewDescriptor::default()),
@@ -334,6 +440,20 @@ impl RenderState {
 	}
 }
 
+/// RGBA8 pixels of the viewport test fill: [`VIEWPORT_FILL`] framed by a
+/// 1 px [`VIEWPORT_BORDER`]. Viewport-sized, never document-sized.
+fn viewport_test_pixels(width: u32, height: u32) -> Vec<u8> {
+	let (w, h) = (width as usize, height as usize);
+	let mut pixels = Vec::with_capacity(w * h * 4);
+	for y in 0..h {
+		for x in 0..w {
+			let edge = x == 0 || y == 0 || x + 1 == w || y + 1 == h;
+			pixels.extend_from_slice(if edge { &VIEWPORT_BORDER } else { &VIEWPORT_FILL });
+		}
+	}
+	pixels
+}
+
 /// A filterable `texture_2d<f32>` bound to a fragment shader slot.
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 	wgpu::BindGroupLayoutEntry {
@@ -359,4 +479,44 @@ pub(crate) enum RenderError {
 	SurfaceOutdated,
 	SurfaceTimeout,
 	SurfaceValidation,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn bounds_round_to_whole_physical_pixels() {
+		// 125 % scaling: 44.2 CSS px × 1.25 = 55.25 physical px.
+		assert_eq!(
+			ViewportBounds::from_physical(55.25, 100.5, 1199.6, 0.4),
+			ViewportBounds {
+				x: 55,
+				y: 101,
+				width: 1200,
+				height: 0
+			}
+		);
+		let clamped = ViewportBounds::from_physical(-3.0, f64::NAN, f64::INFINITY, 10.0);
+		assert_eq!((clamped.x, clamped.y, clamped.width, clamped.height), (0, 0, 0, 10));
+	}
+
+	#[test]
+	fn test_fill_has_a_one_pixel_red_frame() {
+		let (w, h) = (5u32, 4u32);
+		let pixels = viewport_test_pixels(w, h);
+		assert_eq!(pixels.len(), (w * h * 4) as usize);
+		let at = |x: u32, y: u32| &pixels[((y * w + x) * 4) as usize..][..4];
+		for x in 0..w {
+			assert_eq!(at(x, 0), VIEWPORT_BORDER);
+			assert_eq!(at(x, h - 1), VIEWPORT_BORDER);
+		}
+		for y in 0..h {
+			assert_eq!(at(0, y), VIEWPORT_BORDER);
+			assert_eq!(at(w - 1, y), VIEWPORT_BORDER);
+		}
+		for (x, y) in [(1, 1), (3, 2), (2, 1)] {
+			assert_eq!(at(x, y), VIEWPORT_FILL);
+		}
+	}
 }

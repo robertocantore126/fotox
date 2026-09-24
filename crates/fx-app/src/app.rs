@@ -23,7 +23,9 @@ use crate::event::{AppEvent, AppEventScheduler};
 use crate::gpu::Gpu;
 use crate::input::InputState;
 use crate::preferences::Preferences;
-use crate::render::{RenderError, RenderState};
+use fx_protocol::UiToEngine;
+
+use crate::render::{RenderError, RenderState, ViewportBounds};
 use crate::ui::{UiCommand, UiInstance};
 use crate::window::Window;
 
@@ -177,6 +179,32 @@ impl App {
 		}
 	}
 
+	/// Handle one `fx-protocol` frame from the UI (docs/PROTOCOL.md). Messages
+	/// for the shell are handled here; the rest go to the engine once it
+	/// exists (M0-T05/T06).
+	fn ui_message(&mut self, frame: &[u8]) {
+		let message = match fx_protocol::decode::<UiToEngine>(frame) {
+			Ok((message, _payload)) => message,
+			Err(error) => {
+				tracing::warn!("dropping a malformed UI message ({} bytes): {error}", frame.len());
+				return;
+			}
+		};
+		match message {
+			UiToEngine::ViewportBounds { x, y, width, height } => {
+				let bounds = ViewportBounds::from_physical(x, y, width, height);
+				tracing::debug!("viewport bounds: {bounds:?}");
+				if let Some(render_state) = &mut self.render_state {
+					render_state.set_viewport_bounds(bounds);
+				}
+				if let Some(window) = &self.window {
+					window.request_redraw();
+				}
+			}
+			other => tracing::debug!("UI message not routed yet (M0-T05): {other:?}"),
+		}
+	}
+
 	/// Handle one event that arrived from another thread.
 	fn user_event(&mut self, event_loop: &dyn ActiveEventLoop, event: AppEvent) {
 		match event {
@@ -201,10 +229,7 @@ impl App {
 					window.set_cursor(event_loop, cursor);
 				}
 			}
-			AppEvent::UiMessage(message) => {
-				// The `fx-protocol` bridge that gives this meaning is M0-T05.
-				tracing::debug!("received a {}-byte UI message; not routed yet (M0-T05)", message.len());
-			}
+			AppEvent::UiMessage(frame) => self.ui_message(&frame),
 			AppEvent::UiCrashed => {
 				tracing::error!("the UI crashed, exiting");
 				self.exit(ExitReason::Shutdown);

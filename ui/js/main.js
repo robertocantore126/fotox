@@ -15,6 +15,7 @@ import { initWorkspace, zoomTo, fit, actual } from "./canvas.js";
 import { initTooltips, toast, status } from "./tooltip.js";
 import { runAction } from "./actions.js";
 import { initShortcuts } from "./shortcuts.js";
+import * as bridge from "./native/bridge.js";
 
 /* ----------------------------------------------------------------- logo */
 
@@ -176,6 +177,8 @@ function refreshSwatches() {
 /* ---------------------------------------------------------------- avvio */
 
 async function boot() {
+  // First, so `body.native` is set before any part of the chrome is built.
+  bridge.init();
   await loadSprite();
 
   const shell = buildShell();

@@ -2,10 +2,18 @@
 
 #app {
   display: grid;
-  grid-template-rows: var(--topbar-h) auto 1fr auto;
+  /* Every row is placed explicitly and sized by its content, so a bar hidden
+     by a screen mode collapses its own row instead of shifting the others
+     into the wrong tracks (full-screen mode used to squeeze the whole
+     workspace into the title bar's row). */
+  grid-template-rows: auto auto 1fr auto;
   height: 100vh;
   min-height: 0;
 }
+#app > .topbar { grid-row: 1; height: var(--topbar-h); }
+#app > .optionsbar { grid-row: 2; }
+#app > .middle { grid-row: 3; }
+#app > .statusbar { grid-row: 4; }
 
 /* ------------------------------------------------------------- barra titolo */
 
@@ -393,6 +401,18 @@ body.no-doctabs .doctabs { display: none; }
 .guide { position: absolute; display: block; }
 .guide.v { top: 0; bottom: 0; width: 1px; background: var(--guide); }
 .guide.h { left: 0; right: 0; height: 1px; background: var(--guide); }
+
+/* Native mode (inside the app): the document is drawn by the shell *under*
+   the page, so the workspace and every box around it are see-through. Each
+   chrome element (menu bar, options bar, tools, dock, status bar, doc tabs,
+   rulers) keeps its own opaque background. */
+body.native,
+body.native #app,
+body.native .middle,
+body.native .workspace,
+body.native .workspace-body,
+body.native .workspace-main { background: transparent; }
+body.native #viewport { flex: 1; min-width: 0; min-height: 0; }
 
 /* ----------------------------------------------------------- barra di stato */
 
