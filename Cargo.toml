@@ -80,6 +80,10 @@ rayon = "1.12"
 pollster = "1.0"
 futures = "0.3"
 clap = { version = "4.6", features = ["derive"] }
+# per-user data directory (%APPDATA%/Fotox) — decision D-021
+dirs = "6.0"
+# single-instance lock (std's File::try_lock is newer than our MSRV) — D-021
+fd-lock = "4.0"
 # native file dialogs (M1-T08)
 rfd = "0.17"
 # Windows exe icon/metadata (M0-T06, build-dependency of fx-app)
