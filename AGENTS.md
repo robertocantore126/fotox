@@ -64,7 +64,7 @@ it precisely, write solid code, and report honestly.
 ## 4. Checks (all must pass)
 
 ```bash
-cargo fmt -p fx-tiles -p fx-core -p fx-protocol -p fx-color -p fx-io -p fx-render -p fx-ops -p fx-engine -p fx-cli -p fx-app -- --check
+cargo fmt -p fx-tiles -p fx-core -p fx-protocol -p fx-color -p fx-io -p fx-render -p fx-ops -p fx-engine -p fx-cli -p fx-app -p xtask -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test                     # GPU tests skip themselves if no adapter exists
 cargo build -p fx-app          # when the task touches fx-app, vendor/ or ui/
@@ -105,5 +105,8 @@ Claude will answer or take the task over.
   app restart, not a rebuild.
 * Debug the UI inside the app: set `GRAPHITE_BROWSER_DEBUG_PORT=9222`, open
   `chrome://inspect` in Chrome.
-* Logs: `RUST_LOG=fx_engine=debug,fx_app=debug`; CEF logs: `GRAPHITE_BROWSER_LOG=info`.
+* Logs: `RUST_LOG=fx_engine=debug,fotox=debug` (the shell's binary crate is
+  `fotox`, not `fx_app`); CEF logs: `GRAPHITE_BROWSER_LOG=info`.
+* CMake must be on `PATH` for cargo (`C:\Program Files\CMake\bin`), or
+  `cef-dll-sys` fails to build.
 * Browser-only UI work: `cd ui && python tools/serve.py`.
