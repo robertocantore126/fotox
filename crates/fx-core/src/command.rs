@@ -495,10 +495,21 @@ fn delete_mask(doc: &mut Document, layer: &LayerRef, apply: bool, store: &TileSt
 	if !apply {
 		return Ok(delete_mask_effect(id, false));
 	}
-	let LayerKind::Pixel { image, .. } = &mut target.kind else {
+	let LayerKind::Pixel { image, offset } = &mut target.kind else {
 		target.mask = Some(mask);
 		return Err(CommandError::NotAllowed("only pixel layers can apply their mask".into()));
 	};
+	// The bake pairs layer tile (tx, ty) with mask tile (tx, ty), which is the
+	// renderer's alignment only while both grids share an origin: a *linked*
+	// mask is drawn at the layer's offset, an *unlinked* one at the document
+	// origin (`fx-render::program`). Under an offset those two differ, so
+	// refuse instead of baking the wrong pixels into the layer.
+	if !mask.linked && *offset != (0, 0) {
+		target.mask = Some(mask);
+		return Err(CommandError::NotAllowed(
+			"an unlinked mask on a layer with a non-zero offset cannot be applied yet".into(),
+		));
+	}
 	// `apply` bakes the mask's pixels, so a *disabled* mask is applied too:
 	// the flag governs live compositing, not the stored content.
 	match bake_mask(image, &mask.image, store) {
@@ -2191,6 +2202,60 @@ mod tests {
 		});
 		assert!(effect.pixels_changed.is_empty());
 		assert!(f.slot(a, 0, 0).is_empty());
+	}
+
+	#[test]
+	fn delete_mask_apply_refuses_an_unlinked_mask_under_an_offset_layer() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		f.paint(a, &[(0, 0, [500, 600, 700, 65535])]);
+		f.ok(Command::AddMask {
+			layer: LayerRef::Id(a),
+			fill: MaskFill::RevealAll,
+		});
+		f.fill_mask(a, (0, 0), 32768);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 7,
+			dy: -3,
+		});
+
+		// A *linked* mask moves with the layer, so its tiles stay paired with
+		// the layer's and the bake goes through.
+		f.ok(Command::DeleteMask {
+			layer: LayerRef::Id(a),
+			apply: true,
+		});
+		assert_eq!(f.read_pixel(a, 0, 0)[3], scale_alpha16(65535, 32768));
+
+		// An *unlinked* mask stays at the document origin: the two grids no
+		// longer line up, so the command refuses and changes nothing.
+		f.ok(Command::AddMask {
+			layer: LayerRef::Id(a),
+			fill: MaskFill::RevealAll,
+		});
+		f.fill_mask(a, (0, 0), 32768);
+		let mask = &mut f.doc.layer_mut(a).expect("layer exists").mask;
+		mask.as_mut().expect("layer has a mask").linked = false;
+		let error = f.fail(Command::DeleteMask {
+			layer: LayerRef::Id(a),
+			apply: true,
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+		assert!(f.layer(a).mask.is_some(), "the failed command put the mask back");
+		assert_eq!(f.read_pixel(a, 0, 0)[3], scale_alpha16(65535, 32768), "the mask was not baked a second time");
+
+		// With no offset the two alignments coincide, so an unlinked mask can go.
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: -7,
+			dy: 3,
+		});
+		f.ok(Command::DeleteMask {
+			layer: LayerRef::Id(a),
+			apply: true,
+		});
+		assert_eq!(f.read_pixel(a, 0, 0)[3], scale_alpha16(scale_alpha16(65535, 32768), 32768));
 	}
 
 	#[test]
