@@ -8,8 +8,9 @@
 //! The viewport texture is drawn inside the rectangle the UI reports with
 //! `viewport_bounds` (the transparent hole in the page); outside it, and
 //! wherever the viewport texture is transparent, the background colour shows.
-//! Until the engine renders the document (M0-T06) the viewport texture is a
-//! flat test fill ([`viewport_test_pixels`]).
+//! The viewport texture itself comes from the engine's render thread
+//! (`EngineOutput::ViewportFrame`); until the first one arrives the slot is
+//! transparent.
 
 use anyhow::Result;
 
@@ -33,11 +34,6 @@ struct Immediates {
 
 /// The colour of everything the UI does not paint. `#282828`.
 const BACKGROUND: [f32; 4] = [0x28 as f32 / 0xff as f32, 0x28 as f32 / 0xff as f32, 0x28 as f32 / 0xff as f32, 1.0];
-
-/// Test fill of the viewport until M0-T06: `#3a3a3a`, opaque.
-const VIEWPORT_FILL: [u8; 4] = [0x3a, 0x3a, 0x3a, 0xff];
-/// 1 px frame around the test fill, so misplacement by a single pixel shows.
-const VIEWPORT_BORDER: [u8; 4] = [0xff, 0x00, 0x00, 0xff];
 
 /// The viewport rectangle in physical window pixels, as reported by the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,54 +222,25 @@ impl RenderState {
 		self.outdated = true;
 	}
 
-	/// Move the viewport to `bounds` (physical window pixels). The test
-	/// texture is rebuilt when the size changes; a pure move only changes the
-	/// composite's offset.
+	/// Move the viewport to `bounds` (physical window pixels). Until the
+	/// engine renders at the new size, the previous texture is stretched over
+	/// the new rectangle.
 	pub(crate) fn set_viewport_bounds(&mut self, bounds: ViewportBounds) {
 		if self.viewport_bounds == Some(bounds) {
 			return;
 		}
-		let resized = self.viewport_bounds.is_none_or(|old| old.width != bounds.width || old.height != bounds.height);
 		self.viewport_bounds = Some(bounds);
 		self.outdated = true;
-		if resized {
-			self.viewport_texture = (bounds.width > 0 && bounds.height > 0).then(|| self.create_viewport_test_texture(bounds.width, bounds.height));
-			self.update_bind_group();
-		}
 	}
 
-	/// A `width × height` viewport texture holding the test fill.
-	///
-	/// `Rgba8Unorm`, not sRGB: the composite shader treats the viewport's
-	/// values as sRGB-encoded itself, the same contract M0-T06's engine
-	/// texture follows.
-	fn create_viewport_test_texture(&self, width: u32, height: u32) -> wgpu::Texture {
-		let size = wgpu::Extent3d {
-			width,
-			height,
-			depth_or_array_layers: 1,
-		};
-		let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-			label: Some("viewport_test"),
-			size,
-			mip_level_count: 1,
-			sample_count: 1,
-			dimension: wgpu::TextureDimension::D2,
-			format: wgpu::TextureFormat::Rgba8Unorm,
-			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-			view_formats: &[],
-		});
-		self.queue.write_texture(
-			texture.as_image_copy(),
-			&viewport_test_pixels(width, height),
-			wgpu::TexelCopyBufferLayout {
-				offset: 0,
-				bytes_per_row: Some(width * 4),
-				rows_per_image: Some(height),
-			},
-			size,
-		);
-		texture
+	/// Composite this engine frame in the viewport from now on.
+	pub(crate) fn bind_viewport_texture(&mut self, texture: wgpu::Texture) {
+		if self.viewport_texture.as_ref() == Some(&texture) {
+			self.outdated = true;
+			return;
+		}
+		self.viewport_texture = Some(texture);
+		self.update_bind_group();
 	}
 
 	/// Composite the newest UI frame.
@@ -440,20 +407,6 @@ impl RenderState {
 	}
 }
 
-/// RGBA8 pixels of the viewport test fill: [`VIEWPORT_FILL`] framed by a
-/// 1 px [`VIEWPORT_BORDER`]. Viewport-sized, never document-sized.
-fn viewport_test_pixels(width: u32, height: u32) -> Vec<u8> {
-	let (w, h) = (width as usize, height as usize);
-	let mut pixels = Vec::with_capacity(w * h * 4);
-	for y in 0..h {
-		for x in 0..w {
-			let edge = x == 0 || y == 0 || x + 1 == w || y + 1 == h;
-			pixels.extend_from_slice(if edge { &VIEWPORT_BORDER } else { &VIEWPORT_FILL });
-		}
-	}
-	pixels
-}
-
 /// A filterable `texture_2d<f32>` bound to a fragment shader slot.
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 	wgpu::BindGroupLayoutEntry {
@@ -499,24 +452,5 @@ mod tests {
 		);
 		let clamped = ViewportBounds::from_physical(-3.0, f64::NAN, f64::INFINITY, 10.0);
 		assert_eq!((clamped.x, clamped.y, clamped.width, clamped.height), (0, 0, 0, 10));
-	}
-
-	#[test]
-	fn test_fill_has_a_one_pixel_red_frame() {
-		let (w, h) = (5u32, 4u32);
-		let pixels = viewport_test_pixels(w, h);
-		assert_eq!(pixels.len(), (w * h * 4) as usize);
-		let at = |x: u32, y: u32| &pixels[((y * w + x) * 4) as usize..][..4];
-		for x in 0..w {
-			assert_eq!(at(x, 0), VIEWPORT_BORDER);
-			assert_eq!(at(x, h - 1), VIEWPORT_BORDER);
-		}
-		for y in 0..h {
-			assert_eq!(at(0, y), VIEWPORT_BORDER);
-			assert_eq!(at(w - 1, y), VIEWPORT_BORDER);
-		}
-		for (x, y) in [(1, 1), (3, 2), (2, 1)] {
-			assert_eq!(at(x, y), VIEWPORT_FILL);
-		}
 	}
 }

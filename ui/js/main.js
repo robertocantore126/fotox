@@ -11,7 +11,7 @@ import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
 import { renderOptionsBar } from "./optionsbar.js";
 import { renderDock, focusPanel, togglePanel } from "./panels.js";
 import { openDialog, isDialogOpen } from "./dialogs.js";
-import { initWorkspace, zoomTo, fit, actual } from "./canvas.js";
+import { initWorkspace, zoomTo } from "./canvas.js";
 import { initTooltips, toast, status } from "./tooltip.js";
 import { runAction } from "./actions.js";
 import { initShortcuts } from "./shortcuts.js";
@@ -153,9 +153,10 @@ function buildStatusbar(el) {
           anchor: e.currentTarget, value: "", width: 110,
           items: ["3200%", "1600%", "800%", "400%", "200%", "100%", "66.7%", "50%", "33.3%", "25%", "12.5%", "Fit on Screen", "Fill Screen", "Actual Pixels"],
           onPick: (v) => {
-            if (v === "Fit on Screen") return fit();
+            // Actions, not direct calls: in the app the engine owns the view.
+            if (v === "Fit on Screen") return runAction({ a: "zoom:fit", label: v });
             if (v === "Fill Screen") return zoomTo(200);
-            if (v === "Actual Pixels") return actual();
+            if (v === "Actual Pixels") return runAction({ a: "zoom:100", label: v });
             zoomTo(parseFloat(v));
           },
         }),

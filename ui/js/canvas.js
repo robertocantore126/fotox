@@ -4,7 +4,7 @@
 import { h, icon, clear } from "./el.js";
 import { state, setZoom, emit, on } from "./state.js";
 import * as bridge from "./native/bridge.js";
-import { UI } from "./native/protocol.js";
+import { UI, ENGINE } from "./native/protocol.js";
 
 let canvasEl = null;
 let scrollEl = null;
@@ -13,6 +13,10 @@ let rulerTop = null;
 let rulerLeft = null;
 let guidesLayer = null;
 let zoomMode = "fit"; // fit | custom
+// Native mode: the latest `view` message from the engine and the #viewport
+// element the rulers measure.
+let nativeView = null;
+let viewportEl = null;
 
 const RULER = 18;
 
@@ -46,9 +50,18 @@ export function initWorkspace(host) {
       h("div", { class: "ruler-col" }, rulerLeft),
       h("div", { class: "workspace-main" }, viewport, gridLayer));
     host.append(tabs, rulerRow, body);
+    viewportEl = viewport;
     on("flag", (key) => {
       if (key === "rulers") applyRulers();
       if (key === "grid" || key === "pixelgrid") applyGrid();
+    });
+    // The engine owns zoom and pan: rulers, tab label and status bar follow
+    // its `view` messages (docs/PROTOCOL.md §5).
+    bridge.on(ENGINE.VIEW, (view) => {
+      nativeView = view;
+      state.zoom = view.zoom * 100;
+      updateZoomLabels(state.zoom);
+      drawRulers();
     });
     requestAnimationFrame(() => { applyRulers(); applyGrid(); });
     reportViewportBounds(viewport);
@@ -122,6 +135,7 @@ function reportViewportBounds(viewport) {
     if (key === last) return;
     last = key;
     bridge.send({ type: UI.VIEWPORT_BOUNDS, ...bounds });
+    drawRulers();
   };
   const observer = new ResizeObserver(sendBounds);
   for (const el of [viewport, document.getElementById("app"), document.querySelector(".workspace"), document.querySelector(".middle")]) {
@@ -247,33 +261,41 @@ function applyZoom(z) {
   canvasEl.style.width = (state.doc.w * z / 100) + "px";
   canvasEl.style.height = (state.doc.h * z / 100) + "px";
   canvasEl.classList.toggle("smooth", z < 120);
-  const label = document.querySelector(".doctab-label");
-  if (label) label.textContent = `${state.doc.name} @ ${Math.round(z)}% (${state.doc.mode}/${state.doc.bits})`;
-  updateStatusZoom(z);
+  updateZoomLabels(z);
   applyGrid();
   drawRulers();
   positionGuides();
 }
 
+// In native mode the engine owns the view: the zoom:* action ids reach it
+// through actions.js, and explicit values go out as `set_zoom`.
 export function zoomTo(z) {
+  if (bridge.isNative) {
+    bridge.send({ type: UI.SET_ZOOM, doc: nativeView ? nativeView.doc : 0, zoom: z / 100 });
+    return;
+  }
   zoomMode = "custom";
   setZoom(z);
 }
 
 export function zoomIn() {
+  if (bridge.isNative) return;
   setZoom(state.zoom * 1.25);
 }
 
 export function zoomOut() {
+  if (bridge.isNative) return;
   setZoom(state.zoom / 1.25);
 }
 
 export function actual() {
+  if (bridge.isNative) return;
   setZoom(100);
   center();
 }
 
 export function fit() {
+  if (bridge.isNative) return;
   zoomMode = "fit";
   if (!scrollEl) return;
   const pad = 64;
@@ -333,12 +355,41 @@ function applyRulers() {
   if (on) requestAnimationFrame(drawRulers);
 }
 
-function drawRulers() {
-  if (!rulerTop || !rulerLeft || !state.flags.rulers || !scrollEl) return;
-  const dpr = window.devicePixelRatio || 1;
-  const w = scrollEl.clientWidth;
-  const hgt = scrollEl.clientHeight;
+// Per axis: CSS pixels per document pixel, and the document coordinate at
+// CSS position 0 of the ruler. Browser mode reads the DOM scroll position;
+// native mode maps the engine's view (zoom is in *physical* pixels per
+// document pixel, centred in the viewport).
+function rulerMapping() {
+  if (bridge.isNative) {
+    if (!nativeView || !viewportEl) return null;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = viewportEl.getBoundingClientRect();
+    const scale = nativeView.zoom / dpr;
+    return {
+      w: rect.width, h: rect.height, scale,
+      x0: nativeView.center_x - rect.width / 2 / scale,
+      y0: nativeView.center_y - rect.height / 2 / scale,
+    };
+  }
+  if (!scrollEl) return null;
   const scale = state.zoom / 100;
+  const docLeft = (scrollEl.scrollWidth - state.doc.w * scale) / 2;
+  const docTop = (scrollEl.scrollHeight - state.doc.h * scale) / 2;
+  return {
+    w: scrollEl.clientWidth, h: scrollEl.clientHeight, scale,
+    x0: (scrollEl.scrollLeft - docLeft) / scale,
+    y0: (scrollEl.scrollTop - docTop) / scale,
+  };
+}
+
+function drawRulers() {
+  if (!rulerTop || !rulerLeft || !state.flags.rulers) return;
+  const m = rulerMapping();
+  if (!m) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = m.w;
+  const hgt = m.h;
+  const scale = m.scale;
   for (const [cv, size, horizontal] of [[rulerTop, w, true], [rulerLeft, hgt, false]]) {
     cv.width = Math.max(1, Math.floor(size * dpr));
     cv.height = Math.floor(RULER * dpr);
@@ -349,19 +400,18 @@ function drawRulers() {
     ctx.fillStyle = "#33363d";
     ctx.fillRect(0, 0, horizontal ? size : RULER, horizontal ? RULER : size);
 
-    const offset = horizontal ? scrollEl.scrollLeft : scrollEl.scrollTop;
-    const docOffset = (horizontal ? (scrollEl.scrollWidth - state.doc.w * scale) / 2 : (scrollEl.scrollHeight - state.doc.h * scale) / 2);
-    // scala dei tick: 10, 50, 100, 500 px di documento
-    const steps = [1, 2, 5, 10, 25, 50, 100, 250, 500];
-    let step = steps.find((s) => s * scale >= 44) || 1000;
+    const docAt0 = horizontal ? m.x0 : m.y0;
+    // scala dei tick: la più piccola che lascia almeno 44 px tra le etichette
+    const steps = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 2500, 5000, 10000, 25000];
+    let step = steps.find((s) => s * scale >= 44) || 50000;
     ctx.font = '9px "Segoe UI", system-ui, sans-serif';
     ctx.fillStyle = "#9aa0ab";
     ctx.strokeStyle = "#5b616c";
     ctx.lineWidth = 1;
-    const from = Math.floor((offset - docOffset) / scale / step) * step - step * 2;
+    const from = Math.floor(docAt0 / step) * step - step * 2;
     const to = from + (size / scale) + step * 4;
     for (let doc = from; doc <= to; doc += step) {
-      const p = docOffset + doc * scale - offset;
+      const p = (doc - docAt0) * scale;
       if (p < -60 || p > size + 60) continue;
       ctx.beginPath();
       if (horizontal) { ctx.moveTo(Math.round(p) + 0.5, RULER - 5); ctx.lineTo(Math.round(p) + 0.5, RULER); }
@@ -413,5 +463,16 @@ function positionGuides() {
 
 function updateStatusZoom(z) {
   const el = document.getElementById("statuszoom");
-  if (el) el.querySelector(".pf-value").textContent = Math.round(z) + "%";
+  if (el) el.querySelector(".pf-value").textContent = formatZoom(z) + "%";
+}
+
+function updateZoomLabels(z) {
+  const label = document.querySelector(".doctab-label");
+  if (label) label.textContent = `${state.doc.name} @ ${formatZoom(z)}% (${state.doc.mode}/${state.doc.bits})`;
+  updateStatusZoom(z);
+}
+
+// Photoshop shows fractions below 10 % ("3.33%") and whole numbers above.
+function formatZoom(z) {
+  return z < 10 ? String(Math.round(z * 100) / 100) : String(Math.round(z));
 }

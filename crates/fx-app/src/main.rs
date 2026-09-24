@@ -157,7 +157,18 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 		return ExitCode::FAILURE;
 	}
 
-	let app = app::App::new(ui.clone(), gpu, app_event_receiver, app_event_scheduler, preferences);
+	let engine_scheduler = app_event_scheduler.clone();
+	let engine = match fx_engine::EngineHandle::spawn(gpu.device.clone(), gpu.queue.clone(), move |output| {
+		engine_scheduler.schedule(AppEvent::Engine(output))
+	}) {
+		Ok(engine) => engine,
+		Err(error) => {
+			tracing::error!("failed to start the engine threads: {error}");
+			return ExitCode::FAILURE;
+		}
+	};
+
+	let app = app::App::new(ui.clone(), engine, gpu, app_event_receiver, app_event_scheduler, preferences);
 	let exit_reason = app.run(event_loop);
 
 	// The UI has to be shut down before a restart, or the next process cannot
