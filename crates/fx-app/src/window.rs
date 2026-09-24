@@ -49,10 +49,11 @@ impl Window {
 			.with_resizable(true)
 			.with_visible(false)
 			.with_theme(Some(winit::window::Theme::Dark))
-			// The Fotox UI draws its own title bar: `ui/css/app.css` marks
-			// `.brand` with `app-region: drag`, so an OS title bar would be a
-			// second, redundant one.
-			.with_decorations(false);
+			// Native title bar and resize border (decision D-022). The Fotox UI
+			// has no window buttons, and in off-screen mode CEF ignores its
+			// `app-region: drag`, so a frameless window could not be moved,
+			// resized, minimised or maximised.
+			.with_decorations(true);
 
 		let winit_window = event_loop.create_window(attributes).context("failed to create the Fotox window")?;
 		Ok(Self {
