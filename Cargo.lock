@@ -840,6 +840,7 @@ dependencies = [
  "fx-engine",
  "fx-io",
  "fx-tiles",
+ "rayon",
  "tracing",
  "tracing-subscriber",
 ]
