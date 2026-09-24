@@ -7,6 +7,7 @@
 //! the engine behind it is M0-T06.
 
 mod app;
+mod bridge;
 mod cli;
 mod consts;
 mod dirs;

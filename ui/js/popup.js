@@ -3,6 +3,7 @@
 // sottomenu si aprono accanto e la chiusura avviene dal più profondo.
 
 import { h } from "./el.js";
+import { emit } from "./state.js";
 
 /** @type {{el:HTMLElement, parent:HTMLElement|null}[]} */
 const stack = [];
@@ -109,6 +110,7 @@ export function openPopup(o) {
     stack.push(entry);
   }
   el.dataset.depth = String(stack.length - 1);
+  emit("overlays");
   return el;
 }
 
@@ -122,6 +124,7 @@ export function closeFrom(parent = null, keepLast = false) {
     if (entry.onClose) entry.onClose();
     closed = true;
   }
+  if (closed) emit("overlays");
   return closed;
 }
 
