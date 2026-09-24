@@ -874,6 +874,8 @@ dependencies = [
  "fx-tiles",
  "thiserror 2.0.21",
  "tracing",
+ "wgpu",
+ "wgpu-sync",
 ]
 
 [[package]]
