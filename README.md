@@ -50,15 +50,28 @@ bench/                 benchmark results (data files are git-ignored)
 ## Build and run (Windows)
 
 Prerequisites: Rust (rustup, MSVC toolchain), Visual Studio 2022 Build
-Tools with "Desktop development with C++", CMake, Ninja, Git.
+Tools with "Desktop development with C++" (it also provides `rc.exe` for the
+exe icon), CMake, Ninja, Git. CMake and Ninja must be on `PATH` in the shell
+that runs cargo.
 
 ```bash
 cargo test                 # engine crates, no CEF needed
 cargo build -p fx-app      # first run downloads CEF (~300 MB) into third_party/cef
-cargo xtask run            # bundle + launch (available after task M0-T02)
+cargo xtask run            # build, bundle next to the CEF runtime, launch
+cargo xtask run --release  # the same, optimised
 ```
 
-UI only, in a browser: `cd ui && python tools/serve.py`.
+`cargo xtask bundle` only builds the bundle (`target/<profile>/Fotox/`).
+UI changes need only an app restart: in dev builds the UI is read from `./ui`.
+
+Logs: `RUST_LOG=fotox=debug,fx_engine=debug` (the shell's binary crate is
+`fotox`). Inspect the UI inside the app with `GRAPHITE_BROWSER_DEBUG_PORT=9222`
+and `chrome://inspect` in Chrome.
+
+UI only, in a browser (with the mock engine): `cd ui && python tools/serve.py`.
+
+A second git worktree can share the CEF download: set `CEF_PATH` to the first
+checkout's `third_party/cef` before running cargo there.
 
 ## Licence
 
