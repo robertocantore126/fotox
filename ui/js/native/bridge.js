@@ -1,5 +1,7 @@
 // Fotox — the bridge between the UI and the native shell/engine.
 //
+// In a plain browser, messages go to ./mock-engine.js instead.
+//
 // Inside the app, the vendored Graphite shell injects `window.sendNativeMessage`
 // and `window.initializeNativeCommunication` before any script runs
 // (docs/GRAPHITE.md §1), so their presence is what "native mode" means. In a
@@ -12,6 +14,7 @@
 //   bridge.on("toast", (msg, payload) => …);
 
 import { encodeJson, encodeBinary, decode } from "./protocol.js";
+import * as mockEngine from "./mock-engine.js";
 
 /** True inside the Fotox app, false in a plain browser. */
 export const isNative = typeof window.sendNativeMessage === "function";
@@ -35,16 +38,28 @@ export function init() {
 
 /** Send a JSON message (an object with a `type` field). */
 export function send(message) {
-  // In a plain browser there is no engine to talk to yet: M0-T05 routes these
-  // to the mock engine. Until then they are dropped on purpose.
-  if (!isNative) return;
-  window.sendNativeMessage(encodeJson(message));
+  if (isNative) {
+    window.sendNativeMessage(encodeJson(message));
+    return;
+  }
+  // Browser mode: the mock engine answers. Replies go through the same
+  // encode → decode path as native ones, asynchronously like the real thing.
+  for (const reply of mockEngine.handle(message)) {
+    const frame = encodeJson(reply);
+    setTimeout(() => receive(frame), 0);
+  }
 }
 
 /** Send a JSON header followed by raw bytes. */
 export function sendBinary(header, bytes) {
-  if (!isNative) return;
-  window.sendNativeMessage(encodeBinary(header, bytes));
+  if (isNative) {
+    window.sendNativeMessage(encodeBinary(header, bytes));
+    return;
+  }
+  for (const reply of mockEngine.handle(header)) {
+    const frame = encodeJson(reply);
+    setTimeout(() => receive(frame), 0);
+  }
 }
 
 /**

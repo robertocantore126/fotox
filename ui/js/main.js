@@ -6,16 +6,19 @@ import { loadSprite } from "./icons.js";
 import { state, on, emit, setTool, setColors } from "./state.js";
 import { menus } from "./data/menus.js";
 import { toolSlots, findTool } from "./data/tools.js";
-import { initPopupEngine, openDropdown, openPopup, closeAll } from "./popup.js";
+import { initPopupEngine, openDropdown, openPopup, closeAll, isPopupOpen } from "./popup.js";
 import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
 import { renderOptionsBar } from "./optionsbar.js";
 import { renderDock, focusPanel, togglePanel } from "./panels.js";
-import { openDialog } from "./dialogs.js";
+import { openDialog, isDialogOpen } from "./dialogs.js";
 import { initWorkspace, zoomTo, fit, actual } from "./canvas.js";
 import { initTooltips, toast, status } from "./tooltip.js";
 import { runAction } from "./actions.js";
 import { initShortcuts } from "./shortcuts.js";
 import * as bridge from "./native/bridge.js";
+import { UI, ENGINE } from "./native/protocol.js";
+
+const UI_VERSION = "0.1.0";
 
 /* ----------------------------------------------------------------- logo */
 
@@ -217,6 +220,20 @@ async function boot() {
     if (key === "panels") document.body.classList.toggle("no-panels", !state.flags.panels);
     if (key === "doctabs") document.body.classList.toggle("no-doctabs", !state.flags.doctabs);
   });
+
+  // engine bridge ------------------------------------------------------
+  bridge.on(ENGINE.TOAST, (m) => toast(m.text));
+  bridge.on(ENGINE.ERROR, (m) => toast(m.text, "error"));
+  // Pointer input over the viewport belongs to the engine only while no
+  // popup, menu or dialog is open (the shell routes it; M0-T06).
+  let directInput = true;
+  on("overlays", () => {
+    const enabled = !isPopupOpen() && !isDialogOpen();
+    if (enabled === directInput) return;
+    directInput = enabled;
+    bridge.send({ type: UI.DIRECT_INPUT, enabled });
+  });
+  bridge.send({ type: UI.HELLO, ui_version: UI_VERSION });
 
   emit("tool", state.tool);
   status("Fotox 1.0 — interface mock · press Alt for the menus, F for screen modes");

@@ -19,13 +19,12 @@ use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
+use crate::bridge::{self, Routed};
 use crate::event::{AppEvent, AppEventScheduler};
 use crate::gpu::Gpu;
 use crate::input::InputState;
 use crate::preferences::Preferences;
-use fx_protocol::UiToEngine;
-
-use crate::render::{RenderError, RenderState, ViewportBounds};
+use crate::render::{RenderError, RenderState};
 use crate::ui::{UiCommand, UiInstance};
 use crate::window::Window;
 
@@ -59,6 +58,9 @@ pub(crate) struct App {
 	app_event_scheduler: AppEventScheduler,
 	ui_frame_received: bool,
 	web_communication_initialized: bool,
+	/// `false` while a UI popup, menu or dialog is open: pointer input over
+	/// the viewport then stays with the UI (routing arrives in M0-T06).
+	direct_input: bool,
 	startup_time: Option<Instant>,
 	exiting: Arc<AtomicBool>,
 	exit_reason: ExitReason,
@@ -91,6 +93,7 @@ impl App {
 			app_event_scheduler,
 			ui_frame_received: false,
 			web_communication_initialized: false,
+			direct_input: true,
 			startup_time: None,
 			exiting: Arc::new(AtomicBool::new(false)),
 			exit_reason: ExitReason::Shutdown,
@@ -183,16 +186,15 @@ impl App {
 	/// for the shell are handled here; the rest go to the engine once it
 	/// exists (M0-T05/T06).
 	fn ui_message(&mut self, frame: &[u8]) {
-		let message = match fx_protocol::decode::<UiToEngine>(frame) {
-			Ok((message, _payload)) => message,
+		let routed = match bridge::route(frame) {
+			Ok(routed) => routed,
 			Err(error) => {
 				tracing::warn!("dropping a malformed UI message ({} bytes): {error}", frame.len());
 				return;
 			}
 		};
-		match message {
-			UiToEngine::ViewportBounds { x, y, width, height } => {
-				let bounds = ViewportBounds::from_physical(x, y, width, height);
+		match routed {
+			Routed::ViewportBounds(bounds) => {
 				tracing::debug!("viewport bounds: {bounds:?}");
 				if let Some(render_state) = &mut self.render_state {
 					render_state.set_viewport_bounds(bounds);
@@ -201,7 +203,14 @@ impl App {
 					window.request_redraw();
 				}
 			}
-			other => tracing::debug!("UI message not routed yet (M0-T05): {other:?}"),
+			Routed::DirectInput(enabled) => {
+				tracing::debug!("direct input {enabled}");
+				self.direct_input = enabled;
+			}
+			Routed::Engine(message) => match bridge::answer_without_engine(&message) {
+				Some(reply) => self.ui.send(bridge::to_ui(&reply)),
+				None => tracing::debug!("UI message for the engine (not running yet, M0-T06): {message:?}"),
+			},
 		}
 	}
 

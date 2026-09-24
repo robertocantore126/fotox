@@ -34,6 +34,7 @@ export function openDialog(id, overrides = {}) {
     dlg);
   popupLayer().append(wrap);
   stack.push({ wrap, id });
+  emit("overlays");
 
   const rect = dlg.getBoundingClientRect();
   dlg.style.marginTop = Math.max(10, (window.innerHeight - rect.height) / 2 - 30) + "px";
@@ -54,6 +55,7 @@ function close(entry) {
   const idx = entry ? stack.findIndex((s) => s === entry) : stack.length - 1;
   if (idx < 0) return;
   const [removed] = stack.splice(idx, 1);
+  emit("overlays");
   removed.wrap.classList.remove("in");
   setTimeout(() => removed.wrap.remove(), 120);
 }

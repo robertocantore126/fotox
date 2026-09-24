@@ -8,10 +8,16 @@ import { toast, status } from "./tooltip.js";
 import { zoomIn, zoomOut, fit, actual, zoomTo } from "./canvas.js";
 import * as panels from "./panels.js";
 import { dockGroups } from "./data/panels.js";
+import * as bridge from "./native/bridge.js";
+import { UI } from "./native/protocol.js";
 
 export function runAction(item) {
   const a = item && item.a ? item.a : "";
   const label = (item && item.label) || a;
+
+  // Every action also goes to the engine, which ignores the ones it does not
+  // own (docs/PROTOCOL.md §4). The local behaviour below stays as it is.
+  if (a) bridge.send({ type: UI.ACTION, id: a });
 
   // dialoghi -------------------------------------------------------------
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }
