@@ -3,6 +3,8 @@
 
 import { h, icon, clear } from "./el.js";
 import { state, setZoom, emit, on } from "./state.js";
+import * as bridge from "./native/bridge.js";
+import { UI } from "./native/protocol.js";
 
 let canvasEl = null;
 let scrollEl = null;
@@ -33,6 +35,25 @@ export function initWorkspace(host) {
   const rulerCorner = h("div", { class: "ruler-corner", text: "px" });
   rulerTop = h("canvas", { class: "ruler ruler-top", width: 600, height: RULER });
   rulerLeft = h("canvas", { class: "ruler ruler-left", width: RULER, height: 600 });
+
+  if (bridge.isNative) {
+    // Inside the app the document is drawn natively under a transparent hole
+    // (docs/ARCHITECTURE.md §2): no demo canvas, no DOM scrolling.
+    const viewport = h("div", { id: "viewport" });
+    const gridLayer = h("div", { class: "grid-layer" });
+    const rulerRow = h("div", { class: "ruler-row" }, rulerCorner, rulerTop);
+    const body = h("div", { class: "workspace-body" },
+      h("div", { class: "ruler-col" }, rulerLeft),
+      h("div", { class: "workspace-main" }, viewport, gridLayer));
+    host.append(tabs, rulerRow, body);
+    on("flag", (key) => {
+      if (key === "rulers") applyRulers();
+      if (key === "grid" || key === "pixelgrid") applyGrid();
+    });
+    requestAnimationFrame(() => { applyRulers(); applyGrid(); });
+    reportViewportBounds(viewport);
+    return { setZoom: zoomTo, zoomIn, zoomOut, fit, actual };
+  }
 
   canvasEl = h("canvas", { class: "doc-canvas", width: state.doc.w, height: state.doc.h });
   drawArtwork(canvasEl.getContext("2d"), state.doc.w, state.doc.h);
@@ -81,6 +102,40 @@ export function initWorkspace(host) {
   });
 
   return { setZoom: zoomTo, zoomIn, zoomOut, fit, actual };
+}
+
+/* ------------------------------------------------------- native viewport */
+
+// Tell the shell where the viewport hole is, in physical window pixels
+// (`viewport_bounds`, docs/PROTOCOL.md §4). The hole moves or resizes when the
+// window resizes, the dock is dragged, rulers/tabs are toggled or the screen
+// mode changes; every one of those resizes #viewport or one of the boxes
+// around it, so observing them all catches every layout change. Unchanged
+// rectangles are not re-sent.
+function reportViewportBounds(viewport) {
+  let last = "";
+  const sendBounds = () => {
+    const rect = viewport.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const bounds = { x: rect.left * dpr, y: rect.top * dpr, width: rect.width * dpr, height: rect.height * dpr };
+    const key = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+    if (key === last) return;
+    last = key;
+    bridge.send({ type: UI.VIEWPORT_BOUNDS, ...bounds });
+  };
+  const observer = new ResizeObserver(sendBounds);
+  for (const el of [viewport, document.getElementById("app"), document.querySelector(".workspace"), document.querySelector(".middle")]) {
+    if (el) observer.observe(el);
+  }
+  window.addEventListener("resize", sendBounds);
+  // Moving to a monitor with another scale changes the physical rectangle
+  // without changing the CSS one, so no observer above fires.
+  const watchScale = () => {
+    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+      .addEventListener("change", () => { sendBounds(); watchScale(); }, { once: true });
+  };
+  watchScale();
+  sendBounds();
 }
 
 /* ------------------------------------------------------------- disegno */
