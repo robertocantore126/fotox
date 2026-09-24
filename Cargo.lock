@@ -873,6 +873,7 @@ dependencies = [
  "fx-protocol",
  "fx-render",
  "fx-tiles",
+ "rayon",
  "thiserror 2.0.21",
  "tracing",
  "wgpu",

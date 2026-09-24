@@ -15,6 +15,7 @@
 //! most engine features are tested and benchmarked.
 
 pub mod layers;
+pub mod mips;
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
