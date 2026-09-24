@@ -18,6 +18,11 @@ it precisely, write solid code, and report honestly.
 
 ## 2. While you work
 
+* Code marked "Written by Claude" (tile store, `fx-render` programs,
+  compositor, planner, viewport pass — see `docs/reports/CLAUDE-core.md`)
+  is finished and tested. Use its APIs; do not restructure it. A bug there:
+  write a failing test, make the smallest fix, explain it in your report.
+
 * Implement **only** the task. Useful ideas outside it go in the report under
   "Suggestions", not in the code.
 * Keep the public APIs already defined in the skeleton. If one must change,
@@ -61,7 +66,7 @@ it precisely, write solid code, and report honestly.
 ```bash
 cargo fmt -p fx-tiles -p fx-core -p fx-protocol -p fx-color -p fx-io -p fx-render -p fx-ops -p fx-engine -p fx-cli -p fx-app -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test
+cargo test                     # GPU tests skip themselves if no adapter exists
 cargo build -p fx-app          # when the task touches fx-app, vendor/ or ui/
 node ui/tools/check-data.mjs   # when the task touches ui/js/data
 ```

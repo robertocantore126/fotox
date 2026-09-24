@@ -11,7 +11,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
-# Added by M1-T03 when implemented:
-# lz4_flex = { workspace = true }
+lz4_flex = { workspace = true }
 
 [dev-dependencies]

@@ -7,9 +7,11 @@ Photoshop at opening, navigating, layer work and saving.
 The one rule: **the cost of any operation depends on what is on screen and
 what changed, never on the size of the document.** How: `docs/ARCHITECTURE.md`.
 
-Status: **M0 (shell) not started.** The engine crates contain the core data
-structures, API skeletons and spec tests; the UI is the complete Fotox
-interface mock. See `docs/ROADMAP.md`.
+Status: **M0 (shell) not started.** The hard engine core is implemented and
+tested (tile store with RAM/compressed/disk tiers, GPU compositor with all
+blend modes, groups, clipping, masks, adjustments, caches, frame planner —
+`docs/reports/CLAUDE-core.md`); the rest has API skeletons and spec tests;
+the UI is the complete Fotox interface mock. See `docs/ROADMAP.md`.
 
 ## Layout
 

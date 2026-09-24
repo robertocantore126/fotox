@@ -13,6 +13,11 @@ wgpu = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+half = { workspace = true }
+wgpu-sync = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

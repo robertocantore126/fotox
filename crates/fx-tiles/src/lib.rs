@@ -27,6 +27,7 @@
 mod format;
 mod image;
 mod mip;
+mod scratch;
 mod store;
 
 pub use format::{PixelFormat, PixelValue, TILE_PIXELS, TILE_SIZE};

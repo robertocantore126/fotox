@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The exact formulas (and their reference CPU implementation used to test
 /// the GPU shaders) are specified in docs/BLEND_MODES.md and implemented in
-/// `fx-render` (M2-T02). Do not invent formulas: match that document.
+/// `fx-render` (`blend.rs`, `gpu/composite.wgsl`). Do not invent formulas: match that document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {

@@ -2,7 +2,7 @@
 
 Target: match Photoshop's results in its **default** configuration (8/16-bit
 RGB, blending on encoded values, "Blend clipped layers as group" on).
-Implemented in M2-T02 as WGSL (`fx-render`) with an f64 CPU twin
+Implemented in `fx-render/src/gpu/composite.wgsl` with an f64 CPU twin
 (`fx-render::reference`). Items marked **VERIFY** must be checked against
 Photoshop renders in M7 (PSD import gives us test files); until then this
 document is the spec.
@@ -24,21 +24,28 @@ Effective source alpha of a pixel layer:
 (`fill` and `opacity` differ only once layer styles exist; until then they
 multiply.)
 
-## 2. General compositing formula (source-over with blending)
+## 2. General compositing formula
+
+First mix the source with the blend result, weighted by backdrop alpha:
 
 ```
-αo = αs + αb·(1 − αs)
-Co·αo = (1 − αb)·αs·Cs  +  (1 − αs)·αb·Cb  +  αs·αb·B(Cb, Cs)
+Cs' = (1 − αb)·Cs + αb·B(Cb, Cs)
 ```
 
-With premultiplied accumulators (`cb = Cb·αb`, `cs = Cs·αs`) this is:
+Then one of two Porter-Duff operators (premultiplied `cb = Cb·αb`):
 
 ```
-co = (1 − αb)·cs + (1 − αs)·cb + αs·αb·B(Cb, Cs)
+source-over (normal layers):   co = αs·Cs' + (1 − αs)·cb        αo = αs + αb·(1 − αs)
+source-atop (clipped layers,   co = αs·αb·Cs' + (1 − αs)·cb     αo = αb
+             adjustment layers)
 ```
 
+Source-over expands to the familiar
+`Co·αo = (1 − αb)·αs·Cs + (1 − αs)·αb·Cb + αs·αb·B(Cb, Cs)`.
 `B` always receives straight colours: unpremultiply the backdrop
 (`Cb = cb / αb`, `Cb = 0` when `αb = 0`) before calling it.
+
+Implemented in `fx-render/src/blend.rs::composite` and `composite.wgsl::composite`.
 
 ## 3. Separable modes
 
@@ -104,22 +111,36 @@ while panning. At mip levels > 0: evaluate with the level's pixel centres
   backdrop → `R`. If the group has opacity < 1 or a mask:
   `result = lerp(backdrop, R, opacity × mask)`.
 * **Adjustment layers:** `Cs = f(Cb)` with `f` the adjustment, `αs = mask ×
-  opacity × fill`, then the normal formula with the layer's blend mode.
+  opacity × fill`, composited **source-atop** with the layer's blend mode:
+  an adjustment never creates pixels where the backdrop is transparent.
   Inside a pass-through group, `Cb` is the running backdrop; inside an
   isolated group, it is the group's own composite so far.
-* **Solid fill layers:** `Cs = the colour`, content alpha 1.
+* **Solid fill layers:** `Cs = the colour`, content alpha = its alpha.
 * **Clipping masks:** a base layer followed by one or more `clipped` layers
-  above it form a clipping group. Composite, in isolation: the base (Normal
-  mode, its own opacity/fill/mask), then each clipped layer with its mode,
-  with its alpha multiplied by the **base content alpha at that pixel**
-  (content alpha × base mask). Blend the result onto the backdrop with the
-  base's blend mode. **VERIFY** against Photoshop.
+  above it form a clipping group, composited **in isolation**:
+  1. the base with **Normal** mode, its **fill** and its mask (not its opacity);
+  2. each clipped layer with its own mode/opacity/mask, **source-atop**
+     (so it only shows where the base has alpha);
+  3. the result blended onto the backdrop with the **base's blend mode and
+     opacity** (Photoshop: "clipped layers take on the opacity and mode of
+     the base").
+  A hidden base hides the whole group. A base that is a group acts as an
+  isolated group. **VERIFY:** an adjustment layer as base is treated as "no
+  base" (clipped layers composite normally); a clipped pass-through group is
+  treated as isolated Normal.
+* **Layer offsets** at mip levels > 0 are rounded to whole pixels of that
+  level (exact at level 0): up to half a level pixel of shift in zoomed-out
+  previews.
+* **Group nesting** is limited to 11 levels (clipping groups count).
 * **Knockout, blend-if, layer styles:** not supported yet (M6+).
 
-## 7. Precision and tests (M2-T02)
+## 7. Precision and tests
 
-* Display path (Rgba16Float): GPU vs CPU reference, max abs error ≤ 1/1024
-  per channel on 10 000 random pixel pairs per mode, including edge values
-  (0, 1, 0.5, αs/αb ∈ {0, 1}).
+* Display path (Rgba16Float inputs and outputs): GPU vs CPU reference on
+  noisy test stacks. Measured (lavapipe, 2026-09-24): max error ≈ 0.001 for
+  continuous modes; modes with discontinuities (Color Burn/Dodge, Vivid
+  Light, Hard Mix, Darker/Lighter Color, Dissolve, Hue/Saturation) flip a
+  few pixels where f16 rounding crosses a threshold — < 0.01 % of channels.
+  Test threshold: < 0.2 % of channels off by more than 2/1024.
 * Commit path (f32 compute → u16): exact match with the CPU reference after
   rounding.

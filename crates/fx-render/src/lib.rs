@@ -1,30 +1,41 @@
-//! # fx-render — everything that touches the GPU
+//! # fx-render — compositing and everything that touches the GPU
 //!
 //! Pipeline (docs/ARCHITECTURE.md §4):
 //!
 //! ```text
-//! ViewTransform ──► visible tiles at mip level L
-//!                        │
-//!                        ▼
-//!   CompositeCache hit? ──yes──► draw tile quad into viewport texture
-//!         │ no
-//!         ▼
-//!   Compositor: for each visible layer (bottom → top), get its level-L tile
-//!   into the TileAtlas (upload if needed), blend into an accumulator tile,
-//!   store result in CompositeCache ──► draw
-//!         │ tile not ready (upload budget spent / level-L mip dirty)?
-//!         ▼
-//!   draw the parent tile at level L+1 upscaled (never block a frame)
+//! ViewTransform ──► visible tiles at mip level L          (viewport.rs)
+//!        │
+//!        ▼
+//! build_program(doc snapshot, L, tx, ty)                   (program.rs)
+//!        │ Err(dirty mips) → engine computes them, fall back to level L+1
+//!        ▼
+//! key in composite cache? ──yes──► draw
+//!        │ no
+//!        ▼
+//! GPU compositor: upload missing source tiles to the atlas (budgeted),
+//! run the program for all pending tiles in one dispatch    (gpu/)
 //! ```
 //!
-//! * [`viewport`] — pure math, implemented.
-//! * [`atlas`] — GPU residency of tiles (M1-T06).
-//! * [`compositor`] — lazy tile compositing + caches (M1-T07, M2).
-//! * [`reference`] — CPU reference implementations used to test shaders (M2-T02).
+//! * [`viewport`] — view transform, level choice, visible tiles.
+//! * [`program`] — per-tile composite programs + cache keys.
+//! * [`blend`], [`adjust`] — blend-mode and adjustment math (f64).
+//! * [`reference`] — CPU reference compositor (defines correct output).
+//! * [`frame`] — per-frame plan: tiles to draw, coarser fallbacks, requests.
+//! * [`gpu`] — tile atlas and GPU compositor.
 
-pub mod atlas;
-pub mod compositor;
+pub mod adjust;
+pub mod blend;
+pub mod frame;
+pub mod gpu;
+pub mod program;
 pub mod reference;
 pub mod viewport;
 
+pub use frame::{FramePlan, TileDraw, TileKey, plan_frame};
+pub use program::{MipRequest, TileProgram, build_program};
 pub use viewport::{TileRange, ViewTransform, ViewportSize};
+
+#[cfg(test)]
+mod program_tests;
+#[cfg(test)]
+mod testing;

@@ -106,6 +106,10 @@ UI click "Opacity 50%"                        (or a pen stroke in the viewport)
 
 ### 3.2 Residency tiers
 
+A tile can have several **copies** at once (tiles are immutable, so every
+copy stays valid): reading a cold tile back makes it hot *and keeps the cold
+copy*, so evicting it again later is free.
+
 | Tier | Where | Cost to read | Used for |
 | --- | --- | --- | --- |
 | hot | RAM, uncompressed | 0 | tiles in use or recently used |
@@ -149,29 +153,33 @@ largest *L* with 2ᴸ ≤ 1/zoom (never upsample from a coarser level when
 zoomed out). Visible tiles at *L* are bounded by the screen size, not the
 document size (checked by a test in `viewport.rs`).
 
-### 4.2 Lazy tile compositing
+### 4.2 Lazy tile compositing (`fx-render::program`, `gpu::compositor`)
 
-For each visible tile `(L, tx, ty)`:
+For each tile the frame needs, `build_program(doc, level, tx, ty)` produces a
+**tile program**: a flat list of ops (layer, adjustment, begin/end group)
+executed per pixel on a small stack of premultiplied accumulators. The
+builder drops everything that cannot contribute to this tile (hidden layers,
+empty tiles, fully hidden masks, empty groups), so a sparse layer costs
+nothing where it has no pixels.
 
-1. Build the **composite key**: for each contributing layer, its id, the
-   identity of its tile slot at `(L, tx, ty)` (TileId or Solid value), its
-   compositing properties, its mask slot, its adjustment parameters. Because
-   tiles are immutable, the key changes exactly when the result would.
-2. Key in the composite cache → draw it.
-3. Otherwise make sure every source tile is in the GPU atlas, then blend
-   bottom → top into an accumulator (Rgba16Float, premultiplied), in one
-   compute dispatch per tile. Store in the cache, draw.
+The program's **key** hashes the identity of every input (tile ids, solid
+values, parameters). Tiles are immutable, so equal keys mean equal results:
+the compositor keeps one cached result per tile and reuses it while the key
+is unchanged — no invalidation code anywhere.
 
-Empty layer tiles are skipped entirely, so a sparse layer costs almost nothing
-where it has no content.
+The GPU compositor uploads the missing source tiles to the atlas (straight
+f16, bounded per frame), then runs **all pending tile programs in one
+compute dispatch** (`composite.wgsl`). The CPU reference
+(`fx-render::reference`) executes the same programs in f64 and defines the
+correct output; tests compare them.
 
 ### 4.3 Layer offsets
 
 A pixel layer has an integer `offset`. Its tile grid is aligned to its own
-origin. When the offset is not a multiple of the tile size at level *L*, one
-output tile reads up to 4 source tiles. Moving a layer therefore **never
-rewrites pixels** and is instant at any size. (At levels > 0 the offset can
-be fractional: bilinear sampling of that level; exact at level 0.)
+origin. When the offset is not a multiple of the tile size, one output tile
+reads up to 4 source tiles (a "quad" with a shift). Moving a layer therefore
+**never rewrites pixels** and is instant at any size. At levels > 0 the
+offset is rounded to whole pixels of that level (exact at level 0).
 
 ### 4.4 Never block a frame
 
@@ -192,15 +200,28 @@ be fractional: bilinear sampling of that level; exact at level 0.)
   scale-consistent (e.g. noise, small-radius sharpening) show an approximate
   preview when zoomed out; at ≥ 100 % the preview *is* the final result.
 
-### 4.6 Stack split cache (M2)
+### 4.6 Prefix cache ("stack split")
 
-While one layer is being edited, cache the composite of everything **below**
-it and, when all layers above are Normal mode, of everything **above** it.
-Each frame then blends 3 things instead of the whole stack.
+While one layer is being edited (`GpuCompositor::set_hot_layer`), the
+composite of everything **below** its root-level segment is computed once and
+kept in the atlas; each frame only runs the ops from the edited layer up.
+(A cache of the layers *above* is possible for Normal-mode stacks; not built
+until measurements ask for it.)
 
-### 4.7 Precision
+### 4.7 Frame planning (`fx-render::frame`)
 
-* Display path: Rgba16Float premultiplied. Good enough to look at, never
+`plan_frame` decides, every frame, which composite tiles to draw: the target
+level where ready, otherwise the nearest ready ancestor tile's matching
+sub-rectangle (drawn first, so sharper tiles cover it). It also lists the
+tiles to request, target level centre-out first, plus a coarse "coverage"
+level 2 levels up (1/16 of the tiles) so fast pans always have something to
+show. `ViewportRenderer` draws the plan: background, transparency
+checkerboard, tiles (nearest sampling ≥ 100 %, linear below).
+
+### 4.8 Precision
+
+* Display path: sources in the atlas as straight Rgba16Float, composites
+  as premultiplied Rgba16Float, math in f32. Good enough to look at, never
   written back.
 * Commit path (filters/brushes/merge that produce document pixels): f32
   compute, written back to u8/u16 exactly. The CPU reference in

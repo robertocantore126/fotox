@@ -22,3 +22,7 @@ New entries go at the bottom with the next number.
 | D-014 | Windows is the only tested platform. Keep `cfg` structure portable. | Reference machine. | 2026-09-24 |
 | D-015 | Layer moves change an integer offset; pixels are not rewritten. | Instant moves at any size (`ARCHITECTURE.md` §4.3). | 2026-09-24 |
 | D-016 | LZ4 (`lz4_flex`) for warm and cold tiers; zstd only for `.fxd` files. | Tier transitions are on the interactive path: speed over ratio. | 2026-09-24 |
+| D-017 | Clipped layers and adjustment layers composite source-atop; a clipping group is isolated, base drawn Normal with its fill, result blended with the base's mode and opacity. | Matches Photoshop's documented behaviour; adjustments must not create pixels on transparency. | 2026-09-24 |
+| D-018 | Layer offsets are rounded to whole level pixels at mip levels > 0. | One integer shift per tile quad keeps the shader simple and exact at 100 %; the preview error is ≤ half a level pixel. | 2026-09-24 |
+| D-019 | Atlas holds straight f16 sources; composites are premultiplied f16; one compute dispatch runs all pending tile programs of a frame. | Blending needs straight source colours; one dispatch per frame keeps GPU overhead flat. | 2026-09-24 |
+| D-020 | Tile residency = independent copies (hot/warm/cold can coexist). | Tiles are immutable, so copies never go stale; re-evicting a tile read back from disk is free. | 2026-09-24 |
