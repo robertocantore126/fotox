@@ -11,6 +11,7 @@ members = [
 	"crates/fx-engine",
 	"crates/fx-cli",
 	"crates/fx-app",
+	"tools/xtask",
 	"vendor/graphite/desktop-ui",
 	"vendor/graphite/embedded-resources",
 	"vendor/graphite/wgpu-sync",
