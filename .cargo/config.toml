@@ -8,3 +8,9 @@ CEF_PATH = { value = "third_party/cef", relative = true }
 # need a reload (Ctrl+R in the app, or restart), not a Rust rebuild.
 # Release builds embed ./ui with the `embedded_resources` feature instead.
 GRAPHITE_RESOURCES = { value = "ui", relative = true }
+
+[alias]
+# One command builds fotox.exe, puts the CEF runtime beside it and runs it:
+#   cargo xtask run [--release] [-- <args>]
+# See docs/tasks/M0.md, M0-T02.
+xtask = "run -p xtask --"
