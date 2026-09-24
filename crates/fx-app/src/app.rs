@@ -19,13 +19,15 @@ use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
+use fx_engine::{CursorShape, EngineHandle, EngineInput, EngineOutput};
+
 use crate::bridge::{self, Routed};
 use crate::event::{AppEvent, AppEventScheduler};
 use crate::gpu::Gpu;
 use crate::input::InputState;
 use crate::preferences::Preferences;
 use crate::render::{RenderError, RenderState};
-use crate::ui::{UiCommand, UiInstance};
+use crate::ui::{Cursor, UiCommand, UiInstance};
 use crate::window::Window;
 
 /// How long the accelerated UI may go without presenting a single frame before
@@ -48,6 +50,7 @@ pub(crate) enum ExitReason {
 pub(crate) struct App {
 	gpu: Gpu,
 	ui: UiInstance,
+	engine: EngineHandle,
 	preferences: Preferences,
 	render_state: Option<RenderState>,
 	window: Option<Window>,
@@ -58,9 +61,10 @@ pub(crate) struct App {
 	app_event_scheduler: AppEventScheduler,
 	ui_frame_received: bool,
 	web_communication_initialized: bool,
-	/// `false` while a UI popup, menu or dialog is open: pointer input over
-	/// the viewport then stays with the UI (routing arrives in M0-T06).
-	direct_input: bool,
+	/// The cursor the UI asked for last, and the engine's for the viewport;
+	/// whichever owns the pointer shows.
+	ui_cursor: Option<Cursor>,
+	engine_cursor: CursorShape,
 	startup_time: Option<Instant>,
 	exiting: Arc<AtomicBool>,
 	exit_reason: ExitReason,
@@ -75,6 +79,7 @@ impl App {
 	/// Assemble the app.
 	pub(crate) fn new(
 		ui: UiInstance,
+		engine: EngineHandle,
 		gpu: Gpu,
 		app_event_receiver: Receiver<AppEvent>,
 		app_event_scheduler: AppEventScheduler,
@@ -83,6 +88,7 @@ impl App {
 		Self {
 			gpu,
 			ui,
+			engine,
 			preferences,
 			render_state: None,
 			window: None,
@@ -93,19 +99,23 @@ impl App {
 			app_event_scheduler,
 			ui_frame_received: false,
 			web_communication_initialized: false,
-			direct_input: true,
+			ui_cursor: None,
+			engine_cursor: CursorShape::Default,
 			startup_time: None,
 			exiting: Arc::new(AtomicBool::new(false)),
 			exit_reason: ExitReason::Shutdown,
 		}
 	}
 
-	/// Run the event loop to completion and report why it stopped.
+	/// Run the event loop to completion, stop the engine and report why it
+	/// stopped.
 	pub(crate) fn run(mut self, mut event_loop: EventLoop) -> ExitReason {
 		if let Err(error) = event_loop.run_app_on_demand(&mut self) {
 			tracing::error!("the event loop failed: {error}");
 		}
-		self.exit_reason
+		let reason = self.exit_reason;
+		self.engine.shutdown();
+		reason
 	}
 
 	/// Leave the event loop, recording why. Idempotent.
@@ -196,6 +206,11 @@ impl App {
 		match routed {
 			Routed::ViewportBounds(bounds) => {
 				tracing::debug!("viewport bounds: {bounds:?}");
+				self.input_state.set_viewport(bounds);
+				self.engine.send(EngineInput::ViewportResized {
+					width: bounds.width,
+					height: bounds.height,
+				});
 				if let Some(render_state) = &mut self.render_state {
 					render_state.set_viewport_bounds(bounds);
 				}
@@ -205,12 +220,48 @@ impl App {
 			}
 			Routed::DirectInput(enabled) => {
 				tracing::debug!("direct input {enabled}");
-				self.direct_input = enabled;
+				self.input_state.set_direct_input(enabled);
 			}
-			Routed::Engine(message) => match bridge::answer_without_engine(&message) {
-				Some(reply) => self.ui.send(bridge::to_ui(&reply)),
-				None => tracing::debug!("UI message for the engine (not running yet, M0-T06): {message:?}"),
-			},
+			Routed::Engine(message) => self.engine.send(EngineInput::Ui(message)),
+		}
+	}
+
+	/// Handle one output of the engine or render thread.
+	fn engine_output(&mut self, event_loop: &dyn ActiveEventLoop, output: EngineOutput) {
+		match output {
+			EngineOutput::ToUi(frame) => self.ui.send(UiCommand::Message(frame)),
+			EngineOutput::ViewportFrame(texture) => {
+				if let Some(render_state) = &mut self.render_state {
+					render_state.bind_viewport_texture(texture);
+				}
+				if let Some(window) = &self.window {
+					window.request_redraw();
+				}
+			}
+			EngineOutput::RedrawViewport => {
+				if let Some(window) = &self.window {
+					window.request_redraw();
+				}
+			}
+			EngineOutput::Cursor(shape) => {
+				self.engine_cursor = shape;
+				self.apply_cursor(event_loop);
+			}
+		}
+	}
+
+	/// Show the engine's cursor while it owns the pointer, the UI's otherwise.
+	fn apply_cursor(&mut self, event_loop: &dyn ActiveEventLoop) {
+		let cursor = if self.input_state.pointer_on_engine() {
+			engine_cursor(self.engine_cursor)
+		} else {
+			match &self.ui_cursor {
+				Some(cursor) => cursor.clone(),
+				None => return,
+			}
+		};
+		if let Some(window) = &mut self.window {
+			window.set_cursor(event_loop, cursor);
 		}
 	}
 
@@ -234,10 +285,10 @@ impl App {
 				self.ui_frame_received = true;
 			}
 			AppEvent::CursorChange(cursor) => {
-				if let Some(window) = &mut self.window {
-					window.set_cursor(event_loop, cursor);
-				}
+				self.ui_cursor = Some(cursor);
+				self.apply_cursor(event_loop);
 			}
+			AppEvent::Engine(output) => self.engine_output(event_loop, output),
 			AppEvent::UiMessage(frame) => self.ui_message(&frame),
 			AppEvent::UiCrashed => {
 				tracing::error!("the UI crashed, exiting");
@@ -284,11 +335,17 @@ impl ApplicationHandler for App {
 		}
 	}
 
-	fn window_event(&mut self, _event_loop: &dyn ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
-		// Every input event goes to the UI. M0-T06 splits viewport strokes off
-		// to the engine (`docs/ARCHITECTURE.md` §2.2).
+	fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+		// Pointer input over the viewport goes to the engine, everything else
+		// to the UI (`docs/ARCHITECTURE.md` §2.2, `input.rs`).
+		let was_on_engine = self.input_state.pointer_on_engine();
 		let ui = self.ui.clone();
-		self.input_state.process(&event, |input| ui.send(UiCommand::Input(input)));
+		let engine = &self.engine;
+		self.input_state
+			.process(&event, |input| ui.send(UiCommand::Input(input)), |input| engine.send(input));
+		if self.input_state.pointer_on_engine() != was_on_engine {
+			self.apply_cursor(event_loop);
+		}
 
 		match event {
 			WindowEvent::CloseRequested => self.exit(ExitReason::Shutdown),
@@ -308,5 +365,19 @@ impl ApplicationHandler for App {
 
 	fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
 		event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + IDLE_WAIT));
+	}
+}
+
+/// The OS cursor for an engine cursor shape.
+fn engine_cursor(shape: CursorShape) -> Cursor {
+	use winit::cursor::CursorIcon;
+	match shape {
+		CursorShape::Default => Cursor::Icon(CursorIcon::Default),
+		CursorShape::Crosshair => Cursor::Icon(CursorIcon::Crosshair),
+		CursorShape::Grab => Cursor::Icon(CursorIcon::Grab),
+		CursorShape::Grabbing => Cursor::Icon(CursorIcon::Grabbing),
+		CursorShape::ZoomIn => Cursor::Icon(CursorIcon::ZoomIn),
+		CursorShape::ZoomOut => Cursor::Icon(CursorIcon::ZoomOut),
+		CursorShape::None => Cursor::None,
 	}
 }

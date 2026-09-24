@@ -13,5 +13,7 @@ fx-protocol = { workspace = true }
 fx-render = { workspace = true }
 fx-io = { workspace = true }
 crossbeam-channel = { workspace = true }
+wgpu = { workspace = true }
+wgpu-sync = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

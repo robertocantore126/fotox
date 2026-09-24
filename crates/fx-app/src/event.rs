@@ -15,9 +15,10 @@ pub(crate) enum AppEvent {
 	UiUpdate(wgpu::Texture),
 	/// The UI asks for a different mouse cursor.
 	CursorChange(Cursor),
-	/// A message from the UI. Not decoded yet: the `fx-protocol` bridge is
-	/// M0-T05, so for now this is only reported.
+	/// An `fx-protocol` frame from the UI (decoded by `bridge.rs`).
 	UiMessage(Vec<u8>),
+	/// Something the engine or render thread produced.
+	Engine(fx_engine::EngineOutput),
 	/// The UI failed or crashed; the app cannot continue.
 	UiCrashed,
 	/// Leave the event loop and shut down.

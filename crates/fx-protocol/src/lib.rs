@@ -91,6 +91,13 @@ pub enum UiToEngine {
 	},
 }
 
+/// Action id prefixes the UI handles entirely by itself (panels, tools, view
+/// flags, screen modes, dialogs, zoom display, workspaces). The engine does
+/// not toast "not implemented" for these; it may still *read* some of them
+/// (`tool:` sets the active tool, `zoom:` drives the view).
+/// Mirrored in `ui/js/native/mock-engine.js`.
+pub const UI_LOCAL_ACTION_PREFIXES: &[&str] = &["panel:", "panels:", "tool:", "toggle:", "screen:", "dlg:", "zoom:", "ws:", "par:"];
+
 // ---------------------------------------------------------------------------
 // Engine → UI
 // ---------------------------------------------------------------------------

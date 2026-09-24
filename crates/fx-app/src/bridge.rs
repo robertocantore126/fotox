@@ -2,13 +2,11 @@
 //!
 //! Every frame from the UI is decoded here and sorted: `viewport_bounds` and
 //! `direct_input` belong to the shell (§3), everything else to the engine.
-//! Until the engine thread exists (M0-T06) the shell answers `hello` itself so
-//! the UI can show that the connection works.
+//! Engine → UI frames arrive already encoded (`EngineOutput::ToUi`).
 
-use fx_protocol::{EngineToUi, FrameError, UiToEngine};
+use fx_protocol::{FrameError, UiToEngine};
 
 use crate::render::ViewportBounds;
-use crate::ui::UiCommand;
 
 /// A decoded UI message, sorted by who consumes it.
 #[derive(Debug, PartialEq)]
@@ -32,29 +30,10 @@ pub(crate) fn route(frame: &[u8]) -> Result<Routed, FrameError> {
 	})
 }
 
-/// Wrap an engine message as a command for the UI instance.
-pub(crate) fn to_ui(message: &EngineToUi) -> UiCommand {
-	UiCommand::Message(fx_protocol::encode_json(message))
-}
-
-/// Stand-in for the engine until M0-T06: answers `hello` so the UI can show
-/// the connection works; every other message only gets logged by the caller.
-pub(crate) fn answer_without_engine(message: &UiToEngine) -> Option<EngineToUi> {
-	match message {
-		UiToEngine::Hello { ui_version } => {
-			tracing::info!("UI connected (ui_version {ui_version})");
-			Some(EngineToUi::Toast {
-				text: "Engine connected".into(),
-			})
-		}
-		_ => None,
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use fx_protocol::{KIND_JSON, decode, encode_json};
+	use fx_protocol::KIND_JSON;
 
 	fn frame(json: &str) -> Vec<u8> {
 		[&[KIND_JSON][..], json.as_bytes()].concat()
@@ -85,22 +64,5 @@ mod tests {
 		assert!(route(&[]).is_err());
 		assert!(route(&frame("{not json")).is_err());
 		assert!(route(&frame(r#"{"type":"no_such_message"}"#)).is_err());
-	}
-
-	#[test]
-	fn hello_is_answered_with_a_toast() {
-		let reply = answer_without_engine(&UiToEngine::Hello { ui_version: "test".into() }).unwrap();
-		let UiCommand::Message(bytes) = to_ui(&reply) else {
-			panic!("expected a message command");
-		};
-		let (back, _): (EngineToUi, _) = decode(&bytes).unwrap();
-		assert_eq!(
-			back,
-			EngineToUi::Toast {
-				text: "Engine connected".into()
-			}
-		);
-		assert_eq!(bytes, encode_json(&reply));
-		assert!(answer_without_engine(&UiToEngine::Undo { doc: fx_protocol::DocId(1) }).is_none());
 	}
 }
