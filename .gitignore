@@ -1,0 +1,6 @@
+/target/
+/third_party/
+/bench/data/
+*.scratch
+.DS_Store
+Thumbs.db

@@ -1,0 +1,18 @@
+[package]
+name = "fx-io"
+description = "File import/export (TIFF, PNG, JPEG, later PSD/PSB) and the native .fxd format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fx-tiles = { workspace = true }
+fx-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Added by the tasks that need them:
+# tiff = { workspace = true }      M1-T02
+# png = { workspace = true }      M1-T09
+# zune-jpeg = { workspace = true } M1-T09
+# rayon = { workspace = true }     M1-T02

@@ -1,0 +1,18 @@
+[package]
+name = "fx-render"
+description = "GPU side: tile atlas, lazy compositor, blend modes, viewport rendering (wgpu)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fx-tiles = { workspace = true }
+fx-core = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

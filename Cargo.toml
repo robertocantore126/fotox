@@ -1,0 +1,125 @@
+[workspace]
+resolver = "2"
+members = [
+	"crates/fx-tiles",
+	"crates/fx-core",
+	"crates/fx-protocol",
+	"crates/fx-color",
+	"crates/fx-io",
+	"crates/fx-render",
+	"crates/fx-ops",
+	"crates/fx-engine",
+	"crates/fx-cli",
+	"crates/fx-app",
+	"vendor/graphite/desktop-ui",
+	"vendor/graphite/embedded-resources",
+	"vendor/graphite/wgpu-sync",
+]
+# Everything except the GUI shell builds without CEF. `cargo test` / `cargo check`
+# at the root therefore never downloads CEF. Build the app explicitly:
+#   cargo build -p fx-app
+default-members = [
+	"crates/fx-tiles",
+	"crates/fx-core",
+	"crates/fx-protocol",
+	"crates/fx-color",
+	"crates/fx-io",
+	"crates/fx-render",
+	"crates/fx-ops",
+	"crates/fx-engine",
+	"crates/fx-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Rob"]
+publish = false
+
+# ---------------------------------------------------------------------------
+# APPROVED DEPENDENCIES. Crates may only use dependencies listed here
+# (`foo = { workspace = true }`). Adding a new one is a decision: record it in
+# docs/DECISIONS.md in the same commit. Versions are pinned to what the
+# vendored Graphite shell was built against where they overlap.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# local
+fx-tiles = { path = "crates/fx-tiles" }
+fx-core = { path = "crates/fx-core" }
+fx-protocol = { path = "crates/fx-protocol" }
+fx-color = { path = "crates/fx-color" }
+fx-io = { path = "crates/fx-io" }
+fx-render = { path = "crates/fx-render" }
+fx-ops = { path = "crates/fx-ops" }
+fx-engine = { path = "crates/fx-engine" }
+graphite-desktop-ui = { path = "vendor/graphite/desktop-ui" }
+wgpu-sync = { path = "vendor/graphite/wgpu-sync" }
+
+# GPU / windowing / UI shell (versions dictated by the vendored Graphite shell)
+wgpu = { version = "29.0", features = ["strict_asserts"] }
+winit = "0.31.0-beta.2"
+cef = "151"
+cef-dll-sys = "151"
+include_dir = "0.7"
+rand = { version = "0.9", default-features = false, features = ["std_rng"] }
+windows = "0.62.2"
+
+# general
+thiserror = "2"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+bytemuck = { version = "1.13", features = ["derive", "min_const_generics"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+rayon = "1.12"
+pollster = "1.0"
+futures = "0.3"
+clap = { version = "4.6", features = ["derive"] }
+# native file dialogs (M1-T08)
+rfd = "0.17"
+# Windows exe icon/metadata (M0-T06, build-dependency of fx-app)
+winres = "0.1"
+half = { version = "2.7", features = ["bytemuck"] }
+
+# storage
+lz4_flex = "0.14"
+zstd = "0.14"
+memmap2 = "0.9"
+
+# image formats
+tiff = "0.11"
+png = "0.18"
+zune-jpeg = "0.5"
+
+# color
+lcms2 = "6.2"
+
+# dev
+criterion = "0.8"
+
+[patch.crates-io]
+# Graphite's forks, pinned to the exact revisions its desktop app used at the
+# vendored commit (see vendor/graphite/VENDORED.md). Do not bump casually.
+winit = { git = "https://github.com/timon-schelling/winit", rev = "2bdd85391e28078d1cbb68761b13fd3332e7d2a4" }
+cef = { git = "https://github.com/timon-schelling/cef-rs.git", rev = "35712dc3948628245cf9810eadd045d9435442e8" }
+cef-dll-sys = { git = "https://github.com/timon-schelling/cef-rs.git", rev = "35712dc3948628245cf9810eadd045d9435442e8" }
+
+[profile.dev]
+# Pixel code is unusable at opt-level 0. Our own crates get 1, dependencies 3.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"
+lto = "thin"
+codegen-units = 16
+
+[profile.profiling]
+inherits = "release"
+debug = true

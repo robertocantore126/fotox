@@ -1,0 +1,11 @@
+[package]
+name = "fx-ops"
+description = "Pixel operations: brushes, retouching (clone/heal), filters, destructive adjustments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fx-tiles = { workspace = true }
+fx-core = { workspace = true }

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fotox — image editor interface</title>
+<meta name="description" content="Fotox: an original, from-scratch recreation of a Photoshop-style image editor interface. Menus, panels and dialogs are complete; the editing engine is not part of this build.">
+<link rel="stylesheet" href="css/theme-dark.css">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/menus.css">
+<link rel="stylesheet" href="css/panels.css">
+<link rel="stylesheet" href="css/dialogs.css">
+<style>
+  /* Solo per il messaggio <noscript>: niente fogli di stile esterni, così
+     resta leggibile anche se il CSS non arriva. */
+  .nojs {
+    margin: 0; padding: 22px 26px; font: 14px/1.55 "Open Sans","Segoe UI",system-ui,sans-serif;
+    background: #ffffff; color: #1b1b1b;
+  }
+  .nojs b { font-size: 16px; }
+  .nojs code {
+    font: 13px/1.4 Consolas,monospace; background: #f1f1f1; border: 1px solid #dcdcdc;
+    border-radius: 3px; padding: 1px 5px;
+  }
+</style>
+</head>
+<body class="theme-dark">
+  <div id="app"></div>
+  <div id="popuplayer"></div>
+  <noscript>
+    <div class="nojs">
+      <b>Fotox needs JavaScript.</b><br>
+      The whole interface is built at runtime, so with scripting turned off you get an empty page.
+      Enable JavaScript for this address, or allow it for <code>127.0.0.1</code>, then reload.
+    </div>
+  </noscript>
+
+  <!-- Bootstrap diagnostico (script classico, non modulo): se qualcosa impedisce
+       all'interfaccia di comparire, il motivo viene scritto nella pagina invece di
+       lasciare uno schermo vuoto senza indizi. -->
+  <script>
+  (function () {
+    var problems = [];
+    var ready = false;
+
+    window.addEventListener("error", function (e) {
+      var el = e.target;
+      if (el && el !== window && el.tagName && el.tagName !== "SCRIPT" && el.tagName !== "LINK") {
+        return; // errori di risorse non bloccanti (immagini, favicon...)
+      }
+      if (el && el !== window && el.tagName) {
+        problems.push("Could not load " + (el.src || el.href));
+        return;
+      }
+      problems.push(
+        (e.message || "Script error") +
+        (e.filename ? "  (" + e.filename + ":" + e.lineno + ")" : "")
+      );
+    }, true);
+
+    window.addEventListener("unhandledrejection", function (e) {
+      var r = e.reason;
+      problems.push("Unhandled rejection: " + ((r && r.message) ? r.message : String(r)));
+    });
+
+    function modulesSupported() {
+      try {
+        return !!(window.HTMLScriptElement && (
+          HTMLScriptElement.supports ? HTMLScriptElement.supports("module") : "noModule" in HTMLScriptElement.prototype
+        ));
+      } catch (err) { return false; }
+    }
+
+    function line(parent, text, weight, color) {
+      var p = document.createElement("div");
+      p.style.cssText = "margin:0 0 5px;font:" + (weight || "400") + " 13px/1.5 Consolas,'Courier New',monospace;color:" + (color || "#333");
+      p.textContent = text;
+      parent.appendChild(p);
+    }
+
+    function report() {
+      var app = document.getElementById("app");
+      var page = document.getElementById("fotox-diag");
+      if (!page) {
+        page = document.createElement("div");
+        page.id = "fotox-diag";
+        page.style.cssText = [
+          "position:fixed", "inset:0", "z-index:2147483647", "overflow:auto",
+          "background:#1b1d21", "padding:28px", "box-sizing:border-box"
+        ].join(";");
+        document.body.appendChild(page);
+      }
+
+      var card = document.createElement("div");
+      card.style.cssText = [
+        "max-width:760px", "margin:0 auto", "background:#ffffff", "color:#1b1b1b",
+        "border:1px solid #d7d7d7", "border-top:4px solid #c0392b", "border-radius:5px",
+        "padding:22px 26px", "font:14px/1.6 'Open Sans','Segoe UI',system-ui,sans-serif",
+        "box-shadow:0 12px 34px rgba(0,0,0,.45)"
+      ].join(";");
+
+      var h = document.createElement("h1");
+      h.style.cssText = "margin:0 0 4px;font-size:19px";
+      h.textContent = "Fotox could not start";
+      card.appendChild(h);
+
+      var sub = document.createElement("p");
+      sub.style.cssText = "margin:0 0 16px;color:#555";
+      sub.textContent = "The shell loaded, but the interface never rendered. Details:";
+      card.appendChild(sub);
+
+      if (location.protocol === "file:") {
+        var big = document.createElement("p");
+        big.style.cssText = "margin:0 0 14px;padding:10px 12px;background:#fdf3f2;border:1px solid #f0c8c4;border-radius:4px";
+        big.innerHTML = "";
+        big.textContent = "This page is open straight from disk (file://). Browsers refuse to run ES modules that way, " +
+          "so nothing can load. Start the dev server and use the http:// address it prints.";
+        card.appendChild(big);
+      }
+
+      if (problems.length) {
+        problems.forEach(function (t) { line(card, "• " + t, "600", "#a02b1e"); });
+      } else {
+        line(card, "• no error was reported — the interface script never executed at all", "600", "#a02b1e");
+      }
+
+      var facts = document.createElement("div");
+      facts.style.cssText = "margin:16px 0 0;padding:12px;background:#f5f5f5;border:1px solid #e3e3e3;border-radius:4px";
+      line(facts, "url            " + location.href, "400", "#444");
+      line(facts, "protocol       " + location.protocol, "400", "#444");
+      line(facts, "ES modules     " + (modulesSupported() ? "supported" : "NOT supported by this browser"), "400", "#444");
+      line(facts, "app root       " + (app ? (app.children.length + " child node(s)") : "#app is missing from the document"), "400", "#444");
+      line(facts, "script tags    " + document.scripts.length + " (expected 2)", "400", "#444");
+      line(facts, "browser        " + navigator.userAgent, "400", "#444");
+      card.appendChild(facts);
+
+      var tips = document.createElement("ol");
+      tips.style.cssText = "margin:16px 0 0;padding-left:20px;color:#333";
+      var port = location.port || "5500";
+      [
+        "Serve the folder over HTTP: run " + "python tools/serve.py" + " inside the Fotox folder. It prints the exact address and opens the browser for you.",
+        "Open the console with F12 and reload: a red line there names the real cause. The Network tab shows the file that failed to load.",
+        "Try the other address form — http://localhost:" + port + "/ and http://127.0.0.1:" + port + "/ resolve differently on some machines.",
+        "Check that JavaScript is enabled and that no extension is blocking scripts for 127.0.0.1."
+      ].forEach(function (t) {
+        var li = document.createElement("li");
+        li.style.margin = "0 0 5px";
+        li.textContent = t;
+        tips.appendChild(li);
+      });
+      card.appendChild(tips);
+
+      page.appendChild(card);
+    }
+
+    function ok() {
+      ready = true;
+      var page = document.getElementById("fotox-diag");
+      if (page && page.parentNode) page.parentNode.removeChild(page);
+    }
+
+    window.__fotoxDiag = { report: report, ok: ok, problems: problems };
+
+    // Watchdog: se dopo l'avvio non c'è ancora nulla nell'area principale, spiega il perché.
+    setTimeout(function () {
+      if (ready) return;
+      var app = document.getElementById("app");
+      if (!app || app.children.length === 0) report();
+    }, 1500);
+  })();
+  </script>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

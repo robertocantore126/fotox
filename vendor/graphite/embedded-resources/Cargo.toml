@@ -1,0 +1,15 @@
+[package]
+name = "graphite-desktop-embedded-resources"
+description = "Graphite Desktop Embedded Resources"
+version.workspace = true
+license = "MIT OR Apache-2.0" # vendored from Graphite, see vendor/graphite/VENDORED.md
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+include_dir = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(embedded_resources)'] }

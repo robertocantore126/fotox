@@ -1,0 +1,362 @@
+// Fotox — area di lavoro: disegna un documento finto, gestisce zoom, pan,
+// righelli e guide. Il contenuto è interamente generato dal codice.
+
+import { h, icon, clear } from "./el.js";
+import { state, setZoom, emit, on } from "./state.js";
+
+let canvasEl = null;
+let scrollEl = null;
+let wrapEl = null;
+let rulerTop = null;
+let rulerLeft = null;
+let guidesLayer = null;
+let zoomMode = "fit"; // fit | custom
+
+const RULER = 18;
+
+export function getDocCanvas() {
+  return canvasEl;
+}
+
+export function initWorkspace(host) {
+  clear(host);
+  host.classList.add("workspace");
+
+  const tabs = h("div", { class: "doctabs", id: "doctabs" });
+  const tab = h("div", { class: "doctab active" },
+    icon("i-image", "ic sm"),
+    h("span", { class: "doctab-label", text: `${state.doc.name} @ ${state.zoom}% (${state.doc.mode}/${state.doc.bits})` }),
+    h("button", { class: "doctab-x", type: "button", "data-tip": "Close document", onclick: () => emit("mock", "Close document") }, icon("i-close", "ic xs")));
+  const newTab = h("button", { class: "doctab-add", type: "button", "data-tip": "Create a new document", onclick: () => emit("ask-dialog", "new-doc") }, icon("i-plus", "ic sm"));
+  tabs.append(tab, newTab);
+
+  const rulerCorner = h("div", { class: "ruler-corner", text: "px" });
+  rulerTop = h("canvas", { class: "ruler ruler-top", width: 600, height: RULER });
+  rulerLeft = h("canvas", { class: "ruler ruler-left", width: RULER, height: 600 });
+
+  canvasEl = h("canvas", { class: "doc-canvas", width: state.doc.w, height: state.doc.h });
+  drawArtwork(canvasEl.getContext("2d"), state.doc.w, state.doc.h);
+
+  guidesLayer = h("div", { class: "guides-layer" },
+    h("span", { class: "guide v", style: { left: "25%" } }),
+    h("span", { class: "guide h", style: { top: "33%" } }));
+
+  const stage = h("div", { class: "stage" }, canvasEl, guidesLayer);
+  scrollEl = h("div", { class: "doc-scroll" }, stage);
+
+  const gridLayer = h("div", { class: "grid-layer" });
+  const rulerRow = h("div", { class: "ruler-row" }, rulerCorner, rulerTop);
+  const body = h("div", { class: "workspace-body" },
+    h("div", { class: "ruler-col" }, rulerLeft),
+    h("div", { class: "workspace-main" }, scrollEl, gridLayer));
+
+  host.append(tabs, rulerRow, body);
+
+  scrollEl.addEventListener("scroll", () => { drawRulers(); positionGuides(); });
+  initPanning();
+
+  on("zoom", (z) => { applyZoom(z); updateStatusZoom(z); });
+  on("flag", (key) => {
+    if (key === "rulers") applyRulers();
+    if (key === "grid" || key === "pixelgrid") applyGrid();
+    if (key === "guides") applyGuides();
+  });
+  on("colors", () => {});
+
+  // misura disponibile e adatta lo zoom
+  requestAnimationFrame(() => {
+    applyZoom(state.zoom);
+    applyRulers();
+    applyGrid();
+    applyGuides();
+    drawRulers();
+    positionGuides();
+    fitInitial();
+  });
+
+  window.addEventListener("resize", () => {
+    if (zoomMode === "fit") fit();
+    else applyZoom(state.zoom);
+    drawRulers();
+  });
+
+  return { setZoom: zoomTo, zoomIn, zoomOut, fit, actual };
+}
+
+/* ------------------------------------------------------------- disegno */
+
+function drawArtwork(ctx, w, hgt) {
+  // cielo
+  const sky = ctx.createLinearGradient(0, 0, w * 0.3, hgt);
+  sky.addColorStop(0, "#101830");
+  sky.addColorStop(0.45, "#2a3f6b");
+  sky.addColorStop(0.72, "#7a5aa8");
+  sky.addColorStop(1, "#e08a6a");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, w, hgt);
+
+  // sole
+  const sunX = w * 0.68;
+  const sunY = hgt * 0.46;
+  const glow = ctx.createRadialGradient(sunX, sunY, 4, sunX, sunY, w * 0.3);
+  glow.addColorStop(0, "rgba(255,236,190,0.95)");
+  glow.addColorStop(0.25, "rgba(255,196,120,0.45)");
+  glow.addColorStop(1, "rgba(255,150,90,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, w, hgt);
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, w * 0.052, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff2cf";
+  ctx.fill();
+
+  // stelle
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * w;
+    const y = Math.random() * hgt * 0.42;
+    const r = Math.random() * 1.6 + 0.4;
+    ctx.globalAlpha = 0.25 + Math.random() * 0.6;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // montagne su tre piani
+  const layers = [
+    ["#1b2340", 0.62, 0.16],
+    ["#141a30", 0.72, 0.13],
+    ["#0c1020", 0.83, 0.1],
+  ];
+  for (const [color, base, amp] of layers) {
+    ctx.beginPath();
+    ctx.moveTo(0, hgt);
+    const y0 = hgt * base;
+    ctx.lineTo(0, y0);
+    const peaks = 5 + Math.floor(amp * 40);
+    for (let i = 0; i <= peaks; i++) {
+      const x = (w / peaks) * i;
+      const y = y0 - Math.sin(i * 1.7) * hgt * amp - Math.sin(i * 0.6) * hgt * amp * 0.6;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, hgt);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  // riflesso sotto le montagne
+  const refl = ctx.createLinearGradient(0, hgt * 0.9, 0, hgt);
+  refl.addColorStop(0, "rgba(255,214,160,0.16)");
+  refl.addColorStop(0.5, "rgba(255,214,160,0.06)");
+  refl.addColorStop(1, "rgba(255,214,160,0)");
+  ctx.fillStyle = refl;
+  ctx.fillRect(0, hgt * 0.9, w, hgt * 0.1);
+
+  // blocco titolo in stile locandina
+  ctx.fillStyle = "rgba(10,12,20,0.55)";
+  const bx = w * 0.08;
+  const by = hgt * 0.62;
+  const bw = w * 0.5;
+  const bh = hgt * 0.22;
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(bx, by, bw, bh, w * 0.02) : ctx.rect(bx, by, bw, bh);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `600 ${Math.round(w * 0.052)}px "Segoe UI", system-ui, sans-serif`;
+  ctx.fillText("Golden Hour", bx + w * 0.03, by + hgt * 0.075);
+  ctx.font = `400 ${Math.round(w * 0.024)}px "Segoe UI", system-ui, sans-serif`;
+  ctx.fillStyle = "rgba(255,255,255,0.78)";
+  ctx.fillText("A Fotox demo document — replace it with your own image.", bx + w * 0.03, by + hgt * 0.115);
+  ctx.fillStyle = "rgba(255,255,255,0.16)";
+  ctx.fillRect(bx + w * 0.03, by + hgt * 0.14, bw * 0.6, 2);
+
+  // piccola etichetta in alto a destra, per dare l'idea di un design
+  ctx.fillStyle = "rgba(255,255,255,0.82)";
+  const lx = w * 0.63;
+  const ly = hgt * 0.05;
+  const lw = w * 0.29;
+  const lh = hgt * 0.042;
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(lx, ly, lw, lh, lh / 2) : ctx.rect(lx, ly, lw, lh);
+  ctx.fill();
+  ctx.fillStyle = "rgba(20,22,30,0.85)";
+  ctx.font = `500 ${Math.round(w * 0.019)}px "Segoe UI", system-ui, sans-serif`;
+  ctx.fillText("FOTOX STUDIO", lx + lw * 0.13, ly + lh * 0.68);
+}
+
+/* --------------------------------------------------------------- zoom/pan */
+
+function applyZoom(z) {
+  if (!canvasEl) return;
+  canvasEl.style.width = (state.doc.w * z / 100) + "px";
+  canvasEl.style.height = (state.doc.h * z / 100) + "px";
+  canvasEl.classList.toggle("smooth", z < 120);
+  const label = document.querySelector(".doctab-label");
+  if (label) label.textContent = `${state.doc.name} @ ${Math.round(z)}% (${state.doc.mode}/${state.doc.bits})`;
+  updateStatusZoom(z);
+  applyGrid();
+  drawRulers();
+  positionGuides();
+}
+
+export function zoomTo(z) {
+  zoomMode = "custom";
+  setZoom(z);
+}
+
+export function zoomIn() {
+  setZoom(state.zoom * 1.25);
+}
+
+export function zoomOut() {
+  setZoom(state.zoom / 1.25);
+}
+
+export function actual() {
+  setZoom(100);
+  center();
+}
+
+export function fit() {
+  zoomMode = "fit";
+  if (!scrollEl) return;
+  const pad = 64;
+  const z = Math.min((scrollEl.clientWidth - pad) / state.doc.w, (scrollEl.clientHeight - pad) / state.doc.h) * 100;
+  setZoom(z);
+  requestAnimationFrame(center);
+}
+
+function fitInitial() {
+  fit();
+}
+
+function center() {
+  if (!scrollEl) return;
+  scrollEl.scrollLeft = (scrollEl.scrollWidth - scrollEl.clientWidth) / 2;
+  scrollEl.scrollTop = (scrollEl.scrollHeight - scrollEl.clientHeight) / 2;
+  drawRulers();
+  positionGuides();
+}
+
+function initPanning() {
+  let panning = false;
+  let start = null;
+  scrollEl.addEventListener("mousedown", (e) => {
+    const isHand = state.tool === "hand" || e.button === 1 || (e.altKey && e.button === 0);
+    if (!isHand) return;
+    panning = true;
+    start = { x: e.clientX, y: e.clientY, left: scrollEl.scrollLeft, top: scrollEl.scrollTop };
+    scrollEl.classList.add("panning");
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!panning) return;
+    scrollEl.scrollLeft = start.left - (e.clientX - start.x);
+    scrollEl.scrollTop = start.top - (e.clientY - start.y);
+  });
+  document.addEventListener("mouseup", () => {
+    if (!panning) return;
+    panning = false;
+    scrollEl.classList.remove("panning");
+  });
+  scrollEl.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    setZoom(state.zoom * (e.deltaY < 0 ? 1.1 : 0.9));
+  }, { passive: false });
+  scrollEl.addEventListener("dblclick", () => { if (state.tool === "zoom") actual(); });
+}
+
+/* -------------------------------------------------------------- righelli */
+
+function applyRulers() {
+  const on = state.flags.rulers;
+  const host = document.querySelector(".workspace");
+  if (!host) return;
+  host.classList.toggle("no-rulers", !on);
+  if (on) requestAnimationFrame(drawRulers);
+}
+
+function drawRulers() {
+  if (!rulerTop || !rulerLeft || !state.flags.rulers || !scrollEl) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = scrollEl.clientWidth;
+  const hgt = scrollEl.clientHeight;
+  const scale = state.zoom / 100;
+  for (const [cv, size, horizontal] of [[rulerTop, w, true], [rulerLeft, hgt, false]]) {
+    cv.width = Math.max(1, Math.floor(size * dpr));
+    cv.height = Math.floor(RULER * dpr);
+    if (!horizontal) { cv.width = Math.floor(RULER * dpr); cv.height = Math.max(1, Math.floor(size * dpr)); }
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size, RULER);
+    ctx.fillStyle = "#33363d";
+    ctx.fillRect(0, 0, horizontal ? size : RULER, horizontal ? RULER : size);
+
+    const offset = horizontal ? scrollEl.scrollLeft : scrollEl.scrollTop;
+    const docOffset = (horizontal ? (scrollEl.scrollWidth - state.doc.w * scale) / 2 : (scrollEl.scrollHeight - state.doc.h * scale) / 2);
+    // scala dei tick: 10, 50, 100, 500 px di documento
+    const steps = [1, 2, 5, 10, 25, 50, 100, 250, 500];
+    let step = steps.find((s) => s * scale >= 44) || 1000;
+    ctx.font = '9px "Segoe UI", system-ui, sans-serif';
+    ctx.fillStyle = "#9aa0ab";
+    ctx.strokeStyle = "#5b616c";
+    ctx.lineWidth = 1;
+    const from = Math.floor((offset - docOffset) / scale / step) * step - step * 2;
+    const to = from + (size / scale) + step * 4;
+    for (let doc = from; doc <= to; doc += step) {
+      const p = docOffset + doc * scale - offset;
+      if (p < -60 || p > size + 60) continue;
+      ctx.beginPath();
+      if (horizontal) { ctx.moveTo(Math.round(p) + 0.5, RULER - 5); ctx.lineTo(Math.round(p) + 0.5, RULER); }
+      else { ctx.moveTo(RULER - 5, Math.round(p) + 0.5); ctx.lineTo(RULER, Math.round(p) + 0.5); }
+      ctx.stroke();
+      if (horizontal) {
+        ctx.save();
+        ctx.translate(Math.round(p) + 3, 9);
+        ctx.fillText(String(Math.round(doc)), 0, 0);
+        ctx.restore();
+      } else {
+        ctx.save();
+        ctx.translate(4, Math.round(p) + 3);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText(String(Math.round(doc)), 0, 0);
+        ctx.restore();
+      }
+    }
+  }
+}
+
+function applyGrid() {
+  const host = document.querySelector(".workspace");
+  if (!host) return;
+  host.classList.toggle("show-grid", !!state.flags.grid);
+  host.classList.toggle("show-pixelgrid", !!state.flags.pixelgrid);
+  const layer = host.querySelector(".grid-layer");
+  if (layer && state.flags.grid) {
+    const step = Math.max(8, 100 * state.zoom / 100);
+    layer.style.backgroundImage = `linear-gradient(to right, rgba(255,255,255,.14) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,.14) 1px, transparent 1px)`;
+    layer.style.backgroundSize = `${step}px ${step}px`;
+  }
+}
+
+function applyGuides() {
+  if (guidesLayer) guidesLayer.style.display = state.flags.guides ? "" : "none";
+}
+
+function positionGuides() {
+  if (!guidesLayer || !canvasEl || !scrollEl) return;
+  const scale = state.zoom / 100;
+  guidesLayer.style.width = canvasEl.style.width;
+  guidesLayer.style.height = canvasEl.style.height;
+  const v = guidesLayer.querySelector(".guide.v");
+  const hg = guidesLayer.querySelector(".guide.h");
+  if (v) v.style.left = state.doc.w * 0.25 * scale + "px";
+  if (hg) hg.style.top = state.doc.h * 0.33 * scale + "px";
+}
+
+function updateStatusZoom(z) {
+  const el = document.getElementById("statuszoom");
+  if (el) el.querySelector(".pf-value").textContent = Math.round(z) + "%";
+}

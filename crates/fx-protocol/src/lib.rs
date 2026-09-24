@@ -1,0 +1,323 @@
+//! # fx-protocol — UI ↔ engine messages
+//!
+//! Transport: the binary message channel of the vendored Graphite shell
+//! (`window.sendNativeMessage(ArrayBuffer)` / `window.receiveNativeMessage`).
+//! Every message is one [`Frame`]:
+//!
+//! ```text
+//! byte 0      kind: 0 = JSON, 1 = JSON header + binary payload
+//! kind 0:     bytes 1.. = UTF-8 JSON of UiToEngine / EngineToUi
+//! kind 1:     bytes 1..5 = header length N (u32 little endian)
+//!             bytes 5..5+N = UTF-8 JSON header (an EngineToUi value)
+//!             bytes 5+N..  = raw payload (e.g. RGBA8 thumbnail pixels)
+//! ```
+//!
+//! **Pixels of the document never travel over this channel.** Only small
+//! things do: thumbnails, histograms, the navigator preview. The viewport is
+//! drawn natively under the UI (docs/ARCHITECTURE.md §2).
+//!
+//! The JavaScript side of this file is `ui/js/native/protocol.js`. Keep the
+//! two in sync; docs/PROTOCOL.md is the human-readable contract.
+
+use fx_core::{BitDepth, BlendMode, Command, LayerId};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocId(pub u32);
+
+// ---------------------------------------------------------------------------
+// UI → engine
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UiToEngine {
+	/// First message after the page loads.
+	Hello {
+		ui_version: String,
+	},
+	/// Consumed by the shell. `false` while any Fotox popup (menu, drop-down,
+	/// flyout, modal dialog) is open or a text field over the viewport has
+	/// focus: pointer input over the viewport then goes to the UI instead of
+	/// the engine. (Same mechanism as Graphite's `WindowUpdateDirectInput`.)
+	DirectInput {
+		enabled: bool,
+	},
+	/// Where the transparent viewport hole is, in *physical* window pixels
+	/// (`getBoundingClientRect() × devicePixelRatio`). Sent on every layout change.
+	/// Consumed by the shell (composite + input routing), which forwards the
+	/// size to the engine as `EngineInput::ViewportResized`.
+	ViewportBounds {
+		x: f64,
+		y: f64,
+		width: f64,
+		height: f64,
+	},
+	/// A Fotox menu/shortcut/button action id (`js/data/menus.js` `a:` field),
+	/// e.g. `"doc:save"`, `"zoom:in"`, `"dlg:open"`. Unknown ids get a `Toast` back, never an error.
+	Action {
+		id: String,
+		#[serde(default)]
+		args: serde_json::Value,
+	},
+	/// A document command (panels use this directly, e.g. opacity slider).
+	Command {
+		doc: DocId,
+		command: Command,
+	},
+	Undo {
+		doc: DocId,
+	},
+	Redo {
+		doc: DocId,
+	},
+	/// Make a document tab the active one.
+	ActivateDocument {
+		doc: DocId,
+	},
+	CloseDocument {
+		doc: DocId,
+	},
+	/// Zoom from UI controls (status bar field, View menu). 1.0 = 100 %.
+	SetZoom {
+		doc: DocId,
+		zoom: f64,
+	},
+	/// Ask for layer thumbnails (answered with binary `Thumbnail` frames).
+	RequestThumbnails {
+		doc: DocId,
+		layers: Vec<LayerId>,
+		size: u32,
+	},
+}
+
+// ---------------------------------------------------------------------------
+// Engine → UI
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DocumentInfo {
+	pub doc: DocId,
+	pub name: String,
+	pub width: u32,
+	pub height: u32,
+	pub depth: BitDepth,
+	pub profile_name: String,
+	pub ppi: f32,
+	pub dirty: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerInfoKind {
+	Pixel,
+	Group,
+	Adjustment,
+	SolidFill,
+}
+
+/// Flat, UI-friendly description of one layer. The tree is expressed with
+/// `depth` in top → bottom order (the order the Layers panel draws).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerInfo {
+	pub id: LayerId,
+	pub name: String,
+	pub kind: LayerInfoKind,
+	pub depth: u32,
+	pub visible: bool,
+	pub opacity: f32,
+	pub fill: f32,
+	pub blend: BlendMode,
+	pub clipped: bool,
+	pub has_mask: bool,
+	pub locked: bool,
+	pub expanded: bool,
+	pub selected: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryStats {
+	pub hot_bytes: u64,
+	pub warm_bytes: u64,
+	pub scratch_bytes: u64,
+	pub gpu_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EngineToUi {
+	DocumentOpened {
+		info: DocumentInfo,
+	},
+	DocumentChanged {
+		info: DocumentInfo,
+	},
+	DocumentClosed {
+		doc: DocId,
+	},
+	ActiveDocument {
+		doc: Option<DocId>,
+	},
+	/// Full layer list. Sent after structure/props changes. Fine up to thousands of layers.
+	Layers {
+		doc: DocId,
+		revision: u64,
+		layers: Vec<LayerInfo>,
+	},
+	History {
+		doc: DocId,
+		labels: Vec<String>,
+		current: usize,
+		can_undo: bool,
+		can_redo: bool,
+	},
+	/// View transform, for rulers, status bar and navigator. Throttled to ≤ 60 Hz.
+	View {
+		doc: DocId,
+		zoom: f64,
+		center_x: f64,
+		center_y: f64,
+		rotation_deg: f64,
+	},
+	/// Sent ~2×/s.
+	Status {
+		memory: MemoryStats,
+		fps: f32,
+	},
+	Progress {
+		task: u64,
+		label: String,
+		fraction: f32,
+	},
+	ProgressDone {
+		task: u64,
+	},
+	Toast {
+		text: String,
+	},
+	Error {
+		text: String,
+	},
+	/// Binary frame: payload = `width × height × 4` bytes RGBA8, straight alpha.
+	Thumbnail {
+		doc: DocId,
+		layer: LayerId,
+		revision: u64,
+		width: u32,
+		height: u32,
+	},
+}
+
+// ---------------------------------------------------------------------------
+// Framing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum FrameError {
+	#[error("empty frame")]
+	Empty,
+	#[error("unknown frame kind {0}")]
+	UnknownKind(u8),
+	#[error("truncated frame")]
+	Truncated,
+	#[error("invalid JSON: {0}")]
+	Json(#[from] serde_json::Error),
+}
+
+pub const KIND_JSON: u8 = 0;
+pub const KIND_BINARY: u8 = 1;
+
+pub fn encode_json<T: Serialize>(message: &T) -> Vec<u8> {
+	let mut out = vec![KIND_JSON];
+	serde_json::to_writer(&mut out, message).expect("protocol messages always serialise");
+	out
+}
+
+pub fn encode_binary<T: Serialize>(header: &T, payload: &[u8]) -> Vec<u8> {
+	let header = serde_json::to_vec(header).expect("protocol messages always serialise");
+	let mut out = Vec::with_capacity(5 + header.len() + payload.len());
+	out.push(KIND_BINARY);
+	out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+	out.extend_from_slice(&header);
+	out.extend_from_slice(payload);
+	out
+}
+
+/// Decode a frame into its message and (for binary frames) payload.
+pub fn decode<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<(T, &[u8]), FrameError> {
+	let (&kind, rest) = frame.split_first().ok_or(FrameError::Empty)?;
+	match kind {
+		KIND_JSON => Ok((serde_json::from_slice(rest)?, &[])),
+		KIND_BINARY => {
+			let len_bytes: [u8; 4] = rest.get(..4).ok_or(FrameError::Truncated)?.try_into().unwrap();
+			let len = u32::from_le_bytes(len_bytes) as usize;
+			let header = rest.get(4..4 + len).ok_or(FrameError::Truncated)?;
+			Ok((serde_json::from_slice(header)?, &rest[4 + len..]))
+		}
+		other => Err(FrameError::UnknownKind(other)),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn json_roundtrip() {
+		let msg = UiToEngine::ViewportBounds {
+			x: 44.0,
+			y: 80.0,
+			width: 1600.0,
+			height: 900.0,
+		};
+		let frame = encode_json(&msg);
+		assert_eq!(frame[0], KIND_JSON);
+		assert_eq!(&frame[1..], br#"{"type":"viewport_bounds","x":44.0,"y":80.0,"width":1600.0,"height":900.0}"#);
+		let (back, payload): (UiToEngine, _) = decode(&frame).unwrap();
+		assert_eq!(back, msg);
+		assert!(payload.is_empty());
+	}
+
+	#[test]
+	fn action_args_default_to_null() {
+		let (msg, _): (UiToEngine, _) = decode(&[&[KIND_JSON][..], br#"{"type":"action","id":"dlg:open"}"#].concat()).unwrap();
+		assert_eq!(
+			msg,
+			UiToEngine::Action {
+				id: "dlg:open".into(),
+				args: serde_json::Value::Null
+			}
+		);
+	}
+
+	#[test]
+	fn protocol_md_examples_decode() {
+		// Keep in sync with docs/PROTOCOL.md §6.
+		let frame = [
+			&[KIND_JSON][..],
+			br#"{"type":"command","doc":1,"command":{"op":"set_layer_props","layer":{"id":7},"props":{"opacity":0.5}}}"#,
+		]
+		.concat();
+		let (msg, _): (UiToEngine, _) = decode(&frame).unwrap();
+		assert!(matches!(msg, UiToEngine::Command { doc: DocId(1), .. }));
+		let layers = br#"{"type":"layers","doc":1,"revision":12,"layers":[{"id":7,"name":"Sky","kind":"pixel","depth":0,"visible":true,"opacity":0.5,"fill":1.0,"blend":"normal","clipped":false,"has_mask":false,"locked":false,"expanded":false,"selected":true}]}"#;
+		let (msg, _): (EngineToUi, _) = decode(&[&[KIND_JSON][..], layers].concat()).unwrap();
+		assert!(matches!(msg, EngineToUi::Layers { revision: 12, .. }));
+	}
+
+	#[test]
+	fn binary_roundtrip() {
+		let header = EngineToUi::Thumbnail {
+			doc: DocId(1),
+			layer: LayerId(7),
+			revision: 3,
+			width: 2,
+			height: 1,
+		};
+		let pixels = [1u8, 2, 3, 4, 5, 6, 7, 8];
+		let frame = encode_binary(&header, &pixels);
+		let (back, payload): (EngineToUi, _) = decode(&frame).unwrap();
+		assert_eq!(back, header);
+		assert_eq!(payload, &pixels);
+	}
+}

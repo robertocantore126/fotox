@@ -1,0 +1,131 @@
+/* Fotox — tema scuro: token, reset e tipografia.
+   Le metriche di base (righe da 23 px, testo da 13 px) ricalcano quelle
+   misurate sull'editor di riferimento, ma colori, spaziature e nomi delle
+   classi sono nostri. */
+
+:root {
+  color-scheme: dark;
+
+  /* superfici */
+  --bg-app: #474747;
+  --bg-chrome: #3f3f3f;
+  --bg-chrome-2: #383838;
+  --bg-panel: #454545;
+  --bg-panel-head: #3a3a3a;
+  --bg-popup: #2c2c2c;
+  --bg-popup-hi: #3d5b8f;
+  --bg-input: #303030;
+  --bg-input-hi: #3a3a3a;
+  --bg-stage: #333333;
+  --bg-dialog: #3c3c3c;
+  --bg-dialog-head: #333333;
+
+  /* tratti */
+  --border: #2a2a2a;
+  --border-soft: #565656;
+  --border-popup: #1d1d1d;
+  --border-focus: #6e9bff;
+
+  /* testo */
+  --text: #e9e9ea;
+  --text-dim: #b4b4b6;
+  --text-off: #7d7d80;
+  --text-invert: #ffffff;
+
+  /* accento */
+  --accent: #2f6df6;
+  --accent-soft: #3d5b8f;
+  --danger: #d64545;
+  --ok: #7ac74f;
+  --guide: #4ec3ff;
+
+  /* metriche misurate sull'editor di riferimento */
+  --font: 13px "Open Sans", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  --font-sm: 12px "Open Sans", "Segoe UI", system-ui, sans-serif;
+  --font-xs: 11px "Open Sans", "Segoe UI", system-ui, sans-serif;
+  --row-h: 23px;
+  --topbar-h: 29px;
+  --radius: 3px;
+  --radius-lg: 6px;
+  --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-dialog: 0 20px 60px rgba(0, 0, 0, 0.6);
+  --dock-w: 262px;
+  --tool-w: 44px;
+  --ruler: 18px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text);
+  font: var(--font);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+
+input, textarea {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 2px 5px;
+  outline: none;
+  user-select: text;
+}
+
+input:focus, textarea:focus { border-color: var(--border-focus); }
+
+ul, ol { margin: 0; padding: 0; list-style: none; }
+
+.ic {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: currentColor;
+}
+.ic.sm { width: 15px; height: 15px; }
+.ic.xs { width: 11px; height: 11px; }
+.ic.big { width: 44px; height: 44px; }
+
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: #3b3b3b; }
+::-webkit-scrollbar-thumb { background: #5c5c5c; border: 3px solid #3b3b3b; border-radius: 7px; }
+::-webkit-scrollbar-thumb:hover { background: #6d6d6d; }
+::-webkit-scrollbar-corner { background: #3b3b3b; }
+
+/* pulsanti generici usati da dialoghi e pannelli */
+.btn {
+  min-width: 78px;
+  height: 26px;
+  padding: 0 14px;
+  background: #4a4a4a;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  color: var(--text);
+}
+.btn:hover { background: #555; }
+.btn:active { background: #404040; }
+.btn.primary { background: var(--accent); border-color: #245ecb; color: #fff; }
+.btn.primary:hover { background: #3d7bff; }
+.btn.small { min-width: 0; height: 22px; padding: 0 9px; font-size: 12px; }
+.btn.tiny { min-width: 0; height: 20px; padding: 0 7px; font-size: 11px; }
+.btn.tiny.on { background: var(--accent); border-color: #245ecb; color: #fff; }

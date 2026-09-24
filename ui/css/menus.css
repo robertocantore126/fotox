@@ -1,0 +1,123 @@
+/* Fotox — popup: tendine dei menu, elenchi a discesa, tooltip, toast. */
+
+#popuplayer {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  pointer-events: none;
+}
+
+.popup {
+  position: fixed;
+  pointer-events: auto;
+  background: var(--bg-popup);
+  border: 1px solid var(--border-popup);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-popup);
+  padding: 3px 0;
+}
+
+/* menù a tendina */
+.menu { min-width: 216px; padding: 0; }
+.menu hr {
+  height: 1px;
+  margin: 4px 1px;
+  border: 0;
+  background: #3c3c3c;
+}
+
+.mi {
+  display: flex;
+  align-items: center;
+  height: var(--row-h);
+  padding: 0 6px 0 2px;
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.mi.hl { background: var(--bg-popup-hi); color: #fff; }
+.mi.off { color: var(--text-off); }
+.mi.off.hl { background: #3a3a3a; color: var(--text-off); }
+.mi-check {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: #fff;
+}
+.mi-label { flex: 1; padding-right: 22px; }
+.mi-short { color: #9b9ba0; font-size: 12px; padding-left: 12px; }
+.mi.hl .mi-short { color: #dfe6ff; }
+.mi-arrow { display: grid; place-items: center; width: 16px; color: inherit; opacity: 0.85; }
+.mi.has-sub .mi-label { padding-right: 6px; }
+
+/* elenchi a discesa (select, combo dei pannelli) */
+.dropdown { padding: 3px; }
+.optlist {
+  display: flex;
+  flex-direction: column;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.opt:hover, .opt.hl { background: var(--bg-popup-hi); color: #fff; }
+.opt.sel { background: #4a4a4a; }
+.opt.sel.hl, .opt.sel:hover { background: var(--bg-popup-hi); }
+.opt.off { color: var(--text-off); }
+.opt-label { flex: 1; }
+.opt-key { color: var(--text-off); font-size: 11px; }
+.opt:hover .opt-key { color: #dfe6ff; }
+
+/* tooltip */
+.tooltip {
+  position: fixed;
+  z-index: 1400;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 4px 7px;
+  background: #1f1f22;
+  border: 1px solid #0f0f11;
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  color: #f0f0f2;
+  pointer-events: none;
+}
+.tooltip.show { display: flex; }
+.tip-key { color: #9b9ba0; font-size: 11px; }
+
+/* messaggi */
+.toast {
+  position: fixed;
+  right: 14px;
+  bottom: 34px;
+  z-index: 1500;
+  max-width: 380px;
+  padding: 8px 12px;
+  background: #24262b;
+  border: 1px solid #101114;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-popup);
+  font-size: 12.5px;
+  color: #f1f1f3;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.warn { border-left-color: var(--danger); }

@@ -1,0 +1,30 @@
+[package]
+name = "fx-app"
+description = "The Fotox desktop app: winit window + wgpu + vendored Graphite CEF shell + engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fotox"
+path = "src/main.rs"
+
+[features]
+default = ["accelerated_paint"]
+# GPU texture sharing between CEF and wgpu (D3D11 shared handles on Windows).
+# If the UI is black or flickers, run with --disable-ui-acceleration (M0-T03).
+accelerated_paint = ["graphite-desktop-ui/accelerated_paint"]
+# Release builds: bake ./ui into the binary instead of reading it from disk.
+embedded_resources = ["graphite-desktop-ui/embedded_resources"]
+
+[dependencies]
+graphite-desktop-ui = { workspace = true }
+wgpu-sync = { workspace = true }
+fx-engine = { workspace = true }
+fx-protocol = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+pollster = { workspace = true }

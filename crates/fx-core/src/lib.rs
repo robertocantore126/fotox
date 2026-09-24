@@ -1,0 +1,24 @@
+//! # fx-core — the document model
+//!
+//! * [`Document`] is a cheap-to-clone value: layers are `Arc<Layer>`, pixels are
+//!   tile handles. Cloning a document is how we take snapshots for undo and for
+//!   the render thread. Editing uses `Arc::make_mut`, so only the layers that
+//!   actually change are copied (and only their tile *handles*).
+//! * Every change to a document goes through a [`Command`]. Commands are plain
+//!   serialisable data: the same value drives the UI, undo, macros ("actions")
+//!   and batch processing. There is no other way to mutate a document.
+//! * This crate does no rendering and no file I/O.
+
+pub mod blend;
+pub mod color;
+pub mod command;
+pub mod document;
+pub mod history;
+pub mod layer;
+
+pub use blend::BlendMode;
+pub use color::{BitDepth, ColorProfile, DocumentColor};
+pub use command::{Command, CommandContext, CommandEffect, CommandError, LayerRef};
+pub use document::Document;
+pub use history::History;
+pub use layer::{Adjustment, Layer, LayerId, LayerKind, Mask};

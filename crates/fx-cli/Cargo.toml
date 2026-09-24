@@ -1,0 +1,21 @@
+[package]
+name = "fx-cli"
+description = "Headless Fotox: synthetic test documents, import, benchmarks, batch processing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fotox-cli"
+path = "src/main.rs"
+
+[dependencies]
+fx-tiles = { workspace = true }
+fx-core = { workspace = true }
+fx-io = { workspace = true }
+fx-engine = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

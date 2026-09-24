@@ -1,0 +1,10 @@
+[env]
+# Where cef-dll-sys downloads/looks for the CEF binary distribution (~300 MB,
+# fetched automatically on the first `cargo build -p fx-app`). Kept inside the
+# repo (git-ignored) so the bundle step can find it.
+CEF_PATH = { value = "third_party/cef", relative = true }
+
+# Development: the CEF host loads the UI straight from ./ui, so UI edits only
+# need a reload (Ctrl+R in the app, or restart), not a Rust rebuild.
+# Release builds embed ./ui with the `embedded_resources` feature instead.
+GRAPHITE_RESOURCES = { value = "ui", relative = true }
