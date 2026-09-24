@@ -14,6 +14,8 @@
 //! The engine is headless: `fx-cli` drives it without any GUI, which is how
 //! most engine features are tested and benchmarked.
 
+pub mod layers;
+
 use fx_protocol::UiToEngine;
 
 /// Pointer/keyboard input that happened *over the viewport*. The shell routes
