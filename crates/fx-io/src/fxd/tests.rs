@@ -127,6 +127,36 @@ fn truncation_at_every_byte_of_the_last_save_opens_the_previous_version() {
 }
 
 #[test]
+fn two_appends_to_one_file_do_not_interleave() {
+	let path = path("append-lock.fxd");
+
+	// Save 1 creates the file.
+	let mut writer = FxdWriter::create(&path).unwrap();
+	let manifest = writer.manifest(&[1, 2, 3]).unwrap();
+	writer.commit(manifest, manifest.end()).unwrap();
+
+	// Two writers on clones of the same opened file: the second is refused
+	// before it can write at the first one's offsets.
+	let (opened, _) = FxdFile::open(&path).unwrap();
+	let mut first = FxdWriter::append_to((*opened).clone()).unwrap();
+	let err = match FxdWriter::append_to((*opened).clone()) {
+		Ok(_) => panic!("a second append to the same file was allowed"),
+		Err(error) => error,
+	};
+	assert!(matches!(&err, IoError::Unsupported(m) if m.contains("already being saved")), "got {err:?}");
+
+	// Committing the first releases the file for the next append.
+	let m2 = first.manifest(&[4, 5, 6]).unwrap();
+	first.commit(m2, m2.end()).unwrap();
+	let third = FxdWriter::append_to((*opened).clone());
+	assert!(third.is_ok(), "after a commit the file can be appended again");
+
+	// A dropped writer also releases it.
+	drop(third);
+	assert!(FxdWriter::append_to((*opened).clone()).is_ok(), "a dropped writer releases the file");
+}
+
+#[test]
 fn header_only_file_is_a_clear_error() {
 	let path = path("header-only.fxd");
 	let writer = FxdWriter::create(&path).unwrap();

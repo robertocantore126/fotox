@@ -20,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fx_tiles::{PixelFormat, TileBuffer, TileError, TileSource};
 
@@ -320,6 +320,10 @@ pub struct FxdFile {
 	id: u64,
 	path: PathBuf,
 	footer: Footer,
+	/// True while an [`FxdWriter::append_to`] holds this file: two appends
+	/// from the same offset would interleave and corrupt it (review 2026-09-25,
+	/// S1-02). Shared by every clone.
+	appending: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for FxdFile {
@@ -355,6 +359,7 @@ impl FxdFile {
 			id: NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed),
 			path: path.to_path_buf(),
 			footer,
+			appending: Arc::new(AtomicBool::new(false)),
 		});
 		Ok((fxd, footer))
 	}
@@ -438,6 +443,19 @@ impl TileSource for FxdFile {
 // Writer
 // ---------------------------------------------------------------------------
 
+/// Clears an [`FxdWriter`]'s `appending` flag however the writer goes away:
+/// on `commit`, on an early `?` return, or when it is dropped. Keeping the
+/// release in one `Drop` means no exit path can leave a file un-appendable.
+struct AppendGuard {
+	flag: Arc<AtomicBool>,
+}
+
+impl Drop for AppendGuard {
+	fn drop(&mut self) {
+		self.flag.store(false, Ordering::Release);
+	}
+}
+
 /// Appends chunks to a `.fxd` file. `commit` finishes a save by writing the
 /// footer; until then the previous version stays valid.
 pub struct FxdWriter {
@@ -446,6 +464,8 @@ pub struct FxdWriter {
 	path: PathBuf,
 	/// Offset of the next chunk / the footer.
 	pos: u64,
+	/// Holds the file's `appending` flag while this writer exists.
+	appending: AppendGuard,
 }
 
 impl FxdWriter {
@@ -459,17 +479,28 @@ impl FxdWriter {
 			id: NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed),
 			path: path.to_path_buf(),
 			pos: HEADER_LEN,
+			// A fresh file has no other writer; the guard is symmetric with
+			// `append_to` (nothing else can observe this flag).
+			appending: AppendGuard {
+				flag: Arc::new(AtomicBool::new(false)),
+			},
 		})
 	}
 
 	/// Continue an open file after its current footer. Any torn bytes past
-	/// that footer are overwritten by the next save.
+	/// that footer are overwritten by the next save. Fails when another writer
+	/// already appends to the same file: the two would write at the same
+	/// offsets and corrupt it (review 2026-09-25, S1-02).
 	pub fn append_to(file: FxdFile) -> Result<Self, IoError> {
+		if file.appending.swap(true, Ordering::AcqRel) {
+			return Err(IoError::Unsupported("the file is already being saved".into()));
+		}
 		Ok(FxdWriter {
 			file: file.file,
 			id: file.id,
 			path: file.path,
 			pos: file.footer.end_offset,
+			appending: AppendGuard { flag: file.appending },
 		})
 	}
 
@@ -524,6 +555,7 @@ impl FxdWriter {
 	/// Finish a save: `sync_data`, write the footer, `sync_data` again. The
 	/// previous footer stays valid until this returns.
 	pub fn commit(self, manifest: ChunkRef, live_bytes: u64) -> Result<FxdFile, IoError> {
+		let appending = self.appending.flag.clone();
 		self.file.sync_data()?;
 		let footer = Footer {
 			manifest_offset: manifest.offset,
@@ -543,6 +575,7 @@ impl FxdWriter {
 			id: self.id,
 			path: self.path,
 			footer,
+			appending,
 		})
 	}
 }
