@@ -4,6 +4,7 @@
 //! * the manifest — the versioned serde model of the document (M3-T02).
 
 mod container;
+pub mod manifest;
 #[cfg(test)]
 mod tests;
 

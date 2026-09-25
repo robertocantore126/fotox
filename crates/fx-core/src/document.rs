@@ -102,6 +102,20 @@ impl Document {
 		id
 	}
 
+	/// The document's id counter and per-kind name counters, for persistence
+	/// (the `.fxd` manifest, M3-T02). Together they keep the Photoshop-style
+	/// default names (`"Layer 7"`) continuing after a document is reopened.
+	pub fn id_state(&self) -> (u64, [u32; NameKind::COUNT]) {
+		(self.next_id, self.name_counters)
+	}
+
+	/// Restore the counters saved by [`Document::id_state`].
+	pub fn with_id_state(mut self, next_id: u64, name_counters: [u32; NameKind::COUNT]) -> Self {
+		self.next_id = next_id;
+		self.name_counters = name_counters;
+		self
+	}
+
 	pub fn active_layer(&self) -> Option<LayerId> {
 		self.selected.last().copied()
 	}
@@ -273,6 +287,23 @@ mod tests {
 		assert_eq!(doc.next_default_name(NameKind::Pixel), "Layer 3");
 		// A second document starts over.
 		assert_eq!(empty_doc().next_default_name(NameKind::Pixel), "Layer 1");
+	}
+
+	#[test]
+	fn id_state_round_trips_the_counters() {
+		let mut doc = empty_doc();
+		doc.allocate_layer_id();
+		doc.next_default_name(NameKind::Pixel);
+		doc.next_default_name(NameKind::Curves);
+		let (next_id, counters) = doc.id_state();
+		assert_eq!(next_id, 2);
+
+		let mut restored = empty_doc().with_id_state(next_id, counters);
+		assert_eq!(restored.id_state(), (next_id, counters));
+		assert_eq!(restored.allocate_layer_id(), LayerId(2));
+		// The default names continue where the saved document left off.
+		assert_eq!(restored.next_default_name(NameKind::Pixel), "Layer 2");
+		assert_eq!(restored.next_default_name(NameKind::Curves), "Curves 2");
 	}
 
 	#[test]
