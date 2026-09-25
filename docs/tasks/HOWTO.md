@@ -5,6 +5,10 @@ file says **how** the recurring pieces are built in this code base, so every
 card does them the same way. Read `AGENTS.md` and `docs/ARCHITECTURE.md`
 first; this file does not repeat them.
 
+The small details that are easy to get wrong (rounding, premultiplied
+averaging, negative tile coordinates, spacing, footers, LUT coordinates…)
+have reference sketches in `SNIPPETS.md` — read it before the first card.
+
 Each recipe names the files to touch, in order, and the tests that prove it.
 A card that says "recipe R3" means: follow R3, then do the card's specific part.
 
