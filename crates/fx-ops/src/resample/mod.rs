@@ -40,7 +40,11 @@ pub type ResampledTile = ((u32, u32), TileBuffer);
 pub struct SourceInfo {
 	/// Level-0 pixel size.
 	pub size: (u32, u32),
-	/// Number of mip levels (`TiledImage::level_count`).
+	/// How many mip levels the **caller has made valid** — levels above this
+	/// one are never read, even when the scale would ask for a deeper one. A
+	/// caller that only ran `ensure_mip` for one level passes `2` (levels 0 and
+	/// 1), so the sampler cannot read a stale derived tile. Never more levels
+	/// than the image has.
 	pub levels: usize,
 }
 
@@ -55,11 +59,11 @@ impl SourceInfo {
 /// Resample the destination tiles `dst_tiles` (tile coordinates of `level`,
 /// `level = 0` for full resolution) with `mapping` and `filter`.
 ///
-/// `mapping` maps source image pixels → destination document pixels. The
-/// source's mip levels the sampler reads must already be valid (the caller
-/// runs `mips::ensure_mip` for `source_level`, exactly as it prepares a
-/// filter's blur level). The returned tiles are RGBA in the source's format
-/// and straight (non-premultiplied) alpha.
+/// `mapping` maps source image pixels → destination document pixels. The mip
+/// levels the sampler may read must already be valid (the caller runs
+/// `mips::ensure_mip` for them and reports how many in [`SourceInfo::levels`],
+/// exactly as it prepares a filter's blur level). The returned tiles are in the
+/// source's format, RGBA or gray, with straight (non-premultiplied) alpha.
 pub fn resample(
 	src: &dyn LevelSource,
 	source: SourceInfo,
@@ -69,9 +73,6 @@ pub fn resample(
 	dst_tiles: &[(u32, u32)],
 ) -> Result<Vec<ResampledTile>, TileError> {
 	let format = src.format();
-	if !matches!(format, PixelFormat::Rgba8 | PixelFormat::Rgba16) {
-		return Err(TileError::Corrupt(format!("resampling runs on RGBA images, not {format:?}")));
-	}
 	let transform = Transform::new(mapping);
 	let results: Result<Vec<_>, TileError> = dst_tiles
 		.par_iter()
@@ -181,7 +182,8 @@ fn copy_tile(
 						buffer.bytes_mut()[index + c] = (*value / 257) as u8;
 					}
 				}
-				_ => unreachable!("resample handles RGBA formats only"),
+				PixelFormat::Gray16 => buffer.as_u16_mut()[index / 4] = p[0],
+				PixelFormat::Gray8 => buffer.bytes_mut()[index / 4] = (p[0] / 257) as u8,
 			}
 		}
 	}
@@ -221,7 +223,7 @@ fn sample(grid: &Grid, filter: Filter, u: f64, v: f64) -> Px {
 }
 
 /// The source tiles a destination tile reads, fetched once each.
-struct Grid {
+pub(crate) struct Grid {
 	format: PixelFormat,
 	tx0: i64,
 	ty0: i64,
@@ -233,7 +235,7 @@ struct Grid {
 }
 
 impl Grid {
-	fn load(src: &dyn LevelSource, source: SourceInfo, level: usize, format: PixelFormat, rect: [i64; 4]) -> Result<Self, TileError> {
+	pub(crate) fn load(src: &dyn LevelSource, source: SourceInfo, level: usize, format: PixelFormat, rect: [i64; 4]) -> Result<Self, TileError> {
 		let tile = i64::from(TILE_SIZE);
 		let size = source.level_size(level);
 		let max_tx = ((size.0 - 1).div_euclid(tile)).max(0);
@@ -260,10 +262,18 @@ impl Grid {
 		})
 	}
 
-	/// The straight RGBA16 pixel at a level pixel position; zero outside.
-	fn raw(&self, x: i64, y: i64) -> [u16; 4] {
+	/// The straight 16-bit pixel at a level pixel position.
+	///
+	/// Outside the image an RGBA source is transparent (a layer has no content
+	/// there) but a gray one is the nearest edge pixel: gray images (masks,
+	/// selections) have no transparency, and D-036's rule outside the canvas is
+	/// edge replicate. Without it, resampling a mask would darken its border.
+	pub(crate) fn raw(&self, x: i64, y: i64) -> [u16; 4] {
 		if x < 0 || y < 0 || x >= self.size.0 || y >= self.size.1 {
-			return [0; 4];
+			if self.format.has_alpha() {
+				return [0; 4];
+			}
+			return self.raw(x.clamp(0, self.size.0 - 1), y.clamp(0, self.size.1 - 1));
 		}
 		let tile = i64::from(TILE_SIZE);
 		let (tx, ty) = (x.div_euclid(tile), y.div_euclid(tile));
@@ -278,7 +288,8 @@ impl Grid {
 		}
 	}
 
-	/// The premultiplied pixel at a level pixel position; transparent outside.
+	/// The premultiplied pixel at a level pixel position; transparent outside
+	/// (an RGBA source), the edge pixel (a gray one) — see [`Grid::raw`].
 	fn get(&self, x: i64, y: i64) -> Px {
 		premul16(self.raw(x, y))
 	}

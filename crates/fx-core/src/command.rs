@@ -29,6 +29,7 @@ use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
 use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
+use crate::transform::{Anchor9, Filter, Mapping, Permutation, dest_rect};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -206,6 +207,34 @@ pub enum Command {
 	/// `center` (the view centre, when the source position is not visible),
 	/// or kept where they were when `center` is `None`. M5
 	Paste { in_place: bool, center: Option<(f64, f64)> },
+	/// Image ▸ Rotate 90° CW / CCW / 180° (M6-T02): every pixel layer, mask and
+	/// the selection is permuted **exactly** (no resampling) and its offset is
+	/// recomputed so the content stays where it was relative to the canvas; the
+	/// document's width and height swap for the odd turns. `quarter_turns` is 1
+	/// (clockwise), 2 or 3; 0 (and ±4) is refused.
+	RotateCanvas { quarter_turns: i8 },
+	/// Image ▸ Flip Canvas Horizontal / Vertical (M6-T02): the same exact
+	/// permutation as `RotateCanvas`.
+	FlipCanvas { horizontal: bool },
+	/// Image ▸ Rotate ▸ Arbitrary… (M6-T02): every pixel layer, mask and the
+	/// selection is resampled and the canvas grows to the rotated bounding box.
+	/// `angle_deg` is in degrees, clockwise (screen coordinates, y down); 0 is
+	/// refused.
+	RotateCanvasArbitrary { angle_deg: f64, filter: Filter },
+	/// Image ▸ Canvas Size (M6-T02, Alt+Ctrl+C): only the document's size and
+	/// every offset change — **no pixel is rewritten** (D-015), and content
+	/// outside the new canvas is kept (it reappears if the canvas grows again).
+	CanvasSize { width: u32, height: u32, anchor: Anchor9 },
+	/// Image ▸ Image Size (M6-T02, Alt+Ctrl+I): with `resample` off only `ppi`
+	/// changes (the pixel dimensions must stay); otherwise every pixel layer,
+	/// mask and the selection is resampled with that filter, the offsets scale
+	/// with it and `ppi` becomes the print resolution.
+	ImageSize {
+		width: u32,
+		height: u32,
+		ppi: f32,
+		resample: Option<Filter>,
+	},
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -306,6 +335,19 @@ impl Command {
 				color,
 				samples,
 			} => stroke(doc, layer, *target, tool, brush, *color, samples, ctx),
+			Command::RotateCanvas { quarter_turns } => rotate_canvas(doc, *quarter_turns, ctx),
+			Command::FlipCanvas { horizontal } => permute_canvas(
+				doc,
+				if *horizontal {
+					Permutation::FlipHorizontal
+				} else {
+					Permutation::FlipVertical
+				},
+				ctx,
+			),
+			Command::RotateCanvasArbitrary { angle_deg, filter } => rotate_canvas_arbitrary(doc, *angle_deg, *filter, ctx),
+			Command::CanvasSize { width, height, anchor } => canvas_size(doc, *width, *height, *anchor),
+			Command::ImageSize { width, height, ppi, resample } => image_size(doc, *width, *height, *ppi, *resample, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -1536,6 +1578,317 @@ fn paste(doc: &mut Document, in_place: bool, center: Option<(f64, f64)>, ctx: &C
 	})
 }
 
+// ---------------------------------------------------------------------------
+// Image geometry (M6-T02)
+// ---------------------------------------------------------------------------
+
+/// Every layer of `doc`, depth first (a group's children included).
+fn layer_ids(doc: &Document) -> Vec<LayerId> {
+	let mut ids = Vec::new();
+	doc.walk(|layer, _| ids.push(layer.id));
+	ids
+}
+
+/// Image ▸ Rotate 90° CW / CCW / 180° (M6-T02).
+fn rotate_canvas(doc: &mut Document, quarter_turns: i8, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let Some(op) = Permutation::from_quarter_turns(quarter_turns) else {
+		return Err(CommandError::InvalidValue {
+			field: "quarter_turns",
+			reason: format!("{quarter_turns} is a whole number of full turns; 1, 2 or 3 (or -1…-3) turns the canvas"),
+		});
+	};
+	permute_canvas(doc, op, ctx)
+}
+
+/// Rotate or mirror the whole canvas (M6-T02): every pixel image is permuted
+/// (bit-exact) and every offset recomputed, so the content stays where it was.
+/// Nothing is resampled and nothing is interpolated, so the work is the tile
+/// I/O of the images that really have pixels — an empty or uniform layer costs
+/// nothing at all.
+fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let ops = pixel_ops(ctx, op.label())?;
+	let canvas = (doc.width, doc.height);
+	let (dest_w, dest_h) = op.size(canvas);
+	// Phase 1: compute every new image. The document stays untouched until all
+	// of them are ready, so a corrupt tile or an offset that does not fit
+	// leaves it exactly as it was (apply either fully succeeds or does nothing).
+	let mut images: Vec<(LayerId, TiledImage, (i32, i32))> = Vec::new();
+	let mut masks: Vec<(LayerId, TiledImage)> = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		if let LayerKind::Pixel { image, offset } = &layer.kind {
+			let (image, new_offset) = ops.rotate(image, *offset, canvas, op, ctx.tiles)?;
+			images.push((id, image, new_offset));
+		}
+		if let Some(mask) = &layer.mask {
+			// A mask is canvas coverage: the renderer draws a linked one at the
+			// layer's offset and an unlinked one at the origin, and the model
+			// stores no offset for it. Growing it to the canvas first places the
+			// content of a mask that a Canvas Size left smaller than the canvas.
+			let (image, _) = crate::pixels::grow_to_canvas(&mask.image, (0, 0), canvas, ctx.tiles)?;
+			let (image, _) = ops.rotate(&image, (0, 0), canvas, op, ctx.tiles)?;
+			masks.push((id, image));
+		}
+		// Shape and text layers (M6-T06/T07) carry a transform, not pixels:
+		// they will turn with the canvas without losing anything.
+	}
+	let selection = match &doc.selection {
+		Some(selection) => Some(ops.rotate(&selection.image, selection.offset, canvas, op, ctx.tiles)?),
+		None => None,
+	};
+	let reselect = match &doc.reselect {
+		Some(selection) => Some(ops.rotate(&selection.image, selection.offset, canvas, op, ctx.tiles)?),
+		None => None,
+	};
+	// Phase 2: commit.
+	let mut changed = Vec::new();
+	for (id, image, offset) in images {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let LayerKind::Pixel { image: pixels, offset: at } = &mut layer.kind
+		{
+			*pixels = image;
+			*at = offset;
+		}
+		changed.push(id);
+	}
+	for (id, image) in masks {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some(mask) = &mut layer.mask
+		{
+			mask.image = image;
+		}
+		changed.push(id);
+	}
+	if let Some((image, offset)) = selection {
+		doc.selection = Some(Selection { image, offset });
+	}
+	if let Some((image, offset)) = reselect {
+		doc.reselect = Some(Selection { image, offset });
+	}
+	doc.width = dest_w;
+	doc.height = dest_h;
+	changed.sort_unstable();
+	changed.dedup();
+	Ok(CommandEffect {
+		label: op.label().into(),
+		pixels_changed: changed,
+		..Default::default()
+	})
+}
+
+/// Image ▸ Rotate ▸ Arbitrary… (M6-T02): the canvas grows to the rotated
+/// bounding box and every pixel image is resampled through the turn.
+fn rotate_canvas_arbitrary(doc: &mut Document, angle_deg: f64, filter: Filter, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if !angle_deg.is_finite() {
+		return Err(CommandError::InvalidValue {
+			field: "angle_deg",
+			reason: format!("{angle_deg} is not a number"),
+		});
+	}
+	// Photoshop's Rotate Image dialog: the direction picks which way.
+	let angle = angle_deg.rem_euclid(360.0);
+	if angle == 0.0 {
+		return Err(CommandError::InvalidValue {
+			field: "angle_deg",
+			reason: "0° leaves the canvas as it is".into(),
+		});
+	}
+	let ops = pixel_ops(ctx, "Rotate Image")?;
+	let canvas = (doc.width, doc.height);
+	// Turn about the canvas centre (the same point in both the old and the new
+	// canvas), then move the bounding box's top-left corner to the origin: the
+	// new canvas is exactly the rotated canvas's box, with no wasted border.
+	let turn = Mapping::rotation_about(angle.to_radians(), f64::from(canvas.0) / 2.0, f64::from(canvas.1) / 2.0);
+	let Some(((left, top), size)) = dest_rect(&turn, [0.0, 0.0, f64::from(canvas.0), f64::from(canvas.1)]) else {
+		return Err(CommandError::NotAllowed("the rotated canvas has no bounding box".into()));
+	};
+	let mapping = turn.after_destination_translation(-f64::from(left), -f64::from(top));
+	let changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	doc.width = size.0;
+	doc.height = size.1;
+	Ok(CommandEffect {
+		label: "Rotate Image".into(),
+		pixels_changed: changed,
+		..Default::default()
+	})
+}
+
+/// Image ▸ Canvas Size (M6-T02, D-015): the document's size and every offset
+/// change — no pixel is rewritten, so content outside the new canvas is kept
+/// and reappears if the canvas grows again.
+fn canvas_size(doc: &mut Document, width: u32, height: u32, anchor: Anchor9) -> Result<CommandEffect, CommandError> {
+	if width == 0 || height == 0 {
+		return Err(CommandError::InvalidValue {
+			field: if width == 0 { "width" } else { "height" },
+			reason: "a canvas is at least 1 × 1 pixel".into(),
+		});
+	}
+	let (dx, dy) = anchor.offset((doc.width, doc.height), (width, height));
+	let moved_offset = |offset: (i32, i32)| -> Result<(i32, i32), CommandError> { Ok((checked_offset(offset.0, dx)?, checked_offset(offset.1, dy)?)) };
+	// Validate every new offset before moving anything.
+	let mut moved = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		if let LayerKind::Pixel { offset, .. } = &layer.kind {
+			moved.push((id, moved_offset(*offset)?));
+		}
+	}
+	let selection = match &doc.selection {
+		Some(selection) => Some(moved_offset(selection.offset)?),
+		None => None,
+	};
+	let reselection = match &doc.reselect {
+		Some(selection) => Some(moved_offset(selection.offset)?),
+		None => None,
+	};
+	// Commit.
+	for (id, offset) in &moved {
+		if let Some(layer) = doc.layer_mut(*id)
+			&& let LayerKind::Pixel { offset: at, .. } = &mut layer.kind
+		{
+			*at = *offset;
+		}
+	}
+	if let (Some(selection), Some(offset)) = (doc.selection.as_mut(), selection) {
+		selection.offset = offset;
+	}
+	if let (Some(selection), Some(offset)) = (doc.reselect.as_mut(), reselection) {
+		selection.offset = offset;
+	}
+	doc.width = width;
+	doc.height = height;
+	Ok(CommandEffect {
+		label: "Canvas Size".into(),
+		props_changed: moved.into_iter().map(|(id, _)| id).collect(),
+		..Default::default()
+	})
+}
+
+/// Image ▸ Image Size (M6-T02).
+fn image_size(
+	doc: &mut Document,
+	width: u32,
+	height: u32,
+	ppi: f32,
+	resample: Option<Filter>,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if width == 0 || height == 0 {
+		return Err(CommandError::InvalidValue {
+			field: if width == 0 { "width" } else { "height" },
+			reason: "an image is at least 1 × 1 pixel".into(),
+		});
+	}
+	if !ppi.is_finite() || ppi <= 0.0 {
+		return Err(CommandError::InvalidValue {
+			field: "ppi",
+			reason: format!("{ppi} is not a positive resolution"),
+		});
+	}
+	let Some(filter) = resample else {
+		// "Resample" off: the print size changes, the pixels do not.
+		if (width, height) != (doc.width, doc.height) {
+			return Err(CommandError::NotAllowed(
+				"resampling is off: only the print resolution can change, so the pixel dimensions must stay".into(),
+			));
+		}
+		doc.ppi = ppi;
+		return Ok(CommandEffect {
+			label: "Image Size".into(),
+			..Default::default()
+		});
+	};
+	let ops = pixel_ops(ctx, "Image Size")?;
+	let mapping = Mapping::scale(f64::from(width) / f64::from(doc.width), f64::from(height) / f64::from(doc.height));
+	let changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	doc.width = width;
+	doc.height = height;
+	doc.ppi = ppi;
+	Ok(CommandEffect {
+		label: "Image Size".into(),
+		pixels_changed: changed,
+		..Default::default()
+	})
+}
+
+/// Resample every pixel layer, mask and the selection through `mapping`, which
+/// maps old canvas pixels to new ones (M6-T02's Image Size and arbitrary
+/// rotation). Every image's size and offset come from its mapped bounding box,
+/// so the layout scales with the canvas. Returns the layers that changed; the
+/// caller sets the document's new size.
+fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, filter: Filter, store: &TileStore) -> Result<Vec<LayerId>, CommandError> {
+	// Phase 1: every new image, while the document is still untouched.
+	let mut images = Vec::new();
+	let mut masks = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		if let LayerKind::Pixel { image, offset } = &layer.kind {
+			images.push((id, resample_placed(ops, image, *offset, mapping, filter, store)?));
+		}
+		if let Some(mask) = &layer.mask {
+			// A mask has no offset of its own (see `permute_canvas`).
+			masks.push((id, resample_placed(ops, &mask.image, (0, 0), mapping, filter, store)?.0));
+		}
+	}
+	let selection = match &doc.selection {
+		Some(selection) => Some(resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?),
+		None => None,
+	};
+	let reselect = match &doc.reselect {
+		Some(selection) => Some(resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?),
+		None => None,
+	};
+	// Phase 2: commit.
+	let mut changed = Vec::new();
+	for (id, (image, offset)) in images {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let LayerKind::Pixel { image: pixels, offset: at } = &mut layer.kind
+		{
+			*pixels = image;
+			*at = offset;
+		}
+		changed.push(id);
+	}
+	for (id, image) in masks {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some(mask) = &mut layer.mask
+		{
+			mask.image = image;
+		}
+		changed.push(id);
+	}
+	if let Some((image, offset)) = selection {
+		doc.selection = Some(Selection { image, offset });
+	}
+	if let Some((image, offset)) = reselect {
+		doc.reselect = Some(Selection { image, offset });
+	}
+	changed.sort_unstable();
+	changed.dedup();
+	Ok(changed)
+}
+
+/// One placed image (`image` at `offset`) resampled through a canvas mapping:
+/// the mapped bounding box becomes the image's new offset and size, and the
+/// same mapping moved to that box maps its pixels (M6-T02; M6-T03's straighten
+/// and M6-T04's Free Transform reuse it).
+fn resample_placed(
+	ops: &dyn PixelOps,
+	image: &TiledImage,
+	offset: (i32, i32),
+	mapping: Mapping,
+	filter: Filter,
+	store: &TileStore,
+) -> Result<(TiledImage, (i32, i32)), CommandError> {
+	let placed = mapping.after_translation(f64::from(offset.0), f64::from(offset.1));
+	let rect = [0.0, 0.0, f64::from(image.width()), f64::from(image.height())];
+	let Some((new_offset, size)) = dest_rect(&placed, rect) else {
+		return Err(CommandError::NotAllowed("this mapping cannot be resampled tile by tile".into()));
+	};
+	let local = placed.after_destination_translation(-f64::from(new_offset.0), -f64::from(new_offset.1));
+	Ok((ops.resample(image, local, size, filter, store)?, new_offset))
+}
+
 fn select_all(doc: &mut Document) -> Result<CommandEffect, CommandError> {
 	if doc.width == 0 || doc.height == 0 {
 		return Err(CommandError::NotAllowed("the document is empty".into()));
@@ -1630,6 +1983,61 @@ mod tests {
 			let value = background.map_or([n, n, n, n], |_| [n, n, n, u16::MAX]);
 			image.set_slot(0, 0, TileSlot::Solid(PixelValue(value)));
 			Ok(image)
+		}
+
+		fn rotate(
+			&self,
+			image: &TiledImage,
+			offset: (i32, i32),
+			canvas: (u32, u32),
+			op: Permutation,
+			store: &TileStore,
+		) -> Result<(TiledImage, (i32, i32)), CommandError> {
+			// The same permutation arithmetic `fx_ops::permute` runs (that module
+			// is tested on its own, and `fx-engine` tests the real one end to
+			// end); this one works on the slots directly so the command tests can
+			// see where content lands.
+			let size = (image.width(), image.height());
+			let dest = op.size(size);
+			let format = image.format();
+			let mut out = TiledImage::new(dest.0, dest.1, format);
+			for ty in 0..out.grid(0).rows() {
+				for tx in 0..out.grid(0).cols() {
+					let mut buffer = TileBuffer::zeroed(format);
+					let mut used = false;
+					for y in 0..TILE_SIZE {
+						for x in 0..TILE_SIZE {
+							let (gx, gy) = (tx * TILE_SIZE + x, ty * TILE_SIZE + y);
+							let Some(source) = op.source_pixel((gx, gy), size) else { continue };
+							let px = read_slot(
+								image.slot(0, source.0 / TILE_SIZE, source.1 / TILE_SIZE),
+								format,
+								store,
+								source.0 % TILE_SIZE,
+								source.1 % TILE_SIZE,
+							);
+							used = true;
+							write_pixel(&mut buffer, format, x, y, px);
+						}
+					}
+					if used {
+						out.put_buffer(store, tx, ty, buffer);
+					}
+				}
+			}
+			let new_offset = op.offset(offset, size, canvas).ok_or(CommandError::InvalidValue {
+				field: "offset",
+				reason: "the rotated offset does not fit in 32 bits".into(),
+			})?;
+			Ok((out, new_offset))
+		}
+
+		fn resample(&self, image: &TiledImage, _: Mapping, size: (u32, u32), _: Filter, _: &TileStore) -> Result<TiledImage, CommandError> {
+			// An empty image of the mapped size: these tests check the *geometry*
+			// a command derives from `resample_placed` (which image size and
+			// offset, the document's new size); the pixels are the sampler's job
+			// (`fx-ops`, and the engine's end-to-end tests).
+			Ok(TiledImage::new(size.0, size.1, image.format()))
 		}
 
 		fn convert(&self, image: &TiledImage, _: &crate::ops::Conversion<'_>, _: &TileStore) -> Result<TiledImage, CommandError> {
@@ -1888,6 +2296,23 @@ mod tests {
 			image.put_buffer(store, tile.0, tile.1, TileBuffer::filled(format, PixelValue::gray16(gray)));
 		}
 
+		/// Give a pixel layer an image of its own size (the fixture creates
+		/// document-sized ones), the way an importer of a small image would.
+		fn resize_image(&mut self, id: LayerId, width: u32, height: u32) {
+			let format = self.pixel(id).0.format();
+			if let LayerKind::Pixel { image, .. } = &mut self.doc.layer_mut(id).expect("layer exists").kind {
+				*image = TiledImage::new(width, height, format);
+			}
+		}
+
+		fn size(&self) -> (u32, u32) {
+			(self.doc.width, self.doc.height)
+		}
+
+		fn selection(&self) -> &Selection {
+			self.doc.selection.as_ref().expect("a selection is set")
+		}
+
 		/// One command with undo/redo assertions: after `undo` the document must
 		/// be byte-identical to before, after `redo` to after.
 		fn round_trip(&mut self, command: Command) {
@@ -1921,6 +2346,34 @@ mod tests {
 		let at = ((y * TILE_SIZE + x) * 4) as usize;
 		let samples = buffer.as_u16();
 		[samples[at], samples[at + 1], samples[at + 2], samples[at + 3]]
+	}
+
+	/// One stored pixel of a slot, straight 16-bit (gray: channel 0).
+	fn read_slot(slot: &TileSlot, format: PixelFormat, store: &TileStore, x: u32, y: u32) -> [u16; 4] {
+		match slot {
+			TileSlot::Empty => [0; 4],
+			TileSlot::Solid(value) => value.0,
+			TileSlot::Data(handle) => match store.get(handle) {
+				Err(_) => [0; 4],
+				Ok(buffer) => match format {
+					PixelFormat::Rgba16 => pixel_at(&buffer, x, y),
+					PixelFormat::Gray16 => [buffer.as_u16()[(y * TILE_SIZE + x) as usize], 0, 0, 0],
+					_ => [0; 4],
+				},
+			},
+		}
+	}
+
+	/// Write one pixel of a tile in the fixture formats (see [`read_slot`]).
+	fn write_pixel(buffer: &mut TileBuffer, format: PixelFormat, x: u32, y: u32, px: [u16; 4]) {
+		match format {
+			PixelFormat::Rgba16 => set_pixel(buffer, x, y, px),
+			PixelFormat::Gray16 => {
+				let at = ((y * TILE_SIZE + x) * 2) as usize;
+				buffer.bytes_mut()[at..at + 2].copy_from_slice(&px[0].to_ne_bytes());
+			}
+			_ => {}
+		}
 	}
 
 	/// Tiles of a level-0 grid that hold real pixels (as opposed to empty or
@@ -3538,6 +3991,364 @@ mod tests {
 			.unwrap(),
 			r#"{"op":"modify_selection","modify":{"kind":"feather","px":3.0}}"#
 		);
+	}
+
+	#[test]
+	fn every_image_geometry_command_round_trips_through_json() {
+		let commands = vec![
+			Command::RotateCanvas { quarter_turns: 1 },
+			Command::RotateCanvas { quarter_turns: 3 },
+			Command::FlipCanvas { horizontal: true },
+			Command::FlipCanvas { horizontal: false },
+			Command::RotateCanvasArbitrary {
+				angle_deg: 12.5,
+				filter: Filter::BicubicAutomatic,
+			},
+			Command::CanvasSize {
+				width: 800,
+				height: 600,
+				anchor: Anchor9::Center,
+			},
+			Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: Some(Filter::BicubicSharper),
+			},
+			Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: None,
+			},
+		];
+		for command in commands {
+			let json = serde_json::to_string(&command).unwrap();
+			assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), command, "{json}");
+		}
+		// Pin the wire shapes: `dlg:rotate-arbitrary`, `dlg:canvas-size` and
+		// `dlg:image-size` send exactly these (docs/PROTOCOL.md §4).
+		assert_eq!(
+			serde_json::to_string(&Command::RotateCanvas { quarter_turns: 1 }).unwrap(),
+			r#"{"op":"rotate_canvas","quarter_turns":1}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::FlipCanvas { horizontal: true }).unwrap(),
+			r#"{"op":"flip_canvas","horizontal":true}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::RotateCanvasArbitrary {
+				angle_deg: 12.5,
+				filter: Filter::Bicubic
+			})
+			.unwrap(),
+			r#"{"op":"rotate_canvas_arbitrary","angle_deg":12.5,"filter":"bicubic"}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::CanvasSize {
+				width: 800,
+				height: 600,
+				anchor: Anchor9::TopLeft
+			})
+			.unwrap(),
+			r#"{"op":"canvas_size","width":800,"height":600,"anchor":"top_left"}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: Some(Filter::Lanczos3)
+			})
+			.unwrap(),
+			r#"{"op":"image_size","width":800,"height":600,"ppi":300.0,"resample":"lanczos3"}"#
+		);
+		// "Resample" off: the print resolution changes, the pixels do not.
+		assert_eq!(
+			serde_json::to_string(&Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: None
+			})
+			.unwrap(),
+			r#"{"op":"image_size","width":800,"height":600,"ppi":300.0,"resample":null}"#
+		);
+	}
+
+	#[test]
+	fn quarter_turns_move_the_image_and_its_offset_and_come_back() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [111, 222, 333, 65_535]), (99, 59, [10, 20, 30, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+		assert_eq!(f.size(), (400, 300));
+
+		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
+		assert_eq!(f.size(), (300, 400), "the odd quarter turn swaps the axes");
+		assert_eq!(f.pixel(a).1, (200, 50), "the offset follows the content");
+		assert_eq!(f.pixel(a).0.width(), 60);
+		assert_eq!(f.pixel(a).0.height(), 100);
+		// A clockwise turn puts the image's bottom-left pixel at its top-left.
+		assert_eq!(f.read_pixel(a, 59, 0), [111, 222, 333, 65_535]);
+		assert_eq!(f.read_pixel(a, 0, 0), [0; 4], "the old top-left column is now the bottom row");
+
+		// Four quarter turns are the original document: size, offset and tiles.
+		for _ in 0..3 {
+			f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
+		}
+		assert_eq!(f.size(), (400, 300));
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!((f.pixel(a).0.width(), f.pixel(a).0.height()), (100, 60));
+		assert_eq!(f.read_pixel(a, 0, 0), [111, 222, 333, 65_535]);
+		assert_eq!(f.read_pixel(a, 99, 59), [10, 20, 30, 65_535], "every pixel came home");
+		// The turns are history steps, and undo walks them back.
+		assert_eq!(f.history.labels().count(), 6, "AddLayer, OffsetLayer and the four turns");
+	}
+
+	#[test]
+	fn flipping_the_canvas_mirrors_the_content_and_undoes_itself() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [100, 0, 0, 65_535]), (99, 59, [0, 100, 0, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		assert_eq!(f.size(), (400, 300), "a flip keeps the canvas size");
+		assert_eq!(f.pixel(a).1, (250, 40));
+		assert_eq!(f.read_pixel(a, 99, 0), [100, 0, 0, 65_535], "left ↔ right");
+		assert_eq!(f.read_pixel(a, 0, 59), [0, 100, 0, 65_535]);
+
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!(f.read_pixel(a, 0, 0), [100, 0, 0, 65_535], "twice is the original");
+		assert_eq!(f.read_pixel(a, 99, 59), [0, 100, 0, 65_535]);
+	}
+
+	#[test]
+	fn canvas_size_moves_offsets_and_rewrites_no_pixel() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [7, 8, 9, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+		f.ok(Command::SelectAll);
+		let tile = f.slot(a, 0, 0).clone();
+
+		let effect = f.ok(Command::CanvasSize {
+			width: 600,
+			height: 500,
+			anchor: Anchor9::Center,
+		});
+		assert_eq!(f.size(), (600, 500));
+		assert_eq!(f.pixel(a).1, (150, 140), "the layer moved by the anchor's +100");
+		assert_eq!(f.selection().offset, (100, 100), "the selection moved with it");
+		assert!(f.slot(a, 0, 0).same_as(&tile), "no tile was rewritten (D-015)");
+		assert_eq!(effect.props_changed, vec![a], "an offset change is a property change");
+
+		// And back: the reverse anchor restores the document exactly.
+		f.ok(Command::CanvasSize {
+			width: 400,
+			height: 300,
+			anchor: Anchor9::Center,
+		});
+		assert_eq!(f.size(), (400, 300));
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!(f.selection().offset, (0, 0));
+		assert!(f.slot(a, 0, 0).same_as(&tile));
+	}
+
+	#[test]
+	fn image_size_without_resampling_only_changes_the_resolution() {
+		let mut f = Fixture::new();
+		f.ok(Command::ImageSize {
+			width: 400,
+			height: 300,
+			ppi: 200.0,
+			resample: None,
+		});
+		assert_eq!(f.doc.ppi, 200.0);
+		let error = f.fail(Command::ImageSize {
+			width: 200,
+			height: 150,
+			ppi: 300.0,
+			resample: None,
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+		assert_eq!(f.doc.ppi, 200.0, "nothing was applied");
+	}
+
+	#[test]
+	fn image_size_scales_every_offset_the_masks_and_the_selection() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 40,
+			dy: 20,
+		});
+		f.ok(Command::AddMask {
+			layer: LayerRef::Id(a),
+			fill: MaskFill::RevealAll,
+		});
+		f.ok(Command::SelectAll);
+
+		let effect = f.ok_with_ops(Command::ImageSize {
+			width: 200,
+			height: 150,
+			ppi: 144.0,
+			resample: Some(Filter::Bicubic),
+		});
+		assert_eq!(f.size(), (200, 150));
+		assert_eq!(f.doc.ppi, 144.0);
+		assert!(effect.pixels_changed.contains(&a));
+		// Half scale about the canvas origin: the 100 × 60 image at (40, 20)
+		// becomes 50 × 30 at (20, 10).
+		assert_eq!(f.pixel(a).1, (20, 10));
+		assert_eq!((f.pixel(a).0.width(), f.pixel(a).0.height()), (50, 30));
+		let mask = f.mask(a).image.clone();
+		assert_eq!((mask.width(), mask.height()), (200, 150), "a document-sized mask scales with the canvas");
+		assert_eq!((f.selection().image.width(), f.selection().image.height()), (200, 150));
+	}
+
+	#[test]
+	fn an_arbitrary_rotation_grows_the_canvas_to_the_rotated_box() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		let effect = f.ok_with_ops(Command::RotateCanvasArbitrary {
+			angle_deg: 90.0,
+			filter: Filter::Bicubic,
+		});
+		assert_eq!(effect.label, "Rotate Image");
+		assert_eq!(f.size(), (300, 400));
+		// A document-sized layer covers the whole new canvas, from the origin.
+		assert_eq!(f.pixel(a).1, (0, 0));
+		assert_eq!((f.pixel(a).0.width(), f.pixel(a).0.height()), (300, 400));
+
+		// A 45° turn grows the box by ⌈400·sin45 + 300·cos45⌉ each way.
+		let mut g = Fixture::new();
+		g.add_pixel("Layer 1");
+		g.ok_with_ops(Command::RotateCanvasArbitrary {
+			angle_deg: 45.0,
+			filter: Filter::Bilinear,
+		});
+		assert_eq!(g.size(), (496, 496));
+	}
+
+	#[test]
+	fn geometry_commands_refuse_nonsense_and_change_nothing() {
+		let mut f = Fixture::new();
+		f.add_pixel("Layer 1");
+		let before = format!("{:?}", f.doc);
+		let steps = f.history.labels().count();
+		for command in [
+			Command::RotateCanvas { quarter_turns: 0 },
+			Command::RotateCanvas { quarter_turns: 4 },
+			Command::CanvasSize {
+				width: 0,
+				height: 100,
+				anchor: Anchor9::Center,
+			},
+			Command::CanvasSize {
+				width: 100,
+				height: 0,
+				anchor: Anchor9::Center,
+			},
+			Command::ImageSize {
+				width: 100,
+				height: 100,
+				ppi: 0.0,
+				resample: Some(Filter::Nearest),
+			},
+			Command::ImageSize {
+				width: 100,
+				height: 100,
+				ppi: f32::NAN,
+				resample: None,
+			},
+			Command::ImageSize {
+				width: 0,
+				height: 100,
+				ppi: 72.0,
+				resample: None,
+			},
+			Command::RotateCanvasArbitrary {
+				angle_deg: 0.0,
+				filter: Filter::Bicubic,
+			},
+			Command::RotateCanvasArbitrary {
+				angle_deg: f64::NAN,
+				filter: Filter::Bicubic,
+			},
+		] {
+			let error = f.fail_with_ops(command.clone());
+			assert!(matches!(error, CommandError::InvalidValue { .. }), "{command:?}: {error:?}");
+		}
+		assert_eq!(format!("{:?}", f.doc), before);
+		assert_eq!(f.history.labels().count(), steps, "a refused command is no history step");
+	}
+
+	#[test]
+	fn geometry_commands_round_trip_through_history() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(3, 4, [1, 2, 3, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 10,
+			dy: 20,
+		});
+		let ops = FakeOps;
+		for command in [
+			Command::RotateCanvas { quarter_turns: 1 },
+			Command::FlipCanvas { horizontal: false },
+			Command::CanvasSize {
+				width: 500,
+				height: 400,
+				anchor: Anchor9::BottomRight,
+			},
+			Command::ImageSize {
+				width: 200,
+				height: 150,
+				ppi: 72.0,
+				resample: Some(Filter::Bilinear),
+			},
+			Command::RotateCanvasArbitrary {
+				angle_deg: 30.0,
+				filter: Filter::Bicubic,
+			},
+		] {
+			let before = format!("{:?}", f.doc);
+			let mut ctx = CommandContext {
+				tiles: &f.store,
+				ops: Some(&ops),
+			};
+			f.history
+				.execute(&mut f.doc, command.clone(), &mut ctx)
+				.unwrap_or_else(|e| panic!("{command:?}: {e}"));
+			let after = format!("{:?}", f.doc);
+			assert_ne!(before, after, "{command:?} changed the document");
+			assert!(f.history.undo(&mut f.doc), "{command:?} is undoable");
+			assert_eq!(format!("{:?}", f.doc), before, "undo restores {command:?}");
+			assert!(f.history.redo(&mut f.doc), "{command:?} is redoable");
+			assert_eq!(format!("{:?}", f.doc), after, "redo replays {command:?}");
+		}
 	}
 }
 

@@ -110,23 +110,47 @@ function withValues(fields, values) {
   });
 }
 
-/** Current slider, menu and checkbox values of a dialog, by field label (`curve`: the curve's points). */
+/**
+ * Current slider, menu and checkbox values of a dialog, by field label
+ * (`curve`: the curve's points).
+ *
+ * A label may appear on several fields — Image Size shows Width and Height once
+ * per unit — and the **first** one wins: the fields the dialog lists first are
+ * the pixel ones, the units below are derived. A field without a label (the
+ * Image Size interpolation menu) is keyed by the empty string.
+ */
 function readValues(grid) {
   const values = {};
+  const set = (key, value) => { if (key != null && values[key] === undefined) values[key] = value; };
   grid.querySelectorAll(".dlg-line").forEach((line) => {
     const label = line.querySelector(".dlg-field-label");
+    const key = label ? label.textContent : "";
     const range = line.querySelector(".dlg-range");
     const select = line.querySelector(".dlg-select .pf-value");
-    if (label && range) values[label.textContent] = Number(range.value);
-    if (label && select) values[label.textContent] = select.textContent;
+    if (range) set(key, Number(range.value));
+    if (select) set(key, select.textContent);
     // A plain number field (`num()`): its box is the value.
     const box = line.classList.contains("inline") && !range ? line.querySelector(":scope > .dlg-input.num") : null;
-    if (label && box) values[label.textContent] = Number(box.value);
+    if (box) set(key, Number(box.value));
   });
   grid.querySelectorAll(".dlg-checkline").forEach((line) => {
     const box = line.querySelector(".dlg-check");
     const label = line.querySelector("span:last-child");
-    if (box && label) values[label.textContent] = box.classList.contains("on");
+    if (box && label) set(label.textContent, box.classList.contains("on"));
+  });
+  // A radio group (`rad()`): the label of the selected option.
+  grid.querySelectorAll(".dlg-radiowrap").forEach((wrap) => {
+    const label = wrap.querySelector(".dlg-field-label");
+    const checked = wrap.querySelector("input:checked");
+    const option = checked && checked.parentElement.querySelector("span");
+    if (label && option) set(label.textContent, option.textContent);
+  });
+  // The Canvas Size anchor grid: the selected cell's index, 0..8 (top-left →
+  // bottom-right, 4 = centre).
+  grid.querySelectorAll(".anchor-grid").forEach((cells) => {
+    const label = cells.closest(".dlg-line")?.querySelector(".dlg-field-label");
+    const index = [...cells.children].findIndex((cell) => cell.classList.contains("sel"));
+    if (label && index >= 0) set(label.textContent, index);
   });
   const curve = grid.querySelector(".curve-canvas");
   if (curve && curve.getPoints) values.curve = curve.getPoints();

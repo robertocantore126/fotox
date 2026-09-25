@@ -5,9 +5,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fx_core::{BitDepth, CommandError, Conversion, Document, FilterParams, LayerId, LayerKind, PixelOps, SelectModify, Selection, SelectionShape, WandParams};
+use fx_core::{
+	BitDepth, CommandError, Conversion, Document, Filter, FilterParams, LayerId, LayerKind, Mapping, Permutation, PixelOps, SelectModify, Selection,
+	SelectionShape, WandParams,
+};
 use fx_ops::filter::{self, Geometry};
 use fx_ops::neighbourhood::{LevelSource, TileRef};
+use fx_ops::resample::{SourceInfo, Transform};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
 use rayon::prelude::*;
 
@@ -15,6 +19,11 @@ use crate::mips;
 
 /// One output tile of a filter.
 type FilteredTile = ((u32, u32), fx_tiles::TileBuffer);
+
+/// Destination tiles computed and written back per batch. A whole layer's
+/// worth of tiles in flight is exactly what the One Rule forbids (one Rgba16
+/// tile is 512 KB); a row of 118 tiles of a 30 000² image would be 60 MB.
+const RESAMPLE_BATCH: usize = 16;
 
 /// Reports a job's progress, 0..=1.
 pub type ProgressFn = dyn Fn(f32) + Send + Sync;
@@ -58,6 +67,84 @@ impl PixelOps for EngineOps {
 		for result in results {
 			let ((tx, ty), tile) = result?;
 			out.put_buffer(store, tx, ty, tile);
+		}
+		Ok(out)
+	}
+
+	fn rotate(
+		&self,
+		image: &TiledImage,
+		offset: (i32, i32),
+		canvas: (u32, u32),
+		op: Permutation,
+		store: &TileStore,
+	) -> Result<(TiledImage, (i32, i32)), CommandError> {
+		let size = (image.width(), image.height());
+		let dest = op.size(size);
+		let mut out = TiledImage::new(dest.0, dest.1, image.format());
+		let source = ImageSource { image, store };
+		let (cols, rows) = (out.grid(0).cols(), out.grid(0).rows());
+		let total = (cols * rows).max(1) as usize;
+		// A tile row at a time: the permutation is tile I/O, and the row is the
+		// natural bound on what is in flight.
+		for ty in 0..rows {
+			let tiles: Vec<(u32, u32)> = (0..cols).map(|tx| (tx, ty)).collect();
+			for ((tx, ty), slot) in fx_ops::permute::permute(&source, size, op, &tiles, store)? {
+				out.set_slot(tx, ty, slot);
+			}
+			let n = (ty as usize + 1) * cols as usize;
+			if let Some(progress) = &self.progress
+				&& n * 100 / total != (n - cols as usize) * 100 / total
+			{
+				progress(n as f32 / total as f32);
+			}
+		}
+		let new_offset = op.offset(offset, size, canvas).ok_or(CommandError::InvalidValue {
+			field: "offset",
+			reason: "the rotated offset does not fit in 32 bits".into(),
+		})?;
+		Ok((out, new_offset))
+	}
+
+	fn resample(&self, image: &TiledImage, mapping: Mapping, size: (u32, u32), filter: Filter, store: &TileStore) -> Result<TiledImage, CommandError> {
+		let mut source_image = image.clone();
+		let levels = source_image.level_count();
+		// The sampler reads a mip level when the local scale reduces by more than
+		// 2 × (SNIPPETS §10): make every level it may read valid, and tell it not
+		// to read deeper than that (a stale derived tile would be sampled as if
+		// it were current).
+		let needed = needed_levels(&mapping, size, levels);
+		for level in 1..=needed {
+			let grid = source_image.grid(level).clone();
+			for ty in 0..grid.rows() {
+				for tx in 0..grid.cols() {
+					mips::ensure_mip(&mut source_image, store, level, tx, ty)?;
+				}
+			}
+		}
+		let source = SourceInfo {
+			size: (image.width(), image.height()),
+			levels: needed + 1,
+		};
+		let view = ImageSource { image: &source_image, store };
+		let mut out = TiledImage::new(size.0, size.1, image.format());
+		let (cols, rows) = (out.grid(0).cols(), out.grid(0).rows());
+		let total = (cols * rows).max(1) as usize;
+		let mut done = 0usize;
+		for ty in 0..rows {
+			let row: Vec<(u32, u32)> = (0..cols).map(|tx| (tx, ty)).collect();
+			for chunk in row.chunks(RESAMPLE_BATCH) {
+				for ((tx, ty), buffer) in fx_ops::resample::resample(&view, source, mapping, filter, 0, chunk)? {
+					out.put_buffer(store, tx, ty, buffer);
+				}
+				let before = done;
+				done += chunk.len();
+				if let Some(progress) = &self.progress
+					&& done * 100 / total != before * 100 / total
+				{
+					progress(done as f32 / total as f32);
+				}
+			}
 		}
 		Ok(out)
 	}
@@ -277,6 +364,31 @@ impl fx_ops::flood::WandSource for LayerSource<'_> {
 		}
 		Ok(fx_ops::flood::WandTile::Data(pixels))
 	}
+}
+
+/// The deepest mip level the sampler may read for `mapping`, from its local
+/// scale (a reduction by more than 2 × switches to the matching level).
+///
+/// The scale is sampled on a coarse grid over the destination: exact for the
+/// affine mappings of Image Size and the arbitrary rotations (one constant
+/// scale), an upper bound elsewhere — and since the sampler is *told* how many
+/// levels are valid, an underestimate can only cost sharpness, never read a
+/// stale tile.
+fn needed_levels(mapping: &Mapping, size: (u32, u32), levels: usize) -> usize {
+	let max = levels.saturating_sub(1);
+	if max == 0 {
+		return 0;
+	}
+	let transform = Transform::new(*mapping);
+	let (w, h) = (f64::from(size.0), f64::from(size.1));
+	let mut scale = 1.0f64;
+	for i in 0..=4 {
+		for j in 0..=4 {
+			scale = scale.max(transform.scale_at((w * f64::from(i) / 4.0, h * f64::from(j) / 4.0)));
+		}
+	}
+	let needed = if scale > 2.0 { scale.log2().floor() as usize } else { 0 };
+	needed.min(max)
 }
 
 /// Straight 16-bit RGBA as premultiplied `0..=1`.

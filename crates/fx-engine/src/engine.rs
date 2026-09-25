@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
 use fx_core::command::{LayerPropsPatch, MaskFill, NewLayer};
-use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef, PixelOps};
+use fx_core::{
+	ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef, Permutation, PixelOps,
+};
 use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
@@ -843,6 +845,21 @@ impl Engine {
 					_ => self.to_ui(&EngineToUi::Toast {
 						text: "No filter applied yet".into(),
 					}),
+				}
+				return Changed::default();
+			}
+			// Image ▸ Rotate / Flip (M6-T02): the canvas-level permutations. One
+			// action = one command, so History shows them like Photoshop does.
+			"img:rot90cw" | "img:rot90ccw" | "img:rot180" | "img:flip-h" | "img:flip-v" => {
+				if let Some(doc) = self.docs.active_id() {
+					let command = match id {
+						"img:rot90cw" => Command::RotateCanvas { quarter_turns: 1 },
+						"img:rot90ccw" => Command::RotateCanvas { quarter_turns: 3 },
+						"img:rot180" => Command::RotateCanvas { quarter_turns: 2 },
+						"img:flip-h" => Command::FlipCanvas { horizontal: true },
+						_ => Command::FlipCanvas { horizontal: false },
+					};
+					self.command(doc, command);
 				}
 				return Changed::default();
 			}
@@ -1714,6 +1731,10 @@ impl Engine {
 	/// Tell the UI what an edit changed and redraw.
 	fn after_edit(&mut self, id: DocId, content: bool) {
 		let Some(doc) = self.docs.get_mut(id) else { return };
+		// A command may have changed the document's size (Canvas Size, Image Size,
+		// an arbitrary rotation in M6): the view and the viewport maths read this
+		// copy of it, and `zoom:fit` uses it.
+		doc.view.doc = (doc.doc.width, doc.doc.height);
 		let layers = EngineToUi::Layers {
 			doc: id,
 			revision: doc.doc.revision,
@@ -2666,7 +2687,14 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::ConvertProfile { .. }
 			| Command::ModifySelection { .. }
 			| Command::MagicWand { .. }
+			// Rotating a big canvas is tile I/O, resampling is a full pass over
+			// every layer (M6-T02): both would freeze the engine thread.
+			| Command::RotateCanvas { .. }
+			| Command::FlipCanvas { .. }
+			| Command::RotateCanvasArbitrary { .. }
 	)
+	// Image Size without resampling only changes the print resolution: instant.
+	|| matches!(command, Command::ImageSize { resample: Some(_), .. })
 }
 
 /// The progress label of a pixel job, as Photoshop names the operation.
@@ -2679,6 +2707,12 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
 		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
 		Command::MagicWand { .. } => "Magic Wand".to_owned(),
+		Command::RotateCanvas { quarter_turns } => {
+			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
+		}
+		Command::FlipCanvas { horizontal } => if *horizontal { "Flip Canvas Horizontal" } else { "Flip Canvas Vertical" }.to_owned(),
+		Command::RotateCanvasArbitrary { .. } => "Rotate Image".to_owned(),
+		Command::ImageSize { .. } => "Image Size".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }

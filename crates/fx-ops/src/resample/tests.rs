@@ -112,7 +112,8 @@ impl LevelSource for TestImage {
 							buffer.bytes_mut()[i + c] = (*value / 257) as u8;
 						}
 					}
-					_ => unreachable!("tests use RGBA sources"),
+					PixelFormat::Gray16 => buffer.as_u16_mut()[i / 4] = p[0],
+					PixelFormat::Gray8 => buffer.bytes_mut()[i / 4] = (p[0] / 257) as u8,
 				}
 			}
 		}
@@ -164,6 +165,33 @@ fn resample_image(src: &TestImage, mapping: Mapping, filter: Filter, dw: u32, dh
 	let tiles = dst_tiles(dw, dh, 0);
 	let out = resample(src, src.source_info(), mapping, filter, 0, &tiles).expect("resample");
 	assemble(dw, dh, 0, &out)
+}
+
+#[test]
+fn a_gray_mask_keeps_its_value_at_the_border() {
+	// A mask of one value everywhere: any fade at the image border would show.
+	// Gray images have no transparency, so the taps outside the image must see
+	// the edge pixel (D-036), not transparent black.
+	let src = TestImage::with_format(600, 400, PixelFormat::Gray16, |_, _| [40_000, 40_000, 40_000, 65_535]);
+	let tiles = dst_tiles(300, 200, 0);
+	let out = resample(&src, src.source_info(), Mapping::scale(0.5, 0.5), Filter::Bicubic, 0, &tiles).expect("resample");
+	let mut checked = 0;
+	for ((tx, ty), buffer) in &out {
+		assert_eq!(buffer.format(), PixelFormat::Gray16);
+		let gray = buffer.as_u16();
+		for y in 0..TILE_SIZE as i64 {
+			for x in 0..TILE_SIZE as i64 {
+				let (gx, gy) = (i64::from(*tx) * 256 + x, i64::from(*ty) * 256 + y);
+				if gx >= 300 || gy >= 200 {
+					continue;
+				}
+				let value = i32::from(gray[(y * 256 + x) as usize]);
+				assert!((value - 40_000).abs() <= 1, "({gx},{gy}) = {value}");
+				checked += 1;
+			}
+		}
+	}
+	assert_eq!(checked, 300 * 200);
 }
 
 fn close(a: [u16; 4], b: [u16; 4], tolerance: i32) -> bool {

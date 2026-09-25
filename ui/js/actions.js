@@ -12,6 +12,7 @@ import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
 import { isEngineFilter, openFilterDialog } from "./native/filters.js";
 import { cmykProfiles, isColorDialog, openColorDialog } from "./native/color.js";
+import { isImageDialog, openImageDialog } from "./native/image.js";
 import { activeDocument } from "./native/documents.js";
 import { dialogDef } from "./data/dialogs.js";
 
@@ -88,6 +89,9 @@ export function runAction(item) {
     });
     return;
   }
+  // In the app, Image Size / Canvas Size / Rotate Arbitrary are the engine's
+  // commands (M6-T02).
+  if (a.startsWith("dlg:") && bridge.isNative && isImageDialog(a.slice(4))) { openImageDialog(a.slice(4)); return; }
   // In the app, colour management dialogs and the proof toggles (M4-T03/T04).
   if (a.startsWith("dlg:") && bridge.isNative && isColorDialog(a.slice(4))) { openColorDialog(a.slice(4)); return; }
   if ((a === "view:proof-colors" || a === "view:gamut-warning") && bridge.isNative) return;

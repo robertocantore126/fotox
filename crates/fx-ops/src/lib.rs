@@ -13,8 +13,9 @@
 //!
 //! Modules: `brush` (dab engine, pressure, spacing, 16-bit accumulation),
 //! `filter` (Gaussian blur, unsharp mask), `flood`, `gaussian`, `morph`,
-//! `neighbourhood`, `raster`, and `resample` (M6-T01: Free Transform, Warp,
-//! Image Size — the one place a transform's geometry meets pixels).
+//! `neighbourhood`, `permute` (M6-T02: an exact quarter turn or flip),
+//! `raster`, and `resample` (M6-T01: Free Transform, Warp, Image Size — the
+//! one place a transform's geometry meets pixels).
 
 pub mod brush;
 pub mod filter;
@@ -24,5 +25,6 @@ pub mod flood;
 pub mod gaussian;
 pub mod morph;
 pub mod neighbourhood;
+pub mod permute;
 pub mod raster;
 pub mod resample;

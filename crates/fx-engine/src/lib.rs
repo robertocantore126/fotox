@@ -32,6 +32,10 @@ mod engine;
 mod render;
 mod stats;
 
+/// Image geometry through the real operations (M6-T02).
+#[cfg(test)]
+mod geometry_tests;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;

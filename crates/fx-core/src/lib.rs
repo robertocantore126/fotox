@@ -30,4 +30,4 @@ pub use history::History;
 pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
 pub use ops::{Conversion, FilterParams, PixelOps};
 pub use selection::{SelectMode, SelectModify, Selection, SelectionShape, WandParams};
-pub use transform::{BezierPatch, Filter, Mapping};
+pub use transform::{Anchor9, BezierPatch, Filter, Mapping, Permutation, dest_rect};
