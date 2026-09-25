@@ -12,7 +12,7 @@ fx-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Added by the tasks that need them:
-# tiff = { workspace = true }      M1-T02
+tiff = { workspace = true }
 # png = { workspace = true }      M1-T09
 # zune-jpeg = { workspace = true } M1-T09
-# rayon = { workspace = true }     M1-T02
+rayon = { workspace = true }
