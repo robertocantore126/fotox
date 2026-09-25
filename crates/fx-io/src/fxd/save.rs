@@ -131,9 +131,9 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	}
 	progress(1.0);
 
-	let mut manifest = manifest::to_manifest(request.doc, |handle| refs.get(&handle.id().get()).copied());
+	let mut manifest = manifest::to_manifest(request.doc, |handle| refs.get(&handle.id().get()).copied())?;
 	if let Some(preview) = request.preview {
-		manifest.preview = Some(manifest::image_entry(preview, |handle| refs.get(&handle.id().get()).copied()));
+		manifest.preview = Some(manifest::image_entry(preview, |handle| refs.get(&handle.id().get()).copied())?);
 	}
 	let payload = manifest::encode_manifest(&manifest, FRESH_LEVEL)?;
 	let manifest_chunk = writer.manifest(&payload)?;

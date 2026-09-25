@@ -188,10 +188,14 @@ impl<'de> Deserialize<'de> for SlotEntry {
 /// Build the manifest of `doc`. `tile_ref` maps a stored tile to the chunk the
 /// save path wrote for it; `None` for a derived (mip) tile the save skipped
 /// because it was evicted — it is then left out and rebuilt after opening.
-pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> Manifest {
+///
+/// Fails when a level-0 tile has no chunk: every authoritative tile must have
+/// been written, so a save reports an error instead of a later panic (review
+/// 2026-09-25, S3-04).
+pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> Result<Manifest, IoError> {
 	let tile_ref = &tile_ref;
 	let (next_layer_id, name_counters) = doc.id_state();
-	Manifest {
+	Ok(Manifest {
 		version: MANIFEST_VERSION,
 		width: doc.width,
 		height: doc.height,
@@ -200,14 +204,37 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		next_layer_id,
 		name_counters: name_counters.to_vec(),
 		selected: doc.selected.clone(),
-		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
+		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect::<Result<Vec<_>, _>>()?,
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
-	}
+	})
 }
 
-fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef>) -> LayerEntry {
-	LayerEntry {
+fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef>) -> Result<LayerEntry, IoError> {
+	let mask = match &layer.mask {
+		Some(mask) => Some(MaskEntry {
+			enabled: mask.enabled,
+			linked: mask.linked,
+			outside_value: mask.outside_value,
+			image: image_entry(&mask.image, tile_ref)?,
+		}),
+		None => None,
+	};
+	let kind = match &layer.kind {
+		LayerKind::Pixel { image, offset } => LayerKindEntry::Pixel {
+			offset: *offset,
+			image: image_entry(image, tile_ref)?,
+		},
+		LayerKind::Group { children, expanded } => LayerKindEntry::Group {
+			expanded: *expanded,
+			children: children.iter().map(|child| layer_entry(child, tile_ref)).collect::<Result<_, _>>()?,
+		},
+		LayerKind::Adjustment(adjustment) => LayerKindEntry::Adjustment {
+			adjustment: adjustment.clone(),
+		},
+		LayerKind::SolidFill { rgba } => LayerKindEntry::SolidFill { rgba: *rgba },
+	};
+	Ok(LayerEntry {
 		id: layer.id,
 		name: layer.name.clone(),
 		visible: layer.visible,
@@ -218,27 +245,9 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 		locked_pixels: layer.locked_pixels,
 		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
-		mask: layer.mask.as_ref().map(|mask| MaskEntry {
-			enabled: mask.enabled,
-			linked: mask.linked,
-			outside_value: mask.outside_value,
-			image: image_entry(&mask.image, tile_ref),
-		}),
-		kind: match &layer.kind {
-			LayerKind::Pixel { image, offset } => LayerKindEntry::Pixel {
-				offset: *offset,
-				image: image_entry(image, tile_ref),
-			},
-			LayerKind::Group { children, expanded } => LayerKindEntry::Group {
-				expanded: *expanded,
-				children: children.iter().map(|child| layer_entry(child, tile_ref)).collect(),
-			},
-			LayerKind::Adjustment(adjustment) => LayerKindEntry::Adjustment {
-				adjustment: adjustment.clone(),
-			},
-			LayerKind::SolidFill { rgba } => LayerKindEntry::SolidFill { rgba: *rgba },
-		},
-	}
+		mask,
+		kind,
+	})
 }
 
 /// Build the stored-level entry of one image (level 0 and levels ≥ 3, only
@@ -248,7 +257,10 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 /// store (`tile_ref` → `None`) are left out: after opening they are empty and
 /// dirty, so the renderer rebuilds them. Storing a stale mip would show old
 /// pixels until the next edit.
-pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> ImageEntry {
+///
+/// A level-0 slot with no chunk is an error: the save must have written every
+/// authoritative tile (review 2026-09-25, S3-04).
+pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> Result<ImageEntry, IoError> {
 	let tile_ref = &tile_ref;
 	let mut levels = Vec::new();
 	for level in 0..image.level_count() {
@@ -269,7 +281,9 @@ pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<
 				TileSlot::Data(handle) => match tile_ref(handle) {
 					Some(chunk) => slots.push(SlotEntry::Tile { tx, ty, chunk }),
 					None if level != 0 => {}
-					None => panic!("level-0 tile {tx},{ty} was not written by the save"),
+					None => {
+						return Err(IoError::Decode(format!("level-0 tile {tx},{ty} was not written by the save")));
+					}
 				},
 			}
 		}
@@ -282,12 +296,12 @@ pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<
 			slots,
 		});
 	}
-	ImageEntry {
+	Ok(ImageEntry {
 		width: image.width(),
 		height: image.height(),
 		format: image.format(),
 		levels,
-	}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -434,8 +448,8 @@ mod tests {
 
 	use super::super::container::{ChunkKind, ChunkRef, Codec, FxdFile, FxdWriter};
 	use super::{
-		LayerKindEntry, MANIFEST_VERSION, Manifest, SlotEntry, decode_manifest, encode_manifest, from_manifest, manifest_from_json, manifest_to_json,
-		to_manifest,
+		LayerKindEntry, MANIFEST_VERSION, Manifest, SlotEntry, decode_manifest, encode_manifest, from_manifest, image_entry, manifest_from_json,
+		manifest_to_json, to_manifest,
 	};
 	use crate::IoError;
 
@@ -615,7 +629,8 @@ mod tests {
 				offset: handle.id().get() * 100,
 				len: 1234,
 			})
-		});
+		})
+		.unwrap();
 
 		// Top-level fields come straight from the document.
 		let (next_id, counters) = doc.id_state();
@@ -675,7 +690,7 @@ mod tests {
 	fn a_version_2_manifest_is_refused() {
 		let store = store();
 		let doc = sample_document(&store);
-		let mut manifest = to_manifest(&doc, |_| Some(ChunkRef { offset: 0, len: 0 }));
+		let mut manifest = to_manifest(&doc, |_| Some(ChunkRef { offset: 0, len: 0 })).unwrap();
 		manifest.version = 2;
 		let json = serde_json::to_vec(&manifest).unwrap();
 		let err = manifest_from_json(&json).unwrap_err();
@@ -725,7 +740,7 @@ mod tests {
 			},
 			72.0,
 		);
-		let mut manifest = to_manifest(&doc, |_| None);
+		let mut manifest = to_manifest(&doc, |_| None).unwrap();
 		manifest.name_counters = vec![7; 9];
 		let json = serde_json::to_string(&manifest).unwrap();
 		let back: Manifest = serde_json::from_str(&json).unwrap();
@@ -738,6 +753,29 @@ mod tests {
 		let (_, counters) = restored.id_state();
 		assert_eq!(&counters[..9], &[7; 9]);
 		assert!(counters[9..].iter().all(|&c| c == 0));
+	}
+
+	#[test]
+	fn a_level_0_tile_without_a_chunk_is_an_error() {
+		let store = store();
+		let mut image = TiledImage::new(512, 512, PixelFormat::Rgba16);
+		// A non-uniform buffer stays a real tile (a filled one collapses to Solid).
+		let mut buffer = TileBuffer::zeroed(PixelFormat::Rgba16);
+		buffer.as_u16_mut()[0] = 1234;
+		image.put_buffer(&store, 0, 0, buffer);
+		assert!(matches!(image.slot(0, 0, 0), TileSlot::Data(_)));
+
+		// The save never wrote this authoritative tile: building the manifest
+		// fails with an error instead of panicking on the save thread.
+		let error = image_entry(&image, |_| None).unwrap_err();
+		assert!(matches!(&error, IoError::Decode(m) if m.contains("level-0 tile 0,0")), "got {error:?}");
+
+		// A derived (mip) tile with no chunk is allowed: it is rebuilt later.
+		let mut with_mip = TiledImage::new(4096, 4096, PixelFormat::Rgba16);
+		let mip = store.insert(TileBuffer::zeroed(PixelFormat::Rgba16), fx_tiles::TileClass::Derived);
+		with_mip.set_derived_slot(3, 0, 0, TileSlot::Data(mip));
+		let entry = image_entry(&with_mip, |_| None).unwrap();
+		assert!(entry.levels.is_empty(), "the unwritten mip is left out");
 	}
 
 	// -----------------------------------------------------------------------
@@ -787,7 +825,7 @@ mod tests {
 				}
 			}
 		}
-		let manifest = to_manifest(doc, |handle| refs.get(&handle.id().get()).copied());
+		let manifest = to_manifest(doc, |handle| refs.get(&handle.id().get()).copied()).unwrap();
 		let payload = encode_manifest(&manifest, 3).unwrap();
 		let chunk = writer.manifest(&payload).unwrap();
 		let live = chunk.end();
