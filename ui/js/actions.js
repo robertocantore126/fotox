@@ -26,6 +26,9 @@ export function runAction(item) {
     else toast("The frame-time overlay measures the app's render thread (not available in a browser)");
     return;
   }
+  // In the app, layer and history actions are the engine's (sent above): it
+  // answers with the result, or a toast for what is not implemented yet.
+  if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
   // Other debug actions are the engine's (sent above); nothing to do here.
   if (a.startsWith("debug:")) {
     if (!bridge.isNative) toast(label + " needs the app (not available in a browser)");
