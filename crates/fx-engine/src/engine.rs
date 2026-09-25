@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
 use fx_core::command::{LayerPropsPatch, NewLayer};
-use fx_core::{Command, CommandContext, LayerId, LayerRef};
+use fx_core::{ColorProfile, Command, CommandContext, LayerId, LayerRef};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
 use fx_tiles::{TileError, TileStore};
@@ -39,6 +39,11 @@ const THUMBNAIL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The virtual M0 document's id in `view` messages.
 const VIRTUAL_DOC_ID: DocId = DocId(0);
+
+/// Display LUTs kept alive for reuse (M4-T02): the active document, plus a
+/// couple of recently used ones, so switching tabs does not rebuild 35 937
+/// samples each time.
+const DISPLAY_LUT_CACHE: usize = 4;
 
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
@@ -85,6 +90,11 @@ struct Engine {
 	/// the document had right after it (so an intervening undo or edit
 	/// breaks the merge).
 	last_edit: Option<(DocId, EditKey, Instant, usize)>,
+	/// ICC bytes of the monitor the window is on (M4-T02): `None` = assume
+	/// sRGB (no profile reported, or the shell could not read one).
+	display_profile: Option<Vec<u8>>,
+	/// Display LUTs built so far, most recent last: `(key, table)`.
+	display_luts: Vec<(u64, Arc<fx_color::Lut3d>)>,
 }
 
 /// What makes two consecutive edits "the same" for history merging.
@@ -171,6 +181,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_last: HashMap::new(),
 		thumbs_due: HashMap::new(),
 		last_edit: None,
+		display_profile: None,
+		display_luts: Vec::new(),
 	};
 
 	loop {
@@ -243,6 +255,13 @@ impl Engine {
 			EngineInput::Export(path) => {
 				self.export(path);
 				Changed::default()
+			}
+			EngineInput::DisplayProfile(bytes) => {
+				self.set_display_profile(bytes);
+				Changed {
+					view: true,
+					cursor: None,
+				}
 			}
 			EngineInput::Shutdown => Changed::default(),
 		};
@@ -888,6 +907,16 @@ impl Engine {
 
 	fn request_frame(&mut self) {
 		let virtual_view = self.virtual_view.clone();
+		// The display transform needs the cache on `self`, so build it before
+		// borrowing the active document mutably (and only for a real document:
+		// the virtual test pattern has no profile).
+		let display_lut = match self.docs.active_mut() {
+			Some(doc) => {
+				let profile = doc.doc.color.profile.clone();
+				self.display_lut_for(&profile)
+			}
+			None => None,
+		};
 		let frame = match self.docs.active_mut() {
 			Some(doc) => {
 				let Some(viewport) = doc.view.viewport else { return };
@@ -898,6 +927,7 @@ impl Engine {
 					generation: doc.generation,
 					hot_layer: doc.hot_layer(),
 					virtual_doc: VIRTUAL_DOC,
+					display_lut,
 				}
 			}
 			None => {
@@ -909,10 +939,70 @@ impl Engine {
 					generation: 0,
 					hot_layer: None,
 					virtual_doc: VIRTUAL_DOC,
+					display_lut: None,
 				}
 			}
 		};
 		let _ = self.render.send(RenderRequest::Frame(frame));
+	}
+
+	/// The monitor profile the shell reported (M4-T02), or `None` while it has
+	/// not reported one: Fotox then assumes an sRGB display.
+	fn monitor_profile(&self) -> Option<ColorProfile> {
+		self.display_profile
+			.as_ref()
+			.map(|bytes| ColorProfile::Icc(Arc::from(bytes.as_slice())))
+	}
+
+	/// Tell the engine which display profile to transform into (M4-T02).
+	///
+	/// Called by the shell at start-up and whenever the window moves to another
+	/// monitor. An unreadable profile is reported as `None`; the LUT cache is
+	/// dropped because every entry depended on the old profile.
+	fn set_display_profile(&mut self, bytes: Option<Vec<u8>>) {
+		if self.display_profile == bytes {
+			return;
+		}
+		let name = match &bytes {
+			Some(bytes) => format!("{} ICC bytes", bytes.len()),
+			None => "none (assuming sRGB)".to_owned(),
+		};
+		tracing::info!("display profile: {name}");
+		self.display_profile = bytes;
+		self.display_luts.clear();
+	}
+
+	/// The display LUT for a document with `profile`, or `None` when the
+	/// document is already in the monitor's space (criterion C1: the viewport
+	/// then shows the document's values untouched).
+	///
+	/// Built here, on the engine thread: the render thread only uploads it
+	/// (M4-T02). The result is cached because a moving window, a tab switch or
+	/// a slider drag must not rebuild a 35 937-sample transform per frame.
+	fn display_lut_for(&mut self, profile: &ColorProfile) -> Option<Arc<fx_color::Lut3d>> {
+		let monitor = self.monitor_profile().unwrap_or(ColorProfile::Srgb);
+		if fx_color::same_profile(profile, &monitor) {
+			return None;
+		}
+		let key = fx_color::display_lut_key(profile, &monitor, fx_color::DEFAULT_INTENT, fx_color::DEFAULT_BPC);
+		if let Some((_, lut)) = self.display_luts.iter().find(|(k, _)| *k == key) {
+			return Some(lut.clone());
+		}
+		let built = match display_transform(profile, self.display_profile.as_deref()) {
+			Ok(Some(lut)) => Arc::new(lut),
+			Ok(None) => return None,
+			Err(error) => {
+				tracing::error!("cannot build the display transform: {error}; assuming an sRGB monitor");
+				// A profile we cannot read is the shell's problem, not the user's:
+				// show the document as if the monitor were sRGB.
+				return display_transform(profile, None).ok().flatten().map(Arc::new);
+			}
+		};
+		self.display_luts.push((key, built.clone()));
+		if self.display_luts.len() > DISPLAY_LUT_CACHE {
+			self.display_luts.remove(0);
+		}
+		Some(built)
 	}
 
 	fn view_message_deadline(&self) -> Option<Instant> {
@@ -971,5 +1061,57 @@ impl Engine {
 
 	fn to_ui(&self, message: &EngineToUi) {
 		(self.output)(EngineOutput::ToUi(fx_protocol::encode_json(message)));
+	}
+}
+
+/// The display transform for `profile` on a monitor whose ICC profile is
+/// `monitor` (M4-T02).
+///
+/// * `monitor = None` means the shell reported no profile: the display is
+///   assumed to be sRGB, which is also what makes an sRGB document on an sRGB
+///   monitor cost nothing (criterion C1).
+/// * The same profile on both sides returns `Ok(None)`: no LUT, no change.
+/// * The result is a plain table ([`fx_color::Lut3d`]), so it can travel to
+///   the render thread; building it needs a few milliseconds of lcms2 work
+///   and is why this is not called per frame.
+fn display_transform(profile: &ColorProfile, monitor: Option<&[u8]>) -> Result<Option<fx_color::Lut3d>, fx_color::ColorError> {
+	let monitor = match monitor {
+		Some(bytes) => ColorProfile::Icc(Arc::from(bytes)),
+		None => ColorProfile::Srgb,
+	};
+	if fx_color::same_profile(profile, &monitor) {
+		return Ok(None);
+	}
+	fx_color::display_lut(profile, &monitor, fx_color::DEFAULT_INTENT, fx_color::DEFAULT_BPC).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn an_srgb_document_on_an_srgb_monitor_needs_no_transform() {
+		assert!(display_transform(&ColorProfile::Srgb, None).unwrap().is_none(), "no profile reported = assume sRGB");
+		let icc: Arc<[u8]> = Arc::from(&b"the very same sRGB profile"[..]);
+		let same = ColorProfile::Icc(icc.clone());
+		assert!(display_transform(&same, Some(&icc)).unwrap().is_none(), "the document's own profile on the monitor");
+	}
+
+	#[test]
+	fn another_space_than_the_monitor_gets_a_lut() {
+		let lut = display_transform(&ColorProfile::AdobeRgb1998, None).unwrap().expect("adobe rgb → sRGB needs a transform");
+		assert_eq!(lut.grid(), fx_color::LUT_GRID);
+		// And it is not the identity: a saturated Adobe RGB colour moves.
+		let source = [0.9, 0.25, 0.4];
+		let out = lut.sample(source);
+		assert!(
+			out.iter().zip(source).any(|(mapped, original)| (mapped - original).abs() > 0.01),
+			"{out:?} for {source:?}"
+		);
+	}
+
+	#[test]
+	fn an_unreadable_monitor_profile_is_an_error() {
+		assert!(display_transform(&ColorProfile::Srgb, Some(b"not an ICC profile")).is_err());
 	}
 }

@@ -98,6 +98,11 @@ pub enum EngineInput {
 	/// Export the active document, flattened, to this file (the shell's save
 	/// dialog; the format comes from the extension). M3.
 	Export(PathBuf),
+	/// The ICC profile of the monitor the window is on, as raw ICC bytes
+	/// (M4-T02). `None` = the shell could not read one, and sRGB is assumed.
+	/// Sent at start-up and whenever the window moves to another monitor, so
+	/// the viewport can transform the document into the display's space.
+	DisplayProfile(Option<Vec<u8>>),
 	Shutdown,
 }
 

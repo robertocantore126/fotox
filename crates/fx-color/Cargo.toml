@@ -9,4 +9,8 @@ publish.workspace = true
 [dependencies]
 fx-core = { workspace = true }
 thiserror = { workspace = true }
-# M4: lcms2 = { workspace = true }
+# ICC profiles, transforms and soft proofing (D-031).
+lcms2 = { workspace = true }
+# f16 3D LUTs, uploaded as Rgba16Float (D-031).
+half = { workspace = true }
+bytemuck = { workspace = true }
