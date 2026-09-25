@@ -91,6 +91,25 @@ layer at once. While the box is up it takes the pointer and the `key`s
 (Enter, Escape, the arrows); Enter or ✓ sends
 `{"op":"transform","layer":{"id":n},"mapping":{"kind":"affine"|"projective"|"warp","value":…},"filter":"bicubic"}`.
 
+Shape layers (M6-T06). The Shape tools (`shape`, `shape-rounded`,
+`shape-ellipse`, `shape-polygon`, `shape-line`) drag out a bounding box and add
+**one** shape layer on release: `{"op":"add_layer","layer":{"shape":{"kind":
+"rect"|"ellipse"|"polygon"|"line"|"path",…},"fill":{"kind":"solid",
+"rgba":[…]},"stroke":{"width":…,"align":"inside"|"center"|"outside",
+"paint":…,"dash":[…]},"transform":[a,b,c,d,e,f]},"name":null}`. The layer is
+named after the shape ("Rectangle 1"), the fill is the foreground colour and a
+stroke is added only when the option bar asks for one (`Stroke Width`, painted
+with the background colour). The bar's other keys are `Radius` (rounded
+rectangle), `Sides` and `Kind` ("Smooth"/"Star", polygon) and `Weight` (line,
+the bar of its length × width). Shift constrains to a square (a circle, an
+equilateral polygon) and Alt draws from the centre; the Line tool keeps the
+drawn direction and Shift snaps it to 45° steps. Editing a shape is
+`{"op":"set_shape","layer":…,"shape"|"fill"|"stroke"|"transform":…}` (the
+Path Selection tool sends the transform alone while dragging), and
+`Layer ▸ Rasterize` sends `raster:shape` / `raster:layer` / `raster:all`:
+the geometry is drawn at level 0 and the layer becomes pixels. A shape layer
+reports `kind: "shape"` in `layers`, with its fill in `fill_color`.
+
 Action routing rule for the UI (`ui/js/actions.js`): actions that only change
 UI state (panels, screen modes, tool selection display) stay in JS as today;
 **every** action is also sent to the engine, which ignores the ones it does

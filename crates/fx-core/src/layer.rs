@@ -4,6 +4,7 @@ use fx_tiles::TiledImage;
 use serde::{Deserialize, Serialize};
 
 use crate::blend::BlendMode;
+use crate::vector::{Paint, StrokeStyle, VectorShape};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LayerId(pub u64);
@@ -160,6 +161,19 @@ pub enum LayerKind {
 	Adjustment(Adjustment),
 	SolidFill {
 		rgba: [u16; 4],
+	},
+	/// A vector shape (M6-T06): geometry plus the tiles rendered from it on
+	/// demand at the level being drawn. The geometry is the truth — editing it
+	/// is lossless (D-055) — and `cache` is derived data, rebuilt by the
+	/// engine's vector scheduler whenever the program key changes.
+	Shape {
+		shape: VectorShape,
+		fill: Option<Paint>,
+		stroke: Option<StrokeStyle>,
+		/// Local → document, `[a, b, c, d, e, f]` (see `crate::vector`).
+		transform: [f64; 6],
+		/// Document-sized, one level per document mip level.
+		cache: TiledImage,
 	},
 }
 

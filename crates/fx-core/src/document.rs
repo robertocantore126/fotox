@@ -55,6 +55,16 @@ pub(crate) enum NameKind {
 	ColorBalance,
 	Vibrance,
 	BlackWhite,
+	// M6-T06. A shape layer is named after the shape it holds ("Rectangle 1"),
+	// so each kind of shape has its own counter; `Shape` is the generic one
+	// (a free path).
+	Shape,
+	Rectangle,
+	RoundedRectangle,
+	Ellipse,
+	Polygon,
+	Star,
+	Line,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -62,7 +72,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 17;
+	const COUNT: usize = 24;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -85,6 +95,26 @@ impl NameKind {
 			NameKind::ColorBalance => "Color Balance",
 			NameKind::Vibrance => "Vibrance",
 			NameKind::BlackWhite => "Black & White",
+			NameKind::Shape => "Shape",
+			NameKind::Rectangle => "Rectangle",
+			NameKind::RoundedRectangle => "Rounded Rectangle",
+			NameKind::Ellipse => "Ellipse",
+			NameKind::Polygon => "Polygon",
+			NameKind::Star => "Star",
+			NameKind::Line => "Line",
+		}
+	}
+
+	/// The counter a shape layer of `stem` uses ([`NameKind::stem`] names it).
+	pub(crate) fn of_shape_stem(stem: &str) -> Self {
+		match stem {
+			"Rectangle" => NameKind::Rectangle,
+			"Rounded Rectangle" => NameKind::RoundedRectangle,
+			"Ellipse" => NameKind::Ellipse,
+			"Polygon" => NameKind::Polygon,
+			"Star" => NameKind::Star,
+			"Line" => NameKind::Line,
+			_ => NameKind::Shape,
 		}
 	}
 

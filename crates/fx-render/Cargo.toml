@@ -19,6 +19,7 @@ parking_lot = { workspace = true }
 rayon = { workspace = true }
 half = { workspace = true }
 wgpu-sync = { workspace = true }
+tiny-skia = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

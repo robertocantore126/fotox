@@ -178,7 +178,7 @@ impl TileProgram {
 }
 
 /// A mip tile that must be computed before this program can run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MipRequest {
 	pub layer: LayerId,
 	pub mask: bool,
@@ -187,13 +187,44 @@ pub struct MipRequest {
 	pub y: u32,
 }
 
+/// A tile of a shape layer's cache that must be drawn from its geometry
+/// before this program can run (M6-T06). Unlike a mip it is not computed from
+/// the level below: every level is rasterised from the shape, so a shape is
+/// as sharp as the zoom needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VectorRequest {
+	pub layer: LayerId,
+	pub level: usize,
+	pub x: u32,
+	pub y: u32,
+}
+
+/// A tile the program needs before it can run: real pixel data that is not
+/// there yet. The engine turns each into a tile behind the scenes (mip or
+/// shape cache) and asks for the frame again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TileRequest {
+	Mip(MipRequest),
+	Vector(VectorRequest),
+}
+
+impl TileRequest {
+	/// The layer the tile belongs to.
+	pub fn layer(&self) -> LayerId {
+		match self {
+			TileRequest::Mip(r) => r.layer,
+			TileRequest::Vector(r) => r.layer,
+		}
+	}
+}
+
 /// Build the program for output tile `(level, tx, ty)` of `doc`.
 ///
 /// `luts` resolves adjustment parameters to baked LUTs (cached by the caller,
 /// see [`crate::adjust::LutCache`]).
 ///
 /// Errors with the list of dirty mip tiles if any input is not computed yet.
-pub fn build_program(doc: &Document, level: usize, tx: u32, ty: u32, luts: &mut dyn FnMut(&Adjustment) -> Arc<Lut>) -> Result<TileProgram, Vec<MipRequest>> {
+pub fn build_program(doc: &Document, level: usize, tx: u32, ty: u32, luts: &mut dyn FnMut(&Adjustment) -> Arc<Lut>) -> Result<TileProgram, Vec<TileRequest>> {
 	let mut builder = Builder {
 		level,
 		origin: (tx as i64 * TILE_SIZE as i64, ty as i64 * TILE_SIZE as i64),
@@ -222,8 +253,18 @@ struct Builder<'a> {
 	level: usize,
 	/// Output tile origin in level-space pixels.
 	origin: (i64, i64),
-	missing: Vec<MipRequest>,
+	missing: Vec<TileRequest>,
 	luts: &'a mut dyn FnMut(&Adjustment) -> Arc<Lut>,
+}
+
+/// What a source tile is: the program asks the engine for it in a different
+/// way depending on this (M6-T06).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceTile {
+	/// A mip, computed from the level below. `mask` says which image it is.
+	Mip { mask: bool },
+	/// A shape layer's cache, drawn from the geometry at this level.
+	Vector,
 }
 
 enum MaskEval {
@@ -338,7 +379,7 @@ impl Builder<'_> {
 		};
 		let op = match &layer.kind {
 			LayerKind::Pixel { image, offset } => {
-				let Some(quad) = self.quad(image, *offset, layer.id, false) else {
+				let Some(quad) = self.quad(image, *offset, layer.id, SourceTile::Mip { mask: false }) else {
 					return Vec::new();
 				};
 				if quad.all_empty() {
@@ -361,6 +402,28 @@ impl Builder<'_> {
 				mask,
 				clip,
 			},
+			// A shape layer's pixels are its cache: rasterised from the geometry
+			// at this level, on demand (M6-T06). The fill and stroke colours live
+			// in the tiles, so the op is the same as for a pixel layer's.
+			LayerKind::Shape { fill, stroke, cache, .. } => {
+				if fill.is_none() && stroke.is_none() {
+					return Vec::new();
+				}
+				let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Vector) else {
+					return Vec::new();
+				};
+				if quad.all_empty() {
+					return Vec::new();
+				}
+				Op::Layer {
+					layer: layer.id,
+					source: Source::Tiles(quad),
+					blend,
+					alpha,
+					mask,
+					clip,
+				}
+			}
 			LayerKind::Adjustment(adjustment) => {
 				let adjust = match adjustment {
 					Adjustment::HueSaturation {
@@ -445,7 +508,7 @@ impl Builder<'_> {
 			_ => (0, 0),
 		};
 		let outside = mask.outside_value as f32 / 65535.0;
-		let Some(quad) = self.quad(&mask.image, offset, layer.id, true) else {
+		let Some(quad) = self.quad(&mask.image, offset, layer.id, SourceTile::Mip { mask: true }) else {
 			return MaskEval::Constant(1.0);
 		};
 		// Constant if every slot this tile reads is uniform with the same value.
@@ -483,7 +546,7 @@ impl Builder<'_> {
 
 	/// The source quad of `image` (shifted by `offset` document pixels) for
 	/// this output tile. Records dirty mips; `None` if any are dirty.
-	fn quad(&mut self, image: &TiledImage, offset: (i32, i32), layer: LayerId, is_mask: bool) -> Option<Quad> {
+	fn quad(&mut self, image: &TiledImage, offset: (i32, i32), layer: LayerId, source: SourceTile) -> Option<Quad> {
 		// Document invariant: every image in a document has the document's
 		// size, hence the same number of levels (offsets express placement).
 		debug_assert!(self.level < image.level_count(), "image smaller than the document");
@@ -509,12 +572,15 @@ impl Builder<'_> {
 			let (gx, gy) = (gx as u32, gy as u32);
 			if image.is_dirty(level, gx, gy) {
 				dirty = true;
-				self.missing.push(MipRequest {
-					layer,
-					mask: is_mask,
-					level,
-					x: gx,
-					y: gy,
+				self.missing.push(match source {
+					SourceTile::Mip { mask } => TileRequest::Mip(MipRequest {
+						layer,
+						mask,
+						level,
+						x: gx,
+						y: gy,
+					}),
+					SourceTile::Vector => TileRequest::Vector(VectorRequest { layer, level, x: gx, y: gy }),
 				});
 				return QuadSlot::Outside;
 			}

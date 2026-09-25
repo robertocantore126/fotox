@@ -106,6 +106,10 @@ jpeg-encoder = "0.6"
 # color
 lcms2 = "6.2"
 
+# vector geometry: shape layers rasterise their outline into tiles with
+# tiny-skia's anti-aliased CPU renderer (decision D-050)
+tiny-skia = "0.12"
+
 # dev
 criterion = "0.8"
 

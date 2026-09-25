@@ -20,6 +20,7 @@ pub mod pixels;
 pub mod selection;
 pub mod stroke;
 pub mod transform;
+pub mod vector;
 
 pub use blend::BlendMode;
 pub use color::{BitDepth, ColorProfile, DocumentColor, RenderingIntent};
@@ -31,3 +32,4 @@ pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
 pub use ops::{Conversion, FilterParams, PixelOps};
 pub use selection::{SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 pub use transform::{Anchor9, BezierPatch, Filter, Mapping, Permutation, dest_rect};
+pub use vector::{Paint, PathEl, StrokeAlign, StrokeStyle, VectorShape};

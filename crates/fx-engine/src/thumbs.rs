@@ -8,7 +8,8 @@
 //! from disk and compute missing mips (on its own copy of the image).
 
 use fx_core::LayerKind;
-use fx_tiles::{PixelFormat, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
+use fx_core::vector::{Paint, StrokeStyle, VectorShape};
+use fx_tiles::{PixelFormat, TILE_SIZE, TileClass, TileError, TileSlot, TileStore, TiledImage};
 
 use crate::mips;
 
@@ -23,8 +24,19 @@ pub struct Thumbnail {
 
 /// What a thumbnail job needs from the layer, taken on the engine thread.
 pub enum ThumbSource {
-	Pixels { image: TiledImage, offset: (i32, i32) },
+	Pixels {
+		image: TiledImage,
+		offset: (i32, i32),
+	},
 	Solid([u16; 4]),
+	/// A shape layer: no stored pixels, so the job draws the tiles it needs
+	/// from the geometry (M6-T06).
+	Shape {
+		shape: VectorShape,
+		fill: Option<Paint>,
+		stroke: Option<StrokeStyle>,
+		transform: [f64; 6],
+	},
 }
 
 impl ThumbSource {
@@ -37,6 +49,18 @@ impl ThumbSource {
 				offset: *offset,
 			}),
 			LayerKind::SolidFill { rgba } => Some(Self::Solid(*rgba)),
+			LayerKind::Shape {
+				shape,
+				fill,
+				stroke,
+				transform,
+				cache: _,
+			} => Some(Self::Shape {
+				shape: shape.clone(),
+				fill: *fill,
+				stroke: stroke.clone(),
+				transform: *transform,
+			}),
 			_ => None,
 		}
 	}
@@ -55,7 +79,18 @@ pub fn fitted(doc_w: u32, doc_h: u32, size: u32) -> (u32, u32) {
 /// Render the thumbnail of `source` in a `doc_w × doc_h` document.
 pub fn render(source: ThumbSource, doc_w: u32, doc_h: u32, size: u32, store: &TileStore) -> Result<Thumbnail, TileError> {
 	let (tw, th) = fitted(doc_w, doc_h, size);
-	let (mut image, offset) = match source {
+	// A shape has no pixels to read: its tiles are drawn at whatever level the
+	// thumbnail picks (M6-T06), so it is kept aside rather than read.
+	let shape = match &source {
+		ThumbSource::Shape {
+			shape,
+			fill,
+			stroke,
+			transform,
+		} => Some((shape.clone(), *fill, stroke.clone(), *transform)),
+		_ => None,
+	};
+	let (mut image, offset) = match &source {
 		ThumbSource::Solid(rgba) => {
 			let px = [rgba[0], rgba[1], rgba[2], rgba[3]].map(|v| (v / 257) as u8);
 			return Ok(Thumbnail {
@@ -64,7 +99,10 @@ pub fn render(source: ThumbSource, doc_w: u32, doc_h: u32, size: u32, store: &Ti
 				pixels: px.repeat((tw * th) as usize),
 			});
 		}
-		ThumbSource::Pixels { image, offset } => (image, offset),
+		// Cloning a `TiledImage` clones tile handles, not pixels.
+		ThumbSource::Pixels { image, offset } => (image.clone(), *offset),
+		// A shape fills the whole canvas, so its placement is the canvas's.
+		ThumbSource::Shape { .. } => (TiledImage::derived(doc_w, doc_h, PixelFormat::Rgba8), (0, 0)),
 	};
 
 	// Deepest level whose longer side still has ≥ the thumbnail's pixels.
@@ -82,10 +120,18 @@ pub fn render(source: ThumbSource, doc_w: u32, doc_h: u32, size: u32, store: &Ti
 	let mut level_px = vec![[0f32; 4]; (lw * lh) as usize];
 	for ty in 0..rows {
 		for tx in 0..cols {
-			let slot = if level == 0 {
-				image.slot(0, tx, ty).clone()
-			} else {
-				mips::ensure_mip(&mut image, store, level, tx, ty)?
+			let slot = match &shape {
+				// Drawn at the level the thumbnail reads, so a shape is as
+				// sharp in the panel as it is on the canvas (M6-T06).
+				Some((shape, fill, stroke, transform)) => {
+					let buffer = fx_render::render_shape_tile(shape, fill.as_ref(), stroke.as_ref(), *transform, level, (tx, ty), PixelFormat::Rgba8);
+					match buffer.uniform_value() {
+						Some(value) if value.is_transparent(PixelFormat::Rgba8) => TileSlot::Empty,
+						_ => TileSlot::Data(store.insert(buffer, TileClass::Derived)),
+					}
+				}
+				None if level == 0 => image.slot(0, tx, ty).clone(),
+				None => mips::ensure_mip(&mut image, store, level, tx, ty)?,
 			};
 			copy_tile(&slot, image.format(), store, tx, ty, lw, lh, &mut level_px)?;
 		}

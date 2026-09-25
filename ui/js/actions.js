@@ -35,9 +35,10 @@ export function runAction(item) {
   // answers with the result, or a toast for what is not implemented yet.
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
   // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
-  // and its submenu (M6-T04), the Select menu (M5) and Filter ▸ Last Filter:
-  // the mock's "not implemented" toast must not follow them.
-  if (bridge.isNative && ["img:", "xf:", "sel:", "filter:"].some((p) => a.startsWith(p))) return;
+  // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
+  // Layer ▸ Rasterize (M6-T06): the mock's "not implemented" toast must not
+  // follow them.
+  if (bridge.isNative && ["img:", "xf:", "sel:", "filter:", "raster:"].some((p) => a.startsWith(p))) return;
   // Other debug actions are the engine's (sent above); nothing to do here.
   if (a.startsWith("debug:")) {
     if (!bridge.isNative) toast(label + " needs the app (not available in a browser)");

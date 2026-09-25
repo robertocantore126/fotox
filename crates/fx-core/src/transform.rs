@@ -174,6 +174,29 @@ impl Mapping {
 		}
 	}
 
+	/// This mapping composed with the affine `inner`, applied first:
+	/// `self ∘ inner`, the matrix that sends a point of `inner`'s space where
+	/// this mapping sends the point `inner` sends it to. Used to move a shape
+	/// layer through a canvas transform (M6-T06): a shape is placed by an
+	/// affine matrix, so a turn, a flip or a scale is a matrix multiplication.
+	///
+	/// `None` for a mapping that is not affine (a projective homography, a
+	/// warp): a shape layer's placement cannot hold one.
+	pub fn then_affine(self, inner: [f64; 6]) -> Option<[f64; 6]> {
+		let Mapping::Affine([a1, b1, c1, d1, e1, f1]) = self else {
+			return None;
+		};
+		let [a2, b2, c2, d2, e2, f2] = inner;
+		Some([
+			a1 * a2 + c1 * b2,
+			b1 * a2 + d1 * b2,
+			a1 * c2 + c1 * d2,
+			b1 * c2 + d1 * d2,
+			a1 * e2 + c1 * f2 + e1,
+			b1 * e2 + d1 * f2 + f1,
+		])
+	}
+
 	/// Where the mapping sends a source point, or `None` when it cannot be
 	/// evaluated there (outside a warp's surface, a degenerate homography, a
 	/// non-finite result). A warp's surface is not evaluated here — the
@@ -372,6 +395,23 @@ impl Permutation {
 			Permutation::Rot90Cw | Permutation::Rot90Ccw => (height, width),
 			_ => (width, height),
 		}
+	}
+
+	/// The permutation as a [`Mapping`]: source (old) canvas pixels →
+	/// destination (new) canvas pixels, the same relation
+	/// [`source_pixel`](Self::source_pixel) walks backwards. Pixel images
+	/// permute their own tiles; a shape layer's matrix is folded with this, and
+	/// both land in the same place (M6-T06).
+	pub fn mapping(self, (width, height): (u32, u32)) -> Mapping {
+		let (w, h) = (f64::from(width - 1), f64::from(height - 1));
+		let (a, b, c, d, e, f) = match self {
+			Permutation::Rot90Cw => (0.0, 1.0, -1.0, 0.0, h, 0.0),
+			Permutation::Rot90Ccw => (0.0, -1.0, 1.0, 0.0, 0.0, w),
+			Permutation::Rot180 => (-1.0, 0.0, 0.0, -1.0, w, h),
+			Permutation::FlipHorizontal => (-1.0, 0.0, 0.0, 1.0, w, 0.0),
+			Permutation::FlipVertical => (1.0, 0.0, 0.0, -1.0, 0.0, h),
+		};
+		Mapping::Affine([a, b, c, d, e, f])
 	}
 
 	/// The source pixel a destination pixel takes, for a `size` source image.

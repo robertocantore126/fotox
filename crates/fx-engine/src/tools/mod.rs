@@ -25,6 +25,8 @@ pub mod eyedropper;
 pub mod lasso;
 pub mod marquee;
 pub mod paint;
+pub mod path_select;
+pub mod shape;
 pub mod transform;
 pub mod wand;
 
@@ -370,7 +372,15 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"clone" => Some(Box::new(paint::Paint::new("clone", paint::Kind::Clone))),
 		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
-		"quick-select" | "object-select" | "lasso-magnet" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		// The shape tools (M6-T06) and the Path Selection tool that moves a
+		// shape by its transform.
+		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),
+		"shape-rounded" => Some(Box::new(shape::Shape::new("shape-rounded", shape::Kind::Rounded))),
+		"shape-ellipse" => Some(Box::new(shape::Shape::new("shape-ellipse", shape::Kind::Ellipse))),
+		"shape-polygon" => Some(Box::new(shape::Shape::new("shape-polygon", shape::Kind::Polygon))),
+		"shape-line" => Some(Box::new(shape::Shape::new("shape-line", shape::Kind::Line))),
+		"path-select" => Some(Box::new(path_select::PathSelect::default())),
+		"quick-select" | "object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		_ => None,
 	}
 }
@@ -381,6 +391,8 @@ fn not_yet_name(id: &str) -> &'static str {
 		"quick-select" => "Quick Selection",
 		"object-select" => "Object Selection",
 		"lasso-magnet" => "Magnetic Lasso",
+		"shape-custom" => "Custom Shape",
+		"shape-3d" => "3D Object",
 		_ => "This tool",
 	}
 }

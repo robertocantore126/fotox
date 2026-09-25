@@ -27,6 +27,7 @@ pub mod stroke;
 pub mod thumbs;
 pub mod tools;
 pub mod transform_preview;
+pub mod vector;
 pub mod view;
 
 mod engine;

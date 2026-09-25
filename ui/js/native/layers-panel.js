@@ -532,8 +532,10 @@ function barBtn(ic, tip, fn) {
 }
 
 function requestThumbnails() {
+  // Shape layers (M6-T06) get a thumbnail too: the engine draws their tiles
+  // from the geometry, so the panel shows the shape itself.
   const ids = layers
-    .filter((l) => (l.kind === "pixel" || l.kind === "solid_fill") && !requested.has(`${doc}:${l.id}`))
+    .filter((l) => (l.kind === "pixel" || l.kind === "solid_fill" || l.kind === "shape") && !requested.has(`${doc}:${l.id}`))
     .map((l) => l.id);
   if (!ids.length) return;
   for (const id of ids) requested.add(`${doc}:${id}`);

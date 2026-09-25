@@ -1058,6 +1058,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "thiserror 2.0.21",
+ "tiny-skia",
  "tracing",
  "wgpu",
  "wgpu-sync",
@@ -2953,6 +2954,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
+ "png",
  "tiny-skia-path",
 ]
 

@@ -69,6 +69,9 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 		},
 		fill_color: match &layer.kind {
 			LayerKind::SolidFill { rgba } => Some(*rgba),
+			// A shape layer shows its fill in the panel, so its row reads like
+			// a fill layer's until the thumbnail arrives (M6-T06).
+			LayerKind::Shape { fill, .. } => fill.map(|paint| paint.rgba()),
 			_ => None,
 		},
 	}
@@ -80,6 +83,7 @@ fn layer_kind(kind: &LayerKind) -> LayerInfoKind {
 		LayerKind::Group { .. } => LayerInfoKind::Group,
 		LayerKind::Adjustment(_) => LayerInfoKind::Adjustment,
 		LayerKind::SolidFill { .. } => LayerInfoKind::SolidFill,
+		LayerKind::Shape { .. } => LayerInfoKind::Shape,
 	}
 }
 

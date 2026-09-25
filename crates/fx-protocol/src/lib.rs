@@ -179,6 +179,8 @@ pub enum LayerInfoKind {
 	Group,
 	Adjustment,
 	SolidFill,
+	/// A vector shape layer (M6-T06).
+	Shape,
 }
 
 /// Flat, UI-friendly description of one layer. The tree is expressed with

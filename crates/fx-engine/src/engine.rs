@@ -20,6 +20,7 @@ use fx_core::{
 use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
+use fx_render::TileRequest;
 use fx_tiles::{PixelFormat, PixelValue, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
 
 use crate::documents::{Documents, OpenDoc};
@@ -32,7 +33,7 @@ use crate::tools::transform::{self as free_transform, Mode as TransformMode, Upd
 use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
 use crate::transform_preview::{Prepared, PreviewJob as TransformJob, TransformPreview};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
+use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips, vector};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -230,6 +231,11 @@ enum EditKey {
 	Props(LayerRef, [bool; 9]),
 	/// `set_adjustment` of the same layer.
 	Adjustment(LayerRef),
+	/// `set_shape` of the same layer: the option bar's fields and the Path
+	/// Selection tool send a command per change, and a drag is one history step
+	/// (M6-T06). The fields touched are part of the key, so a fill drag and a
+	/// move do not merge into each other.
+	Shape(LayerRef, [bool; 4]),
 }
 
 impl EditKey {
@@ -263,6 +269,16 @@ impl EditKey {
 				))
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
+			Command::SetShape {
+				layer,
+				shape,
+				fill,
+				stroke,
+				transform,
+			} => Some(Self::Shape(
+				layer.clone(),
+				[shape.is_some(), fill.is_some(), stroke.is_some(), transform.is_some()],
+			)),
 			_ => None,
 		}
 	}
@@ -915,6 +931,13 @@ impl Engine {
 				return Changed::default();
 			}
 			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
+			// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06): a shape
+			// layer's pixels are drawn from its geometry on demand, so rasterising
+			// draws the level-0 tiles first and then keeps them.
+			id if id.starts_with("raster:") => {
+				self.rasterize_action(id);
+				return Changed::default();
+			}
 			// Build the B3 benchmark on top of the active document (M2-T08).
 			// View ▸ Proof Colors (Ctrl+Y) / Gamut Warning (Shift+Ctrl+Y), M4-T04.
 			"view:proof-colors" | "view:gamut-warning" => {
@@ -1132,7 +1155,10 @@ impl Engine {
 			});
 			return;
 		};
-		// A snapshot: editing may go on while the export runs.
+		// A snapshot: editing may go on while the export runs. Shape layers
+		// are rasterised from their geometry, so their level-0 tiles are
+		// drawn first (M6-T06).
+		vector::prepare_level0(&mut open.doc, &self.store, None);
 		let doc = open.doc.clone();
 		if let Err(error) = crate::export::options_for(&doc, &path, false) {
 			self.to_ui(&EngineToUi::Error {
@@ -1562,6 +1588,9 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let label = pixel_job_label(&command);
 		open.busy = Some(label.clone());
+		// These commands read level 0 of layers the view may not have drawn
+		// (M6-T06): fill in the shape tiles before the snapshot is taken.
+		vector::prepare_level0(&mut open.doc, &self.store, None);
 		let before = open.doc.clone();
 		self.next_task += 1;
 		let task = self.next_task;
@@ -2326,6 +2355,46 @@ impl Engine {
 		true
 	}
 
+	/// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06). Only layers
+	/// whose pixels come from something outside the document can be rasterised,
+	/// so on a pixel layer (or a group) the item does nothing: Photoshop greys
+	/// it out, and the UI cannot know the layer kind yet (T05/T10).
+	///
+	/// `Command::Rasterize` composites each layer at level 0, and a shape's
+	/// level-0 tiles are only drawn for the tiles the viewport has asked for so
+	/// far, so the rest are drawn here first.
+	fn rasterize_action(&mut self, id: &str) {
+		let Some(doc) = self.docs.active_mut() else { return };
+		let doc_id = doc.id;
+		let mut layers: Vec<LayerId> = Vec::new();
+		if id == "raster:all" {
+			doc.doc.walk(|layer, _| {
+				if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::SolidFill { .. }) {
+					layers.push(layer.id);
+				}
+			});
+		} else if let Some(active) = doc.doc.active_layer() {
+			// `raster:shape` only fires on a shape layer, so the other ids stay
+			// silent on one; `raster:layer` takes whatever can be rasterised.
+			let kind = doc.doc.layer(active).map(|layer| &layer.kind);
+			let wanted = match kind {
+				Some(LayerKind::Shape { .. }) => id == "raster:shape" || id == "raster:layer",
+				Some(LayerKind::SolidFill { .. }) => id == "raster:layer",
+				_ => false,
+			};
+			if wanted {
+				layers.push(active);
+			}
+		}
+		if layers.is_empty() {
+			return;
+		}
+		let drawn = vector::prepare_level0(&mut doc.doc, &self.store, Some(&layers));
+		tracing::debug!("rasterising drew {drawn} level-0 shape tiles");
+		let refs: Vec<LayerRef> = layers.iter().map(|&id| LayerRef::Id(id)).collect();
+		self.command(doc_id, Command::Rasterize { layers: refs });
+	}
+
 	/// Image ▸ Crop (M6-T03): one `Command::Crop` around the pixels the
 	/// selection covers, measured exactly on the coverage image (the Crop tool's
 	/// box does the same for a dragged rectangle).
@@ -2587,6 +2656,10 @@ impl Engine {
 	/// nothing to copy (a toast says why).
 	fn copy_layer(&mut self, doc_id: DocId) -> bool {
 		let store = self.store.clone();
+		// A shape layer is copied as the pixels it draws (M6-T06).
+		if let Some(open) = self.docs.get_mut(doc_id) {
+			vector::prepare_level0(&mut open.doc, &store, None);
+		}
 		let result = {
 			let Some(open) = self.docs.get(doc_id) else { return false };
 			let Some((image, offset)) = crate::clipboard::active_pixels(&open.doc) else {
@@ -2759,22 +2832,33 @@ impl Engine {
 			// The document changed meanwhile; the next frame asks again.
 			return;
 		}
+		let mut shape_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
 		for request in &work.requests {
-			let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
-			let image = if request.mask {
-				match layer.mask.as_mut() {
-					Some(mask) => &mut mask.image,
-					None => continue,
+			match request {
+				TileRequest::Mip(request) => {
+					let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
+					let image = if request.mask {
+						match layer.mask.as_mut() {
+							Some(mask) => &mut mask.image,
+							None => continue,
+						}
+					} else {
+						match &mut layer.kind {
+							fx_core::LayerKind::Pixel { image, .. } => image,
+							_ => continue,
+						}
+					};
+					if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
+						tracing::warn!("mip {request:?} failed: {error}");
+					}
 				}
-			} else {
-				match &mut layer.kind {
-					fx_core::LayerKind::Pixel { image, .. } => image,
-					_ => continue,
-				}
-			};
-			if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
-				tracing::warn!("mip {request:?} failed: {error}");
+				// Shape tiles are drawn from the geometry, all levels alike
+				// (M6-T06); collect them and draw one parallel batch per layer.
+				TileRequest::Vector(request) => shape_tiles.push((request.layer, request.level, request.x, request.y)),
 			}
+		}
+		if !shape_tiles.is_empty() {
+			vector::draw_requests(&mut doc.doc, &store, &shape_tiles);
 		}
 		doc.invalidate_snapshot();
 		if self.docs.active_id() == Some(work.doc) {
