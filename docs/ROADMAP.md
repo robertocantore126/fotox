@@ -16,4 +16,4 @@ milestone only (`docs/tasks/`); later ones are refined when we get there.
 | M7 | PSD/PSB import | Open layered PSD/PSB; verify blend modes against Photoshop | TBD |
 | M8 | Automation and custom workflows | Actions panel (record/replay), batch processing, Rob's custom tools | TBD |
 
-Current milestone: **M0**.
+Current milestone: **M3** (M0–M2 coded, acceptance measurements pending — `docs/reports/STATUS-2026-09-25.md`).
