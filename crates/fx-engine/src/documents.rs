@@ -4,12 +4,13 @@
 //! snapshots (`Arc<Document>`, cheap: layers are shared `Arc`s and images are
 //! slot grids of shared tile handles).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fx_core::{ColorProfile, Document, DocumentColor, History, Layer, LayerId, LayerKind};
 use fx_io::ImportedImage;
+use fx_io::fxd::{FxdFile, OpenedFxd};
 use fx_protocol::{DocId, DocumentInfo};
 
 use crate::view::ViewState;
@@ -34,6 +35,12 @@ pub struct OpenDoc {
 	snapshot: Option<Arc<Document>>,
 	/// Derived data (mips) changed without a new revision.
 	snapshot_stale: bool,
+	/// The open `.fxd` this document was loaded from or last saved to (M3,
+	/// D-027), shared by its backed tiles. `None` for a flat import not yet
+	/// saved: Save then needs a path.
+	pub file: Option<Arc<FxdFile>>,
+	/// The `.fxd`'s path (the Save target while `file` is set).
+	pub path: Option<PathBuf>,
 }
 
 impl OpenDoc {
@@ -77,6 +84,32 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			file: None,
+			path: None,
+		}
+	}
+
+	/// A document loaded lazily from a `.fxd` (M3-T05): opened clean, with the
+	/// file kept for incremental saves.
+	pub fn from_fxd(id: DocId, path: &Path, opened: OpenedFxd) -> Self {
+		let name = path
+			.file_name()
+			.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+		let view = ViewState::new((opened.document.width, opened.document.height));
+		Self {
+			id,
+			name,
+			doc: opened.document,
+			history: History::default(),
+			view,
+			dirty: false,
+			generation: 0,
+			last_edit: None,
+			hot: None,
+			snapshot: None,
+			snapshot_stale: false,
+			file: Some(opened.file),
+			path: Some(path.to_path_buf()),
 		}
 	}
 

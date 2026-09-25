@@ -59,11 +59,14 @@ pub enum Sniffed {
 	Tiff,
 	Png,
 	Jpeg,
+	/// Native Fotox document (`.fxd`, M3).
+	Fxd,
 }
 
-/// Recognise a file from its first bytes (at least 8 are needed for PNG).
+/// Recognise a file from its first bytes (at least 8 are needed for PNG and `.fxd`).
 pub fn sniff(header: &[u8]) -> Option<Sniffed> {
 	match header {
+		[b'F', b'O', b'T', b'O', b'X', b'F', b'X', b'D', ..] => Some(Sniffed::Fxd),
 		[b'I', b'I', 42, 0, ..] | [b'M', b'M', 0, 42, ..] | [b'I', b'I', 43, 0, ..] | [b'M', b'M', 0, 43, ..] => Some(Sniffed::Tiff),
 		[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => Some(Sniffed::Png),
 		[0xFF, 0xD8, 0xFF, ..] => Some(Sniffed::Jpeg),
@@ -90,12 +93,15 @@ pub fn import_file(path: &Path, store: &TileStore, progress: Progress<'_>) -> Re
 		Some(Sniffed::Tiff) => tiff::import(path, store, progress),
 		Some(Sniffed::Png) => png::import(path, store, progress),
 		Some(Sniffed::Jpeg) => jpeg::import(path, store, progress),
+		// A `.fxd` is not a flat image; open it lazily with `fxd::open` (M3-T05).
+		Some(Sniffed::Fxd) => Err(IoError::Unsupported("open .fxd documents with fx_io::fxd::open".into())),
 		None => Err(IoError::UnsupportedFormat),
 	}
 }
 
 mod band;
 pub mod export;
+pub mod fxd;
 mod jpeg;
 mod png;
 #[cfg(test)]
@@ -104,3 +110,17 @@ mod tiff;
 #[cfg(test)]
 mod tiff_tests;
 pub mod tiff_write;
+
+#[cfg(test)]
+mod tests {
+	use super::{Sniffed, sniff};
+
+	#[test]
+	fn sniffs_a_fxd_header() {
+		assert_eq!(sniff(b"FOTOXFXD\x01\x00\x00\x00"), Some(Sniffed::Fxd));
+		// Fewer than 8 bytes is not enough to tell.
+		assert_eq!(sniff(b"FOTOXFX"), None);
+		// The other formats still work.
+		assert_eq!(sniff(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]), Some(Sniffed::Png));
+	}
+}

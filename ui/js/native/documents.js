@@ -8,6 +8,7 @@
 import { h, icon } from "../el.js";
 import { state } from "../state.js";
 import { status } from "../tooltip.js";
+import { openDialog } from "../dialogs.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
 
@@ -64,7 +65,21 @@ export function initDocumentTabs(tabs, add) {
     refresh(view.doc);
   });
 
-  // Long jobs (import): progress in the status bar.
+  // Closing an unsaved document: Save / Don't Save / Cancel (M3-T06).
+  bridge.on(ENGINE.CLOSE_DIRTY_DOCUMENT, ({ doc, name }) => {
+    const answer = (value) => bridge.send({ type: UI.CLOSE_DOCUMENT_ANSWER, doc, answer: value });
+    openDialog("save-changes", {
+      fields: [{ type: "label", text: `Save changes to “${name}” before closing?` }],
+      buttons: [
+        { text: "Save", primary: true, onClick: () => answer("save") },
+        { text: "Don't Save", onClick: () => answer("dont_save") },
+        { text: "Cancel", onClick: () => answer("cancel") },
+      ],
+      onCancel: () => answer("cancel"),
+    });
+  });
+
+  // Long jobs (import, save, export): progress in the status bar.
   bridge.on(ENGINE.PROGRESS, ({ label, fraction }) => status(`${label}… ${Math.round(fraction * 100)} %`));
   bridge.on(ENGINE.PROGRESS_DONE, () => status("Ready"));
 }

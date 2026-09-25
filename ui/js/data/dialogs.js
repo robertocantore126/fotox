@@ -83,13 +83,12 @@ dialogs["export-as"] = {
   title: "Export As", width: 640, wide: true, icon: "i-doc",
   fields: [
     PREVIEW,
+    // Read by label in the app (ui/js/actions.js, M3-T07): keep the labels.
     { type: "col", fields: [
-      sel("Format:", ["PNG", "JPG", "GIF", "SVG", "WebP", "BMP", "TIFF", "PDF", "MP4"], "PNG"),
-      sel("Scale:", ["1x", "0.5x", "0.25x", "2x", "3x", "Original Size"], "1x"),
-      num("Width:", 1080, { unit: "px", w: 90 }), num("Height:", 1080, { unit: "px", w: 90 }),
-      rng("Quality:", 90),
-      grp("PNG options", [chk("Transparency", true), chk("Interlaced", false), sel("Colour:", ["Auto", "16 colours", "64 colours", "256 colours", "True Colour"], "Auto")]),
-      chk("Trim transparent pixels", false),
+      sel("Format:", ["PNG", "JPG", "TIFF"], "PNG"),
+      sel("Bit Depth:", ["Document", "8 bits/channel"], "Document"),
+      sel("Transparency:", ["Automatic", "On", "Off"], "Automatic"),
+      grp("JPG options", [rng("Quality:", 90, { min: 0, max: 100 }), sel("Chroma:", ["4:4:4 (best)", "4:2:0 (smaller)"], "4:4:4 (best)")]),
     ] },
   ],
   ok: "Export", cancel: "Cancel",
@@ -215,6 +214,9 @@ dialogs["guide-layout"] = { title: "New Guide Layout", width: 400, fields: [txt(
 /* ---------------------------------------------------------------- Regolazioni */
 
 dialogs["brightness-contrast"] = { title: "Brightness/Contrast", width: 400, icon: "i-sun", fields: [rng("Brightness:", 0, { min: -150, max: 150 }), rng("Contrast:", 0, { min: -100, max: 100 }), chk("Use Legacy", false), PREVIEW], ok: "OK", cancel: "Cancel" };
+// Asked by the engine before closing an unsaved document (M3-T06); the
+// buttons are supplied by ui/js/native/documents.js.
+dialogs["save-changes"] = { title: "Fotox", width: 420, icon: "i-info", plain: true, fields: [lbl("Save changes to the document before closing?")] };
 dialogs.levels = { title: "Levels", width: 520, icon: "i-adjust", fields: [sel("Preset:", ["Default", "Increase Contrast", "Lighter", "Darker", "Midtones Brighter"], "Default"), sel("Channel:", ["RGB", "Red", "Green", "Blue"], "RGB"), { type: "histo" }, rng("Input Black:", 0, { min: 0, max: 253 }), rng("Gamma (x100):", 100, { min: 1, max: 999 }), rng("Input White:", 255, { min: 2, max: 255 }), rng("Output Black:", 0, { min: 0, max: 255 }), rng("Output White:", 255, { min: 0, max: 255 }), chk("Preview", true)], ok: "OK", cancel: "Cancel" };
 dialogs.curves = { title: "Curves", width: 520, icon: "i-paths", fields: [sel("Preset:", ["Default", "Strong Contrast", "Custom"], "Default"), sel("Channel:", ["RGB", "Red", "Green", "Blue"], "RGB"), { type: "curve" }, row(num("Input:", 0, { w: 55 }), num("Output:", 255, { w: 55 })), row({ type: "btn", text: "Smooth" }, { type: "btn", text: "Linear" }, { type: "btn", text: "Reset", curve: "reset" }), chk("Preview", true)], ok: "OK", cancel: "Cancel" };
 dialogs.exposure = { title: "Exposure", width: 400, icon: "i-sun", fields: [rng("Exposure:", 0, { min: -20, max: 20 }), rng("Offset:", 0, { min: -50, max: 50 }), rng("Gamma Correction:", 100, { min: 1, max: 300 }), { type: "pipette", text: "Set black point" }, { type: "pipette", text: "Set white point" }, { type: "pipette", text: "Set grey point" }, chk("Preview", true)], ok: "OK", cancel: "Cancel" };

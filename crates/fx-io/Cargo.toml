@@ -15,4 +15,13 @@ tracing = { workspace = true }
 tiff = { workspace = true }
 png = { workspace = true }
 zune-jpeg = { workspace = true }
+jpeg-encoder = { workspace = true }
 rayon = { workspace = true }
+# native .fxd container (M3-T01): synchronous crc32 payload checksum + zstd tiles
+crc32fast = { workspace = true }
+zstd = { workspace = true }
+# reading old lz4 tiles (the codec byte keeps both formats readable, D-024)
+lz4_flex = { workspace = true }
+# .fxd manifest model (M3-T02): versioned serde JSON, zstd-compressed
+serde = { workspace = true }
+serde_json = { workspace = true }

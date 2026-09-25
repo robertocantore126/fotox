@@ -33,4 +33,4 @@ mod store;
 pub use format::{PixelFormat, PixelValue, TILE_PIXELS, TILE_SIZE};
 pub use image::{TileGrid, TileSlot, TiledImage};
 pub use mip::{ChildPixels, downsample_2x2};
-pub use store::{TileBuffer, TileClass, TileError, TileHandle, TileId, TileStore, TileStoreConfig, TileStoreStats};
+pub use store::{Backed, TileBuffer, TileClass, TileError, TileHandle, TileId, TileSource, TileStore, TileStoreConfig, TileStoreStats};

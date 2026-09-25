@@ -11,7 +11,7 @@ const combos = [
   ["ctrl+o", "Open...", "dlg:open"],
   ["ctrl+alt+f", "Frame-time overlay", "debug:fps"],
   ["ctrl+s", "Save", "doc:save"],
-  ["ctrl+shift+s", "Save As", "dlg:export-as"],
+  ["ctrl+shift+s", "Save As", "doc:save-as"],
   ["ctrl+shift+c", "Copy Merged", "clip:copy-merged"],
   ["ctrl+alt+i", "Image Size...", "dlg:image-size"],
   ["ctrl+alt+c", "Canvas Size...", "dlg:canvas-size"],

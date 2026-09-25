@@ -21,6 +21,7 @@ pub const EXPORT_BAND_ROWS: u32 = 256;
 pub enum ExportFormat {
 	Tiff,
 	Png,
+	Jpeg,
 }
 
 impl ExportFormat {
@@ -30,21 +31,36 @@ impl ExportFormat {
 		match ext.as_str() {
 			"tif" | "tiff" => Some(Self::Tiff),
 			"png" => Some(Self::Png),
+			"jpg" | "jpeg" => Some(Self::Jpeg),
 			_ => None,
 		}
 	}
 }
 
+/// JPEG chroma subsampling (M3-T07-2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum JpegChroma {
+	/// 4:4:4 — no subsampling, the sharpest chroma.
+	#[default]
+	Full,
+	/// 4:2:0 — half resolution in both directions, smaller files.
+	Half,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportOptions {
 	pub format: ExportFormat,
-	/// 8 or 16 bits per channel.
+	/// 8 or 16 bits per channel (JPEG is 8 only).
 	pub bits: u16,
-	/// Keep transparency. Without it, the image is flattened onto white, like
-	/// Photoshop's Flatten Image with a white background colour.
+	/// Keep transparency (never for JPEG). Without it, the image is flattened
+	/// onto white, like Photoshop's Flatten Image with a white background.
 	pub alpha: bool,
 	/// Pixels per inch written in the file (TIFF resolution, PNG `pHYs`).
 	pub ppi: f32,
+	/// JPEG quality 0..=100 (ignored by TIFF and PNG).
+	pub quality: u8,
+	/// JPEG chroma subsampling (ignored by TIFF and PNG).
+	pub chroma: JpegChroma,
 }
 
 /// Renders one band: `render(y, rows, out)` fills `out` (`width × rows`
@@ -80,6 +96,9 @@ fn part_path(path: &Path) -> PathBuf {
 }
 
 fn write(part: &Path, width: u32, height: u32, options: ExportOptions, render: BandRenderer<'_>, progress: Progress<'_>) -> Result<(), IoError> {
+	if options.format == ExportFormat::Jpeg {
+		return write_jpeg(part, width, height, options, render, progress);
+	}
 	let samples: usize = if options.alpha { 4 } else { 3 };
 	let mut band = vec![[0u16; 4]; width as usize * EXPORT_BAND_ROWS as usize];
 	let mut bytes = Vec::new();
@@ -90,6 +109,8 @@ fn write(part: &Path, width: u32, height: u32, options: ExportOptions, render: B
 			Box::new(writer)
 		}
 		ExportFormat::Png => Box::new(PngSink::create(part, width, height, options)?),
+		// JPEG needs full pixel rows, not the byte stream: handled above.
+		ExportFormat::Jpeg => unreachable!("JPEG is written by write_jpeg"),
 	};
 	let mut y = 0;
 	while y < height {
@@ -105,6 +126,54 @@ fn write(part: &Path, width: u32, height: u32, options: ExportOptions, render: B
 		}
 	}
 	sink.finish()
+}
+
+/// JPEG has no streaming encoder: buffer the whole image (8-bit RGB, flattened
+/// onto white) and encode it. Refuses sides above 16 384 px, where the buffer
+/// would grow past ~800 MB (JPEG's own limit is 65 535).
+fn write_jpeg(part: &Path, width: u32, height: u32, options: ExportOptions, render: BandRenderer<'_>, progress: Progress<'_>) -> Result<(), IoError> {
+	const MAX_SIDE: u32 = 16_384;
+	if options.bits != 8 {
+		return Err(IoError::Unsupported("JPEG is 8 bits per channel".into()));
+	}
+	if width > MAX_SIDE || height > MAX_SIDE {
+		return Err(IoError::Unsupported(format!(
+			"JPEG export supports up to {MAX_SIDE} px per side (this image is {width}×{height})"
+		)));
+	}
+	let stride = width as usize;
+	let mut rgb = vec![0u8; stride * height as usize * 3];
+	let mut band = vec![[0u16; 4]; stride * EXPORT_BAND_ROWS as usize];
+	let mut y = 0;
+	while y < height {
+		let rows = EXPORT_BAND_ROWS.min(height - y);
+		let pixels = &mut band[..stride * rows as usize];
+		render(y, rows, pixels)?;
+		for (i, &[r, g, b, a]) in pixels.iter().enumerate() {
+			let row = y as usize + i / stride;
+			let col = i % stride;
+			let out = (row * stride + col) * 3;
+			rgb[out] = to_8(over_white(r, a));
+			rgb[out + 1] = to_8(over_white(g, a));
+			rgb[out + 2] = to_8(over_white(b, a));
+		}
+		y += rows;
+		if !progress(y as f32 / height as f32) {
+			return Err(IoError::Cancelled);
+		}
+	}
+	let mut encoder = jpeg_encoder::Encoder::new_file(part, options.quality).map_err(jpeg_error)?;
+	encoder.set_sampling_factor(match options.chroma {
+		JpegChroma::Full => jpeg_encoder::SamplingFactor::F_1_1,
+		JpegChroma::Half => jpeg_encoder::SamplingFactor::F_2_2,
+	});
+	encoder
+		.encode(&rgb, width as u16, height as u16, jpeg_encoder::ColorType::Rgb)
+		.map_err(jpeg_error)
+}
+
+fn jpeg_error(e: jpeg_encoder::EncodingError) -> IoError {
+	IoError::Decode(format!("jpeg: {e}"))
 }
 
 /// Straight RGBA16 → the file's samples (RGB or RGBA, 8 or 16 bits).
@@ -290,6 +359,8 @@ mod tests {
 			bits,
 			alpha,
 			ppi: 300.0,
+			quality: 90,
+			chroma: JpegChroma::Full,
 		};
 		let ext = if format == ExportFormat::Tiff { "tif" } else { "png" };
 		let path = dir().join(format!("out-{bits}-{alpha}.{ext}"));
@@ -339,6 +410,8 @@ mod tests {
 			bits: 8,
 			alpha: false,
 			ppi: 72.0,
+			quality: 90,
+			chroma: JpegChroma::Full,
 		};
 		let result = export_image(&path, W, H, options, &mut renderer(), &mut |_| false);
 		assert!(matches!(result, Err(IoError::Cancelled)));
@@ -347,11 +420,49 @@ mod tests {
 	}
 
 	#[test]
+	fn jpeg_round_trips() {
+		// JPEG is lossy: a smooth image plus a small tolerance. 8-bit only.
+		let options = ExportOptions {
+			format: ExportFormat::Jpeg,
+			bits: 8,
+			alpha: false,
+			ppi: 300.0,
+			quality: 90,
+			chroma: JpegChroma::Full,
+		};
+		let path = dir().join("out.jpg");
+		let mut smooth = |y0: u32, rows: u32, out: &mut [[u16; 4]]| -> Result<(), IoError> {
+			for y in 0..rows {
+				for x in 0..W {
+					out[(y * W + x) as usize] = [(x * 100) as u16, ((y0 + y) * 50) as u16, 32768, 65535];
+				}
+			}
+			Ok(())
+		};
+		export_image(&path, W, H, options, &mut smooth, &mut |_| true).unwrap();
+
+		let store = store();
+		let imported = import_file(&path, &store, &mut |_| true).unwrap();
+		assert_eq!((imported.width, imported.height), (W, H));
+		for &(x, y) in &[(10, 10), (200, 300), (299, 529)] {
+			let want = [to_8((x * 100) as u16), to_8((y * 50) as u16), to_8(32768), 255];
+			let got = pixel(&imported.image, &store, x, y);
+			for c in 0..3 {
+				let d = (i32::from(got[c]) - i32::from(want[c])).abs();
+				assert!(d <= 6, "jpeg pixel ({x},{y}) channel {c}: {got:?} vs {want:?}");
+			}
+			assert_eq!(got[3], 255, "jpeg has no alpha: opaque white background");
+		}
+	}
+
+	#[test]
 	fn format_from_extension() {
 		assert_eq!(ExportFormat::from_path(Path::new("a/b.TIFF")), Some(ExportFormat::Tiff));
 		assert_eq!(ExportFormat::from_path(Path::new("b.tif")), Some(ExportFormat::Tiff));
 		assert_eq!(ExportFormat::from_path(Path::new("b.png")), Some(ExportFormat::Png));
-		assert_eq!(ExportFormat::from_path(Path::new("b.jpg")), None);
+		assert_eq!(ExportFormat::from_path(Path::new("b.jpg")), Some(ExportFormat::Jpeg));
+		assert_eq!(ExportFormat::from_path(Path::new("b.jpeg")), Some(ExportFormat::Jpeg));
+		assert_eq!(ExportFormat::from_path(Path::new("b.gif")), None);
 		assert_eq!(ExportFormat::from_path(Path::new("b")), None);
 	}
 }

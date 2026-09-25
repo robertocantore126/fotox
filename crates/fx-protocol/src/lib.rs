@@ -89,6 +89,20 @@ pub enum UiToEngine {
 		layers: Vec<LayerId>,
 		size: u32,
 	},
+	/// The user answered the "save changes?" prompt of [`EngineToUi::CloseDirtyDocument`].
+	CloseDocumentAnswer {
+		doc: DocId,
+		answer: CloseAnswer,
+	},
+}
+
+/// Answer to the "save changes before closing?" prompt (M3-T06).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseAnswer {
+	Save,
+	DontSave,
+	Cancel,
 }
 
 /// Action id prefixes the UI handles entirely by itself (panels, tools, view
@@ -228,6 +242,12 @@ pub enum EngineToUi {
 	},
 	Error {
 		text: String,
+	},
+	/// A dirty document was asked to close: the UI shows the save/don't save/
+	/// cancel prompt and answers with [`UiToEngine::CloseDocumentAnswer`].
+	CloseDirtyDocument {
+		doc: DocId,
+		name: String,
 	},
 	/// Binary frame: payload = `width × height × 4` bytes RGBA8, straight alpha.
 	Thumbnail {

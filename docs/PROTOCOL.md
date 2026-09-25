@@ -44,10 +44,11 @@ Some UI messages are for the **shell** (`fx-app`), not the engine:
 | `hello` | `ui_version` | page loaded and receiver installed |
 | `direct_input` | `enabled` | a popup/menu/dialog opens (`false`) or all close (`true`) |
 | `viewport_bounds` | `x, y, width, height` (physical px) | layout change (`ResizeObserver` on `#viewport`, window resize, panel dock resize, screen mode change) |
-| `action` | `id`, `args?` | any Fotox action id from `js/data/menus.js` (`"doc:save"`, `"zoom:in"`, `"dlg:open"`, `"tool:brush"`…). Unknown ids → engine answers `toast`. The shell also answers `dlg:open` (native open dialog), `export:png` and `export:tiff` (native save dialog, then the engine exports the flattened document with `progress` and a `toast`). |
+| `action` | `id`, `args?` | any Fotox action id from `js/data/menus.js` (`"doc:save"`, `"zoom:in"`, `"dlg:open"`, `"tool:brush"`…). Unknown ids → engine answers `toast`. The shell also answers `dlg:open` (native open dialog), `export:png` and `export:tiff` (native save dialog, then the engine exports the flattened document with `progress` and a `toast`). `doc:save` / `doc:save-as` (M3-T06): the engine saves the `.fxd` incrementally, or — no file yet, or Save As — tells the shell (`EngineOutput::NeedSavePath`, not a protocol message) to show its save dialog. |
 | `command` | `doc`, `command` (an `fx_core::Command` JSON) | panels acting directly on the document (Layers panel opacity, visibility eye, rename…) |
 | `undo` / `redo` | `doc` | |
-| `activate_document` / `close_document` | `doc` | document tabs |
+| `activate_document` / `close_document` | `doc` | document tabs; closing an unsaved document is answered with `close_dirty_document` instead |
+| `close_document_answer` | `doc`, `answer`: `"save"` \| `"dont_save"` \| `"cancel"` | the user's answer to `close_dirty_document` (M3-T06) |
 | `set_zoom` | `doc`, `zoom` (1.0 = 100 %) | status-bar zoom field, View menu |
 | `request_thumbnails` | `doc`, `layers`, `size` | Layers panel needs thumbnails |
 
@@ -69,6 +70,7 @@ not handle. The engine is the authority for anything that touches a document.
 | `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz |
 | `progress` / `progress_done` | `task, label, fraction` / `task` | long jobs (import, export, filters) |
 | `toast` / `error` | `text` | |
+| `close_dirty_document` | `doc, name` | the document has unsaved changes: show *Save / Don't Save / Cancel*, answer with `close_document_answer` (M3-T06). Also sent while the window is closing, once per unsaved document |
 | `thumbnail` (binary frame) | header: `doc, layer, revision, width, height`; payload: RGBA8 straight | Layers panel |
 
 ## 6. Examples

@@ -35,6 +35,23 @@ export function runAction(item) {
     return;
   }
 
+  // In the app, Export As collects the options, then the shell shows the save
+  // dialog for the chosen format and the engine exports (M3-T07).
+  if (a === "dlg:export-as" && bridge.isNative) {
+    openDialog("export-as", {
+      onOk: (v) => bridge.send({
+        type: UI.ACTION, id: "export:as",
+        args: {
+          format: { JPG: "jpg", TIFF: "tif" }[v["Format:"]] || "png",
+          eight_bit: v["Bit Depth:"] === "8 bits/channel",
+          transparency: { On: "on", Off: "off" }[v["Transparency:"]] || "auto",
+          quality: v["Quality:"],
+          chroma: String(v["Chroma:"]).startsWith("4:2:0") ? "420" : "444",
+        },
+      }),
+    });
+    return;
+  }
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }
@@ -100,10 +117,13 @@ export function runAction(item) {
   if (a === "tab:close") { toast("Closing “Untitled-1” would close the document (mock)"); return; }
   if (a === "tab:close-all") { toast("All documents would be closed (mock)"); return; }
   if (a.startsWith("doc:recent")) { toast("Open recent document (mock)"); return; }
+  // In the app, Save / Save As are the engine's (sent above): it saves, or the
+  // shell shows the native save dialog (M3-T06).
+  if ((a === "doc:save" || a === "doc:save-as") && bridge.isNative) { status(label); return; }
   if (a.startsWith("doc:save")) { openDialog("export-as"); return; }
   if (a === "doc:revert") { toast("Reverted to the last saved state (mock)"); return; }
   // In the app, PNG and TIFF export are real: the shell shows the save dialog.
-  if ((a === "export:png" || a === "export:tiff") && bridge.isNative) { status(label); return; }
+  if ((a === "export:png" || a === "export:tiff" || a === "export:jpg") && bridge.isNative) { status(label); return; }
   if (a.startsWith("export:")) { openDialog("export-as"); return; }
 
   // IA, estensioni, account ---------------------------------------------

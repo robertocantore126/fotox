@@ -23,6 +23,7 @@ export const UI = Object.freeze({
   REDO: "redo",
   ACTIVATE_DOCUMENT: "activate_document",
   CLOSE_DOCUMENT: "close_document",
+  CLOSE_DOCUMENT_ANSWER: "close_document_answer",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
 });
@@ -31,6 +32,7 @@ export const UI = Object.freeze({
 export const ENGINE = Object.freeze({
   DOCUMENT_OPENED: "document_opened",
   DOCUMENT_CHANGED: "document_changed",
+  CLOSE_DIRTY_DOCUMENT: "close_dirty_document",
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
