@@ -34,3 +34,5 @@ New entries go at the bottom with the next number.
 | D-026 | A save stores the flattened composite preview at levels ≥ 3, and per-layer mips ≥ 3 as derived tiles. | Makes the first frame independent of the layer count (S3) and correct when a layer is edited right after opening. M3-T00-4. | 2026-09-25 |
 | D-027 | An open `.fxd` stays open read+write while its document is open (tiles read from it lazily); Save appends. Save As copies every tile — no cross-file references. | Incremental save is the point of the format. M3-T00-5. | 2026-09-25 |
 | D-028 | The active pixel selection is not saved; it is not in the manifest. | Matches Photoshop. M3-T00-6. | 2026-09-25 |
+| D-029 | JPEG export uses the `jpeg-encoder` crate (pure Rust, baseline + progressive, 4:2:0 / 4:4:4). | No streaming encoder in the workspace; needed for M3-T07-2. M3-T00-7. | 2026-09-25 |
+| D-030 | Compressed TIFF export (Deflate) is **not** added now; uncompressed stays the default and M8 may revisit it. | Saves ~10–30 % on photos at a real time cost; not needed for M3. M3-T00-8. | 2026-09-25 |

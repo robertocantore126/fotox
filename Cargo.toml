@@ -100,6 +100,8 @@ crc32fast = "1.5"
 tiff = "0.11"
 png = "0.18"
 zune-jpeg = "0.5"
+# JPEG export encoder (decision D-029); zune-jpeg stays the decoder
+jpeg-encoder = "0.6"
 
 # color
 lcms2 = "6.2"

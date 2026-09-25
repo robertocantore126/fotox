@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use fx_core::{BitDepth, Document, LayerKind};
-use fx_io::export::{EXPORT_BAND_ROWS, ExportFormat, ExportOptions, export_image};
+use fx_io::export::{EXPORT_BAND_ROWS, ExportFormat, ExportOptions, JpegChroma, export_image};
 use fx_io::{IoError, Progress};
 use fx_render::adjust::LutCache;
 use fx_render::blend::unpremultiply;
@@ -23,16 +23,24 @@ const _: () = assert!(EXPORT_BAND_ROWS == TILE_SIZE, "one band = one row of tile
 /// document's bit depth, its ppi; transparency kept unless `opaque` (see
 /// [`opaque_background`]).
 pub fn options_for(doc: &Document, path: &Path, opaque: bool) -> Result<ExportOptions, IoError> {
-	let format = ExportFormat::from_path(path).ok_or_else(|| IoError::Unsupported("export to this file type (use .tif or .png)".into()))?;
-	let bits = match doc.color.depth {
-		BitDepth::U8 => 8,
-		BitDepth::U16 => 16,
+	let format = ExportFormat::from_path(path).ok_or_else(|| IoError::Unsupported("export to this file type (use .tif, .png or .jpg)".into()))?;
+	// JPEG is 8-bit and has no alpha: the band is flattened onto white.
+	let jpeg = format == ExportFormat::Jpeg;
+	let bits = if jpeg {
+		8
+	} else {
+		match doc.color.depth {
+			BitDepth::U8 => 8,
+			BitDepth::U16 => 16,
+		}
 	};
 	Ok(ExportOptions {
 		format,
 		bits,
-		alpha: !opaque,
+		alpha: !opaque && !jpeg,
 		ppi: doc.ppi,
+		quality: 90,
+		chroma: JpegChroma::Full,
 	})
 }
 
@@ -181,7 +189,9 @@ mod tests {
 				format: ExportFormat::Png,
 				bits: 16,
 				alpha: true,
-				ppi: 72.0
+				ppi: 72.0,
+				quality: 90,
+				chroma: JpegChroma::Full
 			}
 		);
 		export_document(&doc, &store, &path, options, &mut |_| true).unwrap();
