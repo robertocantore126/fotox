@@ -82,15 +82,15 @@ Files go to `bench/data/` (git-ignored). Results are appended to
 | S7 | B3: save after changing one layer | < 2 s | M3 |
 | S8 | Any document | RSS ≤ 10 GB; scratch ≤ limit | always |
 | S9 | 500 px brush stroke on a 16-bit layer of B1 at 100 % | input → pixels ≤ 16 ms | M5 |
+| S10 | B1: Gaussian Blur dialog, drag Radius 1 → 50 px | preview ≥ 10 updates/s, view never blank | M4 |
+| S11 | B1: Gaussian Blur 10 px, OK | level-0 result ≤ 60 s, UI responsive | M4 |
+| S12 | B1 with a non-sRGB display profile | S2 still met (LUT < 0.5 ms/frame) | M4 |
 
-**Proposed** with the M4–M6 draft cards (not binding until Rob approves the
+**Proposed** with the M5–M6 draft cards (not binding until Rob approves the
 cards; the cards hold the details):
 
 | Id | Scenario | Target | Milestone |
 | --- | --- | --- | --- |
-| S10 | B1: Gaussian Blur dialog, drag Radius 1 → 50 px | preview ≥ 10 updates/s, view never blank | M4 |
-| S11 | B1: Gaussian Blur 10 px, OK | level-0 result ≤ 60 s, UI responsive | M4 |
-| S12 | B1 with a non-sRGB display profile | S2 still met (LUT < 0.5 ms/frame) | M4 |
 | S13 | B1: contiguous magic wand on ~10 % of the image | selection ≤ 2 s | M5 |
 | S14 | B1: feather a 20 000² selection by 50 px | ≤ 5 s | M5 |
 | S15 | B1 at fit: a 500 px stroke across the view | visible while drawing, ≥ 30 fps | M5 |
@@ -103,6 +103,15 @@ cards; the cards hold the details):
 Engine-only scenarios (S1 throughput, tile trim/compress speed, mip
 generation, composite-tile throughput) run in `fotox-cli bench`. GUI scenarios
 use the in-app FPS/frame-time overlay (M1-T12) plus a screen recording.
+
+### Correctness criteria (decided with the M4 cards)
+
+Not performance, but hard pass/fail; measured on the reference machine.
+
+| Id | Scenario | Target | Milestone |
+| --- | --- | --- | --- |
+| C1 | sRGB document on an sRGB monitor | display = document values exactly (identity shortcut, no LUT) | M4 |
+| C2 | CMYK TIFF export of a test chart, FOGRA39 / RSWOP, relative colorimetric + BPC | every patch within ΔE00 ≤ 1 of Photoshop's conversion of the same file (Rob) | M4 |
 
 ### Comparing with Photoshop (done by Rob)
 
