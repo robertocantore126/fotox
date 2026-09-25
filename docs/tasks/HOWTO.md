@@ -102,7 +102,7 @@ macros) but the engine already has the result:
   swaps in the computed layer when it ends, then calls `record`.
 * **Spec test (mandatory):** replaying the command with `Command::apply` on
   `before` gives exactly the same pixels as the live path. This is what makes
-  macros (M8) trustworthy. Live and replay must therefore call the **same**
+  macros (M15) trustworthy. Live and replay must therefore call the **same**
   pixel function (e.g. `fx_ops::brush::render_dabs`) with the same inputs;
   only the scheduling differs.
 
@@ -225,7 +225,7 @@ The model is the mip pyramid (`fx-engine/src/mips.rs`,
    `fx_render::adjust::bake`. Otherwise add an `AdjustKind` variant, a CPU
    implementation in `reference.rs`, and a `K_ADJUST_*` kind in
    `gpu/composite.wgsl` + its params encoding in `gpu/compositor.rs`.
-3. Formulas that copy Photoshop's are marked `VERIFY` (checked in M7) with the
+3. Formulas that copy Photoshop's are marked `VERIFY` (checked in M14, PSD import) with the
    source of the formula in a comment.
 4. Tests: identity parameters leave pixels unchanged; a few hand-computed
    values; **GPU = CPU within 1e-3** (`gpu::tests`, skipped without adapter).
