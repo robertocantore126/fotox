@@ -29,3 +29,16 @@ fx-engine export test: red background + 50 % blue layer over 300 of 400 columns 
 ```
 
 Not tried in the app (Rob): File ▸ Export ▸ PNG / TIFF on an open document, progress in the status bar, the file opens in Photoshop.
+
+## Addendum — `fotox-cli export`
+
+`fotox-cli export <input> <output.tif|png> [--b3]` opens an image, optionally builds B3 on it, and exports exactly like File ▸ Export (same `fx_engine::export` code), printing the time. Measured (release, 6000 × 4000 16-bit test image from `gen`):
+
+```text
+single layer → PNG 16-bit (alpha dropped, opaque):  0.77 s, 31 MP/s
+single layer → TIFF 16-bit:                          0.52 s, 46 MP/s — byte-identical pixels to the input
+                                                      (only the resolution tag differs: 72/1 vs 7200/100)
+B3 on top (220 layers) → PNG 16-bit:                 6.29 s, 3.8 MP/s (CPU reference compositor)
+```
+
+B1 (30 000²) with B3 would take ~4 min at that rate: the GPU readback path of M3-T07 is worth it.
