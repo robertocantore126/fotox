@@ -3,6 +3,7 @@
 //! Used for: generating the benchmark documents, measuring import/trim/render
 //! speed, and (M8) batch processing with recorded actions.
 
+mod bench;
 mod r#gen;
 mod info;
 mod tiffw;
@@ -40,9 +41,13 @@ enum Cmd {
 	Info { path: PathBuf },
 	/// Run a benchmark scenario from docs/PERFORMANCE.md §4 and append the result to bench/results.csv. M1-T10
 	Bench {
+		/// import, trim, scratch or mips
 		scenario: String,
 		#[arg(long)]
 		file: Option<PathBuf>,
+		/// Results file (default: bench/results.csv in the repository)
+		#[arg(long)]
+		csv: Option<PathBuf>,
 	},
 }
 
@@ -66,6 +71,6 @@ fn main() -> anyhow::Result<()> {
 			info::print(&path, &info);
 			Ok(())
 		}
-		Cmd::Bench { .. } => todo!("M1-T10"),
+		Cmd::Bench { scenario, file, csv } => bench::run(&scenario, file.as_deref(), &csv.unwrap_or_else(bench::default_csv)),
 	}
 }
