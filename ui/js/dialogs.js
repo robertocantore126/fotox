@@ -35,6 +35,8 @@ export function openDialog(id, overrides = {}) {
     grid.querySelectorAll(".dlg-range").forEach((r) => r.addEventListener("input", changed));
     grid.querySelectorAll(".dlg-check").forEach((c) => c.addEventListener("click", changed));
     grid.querySelectorAll(".dlg-select, .curve-canvas").forEach((c) => c.addEventListener("change", changed));
+    // Plain number boxes (not a slider's box): every edit counts.
+    grid.querySelectorAll(".dlg-line.inline > .dlg-input.num").forEach((c) => c.addEventListener("input", changed));
   }
 
   const titleBar = h("div", { class: "dlg-title" },
@@ -117,6 +119,9 @@ function readValues(grid) {
     const select = line.querySelector(".dlg-select .pf-value");
     if (label && range) values[label.textContent] = Number(range.value);
     if (label && select) values[label.textContent] = select.textContent;
+    // A plain number field (`num()`): its box is the value.
+    const box = line.classList.contains("inline") && !range ? line.querySelector(":scope > .dlg-input.num") : null;
+    if (label && box) values[label.textContent] = Number(box.value);
   });
   grid.querySelectorAll(".dlg-checkline").forEach((line) => {
     const box = line.querySelector(".dlg-check");
@@ -126,6 +131,12 @@ function readValues(grid) {
   const curve = grid.querySelector(".curve-canvas");
   if (curve && curve.getPoints) values.curve = curve.getPoints();
   return values;
+}
+
+/** Current values of an open dialog (`openDialog`'s return value), like `onChange` gets them. */
+export function dialogValues(wrap) {
+  const grid = wrap && wrap.querySelector(".dlg-fields");
+  return grid ? readValues(grid) : {};
 }
 
 /** Write values back into a dialog's fields (the inverse of `readValues`). */

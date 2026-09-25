@@ -1,0 +1,82 @@
+//! Pixel operations a command needs but `fx-core` cannot implement (M4-T05).
+//!
+//! `Command::apply` lives here, while the algorithms live in crates that depend
+//! on `fx-core` (`fx-ops` for filters, `fx-render` for compositing). The
+//! dependency is inverted: `fx-core` defines [`PixelOps`], the engine
+//! implements it and passes it in [`CommandContext::ops`](crate::CommandContext),
+//! so every command — a live edit or a replayed macro — goes through
+//! `Command::apply` (docs/tasks/HOWTO.md, R1a).
+
+use fx_tiles::{TileStore, TiledImage};
+use serde::{Deserialize, Serialize};
+
+use crate::command::CommandError;
+use crate::document::Document;
+use crate::layer::LayerId;
+
+/// A destructive filter and its parameters. Serialised in commands, so macros
+/// replay it; variant names are stable.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FilterParams {
+	/// Gaussian Blur. `radius` = the standard deviation σ in pixels (D-035),
+	/// 0.1..=1000.
+	GaussianBlur { radius: f32 },
+	/// Unsharp Mask. `amount` in percent (1..=500), `radius` = σ of the blur in
+	/// pixels (0.1..=1000), `threshold` in 8-bit levels (0..=255).
+	UnsharpMask { amount: f32, radius: f32, threshold: u8 },
+}
+
+impl FilterParams {
+	/// The History / menu name, as Photoshop writes it.
+	pub fn label(&self) -> &'static str {
+		match self {
+			FilterParams::GaussianBlur { .. } => "Gaussian Blur",
+			FilterParams::UnsharpMask { .. } => "Unsharp Mask",
+		}
+	}
+
+	/// Check the parameter ranges (a command must refuse bad values, never
+	/// clamp them silently).
+	pub fn validate(&self) -> Result<(), CommandError> {
+		let radius = |r: f32| {
+			if (0.1..=1000.0).contains(&r) {
+				Ok(())
+			} else {
+				Err(CommandError::InvalidValue {
+					field: "radius",
+					reason: format!("{r} is outside 0.1..=1000 px"),
+				})
+			}
+		};
+		match self {
+			FilterParams::GaussianBlur { radius: r } => radius(*r),
+			FilterParams::UnsharpMask { amount, radius: r, .. } => {
+				radius(*r)?;
+				if (1.0..=500.0).contains(amount) {
+					Ok(())
+				} else {
+					Err(CommandError::InvalidValue {
+						field: "amount",
+						reason: format!("{amount} is outside 1..=500 %"),
+					})
+				}
+			}
+		}
+	}
+}
+
+/// Pixel algorithms, implemented by the engine (`fx-engine/src/ops.rs`).
+pub trait PixelOps: Send + Sync {
+	/// `image` (a pixel layer's pixels at level 0, placed at `offset` in a
+	/// document of size `canvas`) after `filter`. Only level 0 of the result
+	/// is authoritative; its mips are left dirty.
+	fn filter(&self, image: &TiledImage, offset: (i32, i32), canvas: (u32, u32), filter: &FilterParams, store: &TileStore) -> Result<TiledImage, CommandError>;
+
+	/// The composite of `layers` of `doc` — an isolated group of them, each
+	/// with its own blend mode, opacity, mask and clipping, adjustments baked
+	/// in — as one pixel image of the document's size, at level 0. With
+	/// `background`, the result is composited onto that opaque colour
+	/// (Flatten's white). Used by merge, flatten and stamp (M4-T08).
+	fn composite(&self, doc: &Document, layers: &[LayerId], background: Option<[u16; 4]>, store: &TileStore) -> Result<TiledImage, CommandError>;
+}

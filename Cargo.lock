@@ -991,6 +991,7 @@ dependencies = [
  "fx-color",
  "fx-core",
  "fx-io",
+ "fx-ops",
  "fx-protocol",
  "fx-render",
  "fx-tiles",

@@ -7,23 +7,26 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
 use fx_core::command::{LayerPropsPatch, NewLayer};
-use fx_core::{ColorProfile, Command, CommandContext, LayerId, LayerRef};
+use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef};
 use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
 use fx_tiles::{TileError, TileStore};
 
 use crate::documents::{Documents, OpenDoc};
+use crate::filters::{FilterPreview, PreviewJob};
+use crate::ops::EngineOps;
 use crate::render::{Frame, MipWork, RenderRequest};
 use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, layers, mips};
+use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, filters, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -109,6 +112,21 @@ pub(crate) enum Internal {
 	},
 	/// The B3 layers are built (M2-T08).
 	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
+	/// A batch of filter-preview tiles (M4-T05).
+	PreviewTiles {
+		doc: DocId,
+		request: u64,
+		tiles: Vec<((u32, u32), fx_tiles::TileBuffer)>,
+	},
+	/// A preview job failed (a tile could not be read).
+	PreviewFailed { doc: DocId, request: u64, error: TileError },
+	/// A pixel job (filter, merge, flatten) finished: the new document, or why not.
+	PixelJobDone {
+		task: u64,
+		doc: DocId,
+		command: Box<Command>,
+		result: Result<(Box<Document>, CommandEffect), CommandError>,
+	},
 	/// A layer thumbnail finished rendering.
 	Thumbnail {
 		doc: DocId,
@@ -140,6 +158,13 @@ struct Engine {
 	/// the document had right after it (so an intervening undo or edit
 	/// breaks the merge).
 	last_edit: Option<(DocId, EditKey, Instant, usize)>,
+	/// Pixel operations for commands applied on the engine thread.
+	ops: EngineOps,
+	/// Per document, the latest filter-preview request (jobs compare with it
+	/// and stop when superseded).
+	preview_latest: HashMap<DocId, Arc<AtomicU64>>,
+	/// The last filter applied, for Filter ▸ Last Filter (Ctrl+F).
+	last_filter: Option<FilterParams>,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -149,7 +174,8 @@ struct Engine {
 	/// sRGB (no profile reported, or the shell could not read one).
 	display_profile: Option<Vec<u8>>,
 	/// Display LUTs built so far, most recent last: `(key, table)`.
-	display_luts: Vec<(u64, Arc<fx_color::Lut3d>)>,
+	/// `None` = that transform is (nearly) the identity: no LUT.
+	display_luts: Vec<(u64, Option<Arc<fx_color::Lut3d>>)>,
 }
 
 /// What makes two consecutive edits "the same" for history merging.
@@ -236,6 +262,9 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_last: HashMap::new(),
 		thumbs_due: HashMap::new(),
 		last_edit: None,
+		ops: EngineOps::default(),
+		preview_latest: HashMap::new(),
+		last_filter: None,
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -346,6 +375,7 @@ impl Engine {
 			(self.output)(EngineOutput::Cursor(cursor));
 		}
 		if changed.view {
+			self.refresh_preview();
 			self.request_frame();
 			self.view_message_pending = true;
 		}
@@ -410,6 +440,14 @@ impl Engine {
 				self.close_answer(doc, answer);
 				Changed::default()
 			}
+			UiToEngine::FilterPreview { doc, layer, filter } => {
+				self.start_preview(doc, layer, filter);
+				Changed::default()
+			}
+			UiToEngine::FilterPreviewCancel { doc } => {
+				self.cancel_preview(doc);
+				Changed::default()
+			}
 			// Shell messages never reach the engine; documents commands, undo
 			// and thumbnails arrive with M2.
 			other => {
@@ -429,6 +467,22 @@ impl Engine {
 			}
 			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
 			// Build the B3 benchmark on top of the active document (M2-T08).
+			// Filter ▸ Last Filter (Ctrl+F): the last filter, same parameters.
+			"filter:last" => {
+				match (self.docs.active_id(), self.last_filter.clone()) {
+					(Some(doc), Some(filter)) => self.command(
+						doc,
+						Command::ApplyFilter {
+							layer: LayerRef::Active,
+							filter,
+						},
+					),
+					_ => self.to_ui(&EngineToUi::Toast {
+						text: "No filter applied yet".into(),
+					}),
+				}
+				return Changed::default();
+			}
 			"debug:load-b3" => {
 				self.load_b3();
 				return Changed::default();
@@ -605,8 +659,239 @@ impl Engine {
 		}
 	}
 
+	// ------------------------------------------------------------ filters (M4-T05)
+
+	/// Show `layer` filtered with `filter` on the visible area, live.
+	fn start_preview(&mut self, id: DocId, layer: LayerId, filter: FilterParams) {
+		if let Err(error) = filter.validate() {
+			self.to_ui(&EngineToUi::Error { text: error.to_string() });
+			return;
+		}
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let base = match open.doc.layer(layer).map(|l| &l.kind) {
+			Some(LayerKind::Pixel { image, .. }) => image.clone(),
+			_ => {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Select a pixel layer to filter it".into(),
+				});
+				return;
+			}
+		};
+		// Same layer: keep what is displayed until the new tiles arrive.
+		let image = match open.preview.take() {
+			Some(old) if old.layer == layer => old.image,
+			_ => base.clone(),
+		};
+		open.preview = Some(FilterPreview {
+			layer,
+			params: filter,
+			base,
+			image,
+			level: usize::MAX,
+			region: (0, 0, 0, 0),
+			request: 0,
+		});
+		self.restart_preview(id);
+	}
+
+	/// Start (or restart) the preview job of `id` for the current view.
+	fn restart_preview(&mut self, id: DocId) {
+		let latest = self.preview_latest.entry(id).or_insert_with(|| Arc::new(AtomicU64::new(0))).clone();
+		let request = latest.fetch_add(1, Ordering::Relaxed) + 1;
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let Some(viewport) = open.view.viewport else { return };
+		let (doc_w, doc_h) = (open.doc.width, open.doc.height);
+		let view = open.view.view;
+		let Some(preview) = &mut open.preview else { return };
+		let Some(layer) = open.doc.layer(preview.layer) else { return };
+		let LayerKind::Pixel { offset, .. } = layer.kind else { return };
+		let level = view.mip_level(preview.base.level_count());
+		if level != preview.level {
+			// Another level: start from the unfiltered pixels.
+			preview.image = preview.base.clone();
+		}
+		preview.level = level;
+		preview.request = request;
+		let Some((region, tiles)) = filters::visible_tiles(&view, viewport, (doc_w, doc_h), &preview.base, offset, level) else {
+			return;
+		};
+		preview.region = region;
+		let job = PreviewJob {
+			request,
+			latest,
+			params: preview.params.clone(),
+			base: preview.base.clone(),
+			geometry: fx_ops::filter::Geometry {
+				offset,
+				canvas: (doc_w, doc_h),
+				image: (preview.base.width(), preview.base.height()),
+			},
+			level,
+			region,
+			tiles,
+		};
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		rayon::spawn(move || {
+			let send = |tiles| {
+				let _ = internal.send(Internal::PreviewTiles { doc: id, request, tiles });
+			};
+			if let Err(error) = job.run(&store, send) {
+				let _ = internal.send(Internal::PreviewFailed { doc: id, request, error });
+			}
+		});
+	}
+
+	/// The view moved: extend or recompute the active document's preview when
+	/// it no longer covers what is on screen.
+	fn refresh_preview(&mut self) {
+		let Some(id) = self.docs.active_id() else { return };
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let (Some(preview), Some(viewport)) = (&open.preview, open.view.viewport) else {
+			return;
+		};
+		let Some(LayerKind::Pixel { offset, .. }) = open.doc.layer(preview.layer).map(|l| &l.kind) else {
+			return;
+		};
+		let level = open.view.view.mip_level(preview.base.level_count());
+		let visible = filters::visible_tiles(&open.view.view, viewport, (open.doc.width, open.doc.height), &preview.base, *offset, level);
+		let covered = level == preview.level
+			&& visible.is_some_and(|((x0, y0, x1, y1), _)| {
+				let (a, b, c, d) = preview.region;
+				x0 >= a && y0 >= b && x1 <= c && y1 <= d
+			});
+		if !covered {
+			self.restart_preview(id);
+		}
+	}
+
+	/// Drop the preview of `id` (Cancel, Preview off).
+	fn cancel_preview(&mut self, id: DocId) {
+		if let Some(latest) = self.preview_latest.get(&id) {
+			latest.fetch_add(1, Ordering::Relaxed);
+		}
+		if let Some(open) = self.docs.get_mut(id)
+			&& open.preview.take().is_some()
+		{
+			open.preview_rev += 1;
+			self.request_frame();
+		}
+	}
+
+	/// Run a heavy pixel command on a worker thread (recipe R2) and record
+	/// it when done (R1b). The document is busy meanwhile.
+	fn start_pixel_job(&mut self, id: DocId, command: Command) {
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let label = pixel_job_label(&command);
+		open.busy = Some(label.clone());
+		let before = open.doc.clone();
+		self.next_task += 1;
+		let task = self.next_task;
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: label.clone(),
+			fraction: 0.0,
+		});
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		let spawned = std::thread::Builder::new().name(format!("pixel-job-{task}")).spawn(move || {
+			let progress_internal = internal.clone();
+			let progress_label = label.clone();
+			let ops = EngineOps {
+				progress: Some(Arc::new(move |fraction| {
+					let _ = progress_internal.send(Internal::Progress {
+						task,
+						label: progress_label.clone(),
+						fraction,
+					});
+				})),
+			};
+			let mut after = before;
+			let mut ctx = CommandContext {
+				tiles: &store,
+				ops: Some(&ops),
+			};
+			let result = command.apply(&mut after, &mut ctx).map(|effect| (Box::new(after), effect));
+			let _ = internal.send(Internal::PixelJobDone {
+				task,
+				doc: id,
+				command: Box::new(command),
+				result,
+			});
+		});
+		if let Err(error) = spawned {
+			if let Some(open) = self.docs.get_mut(id) {
+				open.busy = None;
+			}
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot start the job: {error}"),
+			});
+		}
+	}
+
+	/// A pixel job finished: install its document as a history step.
+	fn pixel_job_done(&mut self, task: u64, id: DocId, command: Command, result: Result<(Box<Document>, CommandEffect), CommandError>) {
+		self.to_ui(&EngineToUi::ProgressDone { task });
+		if let Some(latest) = self.preview_latest.get(&id) {
+			latest.fetch_add(1, Ordering::Relaxed);
+		}
+		let Some(open) = self.docs.get_mut(id) else { return };
+		open.busy = None;
+		if open.preview.take().is_some() {
+			open.preview_rev += 1;
+		}
+		match result {
+			Ok((after, effect)) => {
+				if let Command::ApplyFilter { filter, .. } = &command {
+					self.last_filter = Some(filter.clone());
+				}
+				let Some(open) = self.docs.get_mut(id) else { return };
+				let before = std::mem::replace(&mut open.doc, *after);
+				open.history.record(before, command, effect.label.clone());
+				open.dirty = true;
+				open.changed();
+				open.note_edits(&effect.pixels_changed, Instant::now());
+				self.last_edit = None;
+				self.after_edit(id, true);
+				for layer in effect.pixels_changed {
+					self.refresh_thumbnail(id, layer);
+				}
+			}
+			Err(error) => {
+				self.to_ui(&EngineToUi::Error { text: error.to_string() });
+				self.request_frame();
+			}
+		}
+	}
+
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::PreviewTiles { doc, request, tiles } => {
+				let store = self.store.clone();
+				if let Some(open) = self.docs.get_mut(doc)
+					&& let Some(preview) = &mut open.preview
+					&& preview.request == request
+				{
+					filters::install(preview, &store, tiles);
+					open.preview_rev += 1;
+					if self.docs.active_id() == Some(doc) {
+						self.request_frame();
+					}
+				}
+			}
+			Internal::PreviewFailed { doc, request, error } => {
+				let current = self
+					.docs
+					.get_mut(doc)
+					.and_then(|open| open.preview.as_ref())
+					.is_some_and(|p| p.request == request);
+				if current {
+					tracing::warn!("filter preview failed: {error}");
+					self.to_ui(&EngineToUi::Error {
+						text: format!("The preview failed: {error}"),
+					});
+				}
+			}
+			Internal::PixelJobDone { task, doc, command, result } => self.pixel_job_done(task, doc, *command, result),
 			Internal::Exported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
@@ -920,6 +1205,16 @@ impl Engine {
 			tracing::warn!("command for unknown document {id:?}");
 			return;
 		};
+		if let Some(job) = &doc.busy {
+			let text = format!("Wait until {job} is finished");
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
+		// Heavy pixel commands run as jobs (recipe R2): the UI stays live.
+		if is_pixel_job(&command) {
+			self.start_pixel_job(id, command);
+			return;
+		}
 		let now = Instant::now();
 		let key = EditKey::of(&command);
 		// Merge a repeat of the previous edit into its history step: undo it,
@@ -931,7 +1226,10 @@ impl Engine {
 		if merge {
 			doc.history.undo(&mut doc.doc);
 		}
-		let mut ctx = CommandContext { tiles: &store };
+		let mut ctx = CommandContext {
+			tiles: &store,
+			ops: Some(&self.ops),
+		};
 		let result = doc.history.execute(&mut doc.doc, command, &mut ctx);
 		if let (Err(_), Some(before)) = (&result, before_merge) {
 			// The new value was refused: put the merged step back as it was.
@@ -966,6 +1264,11 @@ impl Engine {
 	/// Undo (`redo == false`) or redo one step.
 	fn step_history(&mut self, id: DocId, redo: bool) {
 		let Some(doc) = self.docs.get_mut(id) else { return };
+		if let Some(job) = &doc.busy {
+			let text = format!("Wait until {job} is finished");
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
 		let stepped = if redo {
 			doc.history.redo(&mut doc.doc)
 		} else {
@@ -1259,7 +1562,7 @@ impl Engine {
 					view: doc.view.view,
 					viewport,
 					doc: Some((doc.id, doc.snapshot())),
-					generation: doc.generation,
+					generation: doc.render_generation(),
 					hot_layer: doc.hot_layer(),
 					virtual_doc: VIRTUAL_DOC,
 					display_lut,
@@ -1319,11 +1622,10 @@ impl Engine {
 		}
 		let key = fx_color::display_lut_key(profile, &monitor, fx_color::DEFAULT_INTENT, fx_color::DEFAULT_BPC);
 		if let Some((_, lut)) = self.display_luts.iter().find(|(k, _)| *k == key) {
-			return Some(lut.clone());
+			return lut.clone();
 		}
 		let built = match display_transform(profile, self.display_profile.as_deref()) {
-			Ok(Some(lut)) => Arc::new(lut),
-			Ok(None) => return None,
+			Ok(lut) => lut.map(Arc::new),
 			Err(error) => {
 				// A monitor profile we cannot read is the shell's problem, not the
 				// user's: forget it (so this is logged once, not every frame) and
@@ -1341,7 +1643,7 @@ impl Engine {
 		if self.display_luts.len() > DISPLAY_LUT_CACHE {
 			self.display_luts.remove(0);
 		}
-		Some(built)
+		built
 	}
 
 	fn view_message_deadline(&self) -> Option<Instant> {
@@ -1421,7 +1723,24 @@ fn display_transform(profile: &ColorProfile, monitor: Option<&[u8]>) -> Result<O
 	if fx_color::same_profile(profile, &monitor) {
 		return Ok(None);
 	}
-	fx_color::display_lut(profile, &monitor, fx_color::DEFAULT_INTENT, fx_color::DEFAULT_BPC).map(Some)
+	let lut = fx_color::display_lut(profile, &monitor, fx_color::DEFAULT_INTENT, fx_color::DEFAULT_BPC)?;
+	// Two encodings of the same space (the named sRGB and Windows' sRGB ICC
+	// file differ by at most 0.54/255, at the saturated green corner): within
+	// one 8-bit step everywhere, show the values as they are (criterion C1).
+	Ok((!lut.is_identity(1.0 / 255.0)).then_some(lut))
+}
+
+/// Commands whose pixel work is too heavy for the engine thread (M4).
+fn is_pixel_job(command: &Command) -> bool {
+	matches!(command, Command::ApplyFilter { .. })
+}
+
+/// The progress label of a pixel job, as Photoshop names the operation.
+fn pixel_job_label(command: &Command) -> String {
+	match command {
+		Command::ApplyFilter { filter, .. } => filter.label().to_owned(),
+		_ => "Working".to_owned(),
+	}
 }
 
 #[cfg(test)]
@@ -1455,6 +1774,18 @@ mod tests {
 			out.iter().zip(source).any(|(mapped, original)| (mapped - original).abs() > 0.01),
 			"{out:?} for {source:?}"
 		);
+	}
+
+	#[test]
+	fn windows_srgb_profile_counts_as_srgb() {
+		// The monitor profile Windows reports for an sRGB display is an ICC
+		// file, not lcms2's built-in sRGB: the two must still give no LUT (C1).
+		let path = std::path::Path::new(r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm");
+		let Ok(bytes) = std::fs::read(path) else {
+			eprintln!("no Windows sRGB profile on this machine: test skipped");
+			return;
+		};
+		assert!(display_transform(&ColorProfile::Srgb, Some(&bytes)).unwrap().is_none());
 	}
 
 	#[test]

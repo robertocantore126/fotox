@@ -130,6 +130,105 @@ pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: 
 	export_image(path, doc.width, doc.height, options, &mut render, progress)
 }
 
+/// The composite of `layers` of `doc` as one pixel image of the document's
+/// size (level 0), for Merge, Flatten and Stamp Visible (M4-T08). The layers
+/// are composited as an isolated stack, each with its own blend mode,
+/// opacity, mask and clipping, adjustment layers baked in; a selected group
+/// brings its whole content, and a layer inside a group keeps its enclosing
+/// groups (with only the selected children). With `background`, the result is
+/// composited onto that opaque colour (Flatten fills with white).
+///
+/// Only tiles where a selected layer contributes are rendered (with a
+/// background, every tile: it is opaque everywhere).
+pub fn composite_layers(
+	doc: &Document,
+	layers: &[fx_core::LayerId],
+	background: Option<[u16; 4]>,
+	store: &TileStore,
+	progress: Option<&crate::ops::ProgressFn>,
+) -> Result<fx_tiles::TiledImage, fx_core::CommandError> {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	let wanted: std::collections::HashSet<fx_core::LayerId> = layers.iter().copied().collect();
+	let mut sub = doc.clone();
+	sub.layers = keep_layers(&doc.layers, &wanted);
+	let format = doc.color.depth.rgba_format();
+	let (cols, rows) = (doc.width.div_ceil(TILE_SIZE), doc.height.div_ceil(TILE_SIZE));
+	let mut luts = LutCache::default();
+	let mut programs = Vec::new();
+	for ty in 0..rows {
+		for tx in 0..cols {
+			let program = build_program(&sub, 0, tx, ty, &mut |a| luts.get(a))
+				.map_err(|_| fx_core::CommandError::NotAllowed("full-resolution tiles are missing".into()))?;
+			if background.is_some() || !program.is_empty() {
+				programs.push(((tx, ty), program));
+			}
+		}
+	}
+	let fetch = |h: &fx_tiles::TileHandle| store.get(h).expect("tile of a live document");
+	let bg = background.map(|c| c.map(|v| f64::from(v) / 65535.0));
+	let done = AtomicUsize::new(0);
+	let total = programs.len().max(1);
+	let tiles: Vec<((u32, u32), fx_tiles::TileBuffer)> = programs
+		.par_iter()
+		.map(|(pos, program)| {
+			let pixels = render_tile(program, &fetch);
+			let mut tile = fx_tiles::TileBuffer::zeroed(format);
+			for (i, &p) in pixels.iter().enumerate() {
+				let p = match bg {
+					// Source-over onto the opaque background.
+					Some(b) => [p[0] + b[0] * (1.0 - p[3]), p[1] + b[1] * (1.0 - p[3]), p[2] + b[2] * (1.0 - p[3]), 1.0],
+					None => p,
+				};
+				let rgb = unpremultiply(p);
+				let px = [to_u16(rgb[0]), to_u16(rgb[1]), to_u16(rgb[2]), to_u16(p[3])];
+				match format {
+					PixelFormat::Rgba16 => tile.as_u16_mut()[i * 4..][..4].copy_from_slice(&px),
+					_ => {
+						for (c, v) in px.iter().enumerate() {
+							tile.bytes_mut()[i * 4 + c] = ((u32::from(*v) * 255 + 32767) / 65535) as u8;
+						}
+					}
+				}
+			}
+			let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+			if let Some(progress) = progress
+				&& n * 100 / total != (n - 1) * 100 / total
+			{
+				progress(n as f32 / total as f32);
+			}
+			(*pos, tile)
+		})
+		.collect();
+	let mut image = fx_tiles::TiledImage::new(doc.width, doc.height, format);
+	for ((tx, ty), tile) in tiles {
+		image.put_buffer(store, tx, ty, tile);
+	}
+	Ok(image)
+}
+
+/// `layers` reduced to the wanted ones: a wanted layer with its whole content,
+/// a group only if it holds wanted layers (then with only those).
+fn keep_layers(layers: &[std::sync::Arc<fx_core::Layer>], wanted: &std::collections::HashSet<fx_core::LayerId>) -> Vec<std::sync::Arc<fx_core::Layer>> {
+	let mut out = Vec::new();
+	for layer in layers {
+		if wanted.contains(&layer.id) {
+			out.push(layer.clone());
+		} else if let LayerKind::Group { children, expanded } = &layer.kind {
+			let kept = keep_layers(children, wanted);
+			if !kept.is_empty() {
+				let mut group = (**layer).clone();
+				group.kind = LayerKind::Group {
+					children: kept,
+					expanded: *expanded,
+				};
+				out.push(std::sync::Arc::new(group));
+			}
+		}
+	}
+	out
+}
+
 fn to_u16(v: f64) -> u16 {
 	(v.clamp(0.0, 1.0) * 65535.0).round() as u16
 }

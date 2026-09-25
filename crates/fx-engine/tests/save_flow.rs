@@ -4,82 +4,15 @@
 //! edit makes it dirty again, closing a dirty document asks first, and the
 //! `.fxd` reopens lazily with the edited layer.
 
+mod common;
+
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+
+use common::{Harness, Seen, gpu};
 
 use fx_core::{Command, LayerRef, command::LayerPropsPatch};
-use fx_engine::{EngineHandle, EngineInput, EngineOutput};
+use fx_engine::EngineInput;
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, UiToEngine};
-
-fn gpu() -> Option<(wgpu::Device, wgpu_sync::Queue)> {
-	let instance = wgpu_sync::Instance::new(wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()));
-	let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
-	let limits = adapter.limits();
-	pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-		label: Some("fx-engine-save-flow"),
-		required_limits: limits,
-		..Default::default()
-	}))
-	.ok()
-}
-
-/// What the engine said, decoded.
-#[derive(Debug)]
-enum Seen {
-	Ui(EngineToUi),
-	NeedSavePath(DocId),
-	MayClose(bool),
-}
-
-struct Harness {
-	engine: EngineHandle,
-	seen: Arc<Mutex<Vec<Seen>>>,
-}
-
-impl Harness {
-	fn start(device: wgpu::Device, queue: wgpu_sync::Queue, dir: &std::path::Path) -> Self {
-		let seen = Arc::new(Mutex::new(Vec::new()));
-		let sink = seen.clone();
-		let engine = EngineHandle::spawn(device, queue, dir.join("scratch"), move |output| {
-			let item = match output {
-				EngineOutput::ToUi(frame) => match fx_protocol::decode::<EngineToUi>(&frame) {
-					Ok((message, _)) => Seen::Ui(message),
-					Err(_) => return,
-				},
-				EngineOutput::NeedSavePath { doc, .. } => Seen::NeedSavePath(doc),
-				EngineOutput::MayClose(may) => Seen::MayClose(may),
-				_ => return,
-			};
-			sink.lock().unwrap().push(item);
-		})
-		.unwrap();
-		engine.send(EngineInput::ViewportResized { width: 800, height: 600 });
-		Harness { engine, seen }
-	}
-
-	/// Wait until `pick` finds something in what the engine said (removing
-	/// everything up to and including it).
-	fn wait<T>(&self, what: &str, pick: impl Fn(&Seen) -> Option<T>) -> T {
-		let deadline = Instant::now() + Duration::from_secs(30);
-		loop {
-			{
-				let mut seen = self.seen.lock().unwrap();
-				if let Some(i) = seen.iter().position(|s| pick(s).is_some()) {
-					let found = pick(&seen[i]).unwrap();
-					seen.drain(..=i);
-					return found;
-				}
-			}
-			assert!(Instant::now() < deadline, "timed out waiting for {what}");
-			std::thread::sleep(Duration::from_millis(10));
-		}
-	}
-
-	fn ui(&self, message: UiToEngine) {
-		self.engine.send(EngineInput::Ui(message));
-	}
-}
 
 fn dirty_of(seen: &Seen, doc: DocId) -> Option<bool> {
 	match seen {

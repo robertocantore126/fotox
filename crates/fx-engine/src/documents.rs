@@ -41,6 +41,16 @@ pub struct OpenDoc {
 	pub file: Option<Arc<FxdFile>>,
 	/// The `.fxd`'s path (the Save target while `file` is set).
 	pub path: Option<PathBuf>,
+	/// A filter dialog's live preview (M4-T05).
+	pub preview: Option<crate::filters::FilterPreview>,
+	/// Bumped whenever the preview's pixels change (the render thread's
+	/// caches must not reuse tiles composited from the old preview).
+	pub preview_rev: u64,
+	/// A pixel job (filter, merge, flatten) is running on this document: its
+	/// label. Commands and undo wait until it is done (M4-T05).
+	pub busy: Option<String>,
+	/// `(revision, preview_rev)` of `snapshot`.
+	snapshot_key: (u64, u64),
 }
 
 impl OpenDoc {
@@ -86,6 +96,10 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: None,
 			path: None,
+			preview: None,
+			preview_rev: 0,
+			busy: None,
+			snapshot_key: (0, 0),
 		}
 	}
 
@@ -110,20 +124,40 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: Some(opened.file),
 			path: Some(path.to_path_buf()),
+			preview: None,
+			preview_rev: 0,
+			busy: None,
+			snapshot_key: (0, 0),
 		}
 	}
 
 	/// The document as the render thread should see it now.
 	pub fn snapshot(&mut self) -> Arc<Document> {
+		let key = (self.doc.revision, self.preview_rev);
 		match &self.snapshot {
-			Some(s) if s.revision == self.doc.revision && !self.snapshot_stale => s.clone(),
+			Some(s) if self.snapshot_key == key && !self.snapshot_stale => s.clone(),
 			_ => {
-				let s = Arc::new(self.doc.clone());
+				let mut doc = self.doc.clone();
+				// A filter preview replaces the layer's pixels on screen only.
+				if let Some(preview) = &self.preview
+					&& let Some(layer) = doc.layer_mut(preview.layer)
+					&& let LayerKind::Pixel { image, .. } = &mut layer.kind
+				{
+					*image = preview.image.clone();
+				}
+				let s = Arc::new(doc);
 				self.snapshot = Some(s.clone());
+				self.snapshot_key = key;
 				self.snapshot_stale = false;
 				s
 			}
 		}
+	}
+
+	/// The render thread's cache key: changes with the content *and* with the
+	/// preview's pixels.
+	pub fn render_generation(&self) -> u64 {
+		self.generation.wrapping_mul(1_000_003).wrapping_add(self.preview_rev)
 	}
 
 	/// Tell [`snapshot`](Self::snapshot) that derived data (mips) changed

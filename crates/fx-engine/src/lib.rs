@@ -17,8 +17,10 @@
 pub mod b3;
 pub mod documents;
 pub mod export;
+pub mod filters;
 pub mod layers;
 pub mod mips;
+pub mod ops;
 pub mod thumbs;
 pub mod view;
 

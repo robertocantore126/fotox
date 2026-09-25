@@ -13,6 +13,7 @@ fx-core = { workspace = true }
 fx-protocol = { workspace = true }
 fx-render = { workspace = true }
 fx-io = { workspace = true }
+fx-ops = { workspace = true }
 crossbeam-channel = { workspace = true }
 rayon = { workspace = true }
 wgpu = { workspace = true }

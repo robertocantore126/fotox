@@ -14,3 +14,9 @@
 //! Planned modules: `brush` (dab engine, pressure, spacing, 16-bit
 //! accumulation), `clone`, `heal`, `blur`, `sharpen`, `noise`, `transform`
 //! (resampling: bicubic / Lanczos), `fill`.
+
+pub mod filter;
+#[cfg(test)]
+mod filter_tests;
+pub mod gaussian;
+pub mod neighbourhood;

@@ -10,6 +10,7 @@ import * as panels from "./panels.js";
 import { dockGroups } from "./data/panels.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
+import { isEngineFilter, openFilterDialog } from "./native/filters.js";
 
 export function runAction(item) {
   const a = item && item.a ? item.a : "";
@@ -52,6 +53,9 @@ export function runAction(item) {
     });
     return;
   }
+  // In the app, Gaussian Blur and Unsharp Mask preview live and apply as a
+  // job in the engine (M4-T05).
+  if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }

@@ -24,6 +24,8 @@ export const UI = Object.freeze({
   ACTIVATE_DOCUMENT: "activate_document",
   CLOSE_DOCUMENT: "close_document",
   CLOSE_DOCUMENT_ANSWER: "close_document_answer",
+  FILTER_PREVIEW: "filter_preview",
+  FILTER_PREVIEW_CANCEL: "filter_preview_cancel",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
 });

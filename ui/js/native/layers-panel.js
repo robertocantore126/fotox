@@ -115,6 +115,18 @@ function send(command) {
 const ref = (id) => ({ id });
 const setProps = (id, props) => send({ op: "set_layer_props", layer: ref(id), props });
 const selectedIds = () => layers.filter((l) => l.selected).map((l) => l.id);
+/** The id of the active layer of the active document, or null (M4 filters). */
+export function activeLayerId() {
+  const a = active();
+  return a ? a.id : null;
+}
+
+/** The kind of the active layer ("pixel", "group", …), or null. */
+export function activeLayerKind() {
+  const a = active();
+  return a ? a.kind : null;
+}
+
 const active = () => {
   // The active layer is the last one selected; `layers` does not carry the
   // selection order, so fall back to the topmost selected row.

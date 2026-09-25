@@ -62,6 +62,18 @@ impl Lut3d {
 		self.key
 	}
 
+	/// Whether every node maps to itself within `tolerance` (0..=1): a
+	/// transform between two encodings of the same space (the named sRGB and
+	/// Windows' `sRGB Color Space Profile.icm`) is then skipped, so the display
+	/// shows the document's values exactly (criterion C1).
+	pub fn is_identity(&self, tolerance: f64) -> bool {
+		let last = (LUT_GRID - 1) as f64;
+		self.entries.iter().enumerate().all(|(i, e)| {
+			let (r, g, b) = (i % LUT_GRID, (i / LUT_GRID) % LUT_GRID, i / (LUT_GRID * LUT_GRID));
+			[r, g, b].iter().zip(e).all(|(&n, v)| (v.to_f64() - n as f64 / last).abs() <= tolerance)
+		})
+	}
+
 	/// The colour a straight `rgb` maps to, interpolated exactly like the
 	/// shader does (trilinear over the same node positions). Values outside
 	/// `0..=1` clamp to the table's edge.

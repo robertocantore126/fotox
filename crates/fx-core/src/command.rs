@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::blend::BlendMode;
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
+use crate::ops::{FilterParams, PixelOps};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -117,6 +118,9 @@ pub enum Command {
 	MergeLayers { layers: Vec<LayerRef> },
 	/// Flatten the whole document into one pixel layer. M4
 	Flatten,
+	/// Run a destructive filter on a pixel layer (level 0; the engine shows a
+	/// live preview first). M4
+	ApplyFilter { layer: LayerRef, filter: FilterParams },
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -154,6 +158,10 @@ pub enum CommandError {
 /// Services a command may need while applying.
 pub struct CommandContext<'a> {
 	pub tiles: &'a TileStore,
+	/// The engine's pixel algorithms (filters, compositing — `ops.rs`).
+	/// `None` in `fx-core`'s own tests: commands that need it return
+	/// `NotAllowed`.
+	pub ops: Option<&'a dyn PixelOps>,
 }
 
 impl Command {
@@ -171,6 +179,7 @@ impl Command {
 			Command::AddMask { layer, fill } => add_mask(doc, layer, *fill),
 			Command::DeleteMask { layer, apply } => delete_mask(doc, layer, *apply, ctx.tiles),
 			Command::SetAdjustment { layer, adjustment } => set_adjustment(doc, layer, adjustment),
+			Command::ApplyFilter { layer, filter } => apply_filter(doc, layer, filter, ctx),
 			other => todo!("{other:?}: see docs/tasks for the milestone that implements it"),
 		}?;
 		doc.revision += 1;
@@ -882,6 +891,32 @@ fn scale_alpha8(alpha: u8, mask: u16) -> u8 {
 
 /// The effect of removing a mask: the layer's pixels changed only when the
 /// mask was actually baked into them.
+/// `ApplyFilter`: validate, then replace the layer's pixels with the
+/// filtered image computed by the engine's [`PixelOps`].
+fn apply_filter(doc: &mut Document, layer: &LayerRef, filter: &FilterParams, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	filter.validate()?;
+	let id = resolve(doc, layer)?;
+	let target = doc.layer(id).expect("resolved id exists");
+	if target.locked_pixels {
+		return Err(CommandError::Locked(id));
+	}
+	let LayerKind::Pixel { image, offset } = &target.kind else {
+		return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
+	};
+	let ops = ctx
+		.ops
+		.ok_or_else(|| CommandError::NotAllowed("filters need the engine's pixel operations".into()))?;
+	let filtered = ops.filter(image, *offset, (doc.width, doc.height), filter, ctx.tiles)?;
+	if let LayerKind::Pixel { image, .. } = &mut doc.layer_mut(id).expect("resolved id exists").kind {
+		*image = filtered;
+	}
+	Ok(CommandEffect {
+		label: filter.label().into(),
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}
+
 fn delete_mask_effect(id: LayerId, pixels_changed: bool) -> CommandEffect {
 	CommandEffect {
 		label: "Delete Layer Mask".into(),
@@ -979,7 +1014,7 @@ mod tests {
 		}
 
 		fn run(&mut self, command: Command) -> Result<CommandEffect, CommandError> {
-			let mut ctx = CommandContext { tiles: &self.store };
+			let mut ctx = CommandContext { tiles: &self.store, ops: None };
 			self.history.execute(&mut self.doc, command, &mut ctx)
 		}
 

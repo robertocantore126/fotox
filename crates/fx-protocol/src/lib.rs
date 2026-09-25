@@ -19,7 +19,7 @@
 //! The JavaScript side of this file is `ui/js/native/protocol.js`. Keep the
 //! two in sync; docs/PROTOCOL.md is the human-readable contract.
 
-use fx_core::{Adjustment, BitDepth, BlendMode, Command, LayerId};
+use fx_core::{Adjustment, BitDepth, BlendMode, Command, FilterParams, LayerId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -88,6 +88,18 @@ pub enum UiToEngine {
 		doc: DocId,
 		layers: Vec<LayerId>,
 		size: u32,
+	},
+	/// A filter dialog's parameters changed: show `layer` filtered, live, on
+	/// the visible area (M4-T05). OK sends the `apply_filter` command; Cancel
+	/// sends `filter_preview_cancel`.
+	FilterPreview {
+		doc: DocId,
+		layer: LayerId,
+		filter: FilterParams,
+	},
+	/// Drop the filter preview (Cancel, or the dialog's Preview box off).
+	FilterPreviewCancel {
+		doc: DocId,
 	},
 	/// The user answered the "save changes?" prompt of [`EngineToUi::CloseDirtyDocument`].
 	CloseDocumentAnswer {
