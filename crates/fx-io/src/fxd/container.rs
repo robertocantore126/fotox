@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fx_tiles::PixelFormat;
+use fx_tiles::{PixelFormat, TileBuffer, TileError, TileSource};
 
 use crate::IoError;
 
@@ -391,6 +391,37 @@ impl FxdFile {
 			return Err(IoError::Decode(format!("corrupt chunk at {}", at.offset)));
 		}
 		Ok((kind, payload))
+	}
+}
+
+/// Backed tiles read their pixels through this: the store calls [`read`] with
+/// a chunk location recorded in the manifest, and gets a decompressed tile.
+///
+/// [`read`]: TileSource::read
+impl TileSource for FxdFile {
+	fn read(&self, offset: u64, len: u64, format: PixelFormat) -> Result<TileBuffer, TileError> {
+		let (kind, payload) = self.read_chunk(ChunkRef { offset, len }).map_err(|e| TileError::Corrupt(e.to_string()))?;
+		if kind != ChunkKind::Tile && kind != ChunkKind::PreviewTile {
+			return Err(TileError::Corrupt(format!("chunk at {offset} is {kind:?}, not a tile")));
+		}
+		let parsed = parse_tile_payload(&payload).map_err(|e| TileError::Corrupt(e.to_string()))?;
+		if parsed.format != format {
+			return Err(TileError::Corrupt(format!(
+				"tile at {offset} is {:?}, the store expected {:?}",
+				parsed.format, format
+			)));
+		}
+		let tile_bytes = format.tile_bytes();
+		let bytes = match parsed.codec {
+			Codec::Raw => parsed.data.to_vec(),
+			Codec::Zstd => zstd::bulk::decompress(parsed.data, tile_bytes).map_err(|e| TileError::Corrupt(format!("zstd tile: {e}")))?,
+			Codec::Lz4 => lz4_flex::block::decompress(parsed.data, tile_bytes).map_err(|e| TileError::Corrupt(format!("lz4 tile: {e}")))?,
+		};
+		TileBuffer::from_bytes(format, bytes.into_boxed_slice())
+	}
+
+	fn id(&self) -> u64 {
+		self.id()
 	}
 }
 

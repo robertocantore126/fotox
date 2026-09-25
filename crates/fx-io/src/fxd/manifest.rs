@@ -10,14 +10,15 @@
 //! compatibility); a version other than [`MANIFEST_VERSION`] is refused.
 
 use std::fmt;
+use std::sync::Arc;
 
-use fx_core::{Adjustment, BlendMode, Document, DocumentColor, Layer, LayerId, LayerKind};
-use fx_tiles::{PixelFormat, TileHandle, TileSlot, TiledImage};
+use fx_core::{Adjustment, BlendMode, Document, DocumentColor, Layer, LayerId, LayerKind, Mask};
+use fx_tiles::{Backed, PixelFormat, PixelValue, TileClass, TileHandle, TileSlot, TileStore, TiledImage};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::container::ChunkRef;
+use super::container::{ChunkRef, FxdFile};
 use crate::IoError;
 
 /// Manifest format version stored in [`Manifest::version`].
@@ -275,6 +276,94 @@ fn image_entry(image: &TiledImage, tile_ref: &impl Fn(&TileHandle) -> ChunkRef) 
 }
 
 // ---------------------------------------------------------------------------
+// Manifest -> Document
+// ---------------------------------------------------------------------------
+
+/// Rebuild a document from a manifest. Every tile slot becomes a **backed**
+/// tile that reads its pixels from `file` on demand — nothing is read here, so
+/// opening a document costs only the manifest.
+///
+/// Levels 1–2 are not in the manifest and are rebuilt lazily when the renderer
+/// asks for them (their ancestors start dirty after the level-0 writes).
+pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore) -> Result<Document, IoError> {
+	if manifest.version != MANIFEST_VERSION {
+		return Err(IoError::Unsupported(format!("fxd manifest version {}", manifest.version)));
+	}
+	let mut doc = Document::new(manifest.width, manifest.height, manifest.color.clone(), manifest.ppi);
+	doc.layers = manifest
+		.layers
+		.iter()
+		.map(|entry| layer_from_entry(entry, file, store))
+		.collect::<Result<Vec<_>, _>>()?;
+	doc.selected = manifest.selected.clone();
+	Ok(doc.with_id_state(manifest.next_layer_id, manifest.name_counters))
+}
+
+fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<Arc<Layer>, IoError> {
+	let kind = match &entry.kind {
+		LayerKindEntry::Pixel { offset, image } => LayerKind::Pixel {
+			image: image_from_entry(image, file, store)?,
+			offset: *offset,
+		},
+		LayerKindEntry::Group { expanded, children } => LayerKind::Group {
+			expanded: *expanded,
+			children: children.iter().map(|child| layer_from_entry(child, file, store)).collect::<Result<_, _>>()?,
+		},
+		LayerKindEntry::Adjustment { adjustment } => LayerKind::Adjustment(adjustment.clone()),
+		LayerKindEntry::SolidFill { rgba } => LayerKind::SolidFill { rgba: *rgba },
+	};
+	let mut layer = Layer::new(entry.id, entry.name.clone(), kind);
+	layer.visible = entry.visible;
+	layer.opacity = entry.opacity;
+	layer.fill = entry.fill;
+	layer.blend = entry.blend;
+	layer.clipped = entry.clipped;
+	layer.locked_pixels = entry.locked_pixels;
+	layer.locked_position = entry.locked_position;
+	layer.mask = match &entry.mask {
+		Some(mask) => Some(Mask {
+			image: image_from_entry(&mask.image, file, store)?,
+			enabled: mask.enabled,
+			linked: mask.linked,
+			outside_value: mask.outside_value,
+		}),
+		None => None,
+	};
+	Ok(Arc::new(layer))
+}
+
+fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
+	let mut image = TiledImage::new(entry.width, entry.height, entry.format);
+	for level in &entry.levels {
+		let derived = level.level != 0;
+		for slot in &level.slots {
+			let (tx, ty) = match slot {
+				SlotEntry::Solid { tx, ty, .. } => (*tx, *ty),
+				SlotEntry::Tile { tx, ty, .. } => (*tx, *ty),
+			};
+			let tile_slot = match slot {
+				SlotEntry::Solid { value, .. } => TileSlot::Solid(PixelValue(*value)),
+				SlotEntry::Tile { chunk, .. } => {
+					let backed = Backed {
+						source: file.clone(),
+						offset: chunk.offset,
+						len: chunk.len,
+					};
+					let class = if derived { TileClass::Derived } else { TileClass::Authoritative };
+					TileSlot::Data(store.insert_backed(entry.format, class, backed))
+				}
+			};
+			if derived {
+				image.set_derived_slot(level.level as usize, tx, ty, tile_slot);
+			} else {
+				image.set_slot(tx, ty, tile_slot);
+			}
+		}
+	}
+	Ok(image)
+}
+
+// ---------------------------------------------------------------------------
 // JSON + zstd
 // ---------------------------------------------------------------------------
 
@@ -315,15 +404,16 @@ pub fn decode_manifest(payload: &[u8]) -> Result<Manifest, IoError> {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
 	use std::sync::Arc;
 
 	use fx_core::{Adjustment, BitDepth, BlendMode, ColorProfile, Document, DocumentColor, Layer, LayerId, LayerKind, Mask};
 	use fx_tiles::{PixelFormat, PixelValue, TileBuffer, TileSlot, TileStore, TileStoreConfig, TiledImage};
 
-	use super::super::container::ChunkRef;
+	use super::super::container::{ChunkKind, ChunkRef, Codec, FxdFile, FxdWriter};
 	use super::{
-		LayerKindEntry, MANIFEST_VERSION, Manifest, NAME_COUNTERS, SlotEntry, decode_manifest, encode_manifest, manifest_from_json, manifest_to_json,
-		to_manifest,
+		LayerKindEntry, MANIFEST_VERSION, Manifest, NAME_COUNTERS, SlotEntry, decode_manifest, encode_manifest, from_manifest, manifest_from_json,
+		manifest_to_json, to_manifest,
 	};
 	use crate::IoError;
 
@@ -613,5 +703,159 @@ mod tests {
 		let (_, counters) = doc.id_state();
 		let typed: [u32; NAME_COUNTERS] = counters;
 		assert_eq!(typed.len(), NAME_COUNTERS);
+	}
+
+	// -----------------------------------------------------------------------
+	// Document <-> file round trip
+	// -----------------------------------------------------------------------
+
+	/// Every `TiledImage` of a document (layer pixels and masks).
+	fn images_of(doc: &Document) -> Vec<&TiledImage> {
+		fn go<'a>(layer: &'a Layer, out: &mut Vec<&'a TiledImage>) {
+			if let Some(mask) = &layer.mask {
+				out.push(&mask.image);
+			}
+			match &layer.kind {
+				LayerKind::Pixel { image, .. } => out.push(image),
+				LayerKind::Group { children, .. } => {
+					for child in children {
+						go(child, out);
+					}
+				}
+				_ => {}
+			}
+		}
+		let mut out = Vec::new();
+		for layer in &doc.layers {
+			go(layer, &mut out);
+		}
+		out
+	}
+
+	/// Write every real tile of `doc` plus its manifest to `path`. This is a
+	/// miniature of the save path (M3-T04); the manifest is what `from_manifest`
+	/// later consumes.
+	fn write_document(path: &std::path::Path, doc: &Document, store: &TileStore) -> Arc<FxdFile> {
+		let mut refs: HashMap<u64, ChunkRef> = HashMap::new();
+		let mut writer = FxdWriter::create(path).unwrap();
+		for image in images_of(doc) {
+			for level in 0..image.level_count() {
+				for (_, _, slot) in image.grid(level).non_empty() {
+					let TileSlot::Data(handle) = slot else { continue };
+					if refs.contains_key(&handle.id().get()) {
+						continue;
+					}
+					let pixels = store.get(handle).unwrap();
+					let compressed = zstd::bulk::compress(pixels.bytes(), 3).unwrap();
+					let chunk = writer.tile(image.format(), Codec::Zstd, &compressed).unwrap();
+					refs.insert(handle.id().get(), chunk);
+				}
+			}
+		}
+		let manifest = to_manifest(doc, |handle| refs[&handle.id().get()]);
+		let payload = encode_manifest(&manifest, 3).unwrap();
+		let chunk = writer.manifest(&payload).unwrap();
+		let live = chunk.end();
+		Arc::new(writer.commit(chunk, live).unwrap())
+	}
+
+	fn assert_documents_equal(a: &Document, b: &Document, store: &TileStore) {
+		assert_eq!((a.width, a.height), (b.width, b.height));
+		assert_eq!(a.color, b.color);
+		assert_eq!(a.ppi, b.ppi);
+		assert_eq!(a.id_state(), b.id_state());
+		assert_eq!(a.selected, b.selected);
+		assert_eq!(a.layers.len(), b.layers.len());
+		for (la, lb) in a.layers.iter().zip(&b.layers) {
+			assert_layers_equal(la, lb, store);
+		}
+	}
+
+	fn assert_layers_equal(a: &Layer, b: &Layer, store: &TileStore) {
+		assert_eq!(a.id, b.id);
+		assert_eq!(a.name, b.name);
+		assert_eq!(a.visible, b.visible);
+		assert_eq!(a.opacity, b.opacity);
+		assert_eq!(a.fill, b.fill);
+		assert_eq!(a.blend, b.blend);
+		assert_eq!(a.clipped, b.clipped);
+		assert_eq!(a.locked_pixels, b.locked_pixels);
+		assert_eq!(a.locked_position, b.locked_position);
+		match (&a.mask, &b.mask) {
+			(None, None) => {}
+			(Some(ma), Some(mb)) => {
+				assert_eq!((ma.enabled, ma.linked, ma.outside_value), (mb.enabled, mb.linked, mb.outside_value));
+				assert_images_equal(&ma.image, &mb.image, store);
+			}
+			_ => panic!("mask presence differs for {}", a.name),
+		}
+		match (&a.kind, &b.kind) {
+			(LayerKind::Pixel { image: ia, offset: oa }, LayerKind::Pixel { image: ib, offset: ob }) => {
+				assert_eq!(oa, ob);
+				assert_images_equal(ia, ib, store);
+			}
+			(LayerKind::Group { children: ca, expanded: ea }, LayerKind::Group { children: cb, expanded: eb }) => {
+				assert_eq!(ea, eb);
+				assert_eq!(ca.len(), cb.len());
+				for (x, y) in ca.iter().zip(cb) {
+					assert_layers_equal(x, y, store);
+				}
+			}
+			(LayerKind::Adjustment(aa), LayerKind::Adjustment(ab)) => assert_eq!(aa, ab),
+			(LayerKind::SolidFill { rgba: x }, LayerKind::SolidFill { rgba: y }) => assert_eq!(x, y),
+			_ => panic!("kind differs for {}", a.name),
+		}
+	}
+
+	fn assert_images_equal(a: &TiledImage, b: &TiledImage, store: &TileStore) {
+		assert_eq!((a.width(), a.height(), a.format()), (b.width(), b.height(), b.format()));
+		assert_eq!(a.level_count(), b.level_count());
+		for level in 0..a.level_count() {
+			// Levels 1-2 are rebuilt lazily and never stored; compare 0 and >= 3.
+			if level != 0 && level < 3 {
+				continue;
+			}
+			let grid = a.grid(level);
+			assert_eq!((grid.cols(), grid.rows()), (b.grid(level).cols(), b.grid(level).rows()));
+			for ty in 0..grid.rows() {
+				for tx in 0..grid.cols() {
+					match (a.slot(level, tx, ty), b.slot(level, tx, ty)) {
+						(TileSlot::Empty, TileSlot::Empty) => {}
+						(TileSlot::Solid(x), TileSlot::Solid(y)) => assert_eq!(x, y, "solid at level {level} ({tx},{ty})"),
+						(TileSlot::Data(x), TileSlot::Data(y)) => {
+							let xb = store.get(x).unwrap();
+							let yb = store.get(y).unwrap();
+							assert_eq!(xb.bytes(), yb.bytes(), "pixels at level {level} ({tx},{ty})");
+						}
+						(x, y) => panic!("slot mismatch at level {level} ({tx},{ty}): {x:?} vs {y:?}"),
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn the_sample_document_round_trips_through_a_file() {
+		let store = store();
+		let doc = sample_document(&store);
+		let dir = std::env::temp_dir().join("fx-io-fxd-manifest-tests");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("roundtrip.fxd");
+
+		let file = write_document(&path, &doc, &store);
+
+		// Read the manifest back through the real container (checksum verified).
+		let footer = file.footer();
+		let (kind, payload) = file
+			.read_chunk(ChunkRef {
+				offset: footer.manifest_offset,
+				len: footer.manifest_len,
+			})
+			.unwrap();
+		assert_eq!(kind, ChunkKind::Manifest);
+		let manifest = decode_manifest(&payload).unwrap();
+
+		let restored = from_manifest(&manifest, &file, &store).unwrap();
+		assert_documents_equal(&doc, &restored, &store);
 	}
 }

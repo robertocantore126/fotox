@@ -971,6 +971,7 @@ dependencies = [
  "crc32fast",
  "fx-core",
  "fx-tiles",
+ "lz4_flex",
  "png",
  "rayon",
  "serde",
