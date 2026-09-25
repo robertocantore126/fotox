@@ -352,6 +352,7 @@ export const menus = [
       it("Flatten Image", "", "layer:flatten"),
       it("Merge Layers", "Ctrl+E", "layer:merge"),
       it("Merge Visible", "Shift+Ctrl+E", "layer:merge-visible"),
+      it("Stamp Visible", "Alt+Shift+Ctrl+E", "layer:stamp-visible"),
       sep,
       sub("Matting", [
         it("Defringe...", "", "dlg:defringe"),

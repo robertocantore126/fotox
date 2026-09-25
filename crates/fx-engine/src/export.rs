@@ -291,6 +291,35 @@ mod tests {
 	}
 
 	#[test]
+	fn composite_layers_matches_what_is_on_screen() {
+		let store = TileStore::new(TileStoreConfig::for_tests(dir().join("scratch-merge"))).unwrap();
+		let doc = document(&store);
+		let ids: Vec<_> = doc.layers.iter().map(|l| l.id).collect();
+		let merged = composite_layers(&doc, &ids, None, &store, None).unwrap();
+		let at = |image: &fx_tiles::TiledImage, x: u32, y: u32| -> [u16; 4] {
+			let tile = match image.slot(0, x / 256, y / 256) {
+				TileSlot::Solid(v) => TileBuffer::filled(PixelFormat::Rgba16, *v),
+				TileSlot::Data(h) => (*store.get(h).unwrap()).clone(),
+				TileSlot::Empty => TileBuffer::zeroed(PixelFormat::Rgba16),
+			};
+			let i = ((y % 256) * 256 + x % 256) as usize * 4;
+			let s = tile.as_u16();
+			[s[i], s[i + 1], s[i + 2], s[i + 3]]
+		};
+		// Half blue over red under the blue layer, plain red elsewhere.
+		let mixed = at(&merged, 10, 10);
+		assert!(
+			(i32::from(mixed[0]) - 32767).abs() <= 2 && (i32::from(mixed[2]) - 32768).abs() <= 2 && mixed[3] == 65535,
+			"{mixed:?}"
+		);
+		assert_eq!(at(&merged, 350, 20), [65535, 0, 0, 65535]);
+		// Only the blue layer, onto white: half blue over white.
+		let on_white = composite_layers(&doc, &ids[1..], Some([65535; 4]), &store, None).unwrap();
+		let p = at(&on_white, 10, 10);
+		assert!((i32::from(p[0]) - 32767).abs() <= 2 && p[2] == 65535 && p[3] == 65535, "{p:?}");
+	}
+
+	#[test]
 	fn exports_the_composite() {
 		let store = TileStore::new(TileStoreConfig::for_tests(dir().join("scratch"))).unwrap();
 		let doc = document(&store);

@@ -1380,6 +1380,22 @@ impl Engine {
 		let doc_id = doc.id;
 		let selected: Vec<LayerRef> = doc.doc.selected.iter().map(|&l| LayerRef::Id(l)).collect();
 		let active = doc.doc.active_layer();
+		// The sibling directly below the active layer (Merge Down).
+		let below: Option<LayerId> = active.and_then(|id| {
+			let path = doc.doc.path_of(id)?;
+			let (&index, parents) = path.split_last()?;
+			let siblings = if parents.is_empty() {
+				&doc.doc.layers[..]
+			} else {
+				let mut layers = &doc.doc.layers[..];
+				for &i in parents {
+					layers = layers.get(i)?.children()?;
+				}
+				layers
+			};
+			index.checked_sub(1).and_then(|i| siblings.get(i)).map(|l| l.id)
+		});
+		let visible_roots: Vec<LayerRef> = doc.doc.layers.iter().filter(|l| l.visible).map(|l| LayerRef::Id(l.id)).collect();
 		let hidden: Vec<LayerRef> = {
 			let mut out = Vec::new();
 			doc.doc.walk(|layer, _| {
@@ -1439,6 +1455,23 @@ impl Engine {
 				locked_position: Some(true),
 				..Default::default()
 			}),
+			// Merge (Ctrl+E): the selected layers, or the active one into the layer below.
+			"layer:merge" if selected.len() > 1 => vec![Command::MergeLayers { layers: selected.clone() }],
+			"layer:merge" => match (active, below) {
+				(Some(a), Some(b)) => vec![Command::MergeLayers {
+					layers: vec![LayerRef::Id(a), LayerRef::Id(b)],
+				}],
+				_ => {
+					self.to_ui(&EngineToUi::Toast {
+						text: "There is no layer below to merge with".into(),
+					});
+					return true;
+				}
+			},
+			"layer:merge-visible" if visible_roots.len() > 1 => vec![Command::MergeLayers { layers: visible_roots }],
+			"layer:flatten" => vec![Command::Flatten],
+			"layer:stamp-visible" => vec![Command::StampVisible],
+			"layer:merge-visible" => return true,
 			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
 				// Nothing selected / nothing hidden: nothing to do, and no toast.
 				return true;
@@ -1732,13 +1765,19 @@ fn display_transform(profile: &ColorProfile, monitor: Option<&[u8]>) -> Result<O
 
 /// Commands whose pixel work is too heavy for the engine thread (M4).
 fn is_pixel_job(command: &Command) -> bool {
-	matches!(command, Command::ApplyFilter { .. })
+	matches!(
+		command,
+		Command::ApplyFilter { .. } | Command::MergeLayers { .. } | Command::Flatten | Command::StampVisible
+	)
 }
 
 /// The progress label of a pixel job, as Photoshop names the operation.
 fn pixel_job_label(command: &Command) -> String {
 	match command {
 		Command::ApplyFilter { filter, .. } => filter.label().to_owned(),
+		Command::MergeLayers { .. } => "Merge Layers".to_owned(),
+		Command::Flatten => "Flatten Image".to_owned(),
+		Command::StampVisible => "Stamp Visible".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }
