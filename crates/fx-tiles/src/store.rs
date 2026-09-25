@@ -243,6 +243,8 @@ pub struct TileStoreStats {
 	pub cold_bytes: u64,
 	/// Derived tiles that were dropped and must be regenerated.
 	pub evicted_tiles: u64,
+	/// Tiles read from a backed native file (`TileSource::read`).
+	pub backed_reads: u64,
 	/// The scratch limit was hit during the last trim: RAM is over budget.
 	pub scratch_full: bool,
 }
@@ -260,6 +262,37 @@ impl TileId {
 	}
 }
 
+/// A source of tiles in an opened native file (M3). `fx-io` implements it for
+/// its `.fxd` reader; `fx-tiles` stays free of any file format.
+///
+/// `read` returns `len` is the total chunk length as written in the file. The
+/// returned buffer's format must equal `format`.
+pub trait TileSource: Send + Sync {
+	fn read(&self, offset: u64, len: u64, format: PixelFormat) -> Result<TileBuffer, TileError>;
+	/// Identity of the source, so a tile can tell which file it was read from.
+	fn id(&self) -> u64;
+}
+
+/// The location of a tile inside a [`TileSource`].
+#[derive(Clone)]
+pub struct Backed {
+	pub source: Arc<dyn TileSource>,
+	/// Offset of the tile's chunk in the source.
+	pub offset: u64,
+	/// Total length of the chunk (header + payload).
+	pub len: u64,
+}
+
+impl std::fmt::Debug for Backed {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Backed")
+			.field("source", &self.source.id())
+			.field("offset", &self.offset)
+			.field("len", &self.len)
+			.finish()
+	}
+}
+
 /// The copies of one tile that currently exist. Tiles are immutable, so every
 /// copy that exists is valid forever: keeping the cold copy after reading a
 /// tile back means evicting it again later costs nothing.
@@ -271,11 +304,13 @@ struct Copies {
 	/// LZ4 block of `format.tile_bytes()` bytes.
 	warm: Option<Arc<[u8]>>,
 	cold: Option<Extent>,
+	/// A tile that lives in an opened native file, read on demand (M3).
+	backed: Option<Backed>,
 }
 
 impl Copies {
 	fn is_empty(&self) -> bool {
-		self.hot.is_none() && self.warm.is_none() && self.cold.is_none()
+		self.hot.is_none() && self.warm.is_none() && self.cold.is_none() && self.backed.is_none()
 	}
 }
 
@@ -334,6 +369,13 @@ impl TileHandle {
 	pub fn same_tile(&self, other: &TileHandle) -> bool {
 		Arc::ptr_eq(&self.0, &other.0)
 	}
+
+	/// The backing of this tile, if any: `(source id, offset, len)`. Save uses
+	/// it to reuse the chunk of a tile it already wrote (M3-T04).
+	pub fn backing(&self) -> Option<(u64, u64, u64)> {
+		let copies = self.0.copies.lock();
+		copies.backed.as_ref().map(|b| (b.source.id(), b.offset, b.len))
+	}
 }
 
 impl std::fmt::Debug for TileHandle {
@@ -358,6 +400,7 @@ struct Counters {
 	cold_tiles: AtomicU64,
 	cold_bytes: AtomicU64,
 	evicted_tiles: AtomicU64,
+	backed_reads: AtomicU64,
 	scratch_full: AtomicBool,
 }
 
@@ -541,6 +584,32 @@ impl TileStore {
 		TileHandle(entry)
 	}
 
+	/// Insert a tile that lives in an opened native file: no copy in RAM or on
+	/// scratch is created and nothing is read until [`Self::get`].
+	pub fn insert_backed(&self, format: PixelFormat, class: TileClass, backed: Backed) -> TileHandle {
+		let id = TileId(NonZeroU64::new(self.0.next_id.fetch_add(1, Ordering::Relaxed)).expect("tile id overflow"));
+		self.0.stats.live_tiles.fetch_add(1, Ordering::Relaxed);
+		let entry = Arc::new(TileEntry {
+			id,
+			format,
+			class,
+			copies: Mutex::new(Copies {
+				backed: Some(backed),
+				..Default::default()
+			}),
+			last_use: AtomicU64::new(self.0.tick()),
+			store: Arc::downgrade(&self.0),
+		});
+		self.0.registry_shard(id).lock().insert(id, Arc::downgrade(&entry));
+		TileHandle(entry)
+	}
+
+	/// Point an existing tile at a chunk of an opened native file, e.g. after a
+	/// save wrote it. The tile may then leave scratch at the next trim.
+	pub fn attach_backing(&self, handle: &TileHandle, backed: Backed) {
+		handle.0.copies.lock().backed = Some(backed);
+	}
+
 	/// Get the pixels of a tile, bringing it back to RAM if needed.
 	///
 	/// May block on decompression (warm) or disk I/O (cold). Never call this
@@ -555,8 +624,9 @@ impl TileStore {
 			return Ok(buffer.clone());
 		}
 		let tile_bytes = entry.format.tile_bytes();
-		let decompressed = if let Some(block) = &copies.warm {
-			decompress(block, tile_bytes)?
+		let buffer: Arc<TileBuffer> = if let Some(block) = &copies.warm {
+			let bytes = decompress(block, tile_bytes)?;
+			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(extent) = copies.cold {
 			let scratch = self
 				.0
@@ -564,11 +634,25 @@ impl TileStore {
 				.as_ref()
 				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
 			let block = scratch.read(extent)?;
-			decompress(&block, tile_bytes)?
+			let bytes = decompress(&block, tile_bytes)?;
+			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
+		} else if let Some(backed) = copies.backed.clone() {
+			// Read from the opened native file (M3). The format is checked by
+			// the source; verify it here too so a bug can never install a
+			// buffer of the wrong format as the hot copy.
+			let buffer = backed.source.read(backed.offset, backed.len, entry.format)?;
+			if buffer.format() != entry.format {
+				return Err(TileError::Corrupt(format!(
+					"backed source returned a {:?} tile for a {:?} tile",
+					buffer.format(),
+					entry.format
+				)));
+			}
+			self.0.stats.backed_reads.fetch_add(1, Ordering::Relaxed);
+			Arc::new(buffer)
 		} else {
 			return Err(TileError::Evicted);
 		};
-		let buffer = Arc::new(TileBuffer::from_bytes(entry.format, decompressed.into_boxed_slice())?);
 		copies.hot = Some(buffer.clone());
 		self.0.account_hot(entry.format, true, true);
 		drop(copies);
@@ -608,6 +692,12 @@ impl TileStore {
 	pub fn trim(&self) {
 		let inner = &*self.0;
 		let _guard = inner.trim_lock.lock();
+		// A tile with a backed copy can always be read again, so it holds no
+		// RAM or scratch. Free that first (this is where a tile frees its
+		// scratch extent after `attach_backing`).
+		for entry in inner.live_entries() {
+			self.release_backed_copies(&entry);
+		}
 		let hot_target = inner.config.hot_budget / 10 * 9;
 		let warm_target = inner.config.warm_budget / 10 * 9;
 		let hot_over = inner.stats.hot_bytes.load(Ordering::Relaxed) > inner.config.hot_budget;
@@ -653,6 +743,33 @@ impl TileStore {
 		}
 	}
 
+	/// Drop every RAM/scratch copy of a backed tile. The backed copy is kept, so
+	/// the pixels are still reachable (by reading the source again).
+	fn release_backed_copies(&self, entry: &Arc<TileEntry>) {
+		let inner = &*self.0;
+		let (had_hot, warm_len, cold) = {
+			let mut copies = entry.copies.lock();
+			if copies.backed.is_none() {
+				return;
+			}
+			let had_hot = copies.hot.take().is_some();
+			let warm_len = copies.warm.take().map(|w| w.len());
+			(had_hot, warm_len, copies.cold.take())
+		};
+		if had_hot {
+			inner.account_hot(entry.format, true, false);
+		}
+		if let Some(len) = warm_len {
+			inner.account_warm(len, false);
+		}
+		if let Some(extent) = cold {
+			inner.account_cold(extent, false);
+			if let Some(scratch) = &inner.scratch {
+				scratch.free(extent);
+			}
+		}
+	}
+
 	/// Remove the hot copy of one tile (compressing it first if it is the
 	/// only copy of an authoritative tile).
 	fn demote_hot(&self, entry: &Arc<TileEntry>) {
@@ -664,7 +781,7 @@ impl TileStore {
 			if Arc::strong_count(&buffer) > 2 {
 				return;
 			}
-			if entry.class == TileClass::Derived || copies.warm.is_some() || copies.cold.is_some() {
+			if entry.class == TileClass::Derived || copies.warm.is_some() || copies.cold.is_some() || copies.backed.is_some() {
 				copies.hot = None;
 				inner.account_hot(entry.format, true, false);
 				if copies.is_empty() {
@@ -697,7 +814,7 @@ impl TileStore {
 		let block = {
 			let mut copies = entry.copies.lock();
 			let Some(block) = copies.warm.clone() else { return true };
-			if copies.cold.is_some() {
+			if copies.cold.is_some() || copies.backed.is_some() {
 				copies.warm = None;
 				inner.account_warm(block.len(), false);
 				return true;
@@ -742,6 +859,7 @@ impl TileStore {
 			cold_tiles: s.cold_tiles.load(Ordering::Relaxed),
 			cold_bytes: s.cold_bytes.load(Ordering::Relaxed),
 			evicted_tiles: s.evicted_tiles.load(Ordering::Relaxed),
+			backed_reads: s.backed_reads.load(Ordering::Relaxed),
 			scratch_full: s.scratch_full.load(Ordering::Relaxed),
 		}
 	}
@@ -776,6 +894,8 @@ fn trim_thread(store: Weak<StoreInner>, signal: Arc<TrimSignal>) {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::atomic::AtomicUsize;
+
 	use super::*;
 
 	fn store() -> TileStore {
@@ -953,5 +1073,131 @@ mod tests {
 		}
 		drop(handles);
 		drop(store); // the thread must notice and exit (no hang at test end)
+	}
+
+	// -----------------------------------------------------------------------
+	// Backed tiles (M3-T03)
+	// -----------------------------------------------------------------------
+
+	/// A [`TileSource`] that returns a fixed buffer and counts its reads.
+	struct TestSource {
+		id: u64,
+		buffer: TileBuffer,
+		reads: AtomicUsize,
+	}
+
+	impl TestSource {
+		fn new(id: u64, buffer: TileBuffer) -> Arc<Self> {
+			Arc::new(Self {
+				id,
+				buffer,
+				reads: AtomicUsize::new(0),
+			})
+		}
+
+		fn reads(&self) -> usize {
+			self.reads.load(Ordering::SeqCst)
+		}
+	}
+
+	impl TileSource for TestSource {
+		fn read(&self, _offset: u64, _len: u64, format: PixelFormat) -> Result<TileBuffer, TileError> {
+			assert_eq!(format, self.buffer.format(), "the store asked for the wrong format");
+			self.reads.fetch_add(1, Ordering::SeqCst);
+			Ok(self.buffer.clone())
+		}
+
+		fn id(&self) -> u64 {
+			self.id
+		}
+	}
+
+	fn backed(source: &Arc<TestSource>, offset: u64, len: u64) -> Backed {
+		Backed {
+			source: source.clone(),
+			offset,
+			len,
+		}
+	}
+
+	#[test]
+	fn backed_tile_is_read_on_demand() {
+		let store = store();
+		let expected = noise(PixelFormat::Rgba8, 5);
+		let source = TestSource::new(1, expected.clone());
+		let handle = store.insert_backed(PixelFormat::Rgba8, TileClass::Authoritative, backed(&source, 100, 40));
+		assert_eq!(source.reads(), 0, "inserting a backed tile reads nothing");
+		assert!(!store.is_hot(&handle));
+		assert_eq!(store.get(&handle).unwrap().bytes(), expected.bytes());
+		assert_eq!(source.reads(), 1);
+		assert_eq!(store.stats().backed_reads, 1);
+		// The second get is served from the hot copy, not the file.
+		assert_eq!(store.get(&handle).unwrap().bytes(), expected.bytes());
+		assert_eq!(source.reads(), 1);
+	}
+
+	#[test]
+	fn dropping_a_backed_tile_does_not_read_it() {
+		let store = store();
+		let source = TestSource::new(2, noise(PixelFormat::Rgba8, 6));
+		let handle = store.insert_backed(PixelFormat::Rgba8, TileClass::Authoritative, backed(&source, 0, 10));
+		drop(handle);
+		assert_eq!(source.reads(), 0);
+		assert_eq!(store.stats().live_tiles, 0);
+	}
+
+	#[test]
+	fn trim_keeps_no_ram_or_scratch_for_a_backed_tile() {
+		let store = store();
+		let expected = noise(PixelFormat::Rgba16, 3);
+		let source = TestSource::new(3, expected.clone());
+		let handle = store.insert_backed(PixelFormat::Rgba16, TileClass::Authoritative, backed(&source, 0, 0));
+		store.get(&handle).unwrap(); // make it hot
+		assert!(store.is_hot(&handle));
+		store.trim();
+		assert!(!store.is_hot(&handle), "a backed tile gives up RAM");
+		assert_eq!(store.stats().warm_bytes, 0);
+		assert_eq!(store.scratch_used(), 0);
+		// Still reachable: the source is read again.
+		assert_eq!(store.get(&handle).unwrap().bytes(), expected.bytes());
+	}
+
+	#[test]
+	fn attach_backing_frees_the_scratch_extent_at_trim() {
+		let store = store(); // hot and warm budgets are 4 RGBA16 tiles each
+		let handle = store.insert(noise(PixelFormat::Rgba16, 1), TileClass::Authoritative);
+		let keep: Vec<_> = (0..40)
+			.map(|i| store.insert(noise(PixelFormat::Rgba16, 10 + i), TileClass::Authoritative))
+			.collect();
+		store.trim();
+		assert!(store.scratch_used() > 0, "some tiles reached scratch");
+		let before = store.scratch_used();
+
+		let source = TestSource::new(4, noise(PixelFormat::Rgba16, 1));
+		store.attach_backing(&handle, backed(&source, 0, 0));
+		assert_eq!(source.reads(), 0, "attaching reads nothing");
+		store.trim();
+		assert!(store.scratch_used() < before, "the backed tile's scratch extent was freed");
+		drop(keep);
+	}
+
+	#[test]
+	fn concurrent_gets_read_the_source_once_per_miss() {
+		let store = store();
+		let expected = noise(PixelFormat::Rgba8, 11);
+		let bytes = expected.bytes().to_vec();
+		let source = TestSource::new(5, expected);
+		let handle = store.insert_backed(PixelFormat::Rgba8, TileClass::Authoritative, backed(&source, 0, 0));
+
+		let threads: Vec<_> = (0..8)
+			.map(|_| {
+				let (store, handle) = (store.clone(), handle.clone());
+				std::thread::spawn(move || store.get(&handle).unwrap().bytes().to_vec())
+			})
+			.collect();
+		for thread in threads {
+			assert_eq!(thread.join().unwrap(), bytes);
+		}
+		assert_eq!(source.reads(), 1, "one read fills the hot copy for every waiter");
 	}
 }
