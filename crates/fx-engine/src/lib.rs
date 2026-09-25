@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crossbeam_channel::Sender;
-use fx_protocol::UiToEngine;
+use fx_protocol::{DocId, UiToEngine};
 use fx_tiles::{TileStore, TileStoreConfig};
 
 /// Pointer/keyboard input that happened *over the viewport*. The shell routes
@@ -98,6 +98,14 @@ pub enum EngineInput {
 	/// Export the active document, flattened, to this file (the shell's save
 	/// dialog; the format comes from the extension). M3.
 	Export(PathBuf),
+	/// Save `doc` in place (its own file); a document without a file answers
+	/// with [`EngineOutput::NeedSavePath`]. M3-T06.
+	Save { doc: DocId },
+	/// Save `doc` to `path` (the shell's save dialog chose it). M3-T06.
+	SaveAs { doc: DocId, path: PathBuf },
+	/// The user asked to close the window; the engine answers
+	/// [`EngineOutput::MayClose`] once no document still needs an answer. M3-T06.
+	CloseRequested,
 	Shutdown,
 }
 
@@ -113,6 +121,12 @@ pub enum EngineOutput {
 	/// sRGB-encoded values in a non-sRGB format). The shell composites it
 	/// until the next one arrives.
 	ViewportFrame(wgpu::Texture),
+	/// The document has no file yet (an imported image): the shell shows its
+	/// save dialog and answers with [`EngineInput::SaveAs`]. M3-T06.
+	NeedSavePath { doc: DocId, suggested_name: String },
+	/// The answer to [`EngineInput::CloseRequested`]: `true` when the shell may
+	/// close the window, `false` while a document still needs to be saved. M3-T06.
+	MayClose(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

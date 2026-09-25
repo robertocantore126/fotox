@@ -11,3 +11,5 @@ pub mod save;
 mod tests;
 
 pub use container::{ChunkKind, ChunkRef, Codec, Footer, FxdFile, FxdWriter, TilePayload, parse_tile_payload};
+pub use open::{OpenedFxd, open};
+pub use save::{SaveReport, SaveRequest, SaveTarget, SavedFxd, needs_compaction, save};
