@@ -50,8 +50,49 @@ pub struct ImportedImage {
 /// Progress callback: `fraction` in 0..=1. Return `false` to cancel.
 pub type Progress<'a> = &'a mut dyn FnMut(f32) -> bool;
 
+/// Largest accepted image side, in pixels (Photoshop's PSB limit).
+pub const MAX_SIDE: u64 = 300_000;
+
+/// File formats [`import_file`] recognises by their first bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sniffed {
+	Tiff,
+	Png,
+	Jpeg,
+}
+
+/// Recognise a file from its first bytes (at least 8 are needed for PNG).
+pub fn sniff(header: &[u8]) -> Option<Sniffed> {
+	match header {
+		[b'I', b'I', 42, 0, ..] | [b'M', b'M', 0, 42, ..] | [b'I', b'I', 43, 0, ..] | [b'M', b'M', 0, 43, ..] => Some(Sniffed::Tiff),
+		[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => Some(Sniffed::Png),
+		[0xFF, 0xD8, 0xFF, ..] => Some(Sniffed::Jpeg),
+		_ => None,
+	}
+}
+
 /// Import by sniffing the file header (not the extension).
 pub fn import_file(path: &Path, store: &TileStore, progress: Progress<'_>) -> Result<ImportedImage, IoError> {
-	let _ = (path, store, progress);
-	todo!("M1-T02 (TIFF) / M1-T09 (PNG, JPEG)")
+	let mut header = [0u8; 8];
+	let read = {
+		use std::io::Read;
+		let mut file = std::fs::File::open(path)?;
+		let mut n = 0;
+		while n < header.len() {
+			match file.read(&mut header[n..])? {
+				0 => break,
+				k => n += k,
+			}
+		}
+		n
+	};
+	match sniff(&header[..read]) {
+		Some(Sniffed::Tiff) => tiff::import(path, store, progress),
+		Some(Sniffed::Png) | Some(Sniffed::Jpeg) => Err(IoError::Unsupported("PNG and JPEG import arrive in M1-T09".into())),
+		None => Err(IoError::UnsupportedFormat),
+	}
 }
+
+mod tiff;
+#[cfg(test)]
+mod tiff_tests;
