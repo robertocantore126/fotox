@@ -100,6 +100,8 @@ export function runAction(item) {
   if (a.startsWith("doc:recent")) { toast("Open recent document (mock)"); return; }
   if (a.startsWith("doc:save")) { openDialog("export-as"); return; }
   if (a === "doc:revert") { toast("Reverted to the last saved state (mock)"); return; }
+  // In the app, PNG and TIFF export are real: the shell shows the save dialog.
+  if ((a === "export:png" || a === "export:tiff") && bridge.isNative) { status(label); return; }
   if (a.startsWith("export:")) { openDialog("export-as"); return; }
 
   // IA, estensioni, account ---------------------------------------------

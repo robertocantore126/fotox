@@ -232,7 +232,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::tiffw::TiffWriter;
+	use fx_io::tiff_write::TiffWriter;
 
 	#[test]
 	fn reads_a_forced_bigtiff() {

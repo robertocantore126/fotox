@@ -21,6 +21,8 @@ pub(crate) enum AppEvent {
 	Engine(fx_engine::EngineOutput),
 	/// Files chosen in the native open dialog.
 	OpenFiles(Vec<std::path::PathBuf>),
+	/// File chosen in the native export dialog.
+	ExportTo(std::path::PathBuf),
 	/// The UI failed or crashed; the app cannot continue.
 	UiCrashed,
 	/// Leave the event loop and shut down.

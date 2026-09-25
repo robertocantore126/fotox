@@ -1,10 +1,11 @@
-//! A minimal streaming TIFF writer: RGB, 8 or 16 bits per sample, uncompressed
-//! strips, little-endian, classic TIFF or BigTIFF.
+//! A minimal streaming TIFF writer: RGB or RGBA (unassociated alpha), 8 or 16
+//! bits per sample, uncompressed strips, little-endian, classic TIFF or BigTIFF.
 //!
-//! Written by hand for `gen` (M1-T01): strips are written as they are
-//! produced, so a 5.4 GB BigTIFF never has to exist in memory, and every byte
-//! of the output is determined by the pixels (no timestamps, no software tag),
-//! so two runs with the same seed give identical files.
+//! Written by hand for `fotox-cli gen` (M1-T01), used by export too (M3):
+//! strips are written as they are produced, so a 5.4 GB BigTIFF never has to
+//! exist in memory, and every byte of the output is determined by the pixels
+//! (no timestamps, no software tag), so two runs with the same seed give
+//! identical files.
 //!
 //! Layout: header (IFD offset patched at the end) → strip data → IFD with its
 //! out-of-line arrays.
@@ -13,7 +14,17 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+use crate::IoError;
+
+type Result<T> = std::result::Result<T, IoError>;
+
+macro_rules! ensure {
+	($cond:expr, $($fmt:tt)+) => {
+		if !$cond {
+			return Err(IoError::Unsupported(format!($($fmt)+)));
+		}
+	};
+}
 
 /// Tag types.
 const SHORT: u16 = 3;
@@ -28,6 +39,8 @@ pub struct TiffWriter {
 	width: u32,
 	height: u32,
 	bits: u16,
+	/// 3 (RGB) or 4 (RGBA, unassociated alpha).
+	samples: u16,
 	rows_per_strip: u32,
 	offsets: Vec<u64>,
 	counts: Vec<u64>,
@@ -45,14 +58,21 @@ impl TiffWriter {
 	/// (`Some`) or automatic (`None`). Forcing BigTIFF lets tests cover it
 	/// without writing 4 GiB.
 	pub fn create_as(path: &Path, width: u32, height: u32, bits: u16, rows_per_strip: u32, big: Option<bool>) -> Result<Self> {
+		Self::create_with(path, width, height, bits, 3, rows_per_strip, big)
+	}
+
+	/// [`create_as`](Self::create_as) with the number of samples per pixel:
+	/// 3 (RGB) or 4 (RGBA, unassociated alpha).
+	pub fn create_with(path: &Path, width: u32, height: u32, bits: u16, samples: u16, rows_per_strip: u32, big: Option<bool>) -> Result<Self> {
 		ensure!(bits == 8 || bits == 16, "bits must be 8 or 16, got {bits}");
+		ensure!(samples == 3 || samples == 4, "samples must be 3 or 4, got {samples}");
 		ensure!(width > 0 && height > 0 && rows_per_strip > 0, "empty image");
-		let data = u64::from(width) * u64::from(height) * 3 * u64::from(bits / 8);
+		let data = u64::from(width) * u64::from(height) * u64::from(samples) * u64::from(bits / 8);
 		// Headroom for the IFD and strip tables.
 		let needs_big = data + (1 << 20) >= u64::from(u32::MAX);
 		ensure!(big != Some(false) || !needs_big, "{width} × {height} does not fit a classic TIFF");
 		let big = big.unwrap_or(needs_big);
-		let file = File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+		let file = File::create(path)?;
 		let mut out = BufWriter::with_capacity(8 << 20, file);
 		let header_len = if big {
 			// "II", 43, offset size 8, reserved 0, first IFD offset (patched later)
@@ -74,6 +94,7 @@ impl TiffWriter {
 			width,
 			height,
 			bits,
+			samples,
 			rows_per_strip,
 			offsets: Vec::new(),
 			counts: Vec::new(),
@@ -94,10 +115,10 @@ impl TiffWriter {
 	/// Bytes of one full strip.
 	pub fn strip_bytes(&self, strip: u32) -> usize {
 		let rows = self.rows_per_strip.min(self.height - strip * self.rows_per_strip);
-		self.width as usize * rows as usize * 3 * usize::from(self.bits / 8)
+		self.width as usize * rows as usize * usize::from(self.samples) * usize::from(self.bits / 8)
 	}
 
-	/// Append the next strip (samples interleaved RGB, little-endian 16-bit).
+	/// Append the next strip (samples interleaved RGB or RGBA, little-endian 16-bit).
 	pub fn write_strip(&mut self, data: &[u8]) -> Result<()> {
 		let strip = self.offsets.len() as u32;
 		ensure!(strip < self.strip_count(), "more strips than the image has");
@@ -128,10 +149,11 @@ impl TiffWriter {
 			self.position += 1;
 		}
 		let ifd_offset = self.position;
-		let bits = [self.bits; 3];
+		let bits = vec![self.bits; usize::from(self.samples)];
 
 		// Out-of-line data goes after the IFD; compute where.
-		let entries: u64 = 13;
+		let alpha = self.samples == 4;
+		let entries: u64 = if alpha { 14 } else { 13 };
 		let (entry_size, count_size, next_size) = if self.big { (20u64, 8u64, 8u64) } else { (12, 2, 4) };
 		let mut extra = ifd_offset + count_size + entries * entry_size + next_size;
 		let inline_limit = if self.big { 8 } else { 4 };
@@ -144,11 +166,11 @@ impl TiffWriter {
 		let mut tags: Vec<(u16, u16, u64, Vec<u8>)> = vec![
 			(256, LONG, 1, self.width.to_le_bytes().to_vec()),
 			(257, LONG, 1, self.height.to_le_bytes().to_vec()),
-			(258, SHORT, 3, bits.iter().flat_map(|b| b.to_le_bytes()).collect()),
+			(258, SHORT, u64::from(self.samples), bits.iter().flat_map(|b| b.to_le_bytes()).collect()),
 			(259, SHORT, 1, 1u16.to_le_bytes().to_vec()), // no compression
 			(262, SHORT, 1, 2u16.to_le_bytes().to_vec()), // RGB
 			(273, off_type, n_strips, pack(&self.offsets, off_width)),
-			(277, SHORT, 1, 3u16.to_le_bytes().to_vec()),
+			(277, SHORT, 1, self.samples.to_le_bytes().to_vec()),
 			(278, LONG, 1, self.rows_per_strip.to_le_bytes().to_vec()),
 			(279, off_type, n_strips, pack(&self.counts, off_width)),
 			(282, RATIONAL, 1, [72u32.to_le_bytes(), 1u32.to_le_bytes()].concat()),
@@ -156,6 +178,9 @@ impl TiffWriter {
 			(284, SHORT, 1, 1u16.to_le_bytes().to_vec()), // chunky
 			(296, SHORT, 1, 2u16.to_le_bytes().to_vec()), // inch
 		];
+		if alpha {
+			tags.push((338, SHORT, 1, 2u16.to_le_bytes().to_vec())); // unassociated alpha
+		}
 		debug_assert_eq!(tags.len() as u64, entries);
 		tags.sort_by_key(|t| t.0);
 

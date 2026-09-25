@@ -19,7 +19,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 
-use crate::tiffw::TiffWriter;
+use fx_io::tiff_write::TiffWriter;
 
 /// Rows per strip / generated band.
 pub const BAND_ROWS: u32 = 256;
@@ -43,7 +43,7 @@ pub fn generate(out: &Path, width: u32, height: u32, bits: u8, seed: u64) -> Res
 			for band in rx {
 				writer.write_strip(&band)?;
 			}
-			writer.finish()
+			Ok(writer.finish()?)
 		})
 		.context("cannot start the writer thread")?;
 

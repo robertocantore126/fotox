@@ -50,6 +50,8 @@ pub(crate) enum Internal {
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
 	},
+	/// An export finished or failed (M3).
+	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
 	/// The B3 layers are built (M2-T08).
 	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
 	/// A layer thumbnail finished rendering.
@@ -238,6 +240,10 @@ impl Engine {
 				}
 				Changed::default()
 			}
+			EngineInput::Export(path) => {
+				self.export(path);
+				Changed::default()
+			}
 			EngineInput::Shutdown => Changed::default(),
 		};
 		self.apply(changed);
@@ -354,6 +360,8 @@ impl Engine {
 			// The shell answers dlg:open with the native file dialog and sends
 			// the chosen files as `EngineInput::Open`.
 			"dlg:open" => return Changed::default(),
+			// Likewise export: the save dialog, then `EngineInput::Export`.
+			"export:png" | "export:tiff" => return Changed::default(),
 			_ => {}
 		}
 		if let Some(changed) = self.view_mut().action(id) {
@@ -421,8 +429,78 @@ impl Engine {
 		}
 	}
 
+	/// Export the active document as a job on a worker thread, with progress.
+	fn export(&mut self, path: PathBuf) {
+		let Some(open) = self.docs.active_mut() else {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Open a document to export it".into(),
+			});
+			return;
+		};
+		// A snapshot: editing may go on while the export runs.
+		let doc = open.doc.clone();
+		let options = match crate::export::options_for(&doc, &path) {
+			Ok(options) => options,
+			Err(error) => {
+				self.to_ui(&EngineToUi::Error {
+					text: format!("Cannot export {}: {error}", path.display()),
+				});
+				return;
+			}
+		};
+		self.next_task += 1;
+		let task = self.next_task;
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		let label = format!(
+			"Exporting {}",
+			path.file_name()
+				.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+		);
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: label.clone(),
+			fraction: 0.0,
+		});
+		let spawned = std::thread::Builder::new().name(format!("export-{task}")).spawn(move || {
+			let mut report = |fraction: f32| {
+				let _ = internal.send(Internal::Progress {
+					task,
+					label: label.clone(),
+					fraction,
+				});
+				true
+			};
+			let result = crate::export::export_document(&doc, &store, &path, options, &mut report);
+			let _ = internal.send(Internal::Exported { task, path, result });
+		});
+		if let Err(error) = spawned {
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot start the export: {error}"),
+			});
+		}
+	}
+
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::Exported { task, path, result } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				match result {
+					Ok(()) => {
+						tracing::info!("exported {}", path.display());
+						self.to_ui(&EngineToUi::Toast {
+							text: format!("Exported {}", path.display()),
+						});
+					}
+					Err(IoError::Cancelled) => {}
+					Err(error) => {
+						tracing::warn!("cannot export {}: {error}", path.display());
+						self.to_ui(&EngineToUi::Error {
+							text: format!("Could not export {}: {error}", path.display()),
+						});
+					}
+				}
+			}
 			Internal::B3Built { task, doc, layers } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				let Some(open) = self.docs.get_mut(doc) else { return };
