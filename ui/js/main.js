@@ -17,6 +17,7 @@ import { runAction } from "./actions.js";
 import { initShortcuts } from "./shortcuts.js";
 import * as bridge from "./native/bridge.js";
 import { UI, ENGINE } from "./native/protocol.js";
+import { initNativePanels } from "./native/layers-panel.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -223,6 +224,7 @@ async function boot() {
   });
 
   // engine bridge ------------------------------------------------------
+  if (bridge.isNative) initNativePanels();
   bridge.on(ENGINE.TOAST, (m) => toast(m.text));
   bridge.on(ENGINE.ERROR, (m) => toast(m.text, "error"));
   // Pointer input over the viewport belongs to the engine only while no

@@ -41,6 +41,7 @@ const combos = [
   ["ctrl+h", "Extras", "toggle:extras"],
   ["ctrl+shift+z", "Redo", "hist:redo"],
   ["ctrl+z", "Undo", "hist:undo"],
+  ["ctrl+alt+z", "Toggle Last State", "hist:toggle"],
   ["f5", "Brush panel", "panel:toggle:brush"],
   ["f6", "Colour panel", "panel:toggle:color"],
   ["f7", "Layers panel", "panel:toggle:layers"],

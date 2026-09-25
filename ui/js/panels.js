@@ -6,6 +6,8 @@ import { openDropdown } from "./popup.js";
 import { openMenuPopup } from "./menu.js";
 import { state, emit, on, setColors } from "./state.js";
 import { getDocCanvas } from "./canvas.js";
+import * as bridge from "./native/bridge.js";
+import * as nativePanels from "./native/layers-panel.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -197,6 +199,7 @@ const renderers = {
   },
 
   layers() {
+    if (bridge.isNative) return nativePanels.layersPanel();
     const wrap = h("div", { class: "players" });
     const modeBtn = h("button", {
       class: "pf-input grow", type: "button", "data-tip": "Blend mode",
@@ -257,6 +260,7 @@ const renderers = {
   },
 
   history() {
+    if (bridge.isNative) return nativePanels.historyPanel();
     const list = h("div", { class: "plist" });
     const snap = listRow({ label: "Snapshot 1", thumb: h("span", { class: "pthumb snap" }, icon("i-image", "ic sm")), extra: h("span", { class: "pmeta", text: "" }) });
     list.append(snap);

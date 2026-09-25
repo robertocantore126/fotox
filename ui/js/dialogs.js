@@ -9,13 +9,25 @@ import { getDocCanvas } from "./canvas.js";
 
 let stack = [];
 
+// `overrides` may also carry, for dialogs that edit something live (M2-T04,
+// adjustment layers in the app):
+//   values:   { "Brightness:": 20, "Use Legacy": true, … } starting values by field label
+//   onChange: (values) => …  called on every slider / checkbox change
+//   onOk:     (values) => …  instead of the mock toast
+//   onCancel: () => …        Cancel, ×, Escape or a click outside
 export function openDialog(id, overrides = {}) {
   const def = { ...dialogDef(id), ...overrides };
+  const fields = def.values ? withValues(def.fields || [], def.values) : def.fields || [];
   const body = h("div", { class: "dlg-body" });
-  const cols = (def.fields || []).some((f) => f.type === "col");
+  const cols = fields.some((f) => f.type === "col");
   const grid = h("div", { class: "dlg-fields" + (cols ? " cols" : "") + (def.wide ? " wide" : "") });
-  for (const field of def.fields || []) grid.append(renderField(field));
+  for (const field of fields) grid.append(renderField(field));
   body.append(grid);
+  if (def.onChange) {
+    const changed = () => def.onChange(readValues(grid));
+    grid.querySelectorAll(".dlg-range").forEach((r) => r.addEventListener("input", changed));
+    grid.querySelectorAll(".dlg-check").forEach((c) => c.addEventListener("click", changed));
+  }
 
   const titleBar = h("div", { class: "dlg-title" },
     def.icon ? icon(def.icon, "ic sm") : null,
@@ -24,7 +36,14 @@ export function openDialog(id, overrides = {}) {
 
   const footer = h("div", { class: "dlg-footer" });
   const cancel = def.cancel === null ? null : h("button", { class: "btn", type: "button", text: def.cancel || "Cancel", onclick: () => close() });
-  const ok = def.ok === null ? null : h("button", { class: "btn primary", type: "button", text: def.ok || "OK", onclick: () => { emit("mock", def.title); close(); } });
+  const ok = def.ok === null ? null : h("button", {
+    class: "btn primary", type: "button", text: def.ok || "OK",
+    onclick: () => {
+      if (def.onOk) def.onOk(readValues(grid));
+      else emit("mock", def.title);
+      close(undefined, true);
+    },
+  });
   if (cancel) footer.append(cancel);
   if (ok) footer.append(ok);
 
@@ -33,7 +52,7 @@ export function openDialog(id, overrides = {}) {
     h("div", { class: "modal-scrim", onclick: () => close() }),
     dlg);
   popupLayer().append(wrap);
-  stack.push({ wrap, id });
+  stack.push({ wrap, id, onCancel: def.onCancel });
   emit("overlays");
 
   const rect = dlg.getBoundingClientRect();
@@ -51,13 +70,41 @@ export function closeTopDialog() {
   return !!top;
 }
 
-function close(entry) {
+function close(entry, confirmed = false) {
   const idx = entry ? stack.findIndex((s) => s === entry) : stack.length - 1;
   if (idx < 0) return;
   const [removed] = stack.splice(idx, 1);
+  if (!confirmed && removed.onCancel) removed.onCancel();
   emit("overlays");
   removed.wrap.classList.remove("in");
   setTimeout(() => removed.wrap.remove(), 120);
+}
+
+/** Copy of `fields` with starting values set by field label (recursing into rows/groups). */
+function withValues(fields, values) {
+  return fields.map((f) => {
+    if (f.fields) return { ...f, fields: withValues(f.fields, values) };
+    if (f.label && Object.prototype.hasOwnProperty.call(values, f.label)) {
+      return f.type === "check" ? { ...f, on: !!values[f.label] } : { ...f, value: values[f.label] };
+    }
+    return f;
+  });
+}
+
+/** Current slider and checkbox values of a dialog, by field label. */
+function readValues(grid) {
+  const values = {};
+  grid.querySelectorAll(".dlg-line").forEach((line) => {
+    const label = line.querySelector(".dlg-field-label");
+    const range = line.querySelector(".dlg-range");
+    if (label && range) values[label.textContent] = Number(range.value);
+  });
+  grid.querySelectorAll(".dlg-checkline").forEach((line) => {
+    const box = line.querySelector(".dlg-check");
+    const label = line.querySelector("span:last-child");
+    if (box && label) values[label.textContent] = box.classList.contains("on");
+  });
+  return values;
 }
 
 export function closeAllDialogs() {
