@@ -5,7 +5,7 @@
 //! With no document open, the view navigates a virtual 30 000² document
 //! ([`crate::view::VIRTUAL_DOC`]) drawn as a test pattern (M0).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -208,6 +208,9 @@ struct Engine {
 	stroke: Option<crate::stroke::Session>,
 	/// The document an export dialog was opened for (review S2-04).
 	export_doc: Option<DocId>,
+	/// Documents already told that a mip cannot be read, so the message is
+	/// sent once per document (review S3-03). Cleared when it closes.
+	mips_reported: HashSet<DocId>,
 }
 
 /// Cache key of the selection contour (M5-T03).
@@ -311,6 +314,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		selection_overlay: None,
 		stroke: None,
 		export_doc: None,
+		mips_reported: HashSet::new(),
 	};
 
 	loop {
@@ -1579,6 +1583,7 @@ impl Engine {
 	/// Close without asking (the document must already be clean).
 	fn force_close(&mut self, id: DocId) {
 		if self.docs.close(id).is_some() {
+			self.mips_reported.remove(&id);
 			self.thumbs_wanted.retain(|(d, _), _| *d != id);
 			self.thumbs_last.retain(|(d, _), _| *d != id);
 			self.thumbs_due.retain(|(d, _), _| *d != id);
@@ -2324,6 +2329,7 @@ impl Engine {
 			// The document changed meanwhile; the next frame asks again.
 			return;
 		}
+		let mut unreadable: Option<TileError> = None;
 		for request in &work.requests {
 			let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
 			let image = if request.mask {
@@ -2339,11 +2345,26 @@ impl Engine {
 			};
 			if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
 				tracing::warn!("mip {request:?} failed: {error}");
+				// Evicted is normal: the trim thread dropped a derived tile and
+				// the next frame asks again. Anything else (a corrupt chunk, a
+				// lost scratch file) would leave a silent hole, so say so once
+				// per document (review S3-03).
+				if !matches!(&error, TileError::Evicted) {
+					unreadable = Some(error);
+				}
 			}
 		}
 		doc.invalidate_snapshot();
-		if self.docs.active_id() == Some(work.doc) {
+		let doc_id = work.doc;
+		if self.docs.active_id() == Some(doc_id) {
 			self.request_frame();
+		}
+		if let Some(error) = unreadable
+			&& self.mips_reported.insert(doc_id)
+		{
+			self.to_ui(&EngineToUi::Error {
+				text: format!("A part of the image could not be read: {error}"),
+			});
 		}
 	}
 
