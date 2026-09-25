@@ -95,6 +95,8 @@ export function runAction(item) {
   }
 
   // documenti e schede ---------------------------------------------------
+  // In the app the engine closes the documents (sent above).
+  if ((a === "tab:close" || a === "tab:close-all") && bridge.isNative) return;
   if (a === "tab:close") { toast("Closing “Untitled-1” would close the document (mock)"); return; }
   if (a === "tab:close-all") { toast("All documents would be closed (mock)"); return; }
   if (a.startsWith("doc:recent")) { toast("Open recent document (mock)"); return; }
