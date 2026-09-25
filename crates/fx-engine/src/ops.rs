@@ -24,6 +24,8 @@ pub type ProgressFn = dyn Fn(f32) + Send + Sync;
 #[derive(Default)]
 pub struct EngineOps {
 	pub progress: Option<Arc<ProgressFn>>,
+	/// What Edit ▸ Copy put aside (M5-T05); jobs share it.
+	pub clipboard: fx_core::pixels::SharedClipboard,
 }
 
 impl PixelOps for EngineOps {
@@ -123,6 +125,10 @@ impl PixelOps for EngineOps {
 		store: &TileStore,
 	) -> Result<Option<Selection>, CommandError> {
 		fx_ops::morph::modify(selection, op, size, depth, store)
+	}
+
+	fn clipboard(&self) -> Option<fx_core::pixels::ClipboardImage> {
+		self.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 	}
 
 	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError> {

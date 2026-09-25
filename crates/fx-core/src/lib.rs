@@ -16,6 +16,7 @@ pub mod document;
 pub mod history;
 pub mod layer;
 pub mod ops;
+pub mod pixels;
 pub mod selection;
 
 pub use blend::BlendMode;

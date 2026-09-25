@@ -38,6 +38,19 @@ export function runAction(item) {
     return;
   }
 
+  // In the app, Edit ▸ Fill (Shift+F5) sends its values to the engine, which
+  // resolves the swatch colours (M5-T05).
+  if (a === "dlg:fill" && bridge.isNative) {
+    openDialog("fill", {
+      onOk: (v) => bridge.send({
+        type: UI.ACTION, id: "edit:fill",
+        args: { use: v["Use:"], mode: v["Mode:"], opacity: Number(v["Opacity:"]), preserve: !!v["Preserve Transparency"] },
+      }),
+    });
+    return;
+  }
+  // Clipboard, Fill shortcuts and masks from the selection are the engine's.
+  if (bridge.isNative && (a.startsWith("clip:") || a.startsWith("edit:fill") || a === "mask:reveal-sel" || a === "mask:hide-sel")) return;
   // In the app, Export As collects the options, then the shell shows the save
   // dialog for the chosen format and the engine exports (M3-T07).
   if (a === "dlg:export-as" && bridge.isNative) {

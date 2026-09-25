@@ -110,6 +110,12 @@ pub trait PixelOps: Send + Sync {
 	/// own pixels, or the composite with `sample_all_layers`. `None` when
 	/// nothing matches.
 	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError>;
+
+	/// What Edit ▸ Paste pastes (M5-T05): the engine's clipboard. `None` =
+	/// empty.
+	fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {
+		None
+	}
 }
 
 /// A colour conversion between two RGB spaces.

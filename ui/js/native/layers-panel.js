@@ -281,10 +281,11 @@ function renderLayers() {
   layersRoot.append(listEl);
 
   layersRoot.append(h("div", { class: "pbar" },
-    barBtn("i-mask", "Add layer mask", () => {
+    barBtn("i-mask", "Add layer mask (Alt: hide)", (btn, e) => {
       if (!a) return;
       if (a.has_mask) toast("The layer already has a mask");
-      else send({ op: "add_mask", layer: ref(a.id), fill: "reveal_all" });
+      // The engine makes it from the selection when there is one (M5-T05).
+      else bridge.send({ type: UI.ACTION, id: "mask:add", args: { alt: !!(e && e.altKey) } });
     }),
     barBtn("i-adjust", "Create new fill or adjustment layer", (btn) => openDropdown({
       anchor: btn, items: NEW_ADJUSTMENTS.map(([n]) => n), value: "", width: 200,
@@ -514,7 +515,7 @@ function lockBtn(ic, tip, on, enabled, fn) {
 }
 
 function barBtn(ic, tip, fn) {
-  return h("button", { class: "pbar-btn", type: "button", "data-tip": tip, onclick: (e) => { e.stopPropagation(); fn(e.currentTarget); } }, icon(ic, "ic sm"));
+  return h("button", { class: "pbar-btn", type: "button", "data-tip": tip, onclick: (e) => { e.stopPropagation(); fn(e.currentTarget, e); } }, icon(ic, "ic sm"));
 }
 
 function requestThumbnails() {

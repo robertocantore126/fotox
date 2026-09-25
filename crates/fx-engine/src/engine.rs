@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
-use fx_core::command::{LayerPropsPatch, NewLayer};
-use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef};
+use fx_core::command::{LayerPropsPatch, MaskFill, NewLayer};
+use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef, PixelOps};
 use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
@@ -110,6 +110,11 @@ pub(crate) enum Internal {
 		/// during the save keep it dirty.
 		generation: u64,
 		result: Result<Arc<FxdFile>, IoError>,
+	},
+	/// Copy Merged finished (M5-T05).
+	Copied {
+		task: u64,
+		result: Result<Option<fx_core::pixels::ClipboardImage>, String>,
 	},
 	/// The B3 layers are built (M2-T08).
 	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
@@ -384,6 +389,10 @@ impl Engine {
 				self.set_display_profile(bytes);
 				Changed { view: true, cursor: None }
 			}
+			EngineInput::PasteImage { width, height, rgba8 } => {
+				self.paste_image(width, height, &rgba8);
+				Changed::default()
+			}
 			EngineInput::Shutdown => Changed::default(),
 		};
 		self.apply(changed);
@@ -470,22 +479,26 @@ impl Engine {
 		};
 		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
 		let store = self.store.clone();
-		let result = {
-			let Some(tool) = self.tools.get(&tool_id) else {
-				return changed;
-			};
-			let Some(open) = self.docs.get_mut(doc_id) else {
-				return changed;
-			};
-			let mut ctx = ToolContext {
-				doc: &mut open.doc,
-				store: &store,
-				ops: &self.ops,
-				settings: &self.settings,
-				view: open.view.view,
-			};
-			tool.key(&mut ctx, key)
+		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
+			(Some(tool), Some(open)) => {
+				let mut ctx = ToolContext {
+					doc: &mut open.doc,
+					store: &store,
+					ops: &self.ops,
+					settings: &self.settings,
+					view: open.view.view,
+				};
+				tool.key(&mut ctx, key)
+			}
+			// A tool Fotox does not implement uses no key.
+			_ => ToolResult::default(),
 		};
+		// Delete / Backspace that no tool used: Edit ▸ Clear (M5-T05).
+		let unused = result.command.is_none() && !result.redraw && result.info.is_none() && result.cursor.is_none();
+		if unused && matches!(key, "Delete" | "Backspace") {
+			self.edit_action("clip:clear", &serde_json::Value::Null);
+			return changed;
+		}
 		self.apply_tool_result(doc_id, result, &mut changed);
 		changed
 	}
@@ -546,7 +559,13 @@ impl Engine {
 				self.view_message_pending = true;
 				Changed::default()
 			}
-			UiToEngine::Action { id, .. } => self.action(&id),
+			UiToEngine::Action { id, args } => {
+				if self.edit_action(&id, &args) {
+					Changed::default()
+				} else {
+					self.action(&id)
+				}
+			}
 			UiToEngine::SetZoom { doc, zoom } => match self.docs.get_mut(doc) {
 				Some(open) => open.view.set_zoom(zoom),
 				None if doc == VIRTUAL_DOC_ID => self.virtual_view.set_zoom(zoom),
@@ -987,6 +1006,7 @@ impl Engine {
 			fraction: 0.0,
 		});
 		let (store, internal) = (self.store.clone(), self.internal.clone());
+		let clipboard = self.ops.clipboard.clone();
 		let spawned = std::thread::Builder::new().name(format!("pixel-job-{task}")).spawn(move || {
 			let progress_internal = internal.clone();
 			let progress_label = label.clone();
@@ -998,6 +1018,7 @@ impl Engine {
 						fraction,
 					});
 				})),
+				clipboard,
 			};
 			let mut after = before;
 			let mut ctx = CommandContext {
@@ -1111,6 +1132,16 @@ impl Engine {
 							text: format!("Could not export {}: {error}", path.display()),
 						});
 					}
+				}
+			}
+			Internal::Copied { task, result } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				match result {
+					Ok(Some(clip)) => self.set_clipboard(clip),
+					Ok(None) => self.to_ui(&EngineToUi::Toast {
+						text: "Could not copy: the selected area is empty".into(),
+					}),
+					Err(text) => self.to_ui(&EngineToUi::Error { text }),
 				}
 			}
 			Internal::B3Built { task, doc, layers } => {
@@ -1699,6 +1730,229 @@ impl Engine {
 			self.command(doc_id, command);
 		}
 		true
+	}
+
+	/// Edit and Layer menu actions that use the selection or the clipboard
+	/// (M5-T05). `true` when `id` was one of them.
+	fn edit_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
+		let Some(doc_id) = self.docs.active_id() else {
+			return matches!(
+				id,
+				"clip:copy" | "clip:copy-merged" | "clip:cut" | "clip:paste" | "clip:paste-special" | "clip:clear" | "edit:fill"
+			);
+		};
+		let has_selection = self.docs.get(doc_id).is_some_and(|open| open.doc.selection.is_some());
+		match id {
+			"clip:copy" | "clip:cut" => {
+				if id == "clip:cut" && !has_selection {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Could not cut: nothing is selected".into(),
+					});
+					return true;
+				}
+				if self.copy_layer(doc_id) && id == "clip:cut" {
+					self.command(
+						doc_id,
+						Command::Clear {
+							layer: LayerRef::Active,
+							cut: true,
+						},
+					);
+				}
+			}
+			"clip:copy-merged" => self.copy_merged(doc_id),
+			"clip:paste" | "clip:paste-special" => {
+				let in_place = id == "clip:paste-special";
+				let Some(clip) = PixelOps::clipboard(&self.ops) else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "The clipboard is empty".into(),
+					});
+					return true;
+				};
+				let center = if in_place { None } else { self.paste_center(doc_id, clip.bounds) };
+				self.command(doc_id, Command::Paste { in_place, center });
+			}
+			"clip:clear" if has_selection => self.command(
+				doc_id,
+				Command::Clear {
+					layer: LayerRef::Active,
+					cut: false,
+				},
+			),
+			"clip:clear" => {}
+			// Edit ▸ Fill (Shift+F5) with the dialog's values, and the shortcuts:
+			// Alt+Backspace foreground, Ctrl+Backspace background, Shift keeps
+			// transparency.
+			"edit:fill" | "edit:fill-fg" | "edit:fill-bg" | "edit:fill-fg-preserve" | "edit:fill-bg-preserve" => {
+				let command = self.fill_command(id, args);
+				self.command(doc_id, command);
+			}
+			"layer:via-copy" | "layer:via-cut" if has_selection => self.command(doc_id, Command::LayerViaCopy { cut: id == "layer:via-cut" }),
+			"layer:via-cut" => self.to_ui(&EngineToUi::Toast {
+				text: "Layer via Cut needs a selection".into(),
+			}),
+			// The Layers panel's mask button: from the selection when there is
+			// one, Alt hides (Photoshop).
+			"mask:add" => {
+				let alt = args.get("alt").and_then(serde_json::Value::as_bool).unwrap_or(false);
+				let fill = match (has_selection, alt) {
+					(true, false) => MaskFill::RevealSelection,
+					(true, true) => MaskFill::HideSelection,
+					(false, false) => MaskFill::RevealAll,
+					(false, true) => MaskFill::HideAll,
+				};
+				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
+			}
+			"mask:reveal-sel" | "mask:hide-sel" => {
+				let fill = if id == "mask:hide-sel" {
+					MaskFill::HideSelection
+				} else {
+					MaskFill::RevealSelection
+				};
+				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
+			}
+			_ => return false,
+		}
+		true
+	}
+
+	/// The Fill command an action asks for; colours come from the swatches.
+	fn fill_command(&self, id: &str, args: &serde_json::Value) -> Command {
+		let text = |key: &str| args.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+		let (color, preserve) = match id {
+			"edit:fill-fg" => (self.settings.fg, false),
+			"edit:fill-bg" => (self.settings.bg, false),
+			"edit:fill-fg-preserve" => (self.settings.fg, true),
+			"edit:fill-bg-preserve" => (self.settings.bg, true),
+			_ => {
+				let color = match text("use").as_str() {
+					"Background Colour" => self.settings.bg,
+					"Black" => [0, 0, 0, u16::MAX],
+					"White" => [u16::MAX; 4],
+					"50% Grey" => [32768, 32768, 32768, u16::MAX],
+					_ => self.settings.fg,
+				};
+				(color, args.get("preserve").and_then(serde_json::Value::as_bool).unwrap_or(false))
+			}
+		};
+		let mode =
+			serde_json::from_value::<fx_core::BlendMode>(serde_json::Value::String(text("mode").to_lowercase().replace([' ', '-'], "_"))).unwrap_or_default();
+		let opacity = args
+			.get("opacity")
+			.and_then(serde_json::Value::as_f64)
+			.map_or(1.0, |v| (v / 100.0).clamp(0.0, 1.0));
+		Command::Fill {
+			layer: LayerRef::Active,
+			color,
+			mode,
+			opacity,
+			preserve_transparency: preserve,
+		}
+	}
+
+	/// Copy the active layer's selected pixels (M5-T05). `false` when there is
+	/// nothing to copy (a toast says why).
+	fn copy_layer(&mut self, doc_id: DocId) -> bool {
+		let store = self.store.clone();
+		let result = {
+			let Some(open) = self.docs.get(doc_id) else { return false };
+			let Some((image, offset)) = crate::clipboard::active_pixels(&open.doc) else {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Could not copy: the layer has no pixels".into(),
+				});
+				return false;
+			};
+			crate::clipboard::copy_layer(image, offset, open.doc.selection.as_ref(), (open.doc.width, open.doc.height), &store)
+		};
+		match result {
+			Ok(Some(clip)) => {
+				self.set_clipboard(clip);
+				true
+			}
+			Ok(None) => {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Could not copy: the selected area is empty".into(),
+				});
+				false
+			}
+			Err(error) => {
+				self.to_ui(&EngineToUi::Error { text: error.to_string() });
+				false
+			}
+		}
+	}
+
+	/// Edit ▸ Copy Merged (M5-T05): the composite of the visible layers under
+	/// the selection. The composite runs on a helper thread.
+	fn copy_merged(&mut self, doc_id: DocId) {
+		let Some(open) = self.docs.get(doc_id) else { return };
+		let doc = open.doc.clone();
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		self.next_task += 1;
+		let task = self.next_task;
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: "Copy Merged".into(),
+			fraction: 0.0,
+		});
+		let spawned = std::thread::Builder::new().name("copy-merged".into()).spawn(move || {
+			let ids: Vec<LayerId> = doc.layers.iter().map(|l| l.id).collect();
+			let result = crate::export::composite_layers(&doc, &ids, None, &store, None)
+				.map_err(|e| e.to_string())
+				.and_then(|merged| {
+					crate::clipboard::copy_layer(&merged, (0, 0), doc.selection.as_ref(), (doc.width, doc.height), &store).map_err(|e| e.to_string())
+				});
+			let _ = internal.send(Internal::Copied { task, result });
+		});
+		if let Err(error) = spawned {
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot copy: {error}"),
+			});
+		}
+	}
+
+	/// Keep `clip` as the clipboard, and share a small one with Windows.
+	fn set_clipboard(&mut self, clip: fx_core::pixels::ClipboardImage) {
+		let image = crate::clipboard::os_pixels(&clip, &self.store).unwrap_or_else(|error| {
+			tracing::warn!("the clipboard copy for Windows failed: {error}");
+			None
+		});
+		(self.output)(EngineOutput::ClipboardCopied { image });
+		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clip);
+	}
+
+	/// Where Paste centres the clipboard: `None` (keep the source position)
+	/// when that position is in view, else the view's centre (Photoshop).
+	fn paste_center(&self, doc_id: DocId, bounds: (i32, i32, i32, i32)) -> Option<(f64, f64)> {
+		let open = self.docs.get(doc_id)?;
+		let view = open.view.view;
+		let visible = open
+			.view
+			.viewport
+			.and_then(|viewport| view.visible_doc_rect(viewport, open.doc.width, open.doc.height));
+		let (x0, y0, x1, y1) = (f64::from(bounds.0), f64::from(bounds.1), f64::from(bounds.2), f64::from(bounds.3));
+		let in_view = visible.is_some_and(|(vx0, vy0, vx1, vy1)| x0 < vx1 && x1 > vx0 && y0 < vy1 && y1 > vy0);
+		let on_canvas = x0 < f64::from(open.doc.width) && y0 < f64::from(open.doc.height) && x1 > 0.0 && y1 > 0.0;
+		if in_view && on_canvas { None } else { Some((view.center_x, view.center_y)) }
+	}
+
+	/// An image from the Windows clipboard: it becomes the clipboard, then a
+	/// new layer (M5-T05).
+	fn paste_image(&mut self, width: u32, height: u32, rgba8: &[u8]) {
+		let Some(doc_id) = self.docs.active_id() else { return };
+		if rgba8.len() != (width as usize) * (height as usize) * 4 || width == 0 || height == 0 {
+			tracing::warn!("a clipboard image of the wrong size was ignored");
+			return;
+		}
+		let format = self
+			.docs
+			.get(doc_id)
+			.map_or(fx_tiles::PixelFormat::Rgba8, |open| open.doc.color.depth.rgba_format());
+		let clip = crate::clipboard::from_os(width, height, rgba8, format, &self.store);
+		let center = self.docs.get(doc_id).map(|open| (open.view.view.center_x, open.view.view.center_y));
+		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clip);
+		self.command(doc_id, Command::Paste { in_place: false, center });
 	}
 
 	fn load_b3(&mut self) {
