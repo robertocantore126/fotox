@@ -7,21 +7,22 @@
 
 use std::path::Path;
 
-use fx_core::{BitDepth, Document};
+use fx_core::{BitDepth, Document, LayerKind};
 use fx_io::export::{EXPORT_BAND_ROWS, ExportFormat, ExportOptions, export_image};
 use fx_io::{IoError, Progress};
 use fx_render::adjust::LutCache;
 use fx_render::blend::unpremultiply;
 use fx_render::build_program;
 use fx_render::reference::render_tile;
-use fx_tiles::{TILE_SIZE, TileStore};
+use fx_tiles::{PixelFormat, TILE_SIZE, TileSlot, TileStore};
 use rayon::prelude::*;
 
 const _: () = assert!(EXPORT_BAND_ROWS == TILE_SIZE, "one band = one row of tiles");
 
 /// Options for exporting `doc` to `path`: the format from the extension, the
-/// document's bit depth (8-bit only for JPEG-like targets later), transparency kept.
-pub fn options_for(doc: &Document, path: &Path) -> Result<ExportOptions, IoError> {
+/// document's bit depth, its ppi; transparency kept unless `opaque` (see
+/// [`opaque_background`]).
+pub fn options_for(doc: &Document, path: &Path, opaque: bool) -> Result<ExportOptions, IoError> {
 	let format = ExportFormat::from_path(path).ok_or_else(|| IoError::Unsupported("export to this file type (use .tif or .png)".into()))?;
 	let bits = match doc.color.depth {
 		BitDepth::U8 => 8,
@@ -30,8 +31,48 @@ pub fn options_for(doc: &Document, path: &Path) -> Result<ExportOptions, IoError
 	Ok(ExportOptions {
 		format,
 		bits,
-		alpha: true,
+		alpha: !opaque,
 		ppi: doc.ppi,
+	})
+}
+
+/// Whether the composite is certainly opaque everywhere: the bottom visible
+/// root layer covers the canvas with opaque pixels at full opacity, no mask.
+/// Every layer above then keeps alpha at 1 (source-over and source-atop both
+/// do, whatever the blend mode). Reads that layer's tiles once, in parallel.
+pub fn opaque_background(doc: &Document, store: &TileStore) -> bool {
+	let Some(bottom) = doc.layers.iter().find(|l| l.visible) else { return false };
+	if bottom.opacity < 1.0 || bottom.fill < 1.0 || bottom.mask.is_some() {
+		return false;
+	}
+	let image = match &bottom.kind {
+		LayerKind::SolidFill { rgba } => return rgba[3] == u16::MAX,
+		LayerKind::Pixel { image, offset: (0, 0) } if image.width() >= doc.width && image.height() >= doc.height => image,
+		_ => return false,
+	};
+	let (tiles_x, tiles_y) = (doc.width.div_ceil(TILE_SIZE), doc.height.div_ceil(TILE_SIZE));
+	(0..tiles_x * tiles_y).into_par_iter().all(|i| {
+		let (tx, ty) = (i % tiles_x, i / tiles_x);
+		match image.slot(0, tx, ty) {
+			TileSlot::Empty => false,
+			TileSlot::Solid(v) => v.0[3] == u16::MAX,
+			TileSlot::Data(handle) => {
+				let Ok(tile) = store.get(handle) else { return false };
+				// Only the pixels inside the canvas count.
+				let cols = TILE_SIZE.min(doc.width - tx * TILE_SIZE) as usize;
+				let rows = TILE_SIZE.min(doc.height - ty * TILE_SIZE) as usize;
+				let row_opaque = |row: usize| match tile.format() {
+					PixelFormat::Rgba8 => tile.bytes()[row * TILE_SIZE as usize * 4..][..cols * 4]
+						.chunks_exact(4)
+						.all(|p| p[3] == u8::MAX),
+					PixelFormat::Rgba16 => tile.as_u16()[row * TILE_SIZE as usize * 4..][..cols * 4]
+						.chunks_exact(4)
+						.all(|p| p[3] == u16::MAX),
+					PixelFormat::Gray8 | PixelFormat::Gray16 => true,
+				};
+				(0..rows).all(row_opaque)
+			}
+		}
 	})
 }
 
@@ -74,8 +115,8 @@ fn to_u16(v: f64) -> u16 {
 mod tests {
 	use std::sync::Arc;
 
-	use fx_core::{ColorProfile, Document, DocumentColor, Layer, LayerKind};
-	use fx_tiles::{PixelFormat, PixelValue, TileBuffer, TileClass, TileSlot, TileStore, TileStoreConfig, TiledImage};
+	use fx_core::{ColorProfile, Document, DocumentColor, Layer};
+	use fx_tiles::{PixelValue, TileBuffer, TileClass, TileStoreConfig, TiledImage};
 
 	use super::*;
 
@@ -132,7 +173,8 @@ mod tests {
 		let store = TileStore::new(TileStoreConfig::for_tests(dir().join("scratch"))).unwrap();
 		let doc = document(&store);
 		let path = dir().join("composite.png");
-		let options = options_for(&doc, &path).unwrap();
+		assert!(opaque_background(&doc, &store), "the red background is opaque");
+		let options = options_for(&doc, &path, false).unwrap();
 		assert_eq!(
 			options,
 			ExportOptions {
@@ -171,6 +213,65 @@ mod tests {
 	fn unknown_extension_is_refused() {
 		let store = TileStore::new(TileStoreConfig::for_tests(dir().join("scratch2"))).unwrap();
 		let doc = document(&store);
-		assert!(options_for(&doc, Path::new("x.jpg")).is_err());
+		assert!(options_for(&doc, Path::new("x.jpg"), true).is_err());
+	}
+}
+
+#[cfg(test)]
+mod opaque_tests {
+	use std::sync::Arc;
+
+	use fx_core::{ColorProfile, Document, DocumentColor, Layer};
+	use fx_tiles::{PixelValue, TileBuffer, TileClass, TileStoreConfig, TiledImage};
+
+	use super::*;
+
+	fn doc_with(image: TiledImage) -> Document {
+		let mut doc = Document::new(
+			300,
+			200,
+			DocumentColor {
+				depth: BitDepth::U8,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		let id = doc.allocate_layer_id();
+		doc.layers
+			.push(Arc::new(Layer::new(id, "Background", LayerKind::Pixel { image, offset: (0, 0) })));
+		doc
+	}
+
+	/// A 300 × 200 Rgba8 image: opaque inside, transparent beyond the canvas
+	/// in the edge tile (as an import leaves it), with one pixel of alpha `hole`.
+	fn image(store: &TileStore, hole: u8) -> TiledImage {
+		let mut image = TiledImage::new(300, 200, PixelFormat::Rgba8);
+		image.set_slot(0, 0, TileSlot::Solid(PixelValue::rgba8(10, 20, 30, 255)));
+		let mut tile = TileBuffer::zeroed(PixelFormat::Rgba8);
+		let bytes = tile.bytes_mut();
+		for y in 0..200 {
+			for x in 0..44 {
+				bytes[(y * 256 + x) * 4..][..4].copy_from_slice(&[1, 2, 3, 255]);
+			}
+		}
+		bytes[(199 * 256 + 43) * 4 + 3] = hole;
+		image.set_slot(1, 0, TileSlot::Data(store.insert(tile, TileClass::Authoritative)));
+		image
+	}
+
+	#[test]
+	fn opaque_only_when_every_canvas_pixel_is() {
+		let dir = std::env::temp_dir().join("fx-engine-opaque-tests");
+		let store = TileStore::new(TileStoreConfig::for_tests(dir)).unwrap();
+		assert!(opaque_background(&doc_with(image(&store, 255)), &store));
+		assert!(!opaque_background(&doc_with(image(&store, 254)), &store));
+
+		let mut doc = doc_with(image(&store, 255));
+		Arc::make_mut(&mut doc.layers[0]).opacity = 0.5;
+		assert!(!opaque_background(&doc, &store), "half opacity");
+
+		let mut doc = doc_with(image(&store, 255));
+		Arc::make_mut(&mut doc.layers[0]).visible = false;
+		assert!(!opaque_background(&doc, &store), "no visible layer");
 	}
 }
