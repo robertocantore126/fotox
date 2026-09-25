@@ -4,9 +4,10 @@
 //! baked on the CPU into a [`Lut`] (4096 entries per channel, f32) and applied
 //! by the compositor with linear interpolation — identical math on CPU and GPU.
 //!
-//! Implemented here: Invert, Levels, Curves, Exposure.
-//! M2-T04 (DeepSeek): Brightness/Contrast (bake as LUT here) and
-//! Hue/Saturation (per pixel, `AdjustKind::HueSaturation` in the compositor).
+//! Implemented here: Invert, Levels, Curves, Exposure, Brightness/Contrast
+//! (LUTs), and [`hue_saturation`] (per pixel).
+//! Hue/Saturation is applied per pixel by the compositor
+//! (`AdjustKind::HueSaturation`), same math on CPU and GPU.
 //! Formulas marked VERIFY are checked against Photoshop in M7.
 
 use std::collections::HashMap;
@@ -61,7 +62,10 @@ pub fn bake(adjustment: &Adjustment) -> Lut {
 				linear_to_srgb(linear.max(0.0).powf(1.0 / g))
 			})
 		}
-		Adjustment::BrightnessContrast { .. } => todo!("M2-T04: Brightness/Contrast curve"),
+		Adjustment::BrightnessContrast { brightness, contrast, legacy } => {
+			let (b, c, legacy) = (*brightness as f64, *contrast as f64, *legacy);
+			Box::new(move |_, x| brightness_contrast(x, b, c, legacy))
+		}
 		Adjustment::HueSaturation { .. } => panic!("Hue/Saturation is not a per-channel LUT"),
 	};
 	let entries = (0..LUT_SIZE)
@@ -99,6 +103,111 @@ fn params_key(adjustment: &Adjustment) -> u64 {
 	// serde_json is deterministic for these types and avoids hashing f32 by hand.
 	serde_json::to_string(adjustment).expect("adjustments serialise").hash(&mut h);
 	h.finish()
+}
+
+/// Brightness/Contrast of one channel value `x` in 0..=1 (M2-T04).
+///
+/// Parameters are in the dialog's units: brightness −150..=150, contrast
+/// −100..=100.
+/// * **Legacy** (`legacy: true`): linear, `(x − 0.5)·k + 0.5 + b` with
+///   `b = brightness / 255` and the contrast slope
+///   `k = 1 + c` for `c = contrast / 100 < 0`, `k = 1 / (1 − c)` for `c ≥ 0`
+///   (so +100 is a step at 0.5). Clips at 0 and 1.
+/// * **Modern**: a curve through (0, 0) and (1, 1) that never clips —
+///   brightness as a gamma `x^(1/g)`, `g = 2^(brightness / 100)`, then
+///   contrast as the S-curve `x^p / (x^p + (1 − x)^p)` through (0.5, 0.5),
+///   `p = 1 + 2c` for more contrast, `p = 1 + 0.8c` for less.
+///
+/// VERIFY both against Photoshop (M7).
+pub fn brightness_contrast(x: f64, brightness: f64, contrast: f64, legacy: bool) -> f64 {
+	let c = (contrast / 100.0).clamp(-1.0, 1.0);
+	if legacy {
+		let k = if c < 0.0 {
+			1.0 + c
+		} else if c < 1.0 {
+			1.0 / (1.0 - c)
+		} else {
+			f64::INFINITY
+		};
+		let y = if k.is_infinite() {
+			if x >= 0.5 { 1.0 } else { 0.0 }
+		} else {
+			(x - 0.5) * k + 0.5
+		};
+		return (y + brightness / 255.0).clamp(0.0, 1.0);
+	}
+	let g = 2f64.powf(brightness / 100.0);
+	let y = x.clamp(0.0, 1.0).powf(1.0 / g);
+	let p = if c >= 0.0 { 1.0 + 2.0 * c } else { 1.0 + 0.8 * c };
+	if y <= 0.0 || y >= 1.0 {
+		return y;
+	}
+	let (a, b) = (y.powf(p), (1.0 - y).powf(p));
+	a / (a + b)
+}
+
+/// Master Hue/Saturation of one straight RGB pixel (M2-T04). Per pixel, not a
+/// LUT; `gpu/composite.wgsl` (`hue_saturation`) is the same math in f32.
+///
+/// Parameters in the dialog's units: hue −180..=180° (colorize: 0..=360°),
+/// saturation −100..=100 (colorize: 0..=100), lightness −100..=100.
+/// * Normal: in HSL, hue rotated, saturation scaled by `1 + saturation/100`
+///   (so greys stay grey), lightness kept.
+/// * Colorize: hue and saturation replaced, HSL lightness kept.
+/// * Then lightness blends towards white (> 0) or black (< 0).
+///
+/// VERIFY against Photoshop (M7).
+pub fn hue_saturation(rgb: [f64; 3], hue: f64, saturation: f64, lightness: f64, colorize: bool) -> [f64; 3] {
+	let (h, s, l) = rgb_to_hsl(rgb);
+	let out = if colorize {
+		hsl_to_rgb((hue / 360.0).rem_euclid(1.0), (saturation / 100.0).clamp(0.0, 1.0), l)
+	} else {
+		let s = (s * (1.0 + saturation / 100.0)).clamp(0.0, 1.0);
+		hsl_to_rgb((h + hue / 360.0).rem_euclid(1.0), s, l)
+	};
+	let k = (lightness / 100.0).clamp(-1.0, 1.0);
+	out.map(|v| if k >= 0.0 { v + (1.0 - v) * k } else { v * (1.0 + k) })
+}
+
+/// Straight RGB → (hue 0..1, saturation, lightness).
+fn rgb_to_hsl([r, g, b]: [f64; 3]) -> (f64, f64, f64) {
+	let max = r.max(g).max(b);
+	let min = r.min(g).min(b);
+	let l = (max + min) / 2.0;
+	let d = max - min;
+	if d <= 0.0 {
+		return (0.0, 0.0, l);
+	}
+	let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+	let h = if max == r {
+		(g - b) / d + if g < b { 6.0 } else { 0.0 }
+	} else if max == g {
+		(b - r) / d + 2.0
+	} else {
+		(r - g) / d + 4.0
+	};
+	(h / 6.0, s, l)
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [f64; 3] {
+	if s <= 0.0 {
+		return [l; 3];
+	}
+	let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+	let p = 2.0 * l - q;
+	let channel = |t: f64| {
+		let t = t.rem_euclid(1.0);
+		if t < 1.0 / 6.0 {
+			p + (q - p) * 6.0 * t
+		} else if t < 0.5 {
+			q
+		} else if t < 2.0 / 3.0 {
+			p + (q - p) * (2.0 / 3.0 - t) * 6.0
+		} else {
+			p
+		}
+	};
+	[channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0)]
 }
 
 fn levels(ch: &LevelsChannel, x: f64) -> f64 {
@@ -222,5 +331,68 @@ mod tests {
 		let a = cache.get(&Adjustment::Invert);
 		let b = cache.get(&Adjustment::Invert);
 		assert!(Arc::ptr_eq(&a, &b));
+	}
+
+	#[test]
+	fn brightness_contrast_identity_endpoints_and_direction() {
+		for legacy in [false, true] {
+			for i in 0..=20 {
+				let x = i as f64 / 20.0;
+				assert!(
+					(brightness_contrast(x, 0.0, 0.0, legacy) - x).abs() < 1e-12,
+					"identity at {x} (legacy {legacy})"
+				);
+			}
+		}
+		// Modern: endpoints never move, brightness lifts the midtones, contrast
+		// makes an S around 0.5, and the curve stays monotonic.
+		for (b, c) in [(150.0, 0.0), (-150.0, 0.0), (0.0, 100.0), (0.0, -100.0), (60.0, 40.0)] {
+			assert_eq!(brightness_contrast(0.0, b, c, false), 0.0);
+			assert_eq!(brightness_contrast(1.0, b, c, false), 1.0);
+			let mut last = 0.0;
+			for i in 0..=100 {
+				let y = brightness_contrast(i as f64 / 100.0, b, c, false);
+				assert!(y >= last - 1e-12, "monotonic for ({b}, {c})");
+				last = y;
+			}
+		}
+		assert!(brightness_contrast(0.5, 50.0, 0.0, false) > 0.5);
+		assert!(brightness_contrast(0.25, 0.0, 50.0, false) < 0.25);
+		assert!(brightness_contrast(0.75, 0.0, 50.0, false) > 0.75);
+		assert!((brightness_contrast(0.5, 0.0, 80.0, false) - 0.5).abs() < 1e-12);
+		// Legacy is the linear formula, clipped.
+		assert!((brightness_contrast(0.6, 25.5, 0.0, true) - 0.7).abs() < 1e-12);
+		assert!((brightness_contrast(0.75, 0.0, 50.0, true) - 1.0).abs() < 1e-12, "slope 2 around 0.5");
+		assert!((brightness_contrast(0.75, 0.0, -50.0, true) - 0.625).abs() < 1e-12, "slope 0.5");
+		// A LUT bakes the same function.
+		let lut = bake(&Adjustment::BrightnessContrast {
+			brightness: 30.0,
+			contrast: 20.0,
+			legacy: false,
+		});
+		let x = 1234.0 / (LUT_SIZE - 1) as f64;
+		assert!((lut.apply([x; 3])[0] - brightness_contrast(x, 30.0, 20.0, false)).abs() < 1e-6);
+	}
+
+	#[test]
+	fn hue_saturation_basics() {
+		let close = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9);
+		let red = [1.0, 0.0, 0.0];
+		assert!(close(hue_saturation(red, 0.0, 0.0, 0.0, false), red), "identity");
+		assert!(close(hue_saturation(red, 120.0, 0.0, 0.0, false), [0.0, 1.0, 0.0]), "red + 120° = green");
+		assert!(close(hue_saturation(red, -120.0, 0.0, 0.0, false), [0.0, 0.0, 1.0]), "red − 120° = blue");
+		let grey = [0.4, 0.4, 0.4];
+		assert!(close(hue_saturation(grey, 90.0, 100.0, 0.0, false), grey), "greys stay grey");
+		assert!(
+			close(hue_saturation([0.8, 0.4, 0.2], 0.0, -100.0, 0.0, false), [0.5; 3]),
+			"desaturate to HSL lightness"
+		);
+		assert!(close(hue_saturation(grey, 0.0, 0.0, 100.0, false), [1.0; 3]), "lightness +100 = white");
+		assert!(close(hue_saturation(grey, 0.0, 0.0, -100.0, false), [0.0; 3]), "lightness −100 = black");
+		// Colorize: fixed hue and saturation, lightness of the source.
+		let tinted = hue_saturation(grey, 240.0, 100.0, 0.0, true);
+		assert!(tinted[2] > tinted[0] && tinted[0] == tinted[1], "blue tint, got {tinted:?}");
+		let (_, _, l) = rgb_to_hsl(tinted);
+		assert!((l - 0.4).abs() < 1e-9);
 	}
 }

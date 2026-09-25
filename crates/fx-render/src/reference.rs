@@ -78,7 +78,12 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 			let cb = unpremultiply(*top);
 			let f = match adjust {
 				AdjustKind::Lut(lut) => lut.apply(cb),
-				AdjustKind::HueSaturation { .. } => todo!("M2-T04: Hue/Saturation"),
+				AdjustKind::HueSaturation {
+					hue,
+					saturation,
+					lightness,
+					colorize,
+				} => crate::adjust::hue_saturation(cb, *hue as f64, *saturation as f64, *lightness as f64, *colorize),
 			};
 			*top = composite(*blend, *top, f, *alpha as f64 * m, true);
 		}

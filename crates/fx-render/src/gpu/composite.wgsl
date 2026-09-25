@@ -13,6 +13,7 @@ const OUTSIDE: u32 = 0xFFFFFFFDu;
 // op kinds
 const K_LAYER: u32 = 0u;
 const K_ADJUST_LUT: u32 = 1u;
+const K_ADJUST_HUESAT: u32 = 2u;
 const K_BEGIN_ISOLATED: u32 = 3u;
 const K_BEGIN_PASS: u32 = 4u;
 const K_END_ISOLATED: u32 = 5u;
@@ -250,6 +251,64 @@ fn dissolve_hash(x: u32, y: u32, seed: u32) -> f32 {
 	return f32(h) / 4294967296.0;
 }
 
+// Master Hue/Saturation of a straight RGB pixel; the same math as
+// `adjust::hue_saturation` in f64. params = (hue°, saturation, lightness,
+// colorize as 0/1), all in the dialog's units.
+fn hue_saturation(rgb: vec3<f32>, params: vec4<f32>) -> vec3<f32> {
+	let hsl = rgb_to_hsl(rgb);
+	var out: vec3<f32>;
+	if params.w > 0.5 {
+		out = hsl_to_rgb(fract(params.x / 360.0), clamp(params.y / 100.0, 0.0, 1.0), hsl.z);
+	} else {
+		let s = clamp(hsl.y * (1.0 + params.y / 100.0), 0.0, 1.0);
+		out = hsl_to_rgb(fract(hsl.x + params.x / 360.0), s, hsl.z);
+	}
+	let k = clamp(params.z / 100.0, -1.0, 1.0);
+	if k >= 0.0 {
+		return out + (vec3<f32>(1.0) - out) * k;
+	}
+	return out * (1.0 + k);
+}
+
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+	let mx = max(c.r, max(c.g, c.b));
+	let mn = min(c.r, min(c.g, c.b));
+	let l = (mx + mn) / 2.0;
+	let d = mx - mn;
+	if d <= 0.0 {
+		return vec3<f32>(0.0, 0.0, l);
+	}
+	var s: f32;
+	if l > 0.5 { s = d / (2.0 - mx - mn); } else { s = d / (mx + mn); }
+	var h: f32;
+	if mx == c.r {
+		h = (c.g - c.b) / d + select(0.0, 6.0, c.g < c.b);
+	} else if mx == c.g {
+		h = (c.b - c.r) / d + 2.0;
+	} else {
+		h = (c.r - c.g) / d + 4.0;
+	}
+	return vec3<f32>(h / 6.0, s, l);
+}
+
+fn hsl_channel(p: f32, q: f32, t_in: f32) -> f32 {
+	let t = fract(t_in);
+	if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+	if t < 0.5 { return q; }
+	if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+	return p;
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
+	if s <= 0.0 {
+		return vec3<f32>(l);
+	}
+	var q: f32;
+	if l < 0.5 { q = l * (1.0 + s); } else { q = l + s - l * s; }
+	let p = 2.0 * l - q;
+	return vec3<f32>(hsl_channel(p, q, h + 1.0 / 3.0), hsl_channel(p, q, h), hsl_channel(p, q, h - 1.0 / 3.0));
+}
+
 fn lut_channel(row: u32, c: u32, v: f32) -> f32 {
 	let x = clamp(v, 0.0, 1.0) * f32(globals.lut_size - 1u);
 	let i = min(u32(floor(x)), globals.lut_size - 2u);
@@ -286,6 +345,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 				let cb = unpremultiply(stack[sp]);
 				let row = ops[i].lut_row;
 				let f = vec3<f32>(lut_channel(row, 0u, cb.r), lut_channel(row, 1u, cb.g), lut_channel(row, 2u, cb.b));
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_HUESAT: {
+				let cb = unpremultiply(stack[sp]);
+				let f = hue_saturation(cb, ops[i].params);
 				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
 			}
 			case K_BEGIN_ISOLATED: {
