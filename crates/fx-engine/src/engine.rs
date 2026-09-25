@@ -25,8 +25,9 @@ use crate::ops::EngineOps;
 use crate::render::{Frame, MipWork, RenderRequest};
 use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
+use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, filters, layers, mips};
+use crate::{EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -176,6 +177,10 @@ struct Engine {
 	/// Display LUTs built so far, most recent last: `(key, table)`.
 	/// `None` = that transform is (nearly) the identity: no LUT.
 	display_luts: Vec<(u64, Option<Arc<fx_color::Lut3d>>)>,
+	/// The viewport tools, created on first use (M5-T01).
+	tools: Tools,
+	/// Colours and option-bar values the tools read (M5-T01).
+	settings: ToolSettings,
 }
 
 /// What makes two consecutive edits "the same" for history merging.
@@ -269,6 +274,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		window_close_pending: false,
 		display_profile: None,
 		display_luts: Vec::new(),
+		tools: Tools::default(),
+		settings: ToolSettings::default(),
 	};
 
 	loop {
@@ -321,7 +328,12 @@ impl Engine {
 						pointer.buttons
 					);
 				}
-				self.view_mut().pointer(&pointer)
+				let outcome = self.view_mut().pointer(&pointer);
+				let mut changed = outcome.changed;
+				if !outcome.consumed {
+					changed = self.tool_pointer(&pointer, changed);
+				}
+				changed
 			}
 			EngineInput::Wheel { x, y, dx, dy, modifiers } => self.view_mut().wheel(x, y, dx, dy, modifiers),
 			EngineInput::ViewportResized { width, height } => {
@@ -378,6 +390,82 @@ impl Engine {
 			self.refresh_preview();
 			self.request_frame();
 			self.view_message_pending = true;
+		}
+	}
+
+	/// Route a pointer event the view did not consume to the active tool
+	/// (M5-T01): the event is mapped into document coordinates, the tool's
+	/// answer is applied here (a command, a cursor, a picked colour).
+	fn tool_pointer(&mut self, input: &crate::PointerInput, changed: Changed) -> Changed {
+		let mut changed = changed;
+		let Some(doc_id) = self.docs.active_id() else {
+			return changed;
+		};
+		// Map the event through the inverse of the view transform.
+		let (tool_id, event) = {
+			let Some(open) = self.docs.get_mut(doc_id) else {
+				return changed;
+			};
+			let Some(viewport) = open.view.viewport else {
+				return changed;
+			};
+			let (x, y) = open.view.view.screen_to_doc(viewport, input.x, input.y);
+			(
+				open.view.tool.clone(),
+				DocPointer {
+					kind: input.kind,
+					x,
+					y,
+					pressure: input.pressure,
+					tilt_x: input.tilt_x,
+					tilt_y: input.tilt_y,
+					buttons: input.buttons,
+					modifiers: input.modifiers,
+					time_us: input.time_us,
+				},
+			)
+		};
+		let store = self.store.clone();
+		let result = {
+			let Some(tool) = self.tools.get(&tool_id) else {
+				return changed;
+			};
+			let Some(open) = self.docs.get_mut(doc_id) else {
+				return changed;
+			};
+			let mut ctx = ToolContext {
+				doc: &mut open.doc,
+				store: &store,
+				ops: &self.ops,
+				settings: &self.settings,
+			};
+			tool.pointer(&mut ctx, &event)
+		};
+		self.apply_tool_result(doc_id, result, &mut changed);
+		changed
+	}
+
+	/// Apply what a tool answered (M5-T01): the cursor, a status line, a picked
+	/// colour for the UI, or a command to execute (R1).
+	fn apply_tool_result(&mut self, doc_id: DocId, result: ToolResult, changed: &mut Changed) {
+		if let Some(cursor) = result.cursor {
+			changed.cursor = Some(cursor);
+		}
+		if let Some(info) = result.info {
+			self.to_ui(&EngineToUi::Toast { text: info });
+		}
+		if let Some((rgba, target)) = result.picked {
+			match target {
+				ColorTarget::Foreground => self.settings.fg = rgba,
+				ColorTarget::Background => self.settings.bg = rgba,
+			}
+			self.to_ui(&EngineToUi::ColorPicked {
+				rgba,
+				target: target.as_str().into(),
+			});
+		}
+		if let Some(command) = result.command {
+			self.command(doc_id, command);
 		}
 	}
 
@@ -454,6 +542,15 @@ impl Engine {
 			}
 			UiToEngine::FilterPreviewCancel { doc } => {
 				self.cancel_preview(doc);
+				Changed::default()
+			}
+			UiToEngine::ToolOptions { tool, options } => {
+				self.settings.options.insert(tool, options);
+				Changed::default()
+			}
+			UiToEngine::SetColors { fg, bg } => {
+				self.settings.fg = fg;
+				self.settings.bg = bg;
 				Changed::default()
 			}
 			UiToEngine::ProofSetup {
@@ -553,6 +650,13 @@ impl Engine {
 			_ => {}
 		}
 		if let Some(changed) = self.view_mut().action(id) {
+			let mut changed = changed;
+			// A tool change also sets the tool's cursor (M5-T01).
+			if let Some(tool) = id.strip_prefix("tool:")
+				&& let Some(t) = self.tools.get(tool)
+			{
+				changed.cursor = Some(t.cursor(Modifiers::default()));
+			}
 			return changed;
 		}
 		if UI_LOCAL_ACTION_PREFIXES.iter().any(|prefix| id.starts_with(prefix)) {

@@ -29,6 +29,8 @@ export const UI = Object.freeze({
   PROOF_SETUP: "proof_setup",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
+  TOOL_OPTIONS: "tool_options",
+  SET_COLORS: "set_colors",
 });
 
 /** Engine → UI message types (`EngineToUi`). */
@@ -48,6 +50,7 @@ export const ENGINE = Object.freeze({
   PROGRESS_DONE: "progress_done",
   TOAST: "toast",
   ERROR: "error",
+  COLOR_PICKED: "color_picked",
   THUMBNAIL: "thumbnail",
 });
 

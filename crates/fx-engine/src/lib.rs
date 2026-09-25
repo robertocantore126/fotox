@@ -22,6 +22,7 @@ pub mod layers;
 pub mod mips;
 pub mod ops;
 pub mod thumbs;
+pub mod tools;
 pub mod view;
 
 mod engine;

@@ -115,6 +115,20 @@ pub enum UiToEngine {
 		doc: DocId,
 		answer: CloseAnswer,
 	},
+	/// The active tool's option-bar values (M5-T01). `options` is a JSON object
+	/// keyed by the option bar's field text without the trailing colon
+	/// (`{"Size": 40, "Hardness": 75, "Mode": "Normal"}`). Sent when a tool
+	/// becomes active and on every change.
+	ToolOptions {
+		tool: String,
+		options: serde_json::Value,
+	},
+	/// The foreground and background colours (M5-T01), 16-bit RGBA. Sent on
+	/// every swatch change, on X (swap) and on D (defaults).
+	SetColors {
+		fg: [u16; 4],
+		bg: [u16; 4],
+	},
 }
 
 /// Answer to the "save changes before closing?" prompt (M3-T06).
@@ -271,6 +285,12 @@ pub enum EngineToUi {
 	Error {
 		text: String,
 	},
+	/// The eyedropper sampled a colour (M5-T01). `target` is `"fg"` or `"bg"`;
+	/// the UI updates that swatch.
+	ColorPicked {
+		rgba: [u16; 4],
+		target: String,
+	},
 	/// The CMYK profiles for proofing and export (M4-T04), sent after `hello`.
 	CmykProfiles {
 		profiles: Vec<CmykProfileInfo>,
@@ -409,5 +429,35 @@ mod tests {
 		let (back, payload): (EngineToUi, _) = decode(&frame).unwrap();
 		assert_eq!(back, header);
 		assert_eq!(payload, &pixels);
+	}
+
+	#[test]
+	fn tool_options_round_trip() {
+		let msg = UiToEngine::ToolOptions {
+			tool: "brush".into(),
+			options: serde_json::json!({"Size": 40, "Hardness": 75, "Mode": "Normal"}),
+		};
+		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
+	}
+
+	#[test]
+	fn set_colors_round_trip() {
+		let msg = UiToEngine::SetColors {
+			fg: [0, 65535, 0, 65535],
+			bg: [65535, 65535, 65535, 65535],
+		};
+		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
+	}
+
+	#[test]
+	fn color_picked_round_trip() {
+		let msg = EngineToUi::ColorPicked {
+			rgba: [1, 2, 3, 65535],
+			target: "fg".into(),
+		};
+		let (back, _): (EngineToUi, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
 	}
 }

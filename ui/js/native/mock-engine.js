@@ -18,8 +18,18 @@ export function handle(message) {
     case UI.HELLO:
       return [{ type: ENGINE.TOAST, text: "Mock engine connected (browser mode)" }];
     case UI.ACTION:
+      // In the browser there is no engine pointer routing, so the mock has no
+      // way to sample on a click; `debug:pick-color` stands in for it and
+      // exercises the ColorPicked path with a fixed colour.
+      if (message.id === "debug:pick-color") {
+        return [{ type: ENGINE.COLOR_PICKED, rgba: [65535, 0, 0, 65535], target: "fg" }];
+      }
       if (UI_LOCAL_PREFIXES.some((p) => message.id.startsWith(p))) return [];
       return [{ type: ENGINE.TOAST, text: `${message.id}: not implemented (mock engine)` }];
+    case UI.TOOL_OPTIONS:
+    case UI.SET_COLORS:
+      // Tool state is kept by the engine; the mock accepts and stays quiet.
+      return [];
     default:
       // viewport_bounds / direct_input are shell messages; the rest arrive
       // with documents (M1+). Nothing to answer yet.

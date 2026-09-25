@@ -232,7 +232,10 @@ pub fn composite_layers(
 
 /// `layers` reduced to the wanted ones: a wanted layer with its whole content,
 /// a group only if it holds wanted layers (then with only those).
-fn keep_layers(layers: &[std::sync::Arc<fx_core::Layer>], wanted: &std::collections::HashSet<fx_core::LayerId>) -> Vec<std::sync::Arc<fx_core::Layer>> {
+pub(crate) fn keep_layers(
+	layers: &[std::sync::Arc<fx_core::Layer>],
+	wanted: &std::collections::HashSet<fx_core::LayerId>,
+) -> Vec<std::sync::Arc<fx_core::Layer>> {
 	let mut out = Vec::new();
 	for layer in layers {
 		if wanted.contains(&layer.id) {
@@ -252,7 +255,7 @@ fn keep_layers(layers: &[std::sync::Arc<fx_core::Layer>], wanted: &std::collecti
 	out
 }
 
-fn to_u16(v: f64) -> u16 {
+pub(crate) fn to_u16(v: f64) -> u16 {
 	(v.clamp(0.0, 1.0) * 65535.0).round() as u16
 }
 
