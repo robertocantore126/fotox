@@ -12,7 +12,9 @@ let stack = [];
 // `overrides` may also carry, for dialogs that edit something live (M2-T04,
 // adjustment layers in the app):
 //   values:   { "Brightness:": 20, "Use Legacy": true, … } starting values by field label
-//   onChange: (values) => …  called on every slider / checkbox change
+//   onChange: (values, dialog) => …  called on every slider / checkbox / menu /
+//             curve change; `dialog.set(values)` writes values back into the
+//             fields (by label, `curve` for the curve editor) without a change event
 //   onOk:     (values) => …  instead of the mock toast
 //   onCancel: () => …        Cancel, ×, Escape or a click outside
 export function openDialog(id, overrides = {}) {
@@ -24,9 +26,13 @@ export function openDialog(id, overrides = {}) {
   for (const field of fields) grid.append(renderField(field));
   body.append(grid);
   if (def.onChange) {
-    const changed = () => def.onChange(readValues(grid));
+    // A live dialog: its menus and buttons act instead of showing the mock toast.
+    grid.classList.add("live");
+    const dialog = { set: (values) => writeValues(grid, values) };
+    const changed = () => def.onChange(readValues(grid), dialog);
     grid.querySelectorAll(".dlg-range").forEach((r) => r.addEventListener("input", changed));
     grid.querySelectorAll(".dlg-check").forEach((c) => c.addEventListener("click", changed));
+    grid.querySelectorAll(".dlg-select, .curve-canvas").forEach((c) => c.addEventListener("change", changed));
   }
 
   const titleBar = h("div", { class: "dlg-title" },
@@ -84,6 +90,7 @@ function close(entry, confirmed = false) {
 function withValues(fields, values) {
   return fields.map((f) => {
     if (f.fields) return { ...f, fields: withValues(f.fields, values) };
+    if (f.type === "curve" && values.curve) return { ...f, points: values.curve };
     if (f.label && Object.prototype.hasOwnProperty.call(values, f.label)) {
       return f.type === "check" ? { ...f, on: !!values[f.label] } : { ...f, value: values[f.label] };
     }
@@ -91,20 +98,52 @@ function withValues(fields, values) {
   });
 }
 
-/** Current slider and checkbox values of a dialog, by field label. */
+/** Current slider, menu and checkbox values of a dialog, by field label (`curve`: the curve's points). */
 function readValues(grid) {
   const values = {};
   grid.querySelectorAll(".dlg-line").forEach((line) => {
     const label = line.querySelector(".dlg-field-label");
     const range = line.querySelector(".dlg-range");
+    const select = line.querySelector(".dlg-select .pf-value");
     if (label && range) values[label.textContent] = Number(range.value);
+    if (label && select) values[label.textContent] = select.textContent;
   });
   grid.querySelectorAll(".dlg-checkline").forEach((line) => {
     const box = line.querySelector(".dlg-check");
     const label = line.querySelector("span:last-child");
     if (box && label) values[label.textContent] = box.classList.contains("on");
   });
+  const curve = grid.querySelector(".curve-canvas");
+  if (curve && curve.getPoints) values.curve = curve.getPoints();
   return values;
+}
+
+/** Write values back into a dialog's fields (the inverse of `readValues`). */
+function writeValues(grid, values) {
+  const has = (k) => Object.prototype.hasOwnProperty.call(values, k);
+  grid.querySelectorAll(".dlg-line").forEach((line) => {
+    const label = line.querySelector(".dlg-field-label");
+    if (!label || !has(label.textContent)) return;
+    const value = values[label.textContent];
+    const range = line.querySelector(".dlg-range");
+    const select = line.querySelector(".dlg-select .pf-value");
+    if (range) {
+      range.value = value;
+      const out = line.querySelector(".dlg-input.num");
+      if (out) out.value = range.value;
+    }
+    if (select) select.textContent = value;
+  });
+  grid.querySelectorAll(".dlg-checkline").forEach((line) => {
+    const box = line.querySelector(".dlg-check");
+    const label = line.querySelector("span:last-child");
+    if (!box || !label || !has(label.textContent)) return;
+    box.classList.toggle("on", !!values[label.textContent]);
+    clear(box);
+    if (values[label.textContent]) box.append(icon("i-check", "ic xs"));
+  });
+  const curve = grid.querySelector(".curve-canvas");
+  if (curve && curve.setPoints && has("curve")) curve.setPoints(values.curve);
 }
 
 export function closeAllDialogs() {
@@ -153,7 +192,7 @@ function renderField(f) {
     case "radio": return radioField(f);
     case "range": return rangeField(f);
     case "color": return colorField(f);
-    case "btn": return h("button", { class: "btn small", type: "button", text: f.text, onclick: () => emit("mock", f.text) });
+    case "btn": return h("button", { class: "btn small", type: "button", text: f.text, onclick: (e) => buttonClicked(e.currentTarget, f) });
     case "locksize": return h("button", { class: "dlg-lock", type: "button", "data-tip": "Constrain proportions", onclick: (e) => e.currentTarget.classList.toggle("on") }, icon("i-link", "ic sm"));
     case "chain": return h("span", { class: "dlg-chain", text: f.text });
     case "pixels": return h("div", { class: "dlg-pixels" }, h("span", { class: "px-box" }), h("span", { class: "dlg-note", text: "Pixel Dimensions: 1080 × 1080 · 8.4 MB" }));
@@ -165,7 +204,7 @@ function renderField(f) {
     case "searchbox": return h("input", { class: "dlg-input", placeholder: f.placeholder || "Search", style: { width: "100%" } });
     case "matrix": return matrixField();
     case "histo": return histoField();
-    case "curve": return curveField();
+    case "curve": return curveField(f);
     case "colorpicker": return colorPickerField();
     case "gradientbar": return gradientBar();
     case "patternpick": return patternPick();
@@ -217,7 +256,14 @@ function selectControl(options, value) {
     class: "dlg-select", type: "button",
     onclick: (e) => {
       e.stopPropagation();
-      openDropdown({ anchor: btn, items: options, value: val.textContent, width: Math.max(150, btn.offsetWidth), onPick: (v) => { val.textContent = v; emit("mock", v); } });
+      openDropdown({
+        anchor: btn, items: options, value: val.textContent, width: Math.max(150, btn.offsetWidth),
+        onPick: (v) => {
+          val.textContent = v;
+          if (btn.closest(".dlg-fields.live")) btn.dispatchEvent(new Event("change", { bubbles: true }));
+          else emit("mock", v);
+        },
+      });
     },
   }, val, icon("i-chevron-down", "ic xs"));
   return btn;
@@ -251,6 +297,13 @@ function rangeField(f) {
   const out = h("input", { class: "dlg-input num", type: "text", value: f.value, style: { width: "46px" } });
   const input = h("input", { class: "dlg-range", type: "range", min, max, value: f.value });
   input.addEventListener("input", () => { out.value = input.value; });
+  // Typing a number moves the slider (and counts as a slider change).
+  out.addEventListener("change", () => {
+    const v = Math.min(max, Math.max(min, Math.round(Number(out.value)) || 0));
+    out.value = v;
+    input.value = v;
+    input.dispatchEvent(new Event("input"));
+  });
   return h("div", { class: "dlg-line" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, input, out);
 }
 
@@ -323,40 +376,160 @@ function histoField() {
   return cv;
 }
 
-function curveField() {
-  const cv = h("canvas", { class: "curve-canvas", width: 300, height: 220 });
+const CURVE_W = 300;
+const CURVE_H = 220;
+
+/**
+ * Curve editor: click to add a point, drag to move it, drag a middle point out
+ * of the box to remove it. Points are (input, output) in 0..=1. The canvas
+ * carries `getPoints()` / `setPoints(points)` / `reset()` and fires `change`.
+ */
+function curveField(f = {}) {
+  const cv = h("canvas", { class: "curve-canvas", width: CURVE_W, height: CURVE_H });
   const ctx = cv.getContext("2d");
-  const points = [[0, 220], [100, 140], [200, 80], [300, 0]];
+  let points = curvePoints(f.points);
+  let active = -1;
+
   const draw = () => {
-    ctx.clearRect(0, 0, 300, 220);
+    ctx.clearRect(0, 0, CURVE_W, CURVE_H);
     ctx.fillStyle = "#23262c";
-    ctx.fillRect(0, 0, 300, 220);
+    ctx.fillRect(0, 0, CURVE_W, CURVE_H);
+    ctx.lineWidth = 1;
     ctx.strokeStyle = "rgba(255,255,255,.12)";
     for (let i = 1; i < 4; i++) {
-      ctx.beginPath(); ctx.moveTo(i * 75, 0); ctx.lineTo(i * 75, 220); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, i * 55); ctx.lineTo(300, i * 55); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(i * CURVE_W / 4, 0); ctx.lineTo(i * CURVE_W / 4, CURVE_H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, i * CURVE_H / 4); ctx.lineTo(CURVE_W, i * CURVE_H / 4); ctx.stroke();
     }
+    ctx.beginPath(); ctx.moveTo(0, CURVE_H); ctx.lineTo(CURVE_W, 0); ctx.stroke();
+    const y = curveSpline(points);
     ctx.strokeStyle = "#e8eaf0";
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    for (let i = 1; i < points.length; i++) {
-      const [px, py] = points[i - 1];
-      const [x, y] = points[i];
-      ctx.bezierCurveTo(px + (x - px) / 2, py, px + (x - px) / 2, y, x, y);
+    for (let i = 0; i <= CURVE_W; i++) {
+      const py = (1 - y(i / CURVE_W)) * CURVE_H;
+      if (i) ctx.lineTo(i, py); else ctx.moveTo(i, py);
     }
     ctx.stroke();
-    ctx.fillStyle = "#7cc4ff";
-    points.forEach(([x, y]) => ctx.fillRect(x - 2, y - 2, 4, 4));
+    points.forEach(([px, py], i) => {
+      const [cx, cy] = [px * CURVE_W, (1 - py) * CURVE_H];
+      if (i === active) { ctx.fillStyle = "#7cc4ff"; ctx.fillRect(cx - 3, cy - 3, 6, 6); }
+      else { ctx.strokeStyle = "#7cc4ff"; ctx.lineWidth = 1; ctx.strokeRect(cx - 3, cy - 3, 6, 6); }
+    });
   };
-  cv.addEventListener("mousedown", (e) => {
-    const r = cv.getBoundingClientRect();
-    points.push([e.clientX - r.left, e.clientY - r.top]);
-    points.sort((a, b) => a[0] - b[0]);
+
+  // The dialog's "Input:" / "Output:" fields show the active point, 0..255.
+  const showActive = () => {
+    const fields = cv.closest(".dlg-fields");
+    if (!fields || active < 0) return;
+    fields.querySelectorAll(".dlg-line.inline").forEach((line) => {
+      const label = line.querySelector(".dlg-field-label")?.textContent;
+      const input = line.querySelector("input");
+      if (input && label === "Input:") input.value = Math.round(points[active][0] * 255);
+      if (input && label === "Output:") input.value = Math.round(points[active][1] * 255);
+    });
+  };
+  const changed = () => {
     draw();
+    showActive();
+    cv.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  cv.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const at = (ev) => [(ev.clientX - r.left) / r.width, 1 - (ev.clientY - r.top) / r.height];
+    const [x, y] = at(e).map(clamp01);
+    active = points.findIndex(([px, py]) => Math.hypot((px - x) * r.width, (py - y) * r.height) < 8);
+    if (active < 0) {
+      const point = [x, y];
+      points.push(point);
+      points.sort((a, b) => a[0] - b[0]);
+      active = points.indexOf(point);
+    }
+    changed();
+    const move = (ev) => {
+      if (active < 0) return;
+      const [mx, my] = at(ev);
+      const middle = active > 0 && active < points.length - 1;
+      const outside = mx < -0.08 || mx > 1.08 || my < -0.1 || my > 1.1;
+      if (middle && outside) {
+        points.splice(active, 1);
+        active = -1;
+        changed();
+        return;
+      }
+      const lo = active > 0 ? points[active - 1][0] + 0.004 : 0;
+      const hi = active < points.length - 1 ? points[active + 1][0] - 0.004 : 1;
+      points[active] = [Math.min(hi, Math.max(lo, mx)), clamp01(my)];
+      changed();
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
   });
+
+  cv.getPoints = () => points.map((p) => [...p]);
+  cv.setPoints = (p) => { points = curvePoints(p); active = -1; draw(); };
+  cv.reset = () => { points = curvePoints(); active = -1; changed(); };
   draw();
   return cv;
+}
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+/** A copy of `points`, sorted, or the identity curve for fewer than 2 points. */
+export function curvePoints(points) {
+  if (!points || points.length < 2) return [[0, 0], [1, 1]];
+  return points.map(([x, y]) => [x, y]).sort((a, b) => a[0] - b[0]);
+}
+
+/**
+ * The curve through `points` as a function of the input: natural cubic spline,
+ * flat outside the end points — the same as the engine's
+ * (`crates/fx-render/src/adjust.rs`, `Spline`), so the drawn curve is the applied one.
+ */
+export function curveSpline(points) {
+  const p = curvePoints(points).filter((q, i, all) => i === 0 || Math.abs(q[0] - all[i - 1][0]) > 1e-9);
+  if (p.length < 2) return (x) => x;
+  const n = p.length;
+  const xs = p.map((q) => q[0]);
+  const ys = p.map((q) => q[1]);
+  const m = new Array(n).fill(0);
+  const c = new Array(n).fill(0);
+  const d = new Array(n).fill(0);
+  for (let i = 1; i < n - 1; i++) {
+    const h0 = xs[i] - xs[i - 1];
+    const h1 = xs[i + 1] - xs[i];
+    const r = 6 * ((ys[i + 1] - ys[i]) / h1 - (ys[i] - ys[i - 1]) / h0);
+    const denom = 2 * (h0 + h1) - h0 * c[i - 1];
+    c[i] = h1 / denom;
+    d[i] = (r - h0 * d[i - 1]) / denom;
+  }
+  for (let i = n - 2; i >= 1; i--) m[i] = d[i] - c[i] * m[i + 1];
+  return (x) => {
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let i = 0;
+    while (i < n - 2 && xs[i + 1] <= x) i++;
+    const hh = xs[i + 1] - xs[i];
+    const a = (xs[i + 1] - x) / hh;
+    const b = (x - xs[i]) / hh;
+    return clamp01(a * ys[i] + b * ys[i + 1] + ((a * a * a - a) * m[i] + (b * b * b - b) * m[i + 1]) * hh * hh / 6);
+  };
+}
+
+/** Dialog buttons: `curve: "reset"` resets the dialog's curve; the rest are mocks outside live dialogs. */
+function buttonClicked(btn, f) {
+  const fields = btn.closest(".dlg-fields");
+  if (f.curve === "reset") {
+    fields?.querySelector(".curve-canvas")?.reset();
+    return;
+  }
+  if (!fields || !fields.classList.contains("live")) emit("mock", f.text);
 }
 
 function colorPickerField() {

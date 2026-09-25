@@ -56,6 +56,7 @@ let historyRoot = null;
 let listEl = null;
 let spacerEl = null;
 let dragId = null;
+let editNew = null;      // ids before a new adjustment layer: its dialog opens when it arrives
 
 /** Start listening to the engine. Call once, in native mode. */
 export function initNativePanels() {
@@ -64,6 +65,7 @@ export function initNativePanels() {
     layers = [];
     tree = [];
     history = id == null ? null : histories.get(id) || null;
+    editNew = null;
     renderLayers();
     renderHistory();
   });
@@ -77,6 +79,12 @@ export function initNativePanels() {
     }
     requestThumbnails();
     renderLayers();
+    // Like Photoshop, a new adjustment layer opens its settings.
+    const added = editNew && layers.find((l) => l.adjustment && !editNew.has(l.id));
+    if (added) {
+      editNew = null;
+      if (added.adjustment.kind !== "invert") editAdjustment(added);
+    }
   });
   bridge.on(ENGINE.HISTORY, (msg) => {
     histories.set(msg.doc, msg);
@@ -229,7 +237,10 @@ function renderLayers() {
       anchor: btn, items: NEW_ADJUSTMENTS.map(([n]) => n), value: "", width: 200,
       onPick: (name) => {
         const make = NEW_ADJUSTMENTS.find(([n]) => n === name);
-        if (make) send({ op: "add_layer", layer: make[1](), name: null });
+        if (!make) return;
+        const layer = make[1]();
+        if (layer.adjustment) editNew = new Set(layers.map((l) => l.id));
+        send({ op: "add_layer", layer, name: null });
       },
     })),
     barBtn("i-group", "Create a new group (with the selected layers: Ctrl+G)", () => {
@@ -485,21 +496,71 @@ const ADJUSTMENT_DIALOGS = {
   },
 };
 
+// Levels and Curves hold one setting per channel (0 = composite, 1..3 = R, G, B);
+// the dialog's Channel menu picks the one its fields show.
+const CHANNELS = ["RGB", "Red", "Green", "Blue"];
+const PER_CHANNEL_DIALOGS = {
+  levels: {
+    dialog: "levels",
+    toValues: (c) => ({
+      "Input Black:": Math.round(c.in_black * 255), "Gamma (x100):": Math.round(c.gamma * 100), "Input White:": Math.round(c.in_white * 255),
+      "Output Black:": Math.round(c.out_black * 255), "Output White:": Math.round(c.out_white * 255),
+    }),
+    fromValues: (v) => {
+      const inBlack = v["Input Black:"];
+      const inWhite = Math.max(inBlack + 2, v["Input White:"]);
+      return { in_black: inBlack / 255, in_white: inWhite / 255, gamma: Math.max(0.01, v["Gamma (x100):"] / 100), out_black: v["Output Black:"] / 255, out_white: v["Output White:"] / 255 };
+    },
+  },
+  curves: {
+    dialog: "curves",
+    toValues: (points) => ({ curve: points.length < 2 ? [[0, 0], [1, 1]] : points }),
+    fromValues: (v) => v.curve,
+  },
+};
+
 function editAdjustment(l) {
   const adj = l.adjustment;
   if (!adj) return;
+  if (PER_CHANNEL_DIALOGS[adj.kind]) { editPerChannel(l, PER_CHANNEL_DIALOGS[adj.kind]); return; }
   const spec = ADJUSTMENT_DIALOGS[adj.kind];
   if (!spec) {
-    toast(adj.kind === "invert" ? "Invert has no settings" : "Editing this adjustment in its dialog arrives later (Levels and Curves need their graph widgets wired)");
+    toast(adj.kind === "invert" ? "Invert has no settings" : "This adjustment has no dialog yet");
     return;
   }
   const original = adj;
   const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
+  // "Preview" off shows the layer as it was; OK still applies the dialog's values.
+  const preview = (values) => set(values.Preview === false ? original : spec.fromValues(values));
   openDialog(spec.dialog, {
     title: `${l.name}`,
     values: spec.toValues(adj),
-    onChange: (values) => set(spec.fromValues(values)),
+    onChange: preview,
     onOk: (values) => set(spec.fromValues(values)),
+    onCancel: () => set(original),
+  });
+}
+
+function editPerChannel(l, spec) {
+  const original = l.adjustment;
+  const channels = original.channels.map((c) => JSON.parse(JSON.stringify(c)));
+  let shown = 0;
+  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
+  const current = () => ({ kind: original.kind, channels });
+  openDialog(spec.dialog, {
+    title: `${l.name}`,
+    values: { "Channel:": CHANNELS[0], ...spec.toValues(channels[0]) },
+    onChange: (values, dialog) => {
+      const picked = CHANNELS.indexOf(values["Channel:"]);
+      if (picked >= 0 && picked !== shown) {
+        shown = picked;
+        dialog.set(spec.toValues(channels[shown]));
+        return;
+      }
+      channels[shown] = spec.fromValues(values);
+      set(values.Preview === false ? original : current());
+    },
+    onOk: () => set(current()),
     onCancel: () => set(original),
   });
 }
