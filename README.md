@@ -62,7 +62,9 @@ cargo xtask run --release  # the same, optimised
 ```
 
 `cargo xtask bundle` only builds the bundle (`target/<profile>/Fotox/`).
-UI changes need only an app restart: in dev builds the UI is read from `./ui`.
+UI changes need only an app restart: in dev builds the UI is read from `./ui`
+(so a dev `fotox.exe` works only when started through cargo). Release bundles
+carry the UI inside `fotox.exe` and start by double-click.
 
 Logs: `RUST_LOG=fotox=debug,fx_engine=debug` (the shell's binary crate is
 `fotox`). Inspect the UI inside the app with `GRAPHITE_BROWSER_DEBUG_PORT=9222`

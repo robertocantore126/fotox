@@ -58,18 +58,23 @@ pub(crate) fn profile_dir_name(profile: &str) -> &str {
 	if profile == "dev" { "debug" } else { profile }
 }
 
-/// Build one workspace package with `cargo build`.
+/// Build one workspace package with `cargo build`, with `features` on.
 ///
 /// The build runs in the workspace root so the nested cargo reads the same
 /// `.cargo/config.toml`; `CARGO_TARGET_DIR` is pinned to the directory we
 /// already resolved, so the artefacts cannot land somewhere unexpected.
-pub(crate) fn cargo_build(package: &str, profile: &str) -> Result<()> {
+pub(crate) fn cargo_build(package: &str, profile: &str, features: &[&str]) -> Result<()> {
 	let target_dir = target_dir();
-	tracing::info!("cargo build -p {package} --profile {profile}");
+	tracing::info!("cargo build -p {package} --profile {profile} --features {features:?}");
 
 	let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+	let mut args = vec!["build", "--package", package, "--profile", profile];
+	let features = features.join(",");
+	if !features.is_empty() {
+		args.extend(["--features", features.as_str()]);
+	}
 	let status = Command::new(&cargo)
-		.args(["build", "--package", package, "--profile", profile])
+		.args(&args)
 		.current_dir(workspace_path())
 		.env("CARGO_TARGET_DIR", &target_dir)
 		.status()

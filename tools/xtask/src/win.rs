@@ -42,7 +42,11 @@ const BUNDLER_OWNED: [&str; 1] = [APP_EXE];
 /// Build `fx-app` and assemble `target/<profile>/Fotox/`, returning the path of
 /// the bundled executable.
 pub(crate) fn bundle(profile: &str) -> Result<PathBuf> {
-	common::cargo_build("fx-app", profile)?;
+	// Dev builds read the UI from ./ui (GRAPHITE_RESOURCES, set by
+	// .cargo/config.toml, reaches only processes started through cargo). A
+	// release exe is started by double-click too, so it carries the UI inside.
+	let features: &[&str] = if profile == "dev" { &[] } else { &["embedded_resources"] };
+	common::cargo_build("fx-app", profile, features)?;
 
 	let profile_dir = common::target_dir().join(common::profile_dir_name(profile));
 	let exe_src = profile_dir.join(APP_EXE);
