@@ -1031,6 +1031,7 @@ version = "0.0.0"
 dependencies = [
  "fx-core",
  "fx-tiles",
+ "rayon",
 ]
 
 [[package]]
