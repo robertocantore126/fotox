@@ -5,18 +5,21 @@
 //! With no document open, the view navigates a virtual 30 000² document
 //! ([`crate::view::VIRTUAL_DOC`]) drawn as a test pattern (M0).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
+use fx_core::{Command, CommandContext, LayerId};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
-use fx_tiles::TileStore;
+use fx_tiles::{TileError, TileStore};
 
 use crate::documents::{Documents, OpenDoc};
 use crate::render::{Frame, MipWork, RenderRequest};
 use crate::stats::RenderStats;
+use crate::thumbs::{self, ThumbSource, Thumbnail};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
 use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, layers, mips};
 
@@ -25,6 +28,9 @@ const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// How often the `status` message (memory, frame statistics) goes out.
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A layer's thumbnail is re-rendered at most this often while it changes (M2-T07).
+const THUMBNAIL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The virtual M0 document's id in `view` messages.
 const VIRTUAL_DOC_ID: DocId = DocId(0);
@@ -38,6 +44,13 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
+	},
+	/// A layer thumbnail finished rendering.
+	Thumbnail {
+		doc: DocId,
+		layer: LayerId,
+		revision: u64,
+		result: Result<Thumbnail, TileError>,
 	},
 }
 
@@ -54,6 +67,11 @@ struct Engine {
 	next_task: u64,
 	last_view_message: Option<Instant>,
 	view_message_pending: bool,
+	/// Thumbnails the Layers panel asked for (doc, layer) → size in px, when
+	/// each was last rendered, and refreshes waiting for the throttle.
+	thumbs_wanted: HashMap<(DocId, LayerId), u32>,
+	thumbs_last: HashMap<(DocId, LayerId), Instant>,
+	thumbs_due: HashMap<(DocId, LayerId), Instant>,
 }
 
 /// Channels and shared state the engine thread works with.
@@ -93,10 +111,16 @@ pub(crate) fn run(ctx: EngineContext) {
 		next_task: 0,
 		last_view_message: None,
 		view_message_pending: false,
+		thumbs_wanted: HashMap::new(),
+		thumbs_last: HashMap::new(),
+		thumbs_due: HashMap::new(),
 	};
 
 	loop {
-		let deadline = engine.view_message_deadline().map_or(engine.next_status, |d| d.min(engine.next_status));
+		let deadline = [engine.view_message_deadline(), engine.hot_expiry(), engine.thumbs_due.values().min().copied()]
+			.into_iter()
+			.flatten()
+			.fold(engine.next_status, Instant::min);
 		let timeout = deadline.saturating_duration_since(Instant::now());
 		select_biased! {
 			recv(inputs) -> input => match input {
@@ -109,6 +133,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		}
 		engine.flush_view_message();
 		engine.send_status_if_due();
+		engine.cool_hot_layer();
+		engine.render_due_thumbnails();
 	}
 
 	let _ = engine.render.send(RenderRequest::Stop);
@@ -204,6 +230,25 @@ impl Engine {
 				}
 				Changed::default()
 			}
+			UiToEngine::Command { doc, command } => {
+				self.command(doc, command);
+				Changed::default()
+			}
+			UiToEngine::Undo { doc } => {
+				self.step_history(doc, false);
+				Changed::default()
+			}
+			UiToEngine::Redo { doc } => {
+				self.step_history(doc, true);
+				Changed::default()
+			}
+			UiToEngine::RequestThumbnails { doc, layers, size } => {
+				for layer in layers {
+					self.thumbs_wanted.insert((doc, layer), size);
+					self.render_thumbnail(doc, layer);
+				}
+				Changed::default()
+			}
 			UiToEngine::CloseDocument { doc } => {
 				self.close(doc);
 				Changed::default()
@@ -228,6 +273,20 @@ impl Engine {
 			"tab:close-all" => {
 				for doc in self.docs.ids() {
 					self.close(doc);
+				}
+				return Changed::default();
+			}
+			// Edit ▸ Undo / Redo and Ctrl+Z / Ctrl+Shift+Z; Ctrl+Alt+Z toggles the
+			// last step (redo if something was just undone, else undo).
+			"hist:undo" | "hist:redo" | "hist:toggle" => {
+				if let Some(active) = self.docs.active_mut() {
+					let redo = match id {
+						"hist:redo" => true,
+						"hist:toggle" => active.history.can_redo(),
+						_ => false,
+					};
+					let doc = active.id;
+					self.step_history(doc, redo);
 				}
 				return Changed::default();
 			}
@@ -303,6 +362,19 @@ impl Engine {
 
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::Thumbnail { doc, layer, revision, result } => match result {
+				Ok(thumb) => {
+					let header = EngineToUi::Thumbnail {
+						doc,
+						layer,
+						revision,
+						width: thumb.width,
+						height: thumb.height,
+					};
+					(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &thumb.pixels)));
+				}
+				Err(error) => tracing::warn!("thumbnail of {layer:?} failed: {error}"),
+			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
 			Internal::Imported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
@@ -333,10 +405,151 @@ impl Engine {
 
 	fn close(&mut self, id: DocId) {
 		if self.docs.close(id).is_some() {
+			self.thumbs_wanted.retain(|(d, _), _| *d != id);
+			self.thumbs_last.retain(|(d, _), _| *d != id);
+			self.thumbs_due.retain(|(d, _), _| *d != id);
 			// Dropping the document drops its tile handles: memory is freed.
 			self.to_ui(&EngineToUi::DocumentClosed { doc: id });
 			self.after_active_change();
 		}
+	}
+
+	// ------------------------------------------------------------ editing
+
+	/// Apply a document command through its history (M2).
+	fn command(&mut self, id: DocId, command: Command) {
+		let store = self.store.clone();
+		let Some(doc) = self.docs.get_mut(id) else {
+			tracing::warn!("command for unknown document {id:?}");
+			return;
+		};
+		let mut ctx = CommandContext { tiles: &store };
+		match doc.history.execute(&mut doc.doc, command, &mut ctx) {
+			Ok(effect) => {
+				if !effect.selection_only {
+					doc.dirty = true;
+					doc.changed();
+					let edited: Vec<LayerId> = effect.props_changed.iter().chain(&effect.pixels_changed).copied().collect();
+					doc.note_edits(&edited, Instant::now());
+				}
+				let pixels = effect.pixels_changed.clone();
+				self.after_edit(id, !effect.selection_only);
+				for layer in pixels {
+					self.refresh_thumbnail(id, layer);
+				}
+			}
+			Err(error) => {
+				tracing::debug!("command refused: {error}");
+				self.to_ui(&EngineToUi::Error { text: error.to_string() });
+			}
+		}
+	}
+
+	/// Undo (`redo == false`) or redo one step.
+	fn step_history(&mut self, id: DocId, redo: bool) {
+		let Some(doc) = self.docs.get_mut(id) else { return };
+		let stepped = if redo {
+			doc.history.redo(&mut doc.doc)
+		} else {
+			doc.history.undo(&mut doc.doc)
+		};
+		if !stepped {
+			return;
+		}
+		doc.dirty = true;
+		doc.changed();
+		self.after_edit(id, true);
+		// Any layer may have changed: refresh every thumbnail on show.
+		let wanted: Vec<LayerId> = self.thumbs_wanted.keys().filter(|(d, _)| *d == id).map(|(_, l)| *l).collect();
+		for layer in wanted {
+			self.refresh_thumbnail(id, layer);
+		}
+	}
+
+	/// Tell the UI what an edit changed and redraw.
+	fn after_edit(&mut self, id: DocId, content: bool) {
+		let Some(doc) = self.docs.get_mut(id) else { return };
+		let layers = EngineToUi::Layers {
+			doc: id,
+			revision: doc.doc.revision,
+			layers: layers::layer_infos(&doc.doc),
+		};
+		let history = EngineToUi::History {
+			doc: id,
+			labels: doc.history.labels().chain(doc.history.redo_labels()).map(str::to_owned).collect(),
+			current: doc.history.labels().count(),
+			can_undo: doc.history.can_undo(),
+			can_redo: doc.history.can_redo(),
+		};
+		let info = doc.info();
+		self.to_ui(&layers);
+		self.to_ui(&history);
+		if content {
+			self.to_ui(&EngineToUi::DocumentChanged { info });
+			if self.docs.active_id() == Some(id) {
+				self.request_frame();
+			}
+		}
+	}
+
+	fn hot_expiry(&mut self) -> Option<Instant> {
+		self.docs.active_mut().and_then(|doc| doc.hot_expiry())
+	}
+
+	/// Let the hot layer cool down after 2 s without edits (M2-T05).
+	fn cool_hot_layer(&mut self) {
+		let now = Instant::now();
+		if self.docs.active_mut().is_some_and(|doc| doc.expire_hot(now)) {
+			self.request_frame();
+		}
+	}
+
+	// ------------------------------------------------------------ thumbnails
+
+	/// A layer changed: re-render its thumbnail if the panel shows it, at most
+	/// every [`THUMBNAIL_INTERVAL`].
+	fn refresh_thumbnail(&mut self, doc: DocId, layer: LayerId) {
+		let key = (doc, layer);
+		if !self.thumbs_wanted.contains_key(&key) {
+			return;
+		}
+		let now = Instant::now();
+		match self.thumbs_last.get(&key) {
+			Some(&last) if now.saturating_duration_since(last) < THUMBNAIL_INTERVAL => {
+				self.thumbs_due.insert(key, last + THUMBNAIL_INTERVAL);
+			}
+			_ => self.render_thumbnail(doc, layer),
+		}
+	}
+
+	fn render_due_thumbnails(&mut self) {
+		let now = Instant::now();
+		let due: Vec<(DocId, LayerId)> = self.thumbs_due.iter().filter(|&(_, &at)| at <= now).map(|(k, _)| *k).collect();
+		for (doc, layer) in due {
+			self.thumbs_due.remove(&(doc, layer));
+			self.render_thumbnail(doc, layer);
+		}
+	}
+
+	/// Render a thumbnail on the rayon pool; the result comes back as
+	/// `Internal::Thumbnail`.
+	fn render_thumbnail(&mut self, id: DocId, layer_id: LayerId) {
+		let Some(&size) = self.thumbs_wanted.get(&(id, layer_id)) else { return };
+		let Some(doc) = self.docs.get_mut(id) else { return };
+		let Some(layer) = doc.doc.layer(layer_id) else { return };
+		let Some(source) = ThumbSource::of(&layer.kind) else { return };
+		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.doc.revision);
+		self.thumbs_last.insert((id, layer_id), Instant::now());
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		rayon::spawn(move || {
+			let result = thumbs::render(source, w, h, size, &store);
+			let _ = internal.send(Internal::Thumbnail {
+				doc: id,
+				layer: layer_id,
+				revision,
+				result,
+			});
+		});
 	}
 
 	fn after_active_change(&mut self) {
@@ -400,6 +613,8 @@ impl Engine {
 					view: doc.view.view,
 					viewport,
 					doc: Some((doc.id, doc.snapshot())),
+					generation: doc.generation,
+					hot_layer: doc.hot_layer(),
 					virtual_doc: VIRTUAL_DOC,
 				}
 			}
@@ -409,6 +624,8 @@ impl Engine {
 					view: virtual_view.view,
 					viewport,
 					doc: None,
+					generation: 0,
+					hot_layer: None,
 					virtual_doc: VIRTUAL_DOC,
 				}
 			}

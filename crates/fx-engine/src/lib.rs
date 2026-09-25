@@ -17,6 +17,7 @@
 pub mod documents;
 pub mod layers;
 pub mod mips;
+pub mod thumbs;
 pub mod view;
 
 mod engine;
