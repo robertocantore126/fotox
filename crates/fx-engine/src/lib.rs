@@ -14,6 +14,7 @@
 //! The engine is headless: `fx-cli` drives it without any GUI, which is how
 //! most engine features are tested and benchmarked.
 
+pub mod b3;
 pub mod documents;
 pub mod layers;
 pub mod mips;
