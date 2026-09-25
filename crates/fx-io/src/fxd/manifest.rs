@@ -335,7 +335,9 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) 
 	Ok(Arc::new(layer))
 }
 
-fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
+/// Rebuild one `TiledImage` from its manifest entry, with backed tiles.
+/// Public so the opener can rebuild the composite preview the same way.
+pub fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
 	let mut image = TiledImage::new(entry.width, entry.height, entry.format);
 	for level in &entry.levels {
 		let derived = level.level != 0;
