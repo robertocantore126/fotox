@@ -1042,11 +1042,19 @@ impl Engine {
 				let Some(open) = self.docs.get_mut(id) else { return };
 				let before = std::mem::replace(&mut open.doc, *after);
 				open.history.record(before, command, effect.label.clone());
-				open.dirty = true;
-				open.changed();
-				open.note_edits(&effect.pixels_changed, Instant::now());
+				// A selection reshape (M5) is a history step, not a content change.
+				let content = !effect.history_only;
+				if content {
+					open.dirty = true;
+					open.changed();
+					open.note_edits(&effect.pixels_changed, Instant::now());
+				}
 				self.last_edit = None;
-				self.after_edit(id, true);
+				self.after_edit(id, content);
+				if !content {
+					self.selection_overlay = None;
+					self.request_frame();
+				}
 				for layer in effect.pixels_changed {
 					self.refresh_thumbnail(id, layer);
 				}
@@ -2141,7 +2149,12 @@ fn cmyk_profile_files() -> Vec<fx_color::CmykProfileFile> {
 fn is_pixel_job(command: &Command) -> bool {
 	matches!(
 		command,
-		Command::ApplyFilter { .. } | Command::MergeLayers { .. } | Command::Flatten | Command::StampVisible | Command::ConvertProfile { .. }
+		Command::ApplyFilter { .. }
+			| Command::MergeLayers { .. }
+			| Command::Flatten
+			| Command::StampVisible
+			| Command::ConvertProfile { .. }
+			| Command::ModifySelection { .. }
 	)
 }
 
@@ -2153,6 +2166,7 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::Flatten => "Flatten Image".to_owned(),
 		Command::StampVisible => "Stamp Visible".to_owned(),
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
+		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }

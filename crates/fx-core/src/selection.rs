@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fx_tiles::{PixelFormat, PixelValue, TILE_SIZE, TileBuffer, TileError, TileSlot, TileStore, TiledImage};
+use fx_tiles::{PixelFormat, PixelValue, TILE_PIXELS, TILE_SIZE, TileBuffer, TileError, TileSlot, TileStore, TiledImage};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::BitDepth;
@@ -144,159 +145,418 @@ pub fn set_gray(buffer: &mut TileBuffer, format: PixelFormat, x: u32, y: u32, va
 	}
 }
 
-/// Combine `new` (a freshly rasterised shape) with `old` under `mode`
-/// (M5-T03). Only the tiles the shape touches are built; the rest follow from
-/// the mode without reading pixels (Replace/Intersect → empty, Add/Subtract →
-/// the old selection).
+/// The coverage of one canvas tile of a selection (M5 review): either one
+/// value for the whole tile, or `TILE_SIZE²` values in row-major order.
 ///
-/// Returns `None` when the result selects nothing.
-pub fn combine(size: (u32, u32), old: Option<&Selection>, new: &Selection, mode: SelectMode, store: &TileStore) -> Result<Option<Selection>, TileError> {
-	let format = new.image.format();
-	let mut result = Selection::empty(size, if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 });
+/// Every algorithm that reads a selection goes through this, so the offset of
+/// a moved selection is honoured in one place and uniform tiles (the inside
+/// of a big marquee, Select All) never cost a per-pixel loop.
+#[derive(Clone, Debug)]
+pub enum TileCoverage {
+	Uniform(f32),
+	Data(Box<[f32]>),
+}
 
-	let mut tiles: Vec<(u32, u32)> = new.tiles().collect();
-	if matches!(mode, SelectMode::Add | SelectMode::Subtract)
-		&& let Some(old) = old
-	{
-		for tile in old.tiles() {
-			if !tiles.contains(&tile) {
-				tiles.push(tile);
-			}
+impl TileCoverage {
+	/// Coverage of pixel `(x, y)` of the tile.
+	pub fn at(&self, x: u32, y: u32) -> f32 {
+		match self {
+			TileCoverage::Uniform(v) => *v,
+			TileCoverage::Data(values) => values[(y * TILE_SIZE + x) as usize],
 		}
 	}
 
-	let mut old_reader = old.map(|old| Coverage::new(old, store, old.image.format()));
-	let mut new_reader = Coverage::new(new, store, format);
-	let mut any = false;
-	for (tx, ty) in tiles {
-		let mut buffer = TileBuffer::zeroed(format);
-		let base_x = i64::from(tx) * i64::from(TILE_SIZE);
-		let base_y = i64::from(ty) * i64::from(TILE_SIZE);
-		for py in 0..TILE_SIZE {
-			for px in 0..TILE_SIZE {
-				let (doc_x, doc_y) = (base_x + i64::from(px), base_y + i64::from(py));
-				if doc_x >= i64::from(size.0) || doc_y >= i64::from(size.1) {
+	/// The values of the whole tile.
+	pub fn into_values(self) -> Box<[f32]> {
+		match self {
+			TileCoverage::Uniform(v) => vec![v; TILE_PIXELS].into_boxed_slice(),
+			TileCoverage::Data(values) => values,
+		}
+	}
+}
+
+/// Canvas tile columns and rows of a document of `size`.
+pub fn canvas_grid(size: (u32, u32)) -> (u32, u32) {
+	(size.0.div_ceil(TILE_SIZE), size.1.div_ceil(TILE_SIZE))
+}
+
+/// Pixels of canvas tile `(tx, ty)` that lie on the canvas: `(w, h)`.
+pub fn valid_extent(size: (u32, u32), tx: u32, ty: u32) -> (u32, u32) {
+	(
+		(size.0 - (tx * TILE_SIZE).min(size.0)).min(TILE_SIZE),
+		(size.1 - (ty * TILE_SIZE).min(size.1)).min(TILE_SIZE),
+	)
+}
+
+/// The slot for a tile of uniform coverage `value` in `format` (quantised to
+/// the format first, so a uniform tile equals the data tile it stands for).
+pub fn uniform_slot(format: PixelFormat, value: f32) -> TileSlot {
+	let value = value.clamp(0.0, 1.0);
+	let v16 = match format {
+		PixelFormat::Gray16 => (value * 65535.0).round() as u16,
+		_ => (value * 255.0).round() as u16 * 257,
+	};
+	if v16 == 0 {
+		TileSlot::Empty
+	} else {
+		TileSlot::Solid(PixelValue::gray16(v16))
+	}
+}
+
+/// A result tile: uniform coverage becomes a slot without a buffer.
+pub enum OutTile {
+	Uniform(f32),
+	Data(TileBuffer),
+}
+
+/// Build a result tile from `values` (row-major, `TILE_SIZE²`). Only the
+/// `valid` part (on the canvas) counts: when it is uniform the tile collapses
+/// to one value, so an edge tile of a full selection is solid like the
+/// others.
+pub fn out_tile(format: PixelFormat, values: &[f32], valid: (u32, u32)) -> OutTile {
+	let first = values[0];
+	let uniform = (0..valid.1).all(|y| values[(y * TILE_SIZE) as usize..(y * TILE_SIZE + valid.0) as usize].iter().all(|v| *v == first));
+	if uniform {
+		return OutTile::Uniform(first);
+	}
+	let mut buffer = TileBuffer::zeroed(format);
+	for y in 0..valid.1 {
+		for x in 0..valid.0 {
+			let v = values[(y * TILE_SIZE + x) as usize];
+			if v > 0.0 {
+				set_gray(&mut buffer, format, x, y, v);
+			}
+		}
+	}
+	OutTile::Data(buffer)
+}
+
+impl Selection {
+	/// The canvas tiles that may hold selected pixels: each non-empty image
+	/// tile moved by the offset (up to four canvas tiles when the offset is
+	/// not a multiple of the tile size), clipped to the canvas. Sorted.
+	pub fn canvas_tiles(&self, size: (u32, u32)) -> Vec<(u32, u32)> {
+		let (cols, rows) = canvas_grid(size);
+		let tile = i64::from(TILE_SIZE);
+		let (ox, oy) = (i64::from(self.offset.0), i64::from(self.offset.1));
+		let mut out = Vec::new();
+		for (tx, ty) in self.tiles() {
+			let x0 = i64::from(tx) * tile + ox;
+			let y0 = i64::from(ty) * tile + oy;
+			let (cx0, cx1) = (x0.div_euclid(tile), (x0 + tile - 1).div_euclid(tile));
+			let (cy0, cy1) = (y0.div_euclid(tile), (y0 + tile - 1).div_euclid(tile));
+			for cy in cy0.max(0)..=cy1.min(i64::from(rows) - 1) {
+				for cx in cx0.max(0)..=cx1.min(i64::from(cols) - 1) {
+					out.push((cx as u32, cy as u32));
+				}
+			}
+		}
+		out.sort_unstable_by_key(|&(x, y)| (y, x));
+		out.dedup();
+		out
+	}
+
+	/// The document rectangle `(x0, y0, x1, y1)` (exclusive) the selection may
+	/// cover, at tile granularity, clipped to the canvas.
+	pub fn canvas_bounds(&self, size: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
+		let tiles = self.canvas_tiles(size);
+		let first = tiles.first()?;
+		let mut b = (first.0, first.1, first.0, first.1);
+		for &(x, y) in &tiles {
+			b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+		}
+		Some((
+			b.0 * TILE_SIZE,
+			b.1 * TILE_SIZE,
+			((b.2 + 1) * TILE_SIZE).min(size.0),
+			((b.3 + 1) * TILE_SIZE).min(size.1),
+		))
+	}
+
+	/// The coverage of canvas tile `(tx, ty)`, with the offset applied. Pixels
+	/// outside the selection image read 0; pixels outside the canvas are not
+	/// meaningful (callers use [`valid_extent`]).
+	pub fn tile_coverage(&self, store: &TileStore, tx: u32, ty: u32) -> Result<TileCoverage, TileError> {
+		let format = self.image.format();
+		let tile = i64::from(TILE_SIZE);
+		let ix = i64::from(tx) * tile - i64::from(self.offset.0);
+		let iy = i64::from(ty) * tile - i64::from(self.offset.1);
+		let (iw, ih) = (i64::from(self.image.width()), i64::from(self.image.height()));
+		let (cols, rows) = (i64::from(self.image.grid(0).cols()), i64::from(self.image.grid(0).rows()));
+		type Part = Option<Result<f32, Arc<TileBuffer>>>;
+		let read = |sx: i64, sy: i64| -> Result<Part, TileError> {
+			if sx < 0 || sy < 0 || sx >= cols || sy >= rows {
+				return Ok(None);
+			}
+			Ok(match self.image.slot(0, sx as u32, sy as u32) {
+				TileSlot::Empty => Some(Ok(0.0)),
+				TileSlot::Solid(v) => Some(Ok(value_of(format, v.0[0]))),
+				TileSlot::Data(handle) => Some(Err(store.get(handle)?)),
+			})
+		};
+		// Aligned: the canvas tile is one image tile.
+		if ix.rem_euclid(tile) == 0 && iy.rem_euclid(tile) == 0 {
+			return Ok(match read(ix / tile, iy / tile)? {
+				None => TileCoverage::Uniform(0.0),
+				Some(Ok(v)) => TileCoverage::Uniform(v),
+				Some(Err(buffer)) => {
+					let mut values = vec![0.0f32; TILE_PIXELS];
+					for (i, out) in values.iter_mut().enumerate() {
+						*out = gray_at(&buffer, format, i as u32 % TILE_SIZE, i as u32 / TILE_SIZE);
+					}
+					TileCoverage::Data(values.into_boxed_slice())
+				}
+			});
+		}
+		// Unaligned: up to four image tiles.
+		let (sx0, sy0) = (ix.div_euclid(tile), iy.div_euclid(tile));
+		let mut parts: [[Part; 2]; 2] = [[None, None], [None, None]];
+		let mut uniform: Option<f32> = None;
+		let mut mixed = false;
+		for (j, row) in parts.iter_mut().enumerate() {
+			for (i, part) in row.iter_mut().enumerate() {
+				let got = read(sx0 + i as i64, sy0 + j as i64)?;
+				match &got {
+					Some(Ok(v)) => {
+						if uniform.is_some_and(|u| u != *v) {
+							mixed = true;
+						}
+						uniform.get_or_insert(*v);
+					}
+					_ => mixed = true,
+				}
+				*part = got;
+			}
+		}
+		let inside = ix >= 0 && iy >= 0 && ix + tile <= iw && iy + tile <= ih;
+		if !mixed && inside {
+			return Ok(TileCoverage::Uniform(uniform.unwrap_or(0.0)));
+		}
+		let mut values = vec![0.0f32; TILE_PIXELS];
+		for y in 0..TILE_SIZE {
+			let sy = iy + i64::from(y);
+			if sy < 0 || sy >= ih {
+				continue;
+			}
+			let pj = (sy.div_euclid(tile) - sy0) as usize;
+			let ly = sy.rem_euclid(tile) as u32;
+			for x in 0..TILE_SIZE {
+				let sx = ix + i64::from(x);
+				if sx < 0 || sx >= iw {
 					continue;
 				}
-				let b = new_reader.at(doc_x, doc_y);
-				let a = old_reader.as_mut().map_or(0.0, |reader| reader.at(doc_x, doc_y));
-				let value = match mode {
-					SelectMode::Replace => b,
-					// Not `a + b`: a soft edge would count twice and clamp.
-					SelectMode::Add => a.max(b),
-					// Not `a - b`: it goes negative outside the shape and wraps.
-					SelectMode::Subtract => a.min(1.0 - b),
-					// Not `a * b`: it darkens a soft edge on both sides.
-					SelectMode::Intersect => a.min(b),
+				let pi = (sx.div_euclid(tile) - sx0) as usize;
+				values[(y * TILE_SIZE + x) as usize] = match &parts[pj][pi] {
+					None => 0.0,
+					Some(Ok(v)) => *v,
+					Some(Err(buffer)) => gray_at(buffer, format, sx.rem_euclid(tile) as u32, ly),
 				};
-				if value > 0.0 {
-					any = true;
-				}
-				set_gray(&mut buffer, format, px, py, value);
 			}
 		}
-		result.image.put_buffer(store, tx, ty, buffer);
+		Ok(TileCoverage::Data(values.into_boxed_slice()))
 	}
-	Ok(any.then_some(result))
-}
 
-/// The inverse of `source` over `size` (Select ▸ Inverse, M5-T03): coverage
-/// `1 - source`, as a canvas-sized selection at offset (0, 0).
-///
-/// Whole tiles that line up with a source tile are inverted without reading
-/// pixels (Empty → solid maximum, Solid(v) → solid maximum − v), so a
-/// document-wide inverse costs one operation per tile, not per pixel. Tiles a
-/// shifted selection cuts through, and tiles holding real data, go pixel by
-/// pixel.
-pub fn invert(size: (u32, u32), source: &Selection, store: &TileStore) -> Result<Selection, TileError> {
-	let format = source.image.format();
-	let depth = if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 };
-	let mut result = Selection::empty(size, depth);
-	let (ox, oy) = (i64::from(source.offset.0), i64::from(source.offset.1));
-	let tile = i64::from(TILE_SIZE);
-	// Only a tile-aligned selection maps whole tiles onto whole tiles.
-	let aligned = source.offset.0.rem_euclid(TILE_SIZE as i32) == 0 && source.offset.1.rem_euclid(TILE_SIZE as i32) == 0;
-	let mut reader = Coverage::new(source, store, format);
-	for ty in 0..size.1.div_ceil(TILE_SIZE) {
-		for tx in 0..size.0.div_ceil(TILE_SIZE) {
-			let (bx, by) = (i64::from(tx) * tile, i64::from(ty) * tile);
-			if aligned && (bx - ox) % tile == 0 && (by - oy) % tile == 0 {
-				let inside = bx >= ox && by >= oy && bx + tile <= ox + i64::from(source.image.width()) && by + tile <= oy + i64::from(source.image.height());
-				if inside {
-					let slot = source.image.slot(0, ((bx - ox) / tile) as u32, ((by - oy) / tile) as u32);
-					match slot {
-						TileSlot::Empty => {
-							result.image.set_slot(tx, ty, TileSlot::Solid(PixelValue::gray16(u16::MAX)));
-							continue;
-						}
-						TileSlot::Solid(value) => {
-							let inverted = u16::MAX - value.0[0];
-							let slot = if inverted == 0 {
-								TileSlot::Empty
-							} else {
-								TileSlot::Solid(PixelValue::gray16(inverted))
-							};
-							result.image.set_slot(tx, ty, slot);
-							continue;
-						}
-						TileSlot::Data(_) => {}
-					}
+	/// Build a canvas-aligned selection (offset 0) from result tiles; `None`
+	/// when nothing is selected.
+	pub fn from_tiles(size: (u32, u32), depth: BitDepth, tiles: Vec<((u32, u32), OutTile)>, store: &TileStore) -> Option<Selection> {
+		let mut result = Selection::empty(size, depth);
+		let format = result.image.format();
+		let mut any = false;
+		for ((tx, ty), tile) in tiles {
+			match tile {
+				OutTile::Uniform(v) => {
+					let slot = uniform_slot(format, v);
+					any |= !slot.is_empty();
+					result.image.set_slot(tx, ty, slot);
+				}
+				OutTile::Data(buffer) => {
+					result.image.put_buffer(store, tx, ty, buffer);
+					any |= !result.image.slot(0, tx, ty).is_empty();
 				}
 			}
-			let mut buffer = TileBuffer::zeroed(format);
-			for py in 0..TILE_SIZE {
-				for px in 0..TILE_SIZE {
-					let (doc_x, doc_y) = (bx + i64::from(px), by + i64::from(py));
-					if doc_x >= i64::from(size.0) || doc_y >= i64::from(size.1) {
-						// Outside the canvas: nothing is selected there.
-						continue;
-					}
-					set_gray(&mut buffer, format, px, py, 1.0 - reader.at(doc_x, doc_y));
-				}
-			}
-			result.image.put_buffer(store, tx, ty, buffer);
 		}
+		any.then_some(result)
 	}
-	Ok(result)
 }
 
-/// Reads a selection's coverage with the tiles it touches cached.
-struct Coverage<'a> {
+/// A grey sample of `format` stored on the 16-bit scale, as `0..=1`.
+fn value_of(format: PixelFormat, v16: u16) -> f32 {
+	match format {
+		PixelFormat::Gray16 => f32::from(v16) / 65535.0,
+		_ => f32::from(v16 / 257) / 255.0,
+	}
+}
+
+/// Reads rectangular patches of a selection's coverage (the apron of a
+/// blur or a distance transform), caching the canvas tiles it has read.
+/// Outside the canvas the coverage is 0.
+pub struct PatchReader<'a> {
 	selection: &'a Selection,
 	store: &'a TileStore,
-	format: PixelFormat,
-	cache: HashMap<(u32, u32), Option<Arc<TileBuffer>>>,
+	size: (u32, u32),
+	cache: HashMap<(u32, u32), Arc<TileCoverage>>,
 }
 
-impl<'a> Coverage<'a> {
-	fn new(selection: &'a Selection, store: &'a TileStore, format: PixelFormat) -> Self {
+impl<'a> PatchReader<'a> {
+	/// A reader over `selection` on a canvas of `size`.
+	pub fn new(selection: &'a Selection, store: &'a TileStore, size: (u32, u32)) -> Self {
 		Self {
 			selection,
 			store,
-			format,
+			size,
 			cache: HashMap::new(),
 		}
 	}
 
-	fn at(&mut self, doc_x: i64, doc_y: i64) -> f32 {
-		let (ix, iy) = (doc_x - i64::from(self.selection.offset.0), doc_y - i64::from(self.selection.offset.1));
-		if ix < 0 || iy < 0 || ix >= i64::from(self.selection.image.width()) || iy >= i64::from(self.selection.image.height()) {
-			return 0.0;
+	/// The canvas tile's coverage (cached).
+	pub fn tile(&mut self, tx: u32, ty: u32) -> Result<Arc<TileCoverage>, TileError> {
+		if let Some(tile) = self.cache.get(&(tx, ty)) {
+			return Ok(tile.clone());
 		}
-		let (tx, ty) = (ix as u32 / TILE_SIZE, iy as u32 / TILE_SIZE);
-		if !self.cache.contains_key(&(tx, ty)) {
-			let tile = match self.selection.image.slot(0, tx, ty) {
-				TileSlot::Empty => None,
-				TileSlot::Solid(value) => Some(Arc::new(TileBuffer::filled(self.format, *value))),
-				TileSlot::Data(handle) => self.store.get(handle).ok(),
-			};
-			self.cache.insert((tx, ty), tile);
-		}
-		match &self.cache[&(tx, ty)] {
-			Some(buffer) => gray_at(buffer, self.format, ix as u32 % TILE_SIZE, iy as u32 % TILE_SIZE),
-			None => 0.0,
-		}
+		let tile = Arc::new(self.selection.tile_coverage(self.store, tx, ty)?);
+		self.cache.insert((tx, ty), tile.clone());
+		Ok(tile)
 	}
+
+	/// Whether every canvas pixel of the rectangle `[x0, x1) × [y0, y1)`
+	/// (clipped to the canvas) has coverage `value`, answered from uniform
+	/// tiles only (`false` when a data tile is involved).
+	pub fn is_uniform(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, value: f32) -> Result<bool, TileError> {
+		let tile = i64::from(TILE_SIZE);
+		let (cx0, cy0) = (x0.max(0), y0.max(0));
+		let (cx1, cy1) = (x1.min(i64::from(self.size.0)), y1.min(i64::from(self.size.1)));
+		if cx1 <= cx0 || cy1 <= cy0 {
+			return Ok(value == 0.0);
+		}
+		// Outside the canvas the coverage is 0.
+		if value != 0.0 && (x0 < 0 || y0 < 0 || x1 > i64::from(self.size.0) || y1 > i64::from(self.size.1)) {
+			return Ok(false);
+		}
+		for ty in cy0 / tile..=(cy1 - 1) / tile {
+			for tx in cx0 / tile..=(cx1 - 1) / tile {
+				match self.tile(tx as u32, ty as u32)?.as_ref() {
+					TileCoverage::Uniform(v) if *v == value => {}
+					_ => return Ok(false),
+				}
+			}
+		}
+		Ok(true)
+	}
+
+	/// Coverage of the `w × h` rectangle at document `(x0, y0)`, row-major.
+	pub fn patch(&mut self, x0: i64, y0: i64, w: usize, h: usize) -> Result<Vec<f32>, TileError> {
+		let mut out = vec![0.0f32; w * h];
+		let tile = i64::from(TILE_SIZE);
+		let cx0 = x0.max(0);
+		let cy0 = y0.max(0);
+		let cx1 = (x0 + w as i64).min(i64::from(self.size.0));
+		let cy1 = (y0 + h as i64).min(i64::from(self.size.1));
+		if cx1 <= cx0 || cy1 <= cy0 {
+			return Ok(out);
+		}
+		for ty in cy0 / tile..=(cy1 - 1) / tile {
+			for tx in cx0 / tile..=(cx1 - 1) / tile {
+				let coverage = self.tile(tx as u32, ty as u32)?;
+				let (bx, by) = (tx * tile, ty * tile);
+				let (rx0, rx1) = (cx0.max(bx), cx1.min(bx + tile));
+				let (ry0, ry1) = (cy0.max(by), cy1.min(by + tile));
+				for y in ry0..ry1 {
+					let row = &mut out[((y - y0) as usize) * w..((y - y0) as usize + 1) * w];
+					let dst = &mut row[(rx0 - x0) as usize..(rx1 - x0) as usize];
+					match coverage.as_ref() {
+						TileCoverage::Uniform(v) => dst.fill(*v),
+						TileCoverage::Data(values) => {
+							let src = ((y - by) * tile) as usize;
+							dst.copy_from_slice(&values[src + (rx0 - bx) as usize..src + (rx1 - bx) as usize]);
+						}
+					}
+				}
+			}
+		}
+		Ok(out)
+	}
+}
+
+/// Combine `new` (a freshly rasterised shape) with `old` under `mode`
+/// (M5-T03). Only the tiles the shape touches are built; the rest follow from
+/// the mode without reading pixels (Replace/Intersect → empty, Add/Subtract →
+/// the old selection). Uniform tiles combine as one value, and tiles run on
+/// rayon.
+///
+/// Returns `None` when the result selects nothing.
+pub fn combine(size: (u32, u32), old: Option<&Selection>, new: &Selection, mode: SelectMode, store: &TileStore) -> Result<Option<Selection>, TileError> {
+	let format = new.image.format();
+	let depth = if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 };
+	let (old, mode) = match old {
+		Some(old) => (old, mode),
+		// Nothing selected: Add = Replace; Subtract/Intersect select nothing.
+		None if matches!(mode, SelectMode::Replace | SelectMode::Add) => (new, SelectMode::Replace),
+		None => return Ok(None),
+	};
+	let mut tiles = new.canvas_tiles(size);
+	if matches!(mode, SelectMode::Add | SelectMode::Subtract) {
+		tiles.extend(old.canvas_tiles(size));
+		tiles.sort_unstable_by_key(|&(x, y)| (y, x));
+		tiles.dedup();
+	}
+	let op = move |a: f32, b: f32| match mode {
+		SelectMode::Replace => b,
+		// Not `a + b`: a soft edge would count twice and clamp.
+		SelectMode::Add => a.max(b),
+		// Not `a - b`: it goes negative outside the shape.
+		SelectMode::Subtract => a.min(1.0 - b),
+		// Not `a * b`: it darkens a soft edge on both sides.
+		SelectMode::Intersect => a.min(b),
+	};
+	let results: Result<Vec<_>, TileError> = tiles
+		.par_iter()
+		.map(|&(tx, ty)| {
+			let b = new.tile_coverage(store, tx, ty)?;
+			let a = if mode == SelectMode::Replace {
+				TileCoverage::Uniform(0.0)
+			} else {
+				old.tile_coverage(store, tx, ty)?
+			};
+			let out = match (&a, &b) {
+				(TileCoverage::Uniform(a), TileCoverage::Uniform(b)) => OutTile::Uniform(op(*a, *b)),
+				_ => {
+					let mut values = vec![0.0f32; TILE_PIXELS];
+					for (i, v) in values.iter_mut().enumerate() {
+						let (x, y) = (i as u32 % TILE_SIZE, i as u32 / TILE_SIZE);
+						*v = op(a.at(x, y), b.at(x, y));
+					}
+					out_tile(format, &values, valid_extent(size, tx, ty))
+				}
+			};
+			Ok(((tx, ty), out))
+		})
+		.collect();
+	Ok(Selection::from_tiles(size, depth, results?, store))
+}
+
+/// The inverse of `source` over `size` (Select ▸ Inverse, M5-T03): coverage
+/// `1 - source`, as a canvas-aligned selection (`None` when that selects
+/// nothing). Uniform tiles invert without a per-pixel loop, so a
+/// document-wide inverse costs one operation per tile.
+pub fn invert(size: (u32, u32), source: &Selection, store: &TileStore) -> Result<Option<Selection>, TileError> {
+	let format = source.image.format();
+	let depth = if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 };
+	let (cols, rows) = canvas_grid(size);
+	let tiles: Vec<(u32, u32)> = (0..rows).flat_map(|ty| (0..cols).map(move |tx| (tx, ty))).collect();
+	let results: Result<Vec<_>, TileError> = tiles
+		.par_iter()
+		.map(|&(tx, ty)| {
+			let out = match source.tile_coverage(store, tx, ty)? {
+				TileCoverage::Uniform(v) => OutTile::Uniform(1.0 - v),
+				TileCoverage::Data(values) => {
+					let inverted: Vec<f32> = values.iter().map(|v| 1.0 - v).collect();
+					out_tile(format, &inverted, valid_extent(size, tx, ty))
+				}
+			};
+			Ok(((tx, ty), out))
+		})
+		.collect();
+	Ok(Selection::from_tiles(size, depth, results?, store))
 }
 
 #[cfg(test)]
@@ -334,8 +594,8 @@ mod tests {
 	}
 
 	fn at(selection: &Selection, store: &TileStore, x: i64, y: i64) -> f32 {
-		let mut reader = Coverage::new(selection, store, selection.image.format());
-		reader.at(x, y)
+		let (tx, ty) = ((x / i64::from(TILE_SIZE)) as u32, (y / i64::from(TILE_SIZE)) as u32);
+		selection.tile_coverage(store, tx, ty).unwrap().at(x as u32 % TILE_SIZE, y as u32 % TILE_SIZE)
 	}
 
 	#[test]
@@ -379,6 +639,35 @@ mod tests {
 		// Image pixel (0, 0) is document pixel (100, 50).
 		assert_eq!(at(&selection, &store, 100, 50), 1.0);
 		assert_eq!(at(&selection, &store, 0, 0), 0.0);
+	}
+
+	#[test]
+	fn adding_to_a_moved_selection_keeps_the_moved_part() {
+		// Review fix: the tiles of an offset selection are canvas tiles moved by
+		// the offset, not the image's own tile coordinates.
+		let store = store();
+		let size = (1000, 300);
+		let mut old = rect_selection(&store, size, (0, 0, 100, 100));
+		old.offset = (600, 10);
+		let new = rect_selection(&store, size, (0, 0, 50, 50));
+		let added = combine(size, Some(&old), &new, SelectMode::Add, &store).unwrap().unwrap();
+		assert_eq!(added.offset, (0, 0), "the result is canvas-aligned");
+		assert_eq!(at(&added, &store, 650, 50), 1.0, "the moved rectangle survives");
+		assert_eq!(at(&added, &store, 25, 25), 1.0, "the new one is added");
+		assert_eq!(at(&added, &store, 75, 75), 0.0, "the old place is empty");
+	}
+
+	#[test]
+	fn a_moved_selection_reads_across_four_tiles() {
+		let store = store();
+		let size = (800, 800);
+		let mut selection = rect_selection(&store, size, (0, 0, 300, 300));
+		selection.offset = (100, 130);
+		let tiles = selection.canvas_tiles(size);
+		assert!(tiles.contains(&(1, 1)) && tiles.contains(&(0, 0)) && !tiles.contains(&(3, 3)), "{tiles:?}");
+		assert_eq!(at(&selection, &store, 399, 429), 1.0);
+		assert_eq!(at(&selection, &store, 400, 429), 0.0);
+		assert_eq!(at(&selection, &store, 99, 200), 0.0);
 	}
 
 	#[test]

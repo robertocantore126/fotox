@@ -1260,7 +1260,7 @@ fn invert_selection(doc: &mut Document, ctx: &mut CommandContext<'_>) -> Result<
 		doc.selection = Some(Selection::full(size, doc.color.depth));
 		return Ok(selection_effect("Inverse"));
 	};
-	doc.selection = Some(selection::invert(size, &source, ctx.tiles)?);
+	doc.selection = selection::invert(size, &source, ctx.tiles)?;
 	Ok(selection_effect("Inverse"))
 }
 
@@ -3109,7 +3109,7 @@ mod tests {
 		// disappear), like Photoshop's "no pixels are selected".
 		f.ok(Command::SelectAll);
 		f.ok(Command::InvertSelection);
-		assert!(f.doc.selection.as_ref().unwrap().is_empty());
+		assert!(f.doc.selection.is_none(), "nothing is left selected");
 	}
 
 	#[test]

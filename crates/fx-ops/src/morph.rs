@@ -1,10 +1,13 @@
-//! Selection reshaping (M5-T03): feather, expand, contract, border, smooth.
+//! Selection reshaping (M5-T03, parallel and offset-aware since the M5
+//! review): feather, expand, contract, border, smooth.
 //!
-//! All of it runs one output tile at a time over a patch with an apron, so
-//! the memory cost is one patch, never the document.
+//! All of it runs one output tile at a time over a patch with an apron, on
+//! rayon, so the memory cost is one patch per worker, never the document. A
+//! tile whose whole patch is uniform (the inside of a big selection, or far
+//! outside it) is answered without touching pixels.
 //!
 //! * **Feather** is a Gaussian blur of the coverage (`σ = radius / 2`, VERIFY
-//!   against Photoshop), separable, trucated at 3σ.
+//!   against Photoshop), separable, truncated at 3σ.
 //! * **Expand / contract** threshold at 50 %, then an exact Euclidean distance
 //!   transform (Felzenszwalb–Huttenlocher, separable —
 //!   `docs/tasks/SNIPPETS.md` §15) within the apron, re-anti-aliased over
@@ -12,38 +15,34 @@
 //! * **Border(w)** = Expand(w/2) − Contract(w/2); **Smooth(r)** = blur r then
 //!   threshold at 50 %.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use fx_core::selection::{SelectModify, Selection, gray_at, set_gray};
+use fx_core::selection::{OutTile, PatchReader, SelectModify, Selection, TileCoverage, canvas_grid, out_tile, valid_extent};
 use fx_core::{BitDepth, CommandError};
-use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileSlot, TileStore};
+use fx_tiles::{TILE_PIXELS, TILE_SIZE, TileError, TileStore};
+use rayon::prelude::*;
 
 /// Largest apron (in pixels) a reshape may read. Bounds the patch memory: at
-/// 1024 the patch is ~2 300² × 4 B ≈ 21 MB.
+/// 1024 the patch is ~2 300² × 4 B ≈ 21 MB per worker.
 const MAX_APRON: u32 = 1024;
 
-/// Apply a [`SelectModify`] to `selection`.
+/// Apply a [`SelectModify`] to `selection`. `None` = nothing left selected.
 pub fn modify(selection: &Selection, op: &SelectModify, size: (u32, u32), depth: BitDepth, store: &TileStore) -> Result<Option<Selection>, CommandError> {
-	let format = depth.gray_format();
 	let out = match *op {
 		SelectModify::Feather(radius) => {
-			let sigma = radius / 2.0;
-			if sigma <= 0.0 {
+			if radius <= 0.0 {
 				Some(selection.clone())
 			} else {
-				blur(selection, sigma, size, format, store)?
+				blur(selection, radius / 2.0, size, depth, store)?
 			}
 		}
-		SelectModify::Expand(px) => expand_contract(selection, px, size, format, store)?,
-		SelectModify::Contract(px) => expand_contract(selection, -px, size, format, store)?,
+		SelectModify::Expand(px) => expand_contract(selection, px, size, depth, store)?,
+		SelectModify::Contract(px) => expand_contract(selection, -px, size, depth, store)?,
 		SelectModify::Border(width) => {
 			let half = width / 2.0;
 			match (
-				expand_contract(selection, half, size, format, store)?,
-				expand_contract(selection, -half, size, format, store)?,
+				expand_contract(selection, half, size, depth, store)?,
+				expand_contract(selection, -half, size, depth, store)?,
 			) {
-				(Some(expanded), Some(contracted)) => subtract(&expanded, &contracted, size, format, store)?,
+				(Some(expanded), Some(contracted)) => per_tile(&[&expanded, &contracted], size, depth, store, |v| (v[0] - v[1]).clamp(0.0, 1.0))?,
 				(Some(expanded), None) => Some(expanded),
 				_ => None,
 			}
@@ -52,8 +51,8 @@ pub fn modify(selection: &Selection, op: &SelectModify, size: (u32, u32), depth:
 			if radius <= 0.0 {
 				Some(selection.clone())
 			} else {
-				match blur(selection, radius, size, format, store)? {
-					Some(blurred) => threshold(&blurred, size, format, store)?,
+				match blur(selection, radius, size, depth, store)? {
+					Some(blurred) => per_tile(&[&blurred], size, depth, store, |v| if v[0] >= 0.5 { 1.0 } else { 0.0 })?,
 					None => None,
 				}
 			}
@@ -62,131 +61,132 @@ pub fn modify(selection: &Selection, op: &SelectModify, size: (u32, u32), depth:
 	Ok(out.filter(|selection| !selection.is_empty()))
 }
 
-/// Every output tile the reshape may touch: the input's non-empty tiles grown
-/// by `grow` tiles.
-fn output_tiles(selection: &Selection, grow: u32, size: (u32, u32)) -> Vec<(u32, u32)> {
-	let cols = size.0.div_ceil(TILE_SIZE);
-	let rows = size.1.div_ceil(TILE_SIZE);
-	let mut bbox: Option<(u32, u32, u32, u32)> = None;
-	for (tx, ty) in selection.tiles() {
-		bbox = Some(match bbox {
-			None => (tx, ty, tx, ty),
-			Some((x0, y0, x1, y1)) => (x0.min(tx), y0.min(ty), x1.max(tx), y1.max(ty)),
-		});
-	}
-	let Some((x0, y0, x1, y1)) = bbox else {
+/// Every output tile a reshape reaching `reach` pixels may touch: the
+/// selection's canvas tiles grown by `reach`, clipped to the canvas.
+fn output_tiles(selection: &Selection, reach: u32, size: (u32, u32)) -> Vec<(u32, u32)> {
+	let Some((x0, y0, x1, y1)) = selection.canvas_bounds(size) else {
 		return Vec::new();
 	};
-	let x0 = x0.saturating_sub(grow);
-	let y0 = y0.saturating_sub(grow);
-	let x1 = (x1 + grow).min(cols.saturating_sub(1));
-	let y1 = (y1 + grow).min(rows.saturating_sub(1));
-	let mut tiles = Vec::new();
-	for ty in y0..=y1 {
-		for tx in x0..=x1 {
-			tiles.push((tx, ty));
-		}
-	}
-	tiles
+	let (cols, rows) = canvas_grid(size);
+	let tx0 = x0.saturating_sub(reach) / TILE_SIZE;
+	let ty0 = y0.saturating_sub(reach) / TILE_SIZE;
+	let tx1 = ((x1 + reach).saturating_sub(1) / TILE_SIZE).min(cols - 1);
+	let ty1 = ((y1 + reach).saturating_sub(1) / TILE_SIZE).min(rows - 1);
+	(ty0..=ty1).flat_map(|ty| (tx0..=tx1).map(move |tx| (tx, ty))).collect()
 }
 
-/// A patch of coverage around one output tile, read through the tile store.
-struct Reader<'a> {
-	selection: &'a Selection,
-	store: &'a TileStore,
-	format: PixelFormat,
-	cache: HashMap<(u32, u32), Option<Arc<TileBuffer>>>,
+/// Run `tile` for every output tile on rayon, each worker with its own patch
+/// reader, and build the result.
+fn run_tiles(
+	selection: &Selection,
+	tiles: Vec<(u32, u32)>,
+	size: (u32, u32),
+	depth: BitDepth,
+	store: &TileStore,
+	tile: impl Fn(&mut PatchReader<'_>, u32, u32) -> Result<OutTile, TileError> + Sync,
+) -> Result<Option<Selection>, CommandError> {
+	let results: Result<Vec<_>, TileError> = tiles
+		.par_iter()
+		.map_init(
+			|| PatchReader::new(selection, store, size),
+			|reader, &(tx, ty)| Ok(((tx, ty), tile(reader, tx, ty)?)),
+		)
+		.collect();
+	Ok(Selection::from_tiles(size, depth, results?, store))
 }
 
-impl<'a> Reader<'a> {
-	fn new(selection: &'a Selection, store: &'a TileStore, format: PixelFormat) -> Self {
-		Self {
-			selection,
-			store,
-			format,
-			cache: HashMap::new(),
-		}
-	}
+/// `f` of the selections' coverages, pixel by pixel, over the tiles of the
+/// first (uniform tiles combine as one value).
+fn per_tile(
+	inputs: &[&Selection],
+	size: (u32, u32),
+	depth: BitDepth,
+	store: &TileStore,
+	f: impl Fn(&[f32]) -> f32 + Sync,
+) -> Result<Option<Selection>, CommandError> {
+	let format = depth.gray_format();
+	let tiles = inputs[0].canvas_tiles(size);
+	let results: Result<Vec<_>, TileError> = tiles
+		.par_iter()
+		.map(|&(tx, ty)| {
+			let covs: Vec<TileCoverage> = inputs.iter().map(|s| s.tile_coverage(store, tx, ty)).collect::<Result<_, _>>()?;
+			let mut values = vec![0.0f32; inputs.len()];
+			if covs.iter().all(|c| matches!(c, TileCoverage::Uniform(_))) {
+				for (v, c) in values.iter_mut().zip(&covs) {
+					*v = c.at(0, 0);
+				}
+				return Ok(((tx, ty), OutTile::Uniform(f(&values))));
+			}
+			let mut out = vec![0.0f32; TILE_PIXELS];
+			for (i, o) in out.iter_mut().enumerate() {
+				let (x, y) = (i as u32 % TILE_SIZE, i as u32 / TILE_SIZE);
+				for (v, c) in values.iter_mut().zip(&covs) {
+					*v = c.at(x, y);
+				}
+				*o = f(&values);
+			}
+			Ok(((tx, ty), out_tile(format, &out, valid_extent(size, tx, ty))))
+		})
+		.collect();
+	Ok(Selection::from_tiles(size, depth, results?, store))
+}
 
-	fn at(&mut self, doc_x: i64, doc_y: i64) -> f32 {
-		let (ix, iy) = (doc_x - i64::from(self.selection.offset.0), doc_y - i64::from(self.selection.offset.1));
-		if ix < 0 || iy < 0 || ix >= i64::from(self.selection.image.width()) || iy >= i64::from(self.selection.image.height()) {
-			return 0.0;
-		}
-		let (tx, ty) = (ix as u32 / TILE_SIZE, iy as u32 / TILE_SIZE);
-		if !self.cache.contains_key(&(tx, ty)) {
-			let tile = match self.selection.image.slot(0, tx, ty) {
-				TileSlot::Empty => None,
-				TileSlot::Solid(value) => Some(Arc::new(TileBuffer::filled(self.format, *value))),
-				TileSlot::Data(handle) => self.store.get(handle).ok(),
-			};
-			self.cache.insert((tx, ty), tile);
-		}
-		match &self.cache[&(tx, ty)] {
-			Some(buffer) => gray_at(buffer, self.format, ix as u32 % TILE_SIZE, iy as u32 % TILE_SIZE),
-			None => 0.0,
-		}
-	}
+/// A normalised Gaussian kernel of `sigma`, truncated at 3σ.
+fn gaussian_kernel(sigma: f64) -> Vec<f32> {
+	let radius = (3.0 * sigma).ceil() as i64;
+	let kernel: Vec<f64> = (-radius..=radius)
+		.map(|i| {
+			let x = i as f64 / sigma;
+			(-0.5 * x * x).exp()
+		})
+		.collect();
+	let sum: f64 = kernel.iter().sum();
+	kernel.into_iter().map(|k| (k / sum) as f32).collect()
 }
 
 /// Gaussian blur of the coverage (`sigma` in pixels), tile by tile.
-fn blur(selection: &Selection, sigma: f64, size: (u32, u32), format: PixelFormat, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+fn blur(selection: &Selection, sigma: f64, size: (u32, u32), depth: BitDepth, store: &TileStore) -> Result<Option<Selection>, CommandError> {
 	if sigma <= 0.0 {
 		return Ok(Some(selection.clone()));
 	}
-	let kernel_radius = (3.0 * sigma).ceil() as u32;
-	if kernel_radius > MAX_APRON {
-		return Err(CommandError::NotAllowed(format!("a feather of {sigma} px is too large")));
+	let kernel = gaussian_kernel(sigma);
+	let radius = (kernel.len() / 2) as u32;
+	if radius > MAX_APRON {
+		return Err(CommandError::NotAllowed(format!("a feather of {} px is too large", sigma * 2.0)));
 	}
-	let kernel: Vec<f32> = (-(i64::from(kernel_radius))..=i64::from(kernel_radius))
-		.map(|i| {
-			let x = i as f64 / sigma;
-			(-0.5 * x * x).exp() as f32
-		})
-		.collect();
-	let sum: f32 = kernel.iter().sum();
-	let kernel: Vec<f32> = kernel.into_iter().map(|k| k / sum).collect();
-	let patch = (TILE_SIZE + 2 * kernel_radius) as usize;
-
+	let format = depth.gray_format();
 	let side = TILE_SIZE as usize;
-	let mut result = Selection::empty(size, if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 });
-	let mut reader = Reader::new(selection, store, format);
-	let mut column = vec![0.0f32; patch];
-	let mut out = vec![0.0f32; side];
-	for (tx, ty) in output_tiles(selection, kernel_radius.div_ceil(TILE_SIZE) + 1, size) {
-		let (base_x, base_y) = (i64::from(tx) * i64::from(TILE_SIZE), i64::from(ty) * i64::from(TILE_SIZE));
-		// Gather the patch (transparent outside the canvas).
-		let mut source = vec![0.0f32; patch * patch];
-		for j in 0..patch {
-			let doc_y = base_y - i64::from(kernel_radius) + j as i64;
-			for i in 0..patch {
-				let doc_x = base_x - i64::from(kernel_radius) + i as i64;
-				source[j * patch + i] = reader.at(doc_x, doc_y);
+	let patch = side + 2 * radius as usize;
+	let r = i64::from(radius);
+	run_tiles(selection, output_tiles(selection, radius, size), size, depth, store, |reader, tx, ty| {
+		let (bx, by) = (i64::from(tx * TILE_SIZE), i64::from(ty * TILE_SIZE));
+		for value in [0.0, 1.0] {
+			if reader.is_uniform(bx - r, by - r, bx + side as i64 + r, by + side as i64 + r, value)? {
+				return Ok(OutTile::Uniform(value));
 			}
 		}
+		let source = reader.patch(bx - r, by - r, patch, patch)?;
 		// Horizontal, then vertical. A convolution drops the kernel's radius
 		// at both ends, so each pass is one tile wide and the result lines up
-		// with the tile's own pixels — no index shifting afterwards.
+		// with the tile's own pixels.
 		let mut band = vec![0.0f32; patch * side];
 		for j in 0..patch {
-			let row = &source[j * patch..(j + 1) * patch];
-			convolve(row, &kernel, &mut band[j * side..(j + 1) * side]);
+			convolve(&source[j * patch..(j + 1) * patch], &kernel, &mut band[j * side..(j + 1) * side]);
 		}
-		let mut tile = TileBuffer::zeroed(format);
+		let mut column = vec![0.0f32; patch];
+		let mut out = vec![0.0f32; side];
+		let mut values = vec![0.0f32; TILE_PIXELS];
 		for i in 0..side {
-			for j in 0..patch {
-				column[j] = band[j * side + i];
+			for (j, c) in column.iter_mut().enumerate() {
+				*c = band[j * side + i];
 			}
 			convolve(&column, &kernel, &mut out);
 			for (j, value) in out.iter().enumerate() {
-				if *value > 0.0 {
-					set_gray(&mut tile, format, j as u32, i as u32, *value);
-				}
+				values[j * side + i] = *value;
 			}
 		}
-		result.image.put_buffer(store, tx, ty, tile);
-	}
-	Ok(Some(result))
+		Ok(out_tile(format, &values, valid_extent(size, tx, ty)))
+	})
 }
 
 /// One separable pass: `src` with `radius` margins, `dst` gets `src.len() - 2r`.
@@ -194,17 +194,13 @@ fn convolve(src: &[f32], kernel: &[f32], dst: &mut [f32]) {
 	let radius = kernel.len() / 2;
 	debug_assert_eq!(dst.len(), src.len() - 2 * radius);
 	for (i, out) in dst.iter_mut().enumerate() {
-		let mut sum = 0.0f32;
-		for (k, weight) in kernel.iter().enumerate() {
-			sum += src[i + k] * weight;
-		}
-		*out = sum;
+		*out = src[i..i + kernel.len()].iter().zip(kernel).map(|(s, k)| s * k).sum();
 	}
 }
 
 /// Expand (`delta > 0`) or contract (`delta < 0`) by `|delta|` pixels, with a
 /// 1 px anti-aliased edge.
-fn expand_contract(selection: &Selection, delta: f64, size: (u32, u32), format: PixelFormat, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+fn expand_contract(selection: &Selection, delta: f64, size: (u32, u32), depth: BitDepth, store: &TileStore) -> Result<Option<Selection>, CommandError> {
 	let magnitude = delta.abs();
 	if magnitude <= 0.0 {
 		return Ok(Some(selection.clone()));
@@ -213,23 +209,22 @@ fn expand_contract(selection: &Selection, delta: f64, size: (u32, u32), format: 
 	if apron > MAX_APRON {
 		return Err(CommandError::NotAllowed(format!("a distance of {magnitude} px is too large")));
 	}
+	let format = depth.gray_format();
 	let patch = (TILE_SIZE + 2 * apron) as usize;
-	let mut result = Selection::empty(size, if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 });
-	let mut reader = Reader::new(selection, store, format);
-	for (tx, ty) in output_tiles(selection, apron.div_ceil(TILE_SIZE) + 1, size) {
-		let (base_x, base_y) = (i64::from(tx) * i64::from(TILE_SIZE), i64::from(ty) * i64::from(TILE_SIZE));
-		// The feature is "inside" for an expand, "outside" for a contract.
-		let mut mask = vec![false; patch * patch];
-		for j in 0..patch {
-			let doc_y = base_y - i64::from(apron) + j as i64;
-			for i in 0..patch {
-				let doc_x = base_x - i64::from(apron) + i as i64;
-				let inside = reader.at(doc_x, doc_y) >= 0.5;
-				mask[j * patch + i] = if delta > 0.0 { inside } else { !inside };
+	let a = i64::from(apron);
+	let side = i64::from(TILE_SIZE);
+	run_tiles(selection, output_tiles(selection, apron, size), size, depth, store, |reader, tx, ty| {
+		let (bx, by) = (i64::from(tx * TILE_SIZE), i64::from(ty * TILE_SIZE));
+		for value in [0.0, 1.0] {
+			if reader.is_uniform(bx - a, by - a, bx + side + a, by + side + a, value)? {
+				return Ok(OutTile::Uniform(value));
 			}
 		}
+		let source = reader.patch(bx - a, by - a, patch, patch)?;
+		// The feature is "inside" for an expand, "outside" for a contract.
+		let mask: Vec<bool> = source.iter().map(|v| (*v >= 0.5) == (delta > 0.0)).collect();
 		let distance = edt_2d(&mask, patch, patch);
-		let mut tile = TileBuffer::zeroed(format);
+		let mut values = vec![0.0f32; TILE_PIXELS];
 		for py in 0..TILE_SIZE {
 			for px in 0..TILE_SIZE {
 				let d = distance[(py + apron) as usize * patch + (px + apron) as usize];
@@ -238,55 +233,11 @@ fn expand_contract(selection: &Selection, delta: f64, size: (u32, u32), format: 
 				} else {
 					(d - magnitude + 0.5).clamp(0.0, 1.0)
 				};
-				if coverage > 0.0 {
-					set_gray(&mut tile, format, px, py, coverage as f32);
-				}
+				values[(py * TILE_SIZE + px) as usize] = coverage as f32;
 			}
 		}
-		result.image.put_buffer(store, tx, ty, tile);
-	}
-	Ok(Some(result))
-}
-
-/// `a - b` per pixel, clamped at 0 (the border of a selection).
-fn subtract(a: &Selection, b: &Selection, size: (u32, u32), format: PixelFormat, store: &TileStore) -> Result<Option<Selection>, CommandError> {
-	let mut result = Selection::empty(size, if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 });
-	let mut reader_b = Reader::new(b, store, format);
-	for (tx, ty) in a.tiles() {
-		let mut reader_a = Reader::new(a, store, format);
-		let mut tile = TileBuffer::zeroed(format);
-		let (base_x, base_y) = (i64::from(tx) * i64::from(TILE_SIZE), i64::from(ty) * i64::from(TILE_SIZE));
-		for py in 0..TILE_SIZE {
-			for px in 0..TILE_SIZE {
-				let (doc_x, doc_y) = (base_x + i64::from(px), base_y + i64::from(py));
-				let value = (reader_a.at(doc_x, doc_y) - reader_b.at(doc_x, doc_y)).clamp(0.0, 1.0);
-				if value > 0.0 {
-					set_gray(&mut tile, format, px, py, value);
-				}
-			}
-		}
-		result.image.put_buffer(store, tx, ty, tile);
-	}
-	Ok(Some(result))
-}
-
-/// Binarise at 50 % (Smooth's second half).
-fn threshold(selection: &Selection, size: (u32, u32), format: PixelFormat, store: &TileStore) -> Result<Option<Selection>, CommandError> {
-	let mut result = Selection::empty(size, if format == PixelFormat::Gray16 { BitDepth::U16 } else { BitDepth::U8 });
-	let mut reader = Reader::new(selection, store, format);
-	for (tx, ty) in selection.tiles() {
-		let mut tile = TileBuffer::zeroed(format);
-		let (base_x, base_y) = (i64::from(tx) * i64::from(TILE_SIZE), i64::from(ty) * i64::from(TILE_SIZE));
-		for py in 0..TILE_SIZE {
-			for px in 0..TILE_SIZE {
-				if reader.at(base_x + i64::from(px), base_y + i64::from(py)) >= 0.5 {
-					set_gray(&mut tile, format, px, py, 1.0);
-				}
-			}
-		}
-		result.image.put_buffer(store, tx, ty, tile);
-	}
-	Ok(Some(result))
+		Ok(out_tile(format, &values, valid_extent(size, tx, ty)))
+	})
 }
 
 /// Exact Euclidean distance transform of the `true` pixels (Felzenszwalb–
@@ -353,10 +304,10 @@ fn edt_1d(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
 
 #[cfg(test)]
 mod tests {
-	use fx_tiles::{TileSlot, TileStoreConfig};
+	use fx_tiles::{PixelFormat, TileBuffer, TileSlot, TileStoreConfig};
 
 	use super::*;
-	use fx_core::selection::gray_at;
+	use fx_core::selection::{gray_at, set_gray};
 
 	fn store() -> TileStore {
 		let dir = std::env::temp_dir().join("fx-ops-morph-tests");

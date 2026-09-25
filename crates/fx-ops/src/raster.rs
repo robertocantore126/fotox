@@ -1,91 +1,93 @@
-//! Selection shape rasterisers (M5-T03).
+//! Selection shape rasterisers (M5-T03, rewritten in the M5 review).
 //!
-//! One tile at a time, and only the tiles the shape's bounding box touches:
-//! a marquee across a 30 000² document costs its own area, not the canvas.
+//! Only the tiles the shape's bounding box touches are visited, on rayon, and
+//! a tile the shape covers entirely becomes a solid tile without a buffer: a
+//! marquee across a 30 000² document costs its outline, not its area.
 //!
 //! Coverage:
-//! * rectangle — exact area of the pixel covered by the rectangle
-//!   (`docs/tasks/SNIPPETS.md` §6);
-//! * ellipse — 1/0 from a normalised distance test, supersampled only in the
-//!   one-pixel band around the boundary;
-//! * polygon — the non-zero winding rule, supersampled only on the boundary;
+//! * rectangle — the exact area of each pixel covered (`docs/tasks/SNIPPETS.md` §6);
+//! * polygon — **non-zero winding**, scan converted with [`SUBSAMPLES`]
+//!   sub-scanlines per pixel row and exact horizontal coverage of each span
+//!   (the accumulation approach of font rasterisers, sparse: one row buffer per
+//!   band of tiles, never an image-sized buffer);
+//! * ellipse — a polygon with enough segments that the chord error stays
+//!   under 0.05 px, whatever the radius;
 //! * one-pixel row/column — a whole row/column at coverage 1.
 //!
 //! Anti-alias off thresholds every coverage at 0.5, like Photoshop.
 
-use fx_core::selection::{Selection, SelectionShape, set_gray};
+use fx_core::selection::{OutTile, Selection, SelectionShape, canvas_grid, out_tile, valid_extent};
 use fx_core::{BitDepth, CommandError};
-use fx_tiles::{TILE_SIZE, TileBuffer, TileStore};
+use fx_tiles::{TILE_PIXELS, TILE_SIZE, TileStore};
+use rayon::prelude::*;
 
-/// Supersampling per axis for the boundary band of an ellipse or polygon.
-const SUPERSAMPLE: u32 = 8;
+/// Sub-scanlines per pixel row for polygons (vertical anti-aliasing steps).
+pub const SUBSAMPLES: u32 = 16;
 
-/// Rasterise `shape` (document pixels) into a fresh selection.
+/// Rasterise `shape` (document pixels) into a fresh canvas-aligned selection.
 pub fn rasterise(shape: &SelectionShape, size: (u32, u32), depth: BitDepth, anti_alias: bool, store: &TileStore) -> Result<Selection, CommandError> {
 	if size.0 == 0 || size.1 == 0 {
 		return Err(CommandError::NotAllowed("the document is empty".into()));
 	}
 	let format = depth.gray_format();
-	let mut selection = Selection::empty(size, depth);
 	let Some((x0, y0, x1, y1)) = shape.bounds() else {
-		return Ok(selection);
+		return Ok(Selection::empty(size, depth));
 	};
 	// Clip to the canvas; an empty intersection selects nothing.
-	let x0 = x0.max(0.0);
-	let y0 = y0.max(0.0);
-	let x1 = x1.min(f64::from(size.0));
-	let y1 = y1.min(f64::from(size.1));
+	let (x0, y0) = (x0.max(0.0), y0.max(0.0));
+	let (x1, y1) = (x1.min(f64::from(size.0)), y1.min(f64::from(size.1)));
 	if !(x1 > x0 && y1 > y0) {
-		return Ok(selection);
+		return Ok(Selection::empty(size, depth));
 	}
-	let (tx0, ty0) = (x0.floor() as u32 / TILE_SIZE, y0.floor() as u32 / TILE_SIZE);
-	let (tx1, ty1) = (
-		(x1.ceil() as u32).saturating_sub(1) / TILE_SIZE,
-		(y1.ceil() as u32).saturating_sub(1) / TILE_SIZE,
-	);
-	for ty in ty0..=ty1 {
-		for tx in tx0..=tx1 {
-			let mut buffer = TileBuffer::zeroed(format);
-			let (base_x, base_y) = (i64::from(tx) * i64::from(TILE_SIZE), i64::from(ty) * i64::from(TILE_SIZE));
-			for py in 0..TILE_SIZE {
-				for px in 0..TILE_SIZE {
-					let (doc_x, doc_y) = (base_x + i64::from(px), base_y + i64::from(py));
-					let mut coverage = coverage(shape, doc_x, doc_y, size);
-					if !anti_alias {
-						coverage = if coverage >= 0.5 { 1.0 } else { 0.0 };
-					}
-					if coverage > 0.0 {
-						set_gray(&mut buffer, format, px, py, coverage);
-					}
-				}
+	let (cols, rows) = canvas_grid(size);
+	let tx0 = (x0.floor() as u32 / TILE_SIZE).min(cols - 1);
+	let ty0 = (y0.floor() as u32 / TILE_SIZE).min(rows - 1);
+	let tx1 = ((x1.ceil() as u32).saturating_sub(1) / TILE_SIZE).min(cols - 1);
+	let ty1 = ((y1.ceil() as u32).saturating_sub(1) / TILE_SIZE).min(rows - 1);
+	let finish = |values: &mut [f32], tx: u32, ty: u32| -> OutTile {
+		if !anti_alias {
+			for v in values.iter_mut() {
+				*v = if *v >= 0.5 { 1.0 } else { 0.0 };
 			}
-			selection.image.put_buffer(store, tx, ty, buffer);
 		}
-	}
-	Ok(selection)
+		out_tile(format, values, valid_extent(size, tx, ty))
+	};
+
+	let tiles: Vec<((u32, u32), OutTile)> = match shape {
+		SelectionShape::Polygon { points } => polygon_tiles(points, size, (tx0, ty0, tx1, ty1), &finish),
+		SelectionShape::Ellipse { x, y, w, h } => {
+			let points = ellipse_polygon(x + w / 2.0, y + h / 2.0, w.abs() / 2.0, h.abs() / 2.0);
+			polygon_tiles(&points, size, (tx0, ty0, tx1, ty1), &finish)
+		}
+		_ => {
+			let list: Vec<(u32, u32)> = (ty0..=ty1).flat_map(|ty| (tx0..=tx1).map(move |tx| (tx, ty))).collect();
+			list.par_iter()
+				.map(|&(tx, ty)| {
+					let mut values = vec![0.0f32; TILE_PIXELS];
+					let (bx, by) = (i64::from(tx * TILE_SIZE), i64::from(ty * TILE_SIZE));
+					for (i, v) in values.iter_mut().enumerate() {
+						let (px, py) = (bx + (i as u32 % TILE_SIZE) as i64, by + (i as u32 / TILE_SIZE) as i64);
+						*v = simple_coverage(shape, px, py);
+					}
+					((tx, ty), finish(&mut values, tx, ty))
+				})
+				.collect()
+		}
+	};
+	Ok(Selection::from_tiles(size, depth, tiles, store).unwrap_or_else(|| Selection::empty(size, depth)))
 }
 
-/// Coverage of the pixel whose top-left corner is `(px, py)`, in document
-/// pixels (0 outside the canvas).
-fn coverage(shape: &SelectionShape, px: i64, py: i64, size: (u32, u32)) -> f32 {
-	if px < 0 || py < 0 || px >= i64::from(size.0) || py >= i64::from(size.1) {
-		return 0.0;
-	}
-	let (fx, fy) = (px as f64, py as f64);
+/// Coverage of pixel `(px, py)` by a rectangle, a row or a column.
+fn simple_coverage(shape: &SelectionShape, px: i64, py: i64) -> f32 {
 	match shape {
 		SelectionShape::Rect { x, y, w, h } => {
 			let (x0, x1) = (x.min(x + w), x.max(x + w));
 			let (y0, y1) = (y.min(y + h), y.max(y + h));
 			rect_coverage(px, py, (x0, y0, x1, y1))
 		}
-		SelectionShape::Ellipse { x, y, w, h } => {
-			let cx = x + w / 2.0;
-			let cy = y + h / 2.0;
-			ellipse_coverage(cx, cy, (w.abs() / 2.0).max(f64::EPSILON), (h.abs() / 2.0).max(f64::EPSILON), fx, fy)
-		}
-		SelectionShape::Polygon { points } => polygon_coverage(points, fx, fy),
 		SelectionShape::RowPixel { y } => f32::from(py == y.floor() as i64),
 		SelectionShape::ColumnPixel { x } => f32::from(px == x.floor() as i64),
+		SelectionShape::Ellipse { .. } | SelectionShape::Polygon { .. } => 0.0,
 	}
 }
 
@@ -100,84 +102,197 @@ fn rect_coverage(px: i64, py: i64, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> f3
 	(ox.max(0.0) * oy.max(0.0)) as f32
 }
 
-/// Exact coverage of an axis-aligned pixel by an ellipse: a full 1/0 outside
-/// the boundary band, supersampled inside it.
-fn ellipse_coverage(cx: f64, cy: f64, rx: f64, ry: f64, px: f64, py: f64) -> f32 {
-	if rx <= 0.0 || ry <= 0.0 {
-		return 0.0;
-	}
-	let inside = |x: f64, y: f64| {
-		let nx = (x - cx) / rx;
-		let ny = (y - cy) / ry;
-		nx * nx + ny * ny <= 1.0
-	};
-	// Half-diagonal of one pixel in normalised units: the furthest the
-	// boundary can sit from the pixel centre and still touch this pixel.
-	// A displacement of at most half a pixel per axis maps to at most this
-	// much in the ellipse's normalised (u, v) space.
-	let margin = 0.5 * (1.0 / (rx * rx) + 1.0 / (ry * ry)).sqrt();
-	let (mx, my) = (px + 0.5, py + 0.5);
-	let d = (((mx - cx) / rx).powi(2) + ((my - cy) / ry).powi(2)).sqrt();
-	if d <= 1.0 - margin {
-		return 1.0;
-	}
-	if d >= 1.0 + margin {
-		return 0.0;
-	}
-	supersample(px, py, &|x, y| inside(x, y))
+/// An ellipse as a polygon whose chords stay within 0.05 px of the curve:
+/// the sagitta of a chord is `r(1 − cos(π/n)) ≈ rπ²/2n²`, so
+/// `n ≥ π·√(r / 0.1)`.
+pub fn ellipse_polygon(cx: f64, cy: f64, rx: f64, ry: f64) -> Vec<(f64, f64)> {
+	let r = rx.max(ry);
+	let n = ((std::f64::consts::PI * (r / 0.1).sqrt()).ceil() as usize).clamp(64, 1 << 16);
+	(0..n)
+		.map(|i| {
+			let a = std::f64::consts::TAU * i as f64 / n as f64;
+			(cx + rx * a.cos(), cy + ry * a.sin())
+		})
+		.collect()
 }
 
-/// Coverage of a polygon by the non-zero winding rule: a full 1/0 outside the
-/// boundary band, supersampled inside it. A self-intersecting shape (a star)
-/// fills its doubly-wound middle, like Photoshop.
-fn polygon_coverage(points: &[(f64, f64)], px: f64, py: f64) -> f32 {
+/// One polygon edge, oriented as drawn (`dir` = +1 going down).
+#[derive(Clone, Copy)]
+struct Edge {
+	x0: f64,
+	y0: f64,
+	x1: f64,
+	y1: f64,
+	/// `min(y0, y1)` and `max(y0, y1)`.
+	top: f64,
+	bottom: f64,
+	dir: i32,
+}
+
+impl Edge {
+	fn x_at(&self, y: f64) -> f64 {
+		self.x0 + (y - self.y0) * (self.x1 - self.x0) / (self.y1 - self.y0)
+	}
+}
+
+/// Scan convert a polygon (non-zero winding) over the tile range, one band of
+/// tile rows per rayon task.
+fn polygon_tiles(
+	points: &[(f64, f64)],
+	size: (u32, u32),
+	(tx0, ty0, tx1, ty1): (u32, u32, u32, u32),
+	finish: &(dyn Fn(&mut [f32], u32, u32) -> OutTile + Sync),
+) -> Vec<((u32, u32), OutTile)> {
 	if points.len() < 3 {
-		return 0.0;
+		return Vec::new();
 	}
-	let inside = |x: f64, y: f64| winding(points, x, y);
-	// Corners of the pixel plus its centre: all in, all out, or boundary.
-	let corners = [inside(px, py), inside(px + 1.0, py), inside(px + 1.0, py + 1.0), inside(px, py + 1.0)];
-	let centre = inside(px + 0.5, py + 0.5);
-	if corners.iter().all(|c| *c) && centre {
-		return 1.0;
-	}
-	if corners.iter().all(|c| !*c) && !centre {
-		return 0.0;
-	}
-	supersample(px, py, &inside)
+	let edges: Vec<Edge> = (0..points.len())
+		.filter_map(|i| {
+			let (a, b) = (points[i], points[(i + 1) % points.len()]);
+			// Horizontal edges never cross a scanline.
+			(a.1 != b.1 && a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite()).then(|| Edge {
+				x0: a.0,
+				y0: a.1,
+				x1: b.0,
+				y1: b.1,
+				top: a.1.min(b.1),
+				bottom: a.1.max(b.1),
+				dir: if b.1 > a.1 { 1 } else { -1 },
+			})
+		})
+		.collect();
+	let bands: Vec<u32> = (ty0..=ty1).collect();
+	bands
+		.par_iter()
+		.flat_map_iter(|&ty| polygon_band(&edges, size, ty, (tx0, tx1), finish))
+		.collect()
 }
 
-/// `SUPERSAMPLE²` samples of `inside` over the pixel.
-fn supersample(px: f64, py: f64, inside: &dyn Fn(f64, f64) -> bool) -> f32 {
-	let step = 1.0 / f64::from(SUPERSAMPLE);
-	let mut hits = 0u32;
-	for j in 0..SUPERSAMPLE {
-		for i in 0..SUPERSAMPLE {
-			if inside(px + (f64::from(i) + 0.5) * step, py + (f64::from(j) + 0.5) * step) {
-				hits += 1;
+/// The tiles of one band (tile row `ty`, columns `tx0..=tx1`).
+fn polygon_band(
+	edges: &[Edge],
+	size: (u32, u32),
+	ty: u32,
+	(tx0, tx1): (u32, u32),
+	finish: &(dyn Fn(&mut [f32], u32, u32) -> OutTile + Sync),
+) -> Vec<((u32, u32), OutTile)> {
+	let band_y0 = f64::from(ty * TILE_SIZE);
+	let band_rows = valid_extent(size, tx0, ty).1;
+	let band_y1 = band_y0 + f64::from(band_rows);
+	let band_edges: Vec<Edge> = edges.iter().filter(|e| e.bottom > band_y0 && e.top < band_y1).copied().collect();
+	if band_edges.is_empty() {
+		return Vec::new();
+	}
+	let x_start = tx0 * TILE_SIZE;
+	let x_end = ((tx1 + 1) * TILE_SIZE).min(size.0);
+	let width = (x_end - x_start) as usize;
+	let n_tiles = (tx1 - tx0 + 1) as usize;
+	// Per tile of the band: `None` = still uniform with value `uniform[i]`.
+	let mut data: Vec<Option<Vec<f32>>> = vec![None; n_tiles];
+	let mut uniform: Vec<Option<f32>> = vec![None; n_tiles];
+	let mut acc = vec![0.0f32; width + 1];
+	let mut diff = vec![0.0f32; width + 1];
+	let mut crossings: Vec<(f64, i32)> = Vec::new();
+	let weight = 1.0 / SUBSAMPLES as f32;
+	for row in 0..band_rows {
+		let y = band_y0 + f64::from(row);
+		acc.fill(0.0);
+		diff.fill(0.0);
+		let active: Vec<&Edge> = band_edges.iter().filter(|e| e.bottom > y && e.top < y + 1.0).collect();
+		for k in 0..SUBSAMPLES {
+			let ys = y + (f64::from(k) + 0.5) / f64::from(SUBSAMPLES);
+			crossings.clear();
+			for e in &active {
+				// Half-open in y so a vertex shared by two edges counts once.
+				if e.top <= ys && ys < e.bottom {
+					crossings.push((e.x_at(ys), e.dir));
+				}
+			}
+			if crossings.len() < 2 {
+				continue;
+			}
+			crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+			let mut winding = 0;
+			let mut span_start = 0.0;
+			for &(x, dir) in &crossings {
+				let before = winding;
+				winding += dir;
+				if before == 0 && winding != 0 {
+					span_start = x;
+				} else if before != 0 && winding == 0 {
+					add_span(&mut acc, &mut diff, span_start - f64::from(x_start), x - f64::from(x_start), width, weight);
+				}
+			}
+		}
+		// Full pixels were added to `diff`; fold them in.
+		let mut run = 0.0f32;
+		for (a, d) in acc.iter_mut().zip(diff.iter()) {
+			run += *d;
+			*a = (*a + run).min(1.0);
+		}
+		// Scatter the row into the band's tiles, keeping uniform ones buffer-free.
+		for (i, tile) in data.iter_mut().enumerate() {
+			let x0 = i * TILE_SIZE as usize;
+			let x1 = (x0 + TILE_SIZE as usize).min(width);
+			let segment = &acc[x0..x1];
+			let first = segment[0];
+			if tile.is_none() {
+				let flat = segment.iter().all(|v| *v == first);
+				match uniform[i] {
+					None if flat => {
+						uniform[i] = Some(first);
+						continue;
+					}
+					Some(u) if flat && u == first => continue,
+					_ => {
+						// Materialise the rows seen so far.
+						let mut values = vec![0.0f32; TILE_PIXELS];
+						if let Some(u) = uniform[i] {
+							values[..(row * TILE_SIZE) as usize].fill(u);
+						}
+						*tile = Some(values);
+					}
+				}
+			}
+			if let Some(values) = tile {
+				let start = (row * TILE_SIZE) as usize;
+				values[start..start + segment.len()].copy_from_slice(segment);
 			}
 		}
 	}
-	hits as f32 / (SUPERSAMPLE * SUPERSAMPLE) as f32
+	let mut out = Vec::new();
+	for (i, tile) in data.into_iter().enumerate() {
+		let tx = tx0 + i as u32;
+		let mut values = match tile {
+			Some(values) => values,
+			None => match uniform[i] {
+				Some(u) if u > 0.0 => vec![u; TILE_PIXELS],
+				_ => continue,
+			},
+		};
+		out.push(((tx, ty), finish(&mut values, tx, ty)));
+	}
+	out
 }
 
-/// The non-zero winding rule (`true` = inside), including the top-left
-/// half-open rule so neighbouring shapes never double-select an edge.
-fn winding(points: &[(f64, f64)], x: f64, y: f64) -> bool {
-	let mut winding = 0i32;
-	for i in 0..points.len() {
-		let a = points[i];
-		let b = points[(i + 1) % points.len()];
-		let side = (b.0 - a.0) * (y - a.1) - (x - a.0) * (b.1 - a.1);
-		if a.1 <= y {
-			if b.1 > y && side > 0.0 {
-				winding += 1;
-			}
-		} else if b.1 <= y && side < 0.0 {
-			winding -= 1;
-		}
+/// Add the span `[a, b)` (row-buffer coordinates) with `weight`: exact
+/// partial coverage at both ends, whole pixels through the difference buffer.
+fn add_span(acc: &mut [f32], diff: &mut [f32], a: f64, b: f64, width: usize, weight: f32) {
+	let (a, b) = (a.max(0.0), b.min(width as f64));
+	if b <= a {
+		return;
 	}
-	winding != 0
+	let (ia, ib) = (a.floor() as usize, b.floor() as usize);
+	if ia == ib {
+		acc[ia] += (b - a) as f32 * weight;
+		return;
+	}
+	acc[ia] += (ia as f64 + 1.0 - a) as f32 * weight;
+	diff[ia + 1] += weight;
+	diff[ib] -= weight;
+	if ib < width {
+		acc[ib] += (b - ib as f64) as f32 * weight;
+	}
 }
 
 #[cfg(test)]
@@ -316,6 +431,65 @@ mod tests {
 		assert_eq!(value(&selection, &store, 4, 3), 1.0);
 		assert_eq!(value(&selection, &store, 4, 4), 0.0);
 		assert!((area(&selection, &store, (10, 10)) - 10.0).abs() < 0.01);
+	}
+
+	#[test]
+	fn a_big_marquee_stores_solid_tiles_inside() {
+		// Review fix: the inside of a large shape costs no buffers.
+		let store = store();
+		let size = (3000, 3000);
+		for shape in [
+			SelectionShape::Rect {
+				x: 10.5,
+				y: 10.5,
+				w: 2900.0,
+				h: 2900.0,
+			},
+			SelectionShape::Ellipse {
+				x: 0.0,
+				y: 0.0,
+				w: 3000.0,
+				h: 3000.0,
+			},
+		] {
+			let selection = rasterise(&shape, size, BitDepth::U16, true, &store).unwrap();
+			assert!(
+				matches!(selection.image.slot(0, 5, 5), TileSlot::Solid(_)),
+				"{shape:?}: the middle tile is solid"
+			);
+			let data = selection.image.grid(0).non_empty().filter(|(_, _, s)| matches!(s, TileSlot::Data(_))).count();
+			assert!(data < 60, "{shape:?}: only edge tiles hold data ({data})");
+		}
+	}
+
+	#[test]
+	fn a_long_freehand_lasso_is_scan_converted_quickly() {
+		// A 20 000-point lasso around a 2 000 px disc: point-in-polygon per
+		// pixel would take minutes, the scanline converter well under a second.
+		let store = store();
+		let points: Vec<(f64, f64)> = (0..20_000)
+			.map(|i| {
+				let a = std::f64::consts::TAU * f64::from(i) / 20_000.0;
+				(1100.0 + 1000.0 * a.cos(), 1100.0 + 1000.0 * a.sin())
+			})
+			.collect();
+		let start = std::time::Instant::now();
+		let selection = rasterise(&SelectionShape::Polygon { points }, (2200, 2200), BitDepth::U8, true, &store).unwrap();
+		assert!(start.elapsed().as_secs_f64() < 5.0, "{:?}", start.elapsed());
+		let exact = PI * 1000.0 * 1000.0;
+		let got = area(&selection, &store, (2200, 2200));
+		assert!((got - exact).abs() / exact < 0.001, "{got} vs {exact}");
+	}
+
+	#[test]
+	fn anti_aliased_polygon_edges_are_fractional() {
+		let store = store();
+		// A triangle with a 45° edge: pixels on the diagonal are half covered.
+		let points = vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)];
+		let selection = rasterise(&SelectionShape::Polygon { points }, (128, 128), BitDepth::U16, true, &store).unwrap();
+		let v = value(&selection, &store, 49, 50);
+		assert!((v - 0.5).abs() < 0.07, "diagonal pixel {v}");
+		assert!((area(&selection, &store, (128, 128)) - 5000.0).abs() < 5.0);
 	}
 
 	#[test]
