@@ -18,6 +18,7 @@ let zoomMode = "fit"; // fit | custom
 // element the rulers measure.
 let nativeView = null;
 let viewportEl = null;
+let fpsOverlay = null;
 
 const RULER = 18;
 
@@ -46,12 +47,14 @@ export function initWorkspace(host) {
     // (docs/ARCHITECTURE.md §2): no demo canvas, no DOM scrolling.
     const viewport = h("div", { id: "viewport" });
     const gridLayer = h("div", { class: "grid-layer" });
+    fpsOverlay = h("div", { class: "fps-overlay", hidden: true });
     const rulerRow = h("div", { class: "ruler-row" }, rulerCorner, rulerTop);
     const body = h("div", { class: "workspace-body" },
       h("div", { class: "ruler-col" }, rulerLeft),
-      h("div", { class: "workspace-main" }, viewport, gridLayer));
+      h("div", { class: "workspace-main" }, viewport, gridLayer, fpsOverlay));
     host.append(tabs, rulerRow, body);
     viewportEl = viewport;
+    bridge.on(ENGINE.STATUS, showStatus);
     // Tabs come from the engine's documents, not the demo document.
     initDocumentTabs(tabs, newTab);
     on("flag", (key) => {
@@ -118,6 +121,32 @@ export function initWorkspace(host) {
   });
 
   return { setZoom: zoomTo, zoomIn, zoomOut, fit, actual };
+}
+
+/* ------------------------------------------------ status and fps overlay */
+
+/** Show or hide the frame-time overlay (action `debug:fps`, Ctrl+Alt+F). */
+export function toggleFpsOverlay() {
+  if (fpsOverlay) fpsOverlay.hidden = !fpsOverlay.hidden;
+}
+
+// `status` from the engine, twice per second: memory in the status bar, frame
+// statistics in the overlay (docs/PROTOCOL.md §5).
+function showStatus(s) {
+  const gb = (bytes) => (bytes / 1e9).toFixed(bytes < 1e8 ? 2 : 1);
+  const mem = document.getElementById("statusmem");
+  if (mem) {
+    const m = s.memory;
+    mem.textContent = `RAM ${gb(m.hot_bytes + m.warm_bytes)} GB`;
+    mem.title = `Tiles in RAM ${gb(m.hot_bytes)} GB · compressed ${gb(m.warm_bytes)} GB · ` +
+      `scratch disk ${gb(m.scratch_bytes)} GB · GPU ${gb(m.gpu_bytes)} GB`;
+  }
+  if (fpsOverlay && !fpsOverlay.hidden) {
+    fpsOverlay.textContent =
+      `${s.fps.toFixed(0)} fps\n` +
+      `frame p50 ${s.frame_ms_p50.toFixed(1)} ms · p99 ${s.frame_ms_p99.toFixed(1)} ms\n` +
+      `uploads ${s.uploads} · loading ${s.pending_loads}`;
+  }
 }
 
 /* ------------------------------------------------------- native viewport */

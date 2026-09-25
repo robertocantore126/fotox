@@ -5,7 +5,7 @@
 import { state, setFlag, toggleFlag, setTool } from "./state.js";
 import { openDialog } from "./dialogs.js";
 import { toast, status } from "./tooltip.js";
-import { zoomIn, zoomOut, fit, actual, zoomTo } from "./canvas.js";
+import { zoomIn, zoomOut, fit, actual, zoomTo, toggleFpsOverlay } from "./canvas.js";
 import * as panels from "./panels.js";
 import { dockGroups } from "./data/panels.js";
 import * as bridge from "./native/bridge.js";
@@ -20,6 +20,13 @@ export function runAction(item) {
   if (a) bridge.send({ type: UI.ACTION, id: a });
 
   // dialoghi -------------------------------------------------------------
+  // Frame-time overlay (Ctrl+Alt+F): only the app has a render thread to measure.
+  if (a === "debug:fps") {
+    if (bridge.isNative) toggleFpsOverlay();
+    else toast("The frame-time overlay measures the app's render thread (not available in a browser)");
+    return;
+  }
+
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }

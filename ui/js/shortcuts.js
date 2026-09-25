@@ -9,6 +9,7 @@ const combos = [
   ["ctrl+n", "New...", "dlg:new-doc"],
   ["ctrl+alt+n", "New...", "dlg:new-doc"],
   ["ctrl+o", "Open...", "dlg:open"],
+  ["ctrl+alt+f", "Frame-time overlay", "debug:fps"],
   ["ctrl+s", "Save", "doc:save"],
   ["ctrl+shift+s", "Save As", "dlg:export-as"],
   ["ctrl+shift+c", "Copy Merged", "clip:copy-merged"],

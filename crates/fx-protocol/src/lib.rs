@@ -96,7 +96,7 @@ pub enum UiToEngine {
 /// not toast "not implemented" for these; it may still *read* some of them
 /// (`tool:` sets the active tool, `zoom:` drives the view).
 /// Mirrored in `ui/js/native/mock-engine.js`.
-pub const UI_LOCAL_ACTION_PREFIXES: &[&str] = &["panel:", "panels:", "tool:", "toggle:", "screen:", "dlg:", "zoom:", "ws:", "par:"];
+pub const UI_LOCAL_ACTION_PREFIXES: &[&str] = &["panel:", "panels:", "tool:", "toggle:", "screen:", "dlg:", "zoom:", "ws:", "par:", "debug:"];
 
 // ---------------------------------------------------------------------------
 // Engine → UI
@@ -186,10 +186,22 @@ pub enum EngineToUi {
 		center_y: f64,
 		rotation_deg: f64,
 	},
-	/// Sent ~2×/s.
+	/// Sent ~2×/s. The frame statistics cover the render thread's last 2 s
+	/// (frames are only drawn when something changes, so an idle view is 0 fps).
 	Status {
 		memory: MemoryStats,
 		fps: f32,
+		/// Render-thread time per frame, median and 99th percentile, in ms.
+		#[serde(default)]
+		frame_ms_p50: f32,
+		#[serde(default)]
+		frame_ms_p99: f32,
+		/// Source tiles uploaded to the GPU by the last frame.
+		#[serde(default)]
+		uploads: u32,
+		/// Tiles being loaded from warm/cold storage right now.
+		#[serde(default)]
+		pending_loads: u32,
 	},
 	Progress {
 		task: u64,
