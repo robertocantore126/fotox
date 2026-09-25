@@ -312,6 +312,11 @@ pub enum EngineToUi {
 		rgba: [u16; 4],
 		target: String,
 	},
+	/// A tool's status line (M5-T10): the marquee's size while it is dragged.
+	/// Empty = clear it.
+	ToolInfo {
+		text: String,
+	},
 	/// The CMYK profiles for proofing and export (M4-T04), sent after `hello`.
 	CmykProfiles {
 		profiles: Vec<CmykProfileInfo>,

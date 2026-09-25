@@ -522,6 +522,9 @@ impl Engine {
 		if let Some(info) = result.info {
 			self.to_ui(&EngineToUi::Toast { text: info });
 		}
+		if let Some(text) = result.status {
+			self.to_ui(&EngineToUi::ToolInfo { text });
+		}
 		if let Some((rgba, target)) = result.picked {
 			match target {
 				ColorTarget::Foreground => self.settings.fg = rgba,

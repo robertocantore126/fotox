@@ -41,4 +41,9 @@ export function initTools() {
     if (m.target === "bg") setColors(undefined, hex);
     else setColors(hex, undefined);
   });
+  // A tool's status line (M5-T10): the marquee's size while dragging.
+  bridge.on(ENGINE.TOOL_INFO, ({ text }) => {
+    const el = document.getElementById("statusmsg");
+    if (el) el.textContent = text;
+  });
 }

@@ -4,7 +4,7 @@ import { setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
 import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
 import { isPopupOpen } from "./popup.js";
-import { optionValue, setOption } from "./optionsbar.js";
+import { optionValue, setOption, showModeHint } from "./optionsbar.js";
 import { toolSlots } from "./data/tools.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
@@ -51,6 +51,8 @@ const combos = [
   ["ctrl+a", "Select All", "sel:all"],
   ["ctrl+d", "Deselect", "sel:none"],
   ["ctrl+shift+i", "Inverse Selection", "sel:inverse"],
+  ["ctrl+shift+d", "Reselect", "sel:reselect"],
+  ["shift+f6", "Feather...", "dlg:sel-feather"],
   ["ctrl+p", "Print...", "dlg:print"],
   ["ctrl+f", "Last Filter", "filter:last"],
   ["ctrl+w", "Close", "tab:close"],
@@ -126,7 +128,16 @@ function brushKey(e) {
   return false;
 }
 
+/** While Shift/Alt are held, the Mode buttons show the mode they select (M5-T10). */
+function modeHint(e) {
+  const index = e.shiftKey && e.altKey ? 3 : e.shiftKey ? 1 : e.altKey ? 2 : null;
+  showModeHint(index);
+}
+
 export function initShortcuts() {
+  document.addEventListener("keydown", modeHint, true);
+  document.addEventListener("keyup", modeHint, true);
+  window.addEventListener("blur", () => showModeHint(null));
   document.addEventListener("keydown", (e) => {
     const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
 

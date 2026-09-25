@@ -272,8 +272,10 @@ impl Tool for Marquee {
 				};
 				self.track(&mut drag, ctx, event);
 				self.drag = Some(drag);
+				let (_, _, w, h) = self.rectangle(&drag);
 				ToolResult {
 					redraw: true,
+					status: Some(format!("W: {} px  H: {} px", w.abs().round(), h.abs().round())),
 					..Default::default()
 				}
 			}

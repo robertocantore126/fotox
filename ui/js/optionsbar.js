@@ -70,6 +70,25 @@ export function setOption(key, value) {
   return true;
 }
 
+/**
+ * Show selection mode `index` on the Mode buttons while a modifier is held
+ * (M5-T10), or the bar's own choice again with `null`. The engine is not
+ * told: the modifier itself picks the mode at the press.
+ */
+export function showModeHint(index) {
+  const field = fields.find((f) => f.key === "Mode" && f.spec.type === "btngroup");
+  if (!field) return;
+  const buttons = [...field.el.children];
+  if (index == null) {
+    if (field.hinted == null) return;
+    buttons.forEach((b, j) => b.classList.toggle("on", j === field.hinted));
+    field.hinted = null;
+    return;
+  }
+  if (field.hinted == null) field.hinted = buttons.findIndex((b) => b.classList.contains("on"));
+  buttons.forEach((b, j) => b.classList.toggle("on", j === index));
+}
+
 function remember() {
   if (currentTool) memory.set(currentTool, readOptions());
 }

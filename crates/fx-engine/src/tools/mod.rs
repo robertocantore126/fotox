@@ -246,8 +246,11 @@ pub struct ToolResult {
 	pub picked: Option<([u16; 4], ColorTarget)>,
 	/// The cursor to show now.
 	pub cursor: Option<CursorShape>,
-	/// A status line (Info panel / status bar, M5-T10).
+	/// A message for a toast (a refused click, a missing clone source).
 	pub info: Option<String>,
+	/// A status line for the Info panel / status bar (M5-T10: the marquee's
+	/// size while it is dragged).
+	pub status: Option<String>,
 	/// The tool's overlay changed (M5-T04): redraw the viewport. The composited
 	/// tiles are reused, so this is the cheap path a rubber band needs.
 	pub redraw: bool,

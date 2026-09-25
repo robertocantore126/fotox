@@ -56,7 +56,19 @@ Some UI messages are for the **shell** (`fx-app`), not the engine:
 | `request_thumbnails` | `doc`, `layers`, `size` | Layers panel needs thumbnails |
 | `tool_options` | `tool`, `options` (a JSON object) | the active tool's option-bar values, keyed by the field text without the colon (`{"Size": 40, "Hardness": 75, "Mode": "Normal"}`); sent when a tool becomes active and on every change (M5-T01) |
 | `set_colors` | `fg`, `bg` (16-bit RGBA arrays) | the foreground/background colours: every swatch change, X (swap), D (defaults) (M5-T01) |
-| `key` | `key` (a DOM `KeyboardEvent.key`: `"Escape"`, `"Enter"`, `"Backspace"`, `"Delete"`) | a key the UI's shortcut map did not consume, for the active viewport tool (M5-T04): Escape drops the marquee/lasso being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last point. The engine ignores it when no tool has anything in progress |
+| `key` | `key` (a DOM `KeyboardEvent.key`: `"Escape"`, `"Enter"`, `"Backspace"`, `"Delete"`, the arrows; `"Shift+ArrowLeft"` with Shift) | a key the UI's shortcut map did not consume, for the active viewport tool (M5-T04): Escape drops the marquee/lasso being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last point, the arrows move the selection outline (Shift = 10 px). Delete/Backspace that no tool uses clear the selected pixels (Edit ▸ Clear, M5-T05) |
+
+M5 actions the engine owns (all through `action`): `sel:all` / `sel:none` /
+`sel:reselect` / `sel:inverse`; `clip:copy`, `clip:copy-merged`, `clip:cut`,
+`clip:paste`, `clip:paste-special` (Paste in Place), `clip:clear`;
+`edit:fill` (`args: {use, mode, opacity, preserve}` from the Fill dialog),
+`edit:fill-fg` / `edit:fill-bg` (Alt/Ctrl+Backspace) and their `-preserve`
+variants; `layer:via-copy` / `layer:via-cut` (with a selection);
+`mask:add` (`args: {alt}`: the panel's mask button — from the selection when
+there is one), `mask:reveal-sel` / `mask:hide-sel`; `layer:edit-mask`
+(`args: {layer, mask}`: a click on a layer's or its mask's thumbnail picks what
+painting edits). The shell answers `clip:paste` itself when another program put
+an image on the Windows clipboard since Fotox's last copy.
 
 Action routing rule for the UI (`ui/js/actions.js`): actions that only change
 UI state (panels, screen modes, tool selection display) stay in JS as today;
@@ -70,10 +82,11 @@ not handle. The engine is the authority for anything that touches a document.
 | `document_opened` / `document_changed` | `info: DocumentInfo` | create/update a document tab |
 | `document_closed` | `doc` | |
 | `active_document` | `doc \| null` | |
-| `layers` | `doc, revision, layers: LayerInfo[]` | full list, top → bottom, tree via `depth`; each row also carries `locked_pixels`, `locked_position`, and `adjustment` (adjustment layers) or `fill_color` (solid fills) |
+| `layers` | `doc, revision, layers: LayerInfo[]` | full list, top → bottom, tree via `depth`; each row also carries `locked_pixels`, `locked_transparency`, `locked_position`, `edit_mask` (painting goes to the mask, M5-T09), and `adjustment` (adjustment layers) or `fill_color` (solid fills) |
 | `history` | `doc, labels, current, can_undo, can_redo` | History panel, Edit menu state |
 | `view` | `doc, zoom, center_x, center_y, rotation_deg` | rulers, status bar, navigator; ≤ 60 Hz |
-| `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz |
+| `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads, input_latency_ms_p50, input_latency_ms_p99` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz. The input latency covers brush input → pixels on screen over the last 2 s (0 when nothing was painted, M5-T11) |
+| `tool_info` | `text` | a tool's status line (M5-T10: the marquee's size while it is dragged) |
 | `progress` / `progress_done` | `task, label, fraction` / `task` | long jobs (import, export, filters) |
 | `toast` / `error` | `text` | |
 | `cmyk_profiles` | `profiles: [{name, path}]` | after `hello`: the CMYK profiles for Proof Setup and CMYK export (M4-T04) |

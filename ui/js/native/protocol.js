@@ -44,6 +44,7 @@ export const ENGINE = Object.freeze({
   CLOSE_DIRTY_DOCUMENT: "close_dirty_document",
   CMYK_PROFILES: "cmyk_profiles",
   PROOF_STATE: "proof_state",
+  TOOL_INFO: "tool_info",
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",

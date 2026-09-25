@@ -406,7 +406,7 @@ export const menus = [
       it("All", "Ctrl+A", "sel:all"),
       // The pixel selection works (M5-T03/T04): these four are live. They
       // stay enabled even when there is nothing to deselect — the engine
-      // ignores the no-op; the UI learns the selection state later (T05).
+      // ignores the no-op.
       it("Deselect", "Ctrl+D", "sel:none"),
       it("Reselect", "Shift+Ctrl+D", "sel:reselect"),
       it("Inverse", "Shift+Ctrl+I", "sel:inverse"),
