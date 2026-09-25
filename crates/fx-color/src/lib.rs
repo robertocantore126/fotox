@@ -22,11 +22,11 @@ mod profile;
 pub use lut::{LUT_BYTES, LUT_GRID, Lut3d, display_lut, display_lut_key};
 pub use profile::{ColorError, profile, profile_key, same_profile};
 
-/// The rendering intents, exactly lcms2's (D-025).
+/// The rendering intents, exactly lcms2's (D-033).
 pub use lcms2::Intent;
 
 /// The intent and black point compensation Fotox displays with by default:
 /// relative colorimetric with BPC, like Photoshop's `Convert to Profile`.
 pub const DEFAULT_INTENT: Intent = Intent::RelativeColorimetric;
-/// Whether black point compensation is on by default (D-025).
+/// Whether black point compensation is on by default (D-033).
 pub const DEFAULT_BPC: bool = true;

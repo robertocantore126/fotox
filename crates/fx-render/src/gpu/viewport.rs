@@ -255,8 +255,8 @@ impl ViewportRenderer {
 	}
 
 	/// Record the viewport pass. `tiles` = `GpuCompositor::composite_view()`.
-	/// `zoom >= 1` draws hard pixels like Photoshop. `lut` is the display
-	/// transform for this frame's document (see [`set_display_lut`]).
+	/// `zoom >= 1` draws hard pixels like Photoshop. The display transform is
+	/// whatever the last [`set_display_lut`] call chose.
 	///
 	/// [`set_display_lut`]: Self::set_display_lut
 	pub fn render(
@@ -267,9 +267,7 @@ impl ViewportRenderer {
 		plan: &FramePlan,
 		zoom: f64,
 		tiles: &wgpu::TextureView,
-		lut: Option<&Lut3d>,
 	) {
-		self.set_display_lut(lut);
 		let draws: Vec<GpuDraw> = plan
 			.draws
 			.iter()
@@ -324,11 +322,7 @@ impl ViewportRenderer {
 				},
 				wgpu::BindGroupEntry {
 					binding: 5,
-					resource: wgpu::BindingResource::TextureView(if self.lut_key.is_some() {
-						&self.lut_view
-					} else {
-						&self.placeholder
-					}),
+					resource: wgpu::BindingResource::TextureView(if self.lut_key.is_some() { &self.lut_view } else { &self.placeholder }),
 				},
 			],
 		});

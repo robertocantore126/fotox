@@ -76,31 +76,29 @@ impl Lut3d {
 			[e[0].to_f64(), e[1].to_f64(), e[2].to_f64()]
 		};
 		let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
-		let mut out = [0.0; 3];
-		for c in 0..3 {
-			// The eight corners, named by their offset on each axis (0 = i0, 1 = i1).
-			let c000 = at(i0[0], i0[1], i0[2])[c];
-			let c100 = at(i1[0], i0[1], i0[2])[c];
-			let c010 = at(i0[0], i1[1], i0[2])[c];
-			let c110 = at(i1[0], i1[1], i0[2])[c];
-			let c001 = at(i0[0], i0[1], i1[2])[c];
-			let c101 = at(i1[0], i0[1], i1[2])[c];
-			let c011 = at(i0[0], i1[1], i1[2])[c];
-			let c111 = at(i1[0], i1[1], i1[2])[c];
+		// The eight corners, named by their offset on each axis (0 = i0, 1 = i1).
+		let c000 = at(i0[0], i0[1], i0[2]);
+		let c100 = at(i1[0], i0[1], i0[2]);
+		let c010 = at(i0[0], i1[1], i0[2]);
+		let c110 = at(i1[0], i1[1], i0[2]);
+		let c001 = at(i0[0], i0[1], i1[2]);
+		let c101 = at(i1[0], i0[1], i1[2]);
+		let c011 = at(i0[0], i1[1], i1[2]);
+		let c111 = at(i1[0], i1[1], i1[2]);
+		std::array::from_fn(|c| {
 			// Interpolate along r, then g, then b.
-			let r0 = lerp(c000, c100, t[0]);
-			let r1 = lerp(c010, c110, t[0]);
-			let r2 = lerp(c001, c101, t[0]);
-			let r3 = lerp(c011, c111, t[0]);
-			out[c] = lerp(lerp(r0, r1, t[1]), lerp(r2, r3, t[1]), t[2]);
-		}
-		out
+			let r0 = lerp(c000[c], c100[c], t[0]);
+			let r1 = lerp(c010[c], c110[c], t[0]);
+			let r2 = lerp(c001[c], c101[c], t[0]);
+			let r3 = lerp(c011[c], c111[c], t[0]);
+			lerp(lerp(r0, r1, t[1]), lerp(r2, r3, t[1]), t[2])
+		})
 	}
 }
 
 /// Build the transform `src` → `dst` as a LUT: what the document's encoded
 /// values become on the display, at `intent`, optionally with black point
-/// compensation (D-025).
+/// compensation (D-033).
 ///
 /// The transformation happens in 16-bit RGBA so the grid nodes are exact; the
 /// alpha channel is written as 1.0 (lcms2 copies it through, `cmsFLAGS_COPY_ALPHA`
@@ -109,7 +107,14 @@ pub fn display_lut(src: &ColorProfile, dst: &ColorProfile, intent: Intent, bpc: 
 	let key = display_lut_key(src, dst, intent, bpc);
 	let (src_profile, dst_profile) = (profile(src)?, profile(dst)?);
 	let transform: Transform<[u16; 4], [u16; 4]> = if bpc {
-		Transform::new_flags(&src_profile, PixelFormat::RGBA_16, &dst_profile, PixelFormat::RGBA_16, intent, Flags::BLACKPOINT_COMPENSATION)?
+		Transform::new_flags(
+			&src_profile,
+			PixelFormat::RGBA_16,
+			&dst_profile,
+			PixelFormat::RGBA_16,
+			intent,
+			Flags::BLACKPOINT_COMPENSATION,
+		)?
 	} else {
 		Transform::new(&src_profile, PixelFormat::RGBA_16, &dst_profile, PixelFormat::RGBA_16, intent)?
 	};
@@ -225,15 +230,18 @@ mod tests {
 			[0.03, 0.09, 0.14],
 		];
 		let mut pixels: Vec<[u16; 4]> = samples.iter().map(|s| rgba16(*s)).collect();
-		direct(&ColorProfile::AdobeRgb1998, &ColorProfile::Srgb, Intent::RelativeColorimetric, true, &mut pixels);
+		direct(
+			&ColorProfile::AdobeRgb1998,
+			&ColorProfile::Srgb,
+			Intent::RelativeColorimetric,
+			true,
+			&mut pixels,
+		);
 		for (sample, expected) in samples.iter().zip(&pixels) {
 			let expected = as_f64(*expected);
 			let got = lut.sample(*sample);
 			for c in 0..3 {
-				assert!(
-					(got[c] - expected[c]).abs() <= 2.0 / 255.0,
-					"at {sample:?}: LUT {got:?} vs lcms2 {expected:?}"
-				);
+				assert!((got[c] - expected[c]).abs() <= 2.0 / 255.0, "at {sample:?}: LUT {got:?} vs lcms2 {expected:?}");
 			}
 		}
 	}
@@ -250,7 +258,12 @@ mod tests {
 
 	#[test]
 	fn every_intent_builds_and_stays_in_range() {
-		let intents = [Intent::Perceptual, Intent::RelativeColorimetric, Intent::Saturation, Intent::AbsoluteColorimetric];
+		let intents = [
+			Intent::Perceptual,
+			Intent::RelativeColorimetric,
+			Intent::Saturation,
+			Intent::AbsoluteColorimetric,
+		];
 		for intent in intents {
 			for bpc in [false, true] {
 				let lut = display_lut(&ColorProfile::AdobeRgb1998, &ColorProfile::Srgb, intent, bpc).unwrap();

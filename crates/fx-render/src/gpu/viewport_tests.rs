@@ -59,9 +59,7 @@ fn tiles_texture(device: &wgpu::Device, queue: &wgpu_sync::Queue, premultiplied:
 		usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
 		view_formats: &[],
 	});
-	let texels: Vec<[u16; 4]> = (0..SIZE * SIZE)
-		.map(|_| premultiplied.map(|c| f16::from_f32(c).to_bits()))
-		.collect();
+	let texels: Vec<[u16; 4]> = (0..SIZE * SIZE).map(|_| premultiplied.map(|c| f16::from_f32(c).to_bits())).collect();
 	queue.write_texture(
 		wgpu::TexelCopyTextureInfo {
 			texture: &texture,
@@ -121,16 +119,11 @@ fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::Texture
 		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
 		view_formats: &[],
 	});
-	let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("fx-test-viewport") });
-	renderer.render(
-		&mut encoder,
-		&target.create_view(&Default::default()),
-		(SIZE, SIZE),
-		&plan(),
-		1.0,
-		tiles,
-		lut,
-	);
+	let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+		label: Some("fx-test-viewport"),
+	});
+	renderer.set_display_lut(lut);
+	renderer.render(&mut encoder, &target.create_view(&Default::default()), (SIZE, SIZE), &plan(), 1.0, tiles);
 	let readback = device.create_buffer(&wgpu::BufferDescriptor {
 		label: Some("fx-test-viewport-readback"),
 		size: (SIZE * SIZE * 4) as u64,
@@ -157,11 +150,7 @@ fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::Texture
 	let slice = readback.slice(..);
 	slice.map_async(wgpu::MapMode::Read, |r| r.expect("readback map failed"));
 	device.poll(wgpu::PollType::wait_indefinitely()).expect("device lost during readback");
-	slice
-		.get_mapped_range()
-		.chunks_exact(4)
-		.map(|p| [p[0], p[1], p[2], p[3]])
-		.collect()
+	slice.get_mapped_range().chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect()
 }
 
 fn to_u8(v: f64) -> u8 {
@@ -201,7 +190,7 @@ fn the_display_lut_maps_the_tile_colour() {
 	let tiles = tiles_texture(&device, &queue, [colour[0], colour[1], colour[2], 1.0]);
 	let mapped = render(&device, &queue, &tiles, Some(&lut));
 	let plain = render(&device, &queue, &tiles, None);
-	let expected = lut.sample(colour.map(f64::from)).map(|v| to_u8(v));
+	let expected = lut.sample(colour.map(f64::from)).map(to_u8);
 	let got = mapped[0];
 	for c in 0..3 {
 		assert!(
@@ -235,6 +224,9 @@ fn the_lut_runs_on_straight_colour_before_the_checkerboard() {
 		// the document is the dark UI colour; inside it is the checkerboard).
 		let expected = to_u8(mapped[c] * f64::from(alpha) + 1.0 * (1.0 - f64::from(alpha)));
 		let at = pixels[(10 * SIZE + 10) as usize][c];
-		assert!((i32::from(at) - i32::from(expected)).abs() <= 3, "channel {c}: {at} vs {expected} (mapped {mapped:?})");
+		assert!(
+			(i32::from(at) - i32::from(expected)).abs() <= 3,
+			"channel {c}: {at} vs {expected} (mapped {mapped:?})"
+		);
 	}
 }

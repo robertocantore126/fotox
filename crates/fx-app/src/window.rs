@@ -62,6 +62,27 @@ impl Window {
 		})
 	}
 
+	/// Raw `HWND` of the window, for the Windows-only helpers in `win.rs`.
+	fn hwnd(&self) -> Option<isize> {
+		use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+		match self.winit_window.window_handle().ok()?.as_raw() {
+			RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+			_ => None,
+		}
+	}
+
+	/// The monitor the window is on (an id that changes when it moves to
+	/// another monitor), and that monitor's ICC profile (M4-T02).
+	pub(crate) fn monitor(&self) -> Option<(isize, Option<Vec<u8>>)> {
+		let hwnd = self.hwnd()?;
+		Some((native::monitor_id(hwnd), native::monitor_icc_profile(hwnd)))
+	}
+
+	/// The id of the monitor the window is on (cheap; no profile read).
+	pub(crate) fn monitor_id(&self) -> Option<isize> {
+		self.hwnd().map(native::monitor_id)
+	}
+
 	/// Make the window visible and give it focus.
 	pub(crate) fn show(&self) {
 		self.winit_window.set_visible(true);

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
 use fx_core::command::{LayerPropsPatch, NewLayer};
-use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_core::{ColorProfile, Command, CommandContext, LayerId, LayerRef};
+use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
 use fx_tiles::{TileError, TileStore};
@@ -334,10 +334,7 @@ impl Engine {
 			}
 			EngineInput::DisplayProfile(bytes) => {
 				self.set_display_profile(bytes);
-				Changed {
-					view: true,
-					cursor: None,
-				}
+				Changed { view: true, cursor: None }
 			}
 			EngineInput::Shutdown => Changed::default(),
 		};
@@ -1287,9 +1284,7 @@ impl Engine {
 	/// The monitor profile the shell reported (M4-T02), or `None` while it has
 	/// not reported one: Fotox then assumes an sRGB display.
 	fn monitor_profile(&self) -> Option<ColorProfile> {
-		self.display_profile
-			.as_ref()
-			.map(|bytes| ColorProfile::Icc(Arc::from(bytes.as_slice())))
+		self.display_profile.as_ref().map(|bytes| ColorProfile::Icc(Arc::from(bytes.as_slice())))
 	}
 
 	/// Tell the engine which display profile to transform into (M4-T02).
@@ -1330,10 +1325,16 @@ impl Engine {
 			Ok(Some(lut)) => Arc::new(lut),
 			Ok(None) => return None,
 			Err(error) => {
-				tracing::error!("cannot build the display transform: {error}; assuming an sRGB monitor");
-				// A profile we cannot read is the shell's problem, not the user's:
+				// A monitor profile we cannot read is the shell's problem, not the
+				// user's: forget it (so this is logged once, not every frame) and
 				// show the document as if the monitor were sRGB.
-				return display_transform(profile, None).ok().flatten().map(Arc::new);
+				if self.display_profile.take().is_some() {
+					tracing::error!("cannot use the display profile: {error}; assuming an sRGB monitor");
+					self.display_luts.clear();
+					return self.display_lut_for(profile);
+				}
+				tracing::error!("cannot build the display transform: {error}");
+				return None;
 			}
 		};
 		self.display_luts.push((key, built.clone()));
@@ -1429,15 +1430,23 @@ mod tests {
 
 	#[test]
 	fn an_srgb_document_on_an_srgb_monitor_needs_no_transform() {
-		assert!(display_transform(&ColorProfile::Srgb, None).unwrap().is_none(), "no profile reported = assume sRGB");
+		assert!(
+			display_transform(&ColorProfile::Srgb, None).unwrap().is_none(),
+			"no profile reported = assume sRGB"
+		);
 		let icc: Arc<[u8]> = Arc::from(&b"the very same sRGB profile"[..]);
 		let same = ColorProfile::Icc(icc.clone());
-		assert!(display_transform(&same, Some(&icc)).unwrap().is_none(), "the document's own profile on the monitor");
+		assert!(
+			display_transform(&same, Some(&icc)).unwrap().is_none(),
+			"the document's own profile on the monitor"
+		);
 	}
 
 	#[test]
 	fn another_space_than_the_monitor_gets_a_lut() {
-		let lut = display_transform(&ColorProfile::AdobeRgb1998, None).unwrap().expect("adobe rgb → sRGB needs a transform");
+		let lut = display_transform(&ColorProfile::AdobeRgb1998, None)
+			.unwrap()
+			.expect("adobe rgb → sRGB needs a transform");
 		assert_eq!(lut.grid(), fx_color::LUT_GRID);
 		// And it is not the identity: a saturated Adobe RGB colour moves.
 		let source = [0.9, 0.25, 0.4];

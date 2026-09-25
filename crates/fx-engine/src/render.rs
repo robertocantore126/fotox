@@ -142,7 +142,17 @@ pub(crate) fn run(ctx: RenderContext) {
 			None => pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc),
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
-				pipeline.compositor.set_hot_layer(f.hot_layer);					match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, (*id, f.generation), doc, f.display_lut.as_deref()) {
+				pipeline.compositor.set_hot_layer(f.hot_layer);
+				match pipeline.frame(
+					&ctx,
+					&mut encoder,
+					&target,
+					&f.view,
+					viewport,
+					(*id, f.generation),
+					doc,
+					f.display_lut.as_deref(),
+				) {
 					Ok(more) => {
 						again = more;
 						uploads = pipeline.frame_uploads;
@@ -329,6 +339,7 @@ impl TilePipeline {
 		// Plan again with this frame's results, and draw.
 		let mut plan: FramePlan = plan_frame(view, viewport, doc.width, doc.height, levels, &|key| self.ready.get(&key).copied().map(slot_of));
 		plan.draws.retain(|d| d.slot != EMPTY_SLOT);
+		self.renderer.set_display_lut(display_lut);
 		self.renderer.render(
 			encoder,
 			target,
@@ -336,7 +347,6 @@ impl TilePipeline {
 			&plan,
 			view.zoom,
 			self.compositor.composite_view(),
-			display_lut,
 		);
 		Ok(!plan.complete && (progressed || budget_spent))
 	}
