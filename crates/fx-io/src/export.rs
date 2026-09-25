@@ -35,7 +35,7 @@ impl ExportFormat {
 	}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportOptions {
 	pub format: ExportFormat,
 	/// 8 or 16 bits per channel.
@@ -43,6 +43,8 @@ pub struct ExportOptions {
 	/// Keep transparency. Without it, the image is flattened onto white, like
 	/// Photoshop's Flatten Image with a white background colour.
 	pub alpha: bool,
+	/// Pixels per inch written in the file (TIFF resolution, PNG `pHYs`).
+	pub ppi: f32,
 }
 
 /// Renders one band: `render(y, rows, out)` fills `out` (`width × rows`
@@ -82,15 +84,11 @@ fn write(part: &Path, width: u32, height: u32, options: ExportOptions, render: B
 	let mut band = vec![[0u16; 4]; width as usize * EXPORT_BAND_ROWS as usize];
 	let mut bytes = Vec::new();
 	let mut sink: Box<dyn Sink> = match options.format {
-		ExportFormat::Tiff => Box::new(TiffWriter::create_with(
-			part,
-			width,
-			height,
-			options.bits,
-			samples as u16,
-			EXPORT_BAND_ROWS,
-			None,
-		)?),
+		ExportFormat::Tiff => {
+			let mut writer = TiffWriter::create_with(part, width, height, options.bits, samples as u16, EXPORT_BAND_ROWS, None)?;
+			writer.set_ppi(options.ppi);
+			Box::new(writer)
+		}
 		ExportFormat::Png => Box::new(PngSink::create(part, width, height, options)?),
 	};
 	let mut y = 0;
@@ -179,6 +177,14 @@ impl PngSink {
 		});
 		// Big images: favour speed; PNG's compression ratio barely changes.
 		encoder.set_compression(::png::Compression::Fast);
+		if options.ppi.is_finite() && options.ppi > 0.0 {
+			let per_metre = (f64::from(options.ppi) / 0.0254).round() as u32;
+			encoder.set_pixel_dims(Some(::png::PixelDimensions {
+				xppu: per_metre,
+				yppu: per_metre,
+				unit: ::png::Unit::Meter,
+			}));
+		}
 		let writer = encoder.write_header().map_err(png_error)?.into_stream_writer().map_err(png_error)?;
 		Ok(Self { writer })
 	}
@@ -279,7 +285,12 @@ mod tests {
 	}
 
 	fn round_trip(format: ExportFormat, bits: u16, alpha: bool) {
-		let options = ExportOptions { format, bits, alpha };
+		let options = ExportOptions {
+			format,
+			bits,
+			alpha,
+			ppi: 300.0,
+		};
 		let ext = if format == ExportFormat::Tiff { "tif" } else { "png" };
 		let path = dir().join(format!("out-{bits}-{alpha}.{ext}"));
 		let mut calls = 0;
@@ -294,6 +305,7 @@ mod tests {
 		let store = store();
 		let imported = import_file(&path, &store, &mut |_| true).unwrap();
 		assert_eq!((imported.width, imported.height), (W, H));
+		assert!((imported.ppi - 300.0).abs() < 0.01, "ppi {}", imported.ppi);
 		for &(x, y) in &[(0, 0), (19, 3), (20, 3), (299, 0), (255, 255), (256, 256), (123, 511), (299, 529), (7, 512)] {
 			let (want, got) = (expected(options, x, y), pixel(&imported.image, &store, x, y));
 			assert_eq!(got, want, "{format:?} {bits}-bit alpha={alpha}: pixel ({x}, {y})");
@@ -326,6 +338,7 @@ mod tests {
 			format: ExportFormat::Png,
 			bits: 8,
 			alpha: false,
+			ppi: 72.0,
 		};
 		let result = export_image(&path, W, H, options, &mut renderer(), &mut |_| false);
 		assert!(matches!(result, Err(IoError::Cancelled)));

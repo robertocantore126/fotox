@@ -27,7 +27,12 @@ pub fn options_for(doc: &Document, path: &Path) -> Result<ExportOptions, IoError
 		BitDepth::U8 => 8,
 		BitDepth::U16 => 16,
 	};
-	Ok(ExportOptions { format, bits, alpha: true })
+	Ok(ExportOptions {
+		format,
+		bits,
+		alpha: true,
+		ppi: doc.ppi,
+	})
 }
 
 /// Composite `doc` and write it to `path`.
@@ -133,7 +138,8 @@ mod tests {
 			ExportOptions {
 				format: ExportFormat::Png,
 				bits: 16,
-				alpha: true
+				alpha: true,
+				ppi: 72.0
 			}
 		);
 		export_document(&doc, &store, &path, options, &mut |_| true).unwrap();

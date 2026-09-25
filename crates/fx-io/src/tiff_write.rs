@@ -41,6 +41,8 @@ pub struct TiffWriter {
 	bits: u16,
 	/// 3 (RGB) or 4 (RGBA, unassociated alpha).
 	samples: u16,
+	/// XResolution / YResolution as a rational, pixels per inch.
+	resolution: (u32, u32),
 	rows_per_strip: u32,
 	offsets: Vec<u64>,
 	counts: Vec<u64>,
@@ -95,11 +97,19 @@ impl TiffWriter {
 			height,
 			bits,
 			samples,
+			resolution: (72, 1),
 			rows_per_strip,
 			offsets: Vec::new(),
 			counts: Vec::new(),
 			position: header_len,
 		})
+	}
+
+	/// Resolution written in the file (default 72 ppi), kept to 1/100 ppi.
+	pub fn set_ppi(&mut self, ppi: f32) {
+		if ppi.is_finite() && ppi > 0.0 {
+			self.resolution = (((f64::from(ppi) * 100.0).round() as u32).max(1), 100);
+		}
 	}
 
 	/// Whether the file is a BigTIFF.
@@ -173,8 +183,8 @@ impl TiffWriter {
 			(277, SHORT, 1, self.samples.to_le_bytes().to_vec()),
 			(278, LONG, 1, self.rows_per_strip.to_le_bytes().to_vec()),
 			(279, off_type, n_strips, pack(&self.counts, off_width)),
-			(282, RATIONAL, 1, [72u32.to_le_bytes(), 1u32.to_le_bytes()].concat()),
-			(283, RATIONAL, 1, [72u32.to_le_bytes(), 1u32.to_le_bytes()].concat()),
+			(282, RATIONAL, 1, [self.resolution.0.to_le_bytes(), self.resolution.1.to_le_bytes()].concat()),
+			(283, RATIONAL, 1, [self.resolution.0.to_le_bytes(), self.resolution.1.to_le_bytes()].concat()),
 			(284, SHORT, 1, 1u16.to_le_bytes().to_vec()), // chunky
 			(296, SHORT, 1, 2u16.to_le_bytes().to_vec()), // inch
 		];
