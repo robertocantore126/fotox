@@ -4,6 +4,7 @@
 //! speed, and (M8) batch processing with recorded actions.
 
 mod bench;
+mod export;
 mod r#gen;
 mod info;
 
@@ -38,6 +39,15 @@ enum Cmd {
 	},
 	/// Print dimensions, depth, profile and tile statistics of an image. M1-T01
 	Info { path: PathBuf },
+	/// Open an image and export it flattened (.tif or .png), like File ▸ Export. M3
+	Export {
+		input: PathBuf,
+		/// Output .tif / .tiff / .png
+		output: PathBuf,
+		/// Build the B3 benchmark layers on top first (a slow CPU composite of 220 layers)
+		#[arg(long)]
+		b3: bool,
+	},
 	/// Run a benchmark scenario from docs/PERFORMANCE.md §4 and append the result to bench/results.csv. M1-T10
 	Bench {
 		/// import, trim, scratch or mips
@@ -70,6 +80,7 @@ fn main() -> anyhow::Result<()> {
 			info::print(&path, &info);
 			Ok(())
 		}
+		Cmd::Export { input, output, b3 } => export::run(&input, &output, b3),
 		Cmd::Bench { scenario, file, csv } => bench::run(&scenario, file.as_deref(), &csv.unwrap_or_else(bench::default_csv)),
 	}
 }
