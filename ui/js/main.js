@@ -163,7 +163,7 @@ function buildStatusbar(el) {
       }, h("span", { class: "pf-value", text: state.zoom + "%" }), icon("i-chevron-down", "ic xs")),
     ),
     h("div", { class: "status-right" },
-      h("span", { class: "status-item", text: `${state.doc.w} × ${state.doc.h} px` }),
+      h("span", { class: "status-item", id: "statusdocsize", text: `${state.doc.w} × ${state.doc.h} px` }),
       h("span", { class: "status-item", text: `${state.doc.mode}/${state.doc.bits}` }),
       h("span", { class: "status-item", text: "8.4 MB" }),
       h("button", { class: "status-btn", type: "button", dataset: { tip: "Interface is a mock: no pixels are written" }, onclick: () => toast("Fotox is a navigable interface mock — no file is written to disk") }, icon("i-info", "ic sm")),

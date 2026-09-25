@@ -89,7 +89,11 @@ pub fn read(path: &Path) -> Result<Info> {
 	for e in entries.chunks_exact(entry_size) {
 		let tag = r.u16(&e[0..2]);
 		let kind = r.u16(&e[2..4]);
-		let (n, value) = if big { (r.u64(&e[4..12]), &e[12..20]) } else { (u64::from(r.u32(&e[4..8])), &e[8..12]) };
+		let (n, value) = if big {
+			(r.u64(&e[4..12]), &e[12..20])
+		} else {
+			(u64::from(r.u32(&e[4..8])), &e[8..12])
+		};
 		// First value of the entry (only used for scalar-ish tags).
 		let first = || -> Result<u64> {
 			let size = type_size(kind)?;
@@ -131,7 +135,11 @@ pub fn read(path: &Path) -> Result<Info> {
 	}
 	ensure!(info.width > 0 && info.height > 0, "TIFF without image dimensions");
 	info.layout = match (tile_w, tile_h) {
-		(Some(width), Some(height)) => Layout::Tiles { width, height, count: tile_count },
+		(Some(width), Some(height)) => Layout::Tiles {
+			width,
+			height,
+			count: tile_count,
+		},
 		_ => Layout::Strips {
 			rows_per_strip: rows_per_strip.unwrap_or(info.height).min(info.height),
 			count: strip_count,

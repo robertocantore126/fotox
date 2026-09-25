@@ -158,7 +158,7 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 	}
 
 	let engine_scheduler = app_event_scheduler.clone();
-	let engine = match fx_engine::EngineHandle::spawn(gpu.device.clone(), gpu.queue.clone(), move |output| {
+	let engine = match fx_engine::EngineHandle::spawn(gpu.device.clone(), gpu.queue.clone(), dirs::scratch_dir(), move |output| {
 		engine_scheduler.schedule(AppEvent::Engine(output))
 	}) {
 		Ok(engine) => engine,
@@ -167,6 +167,10 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 			return ExitCode::FAILURE;
 		}
 	};
+
+	if !cli.files.is_empty() {
+		engine.send(fx_engine::EngineInput::Open(cli.files.clone()));
+	}
 
 	let app = app::App::new(ui.clone(), engine, gpu, app_event_receiver, app_event_scheduler, preferences);
 	let exit_reason = app.run(event_loop);

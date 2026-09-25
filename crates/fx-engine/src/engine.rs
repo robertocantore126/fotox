@@ -1,17 +1,23 @@
 //! The engine thread: processes [`EngineInput`] strictly in order, owns the
-//! view state, asks the render thread for frames and keeps the UI informed.
+//! open documents and their views, runs imports as jobs, asks the render
+//! thread for frames and keeps the UI informed.
 //!
-//! M0 has no document yet: the view navigates a virtual 30 000² document
-//! ([`crate::view::VIRTUAL_DOC`]) drawn by the test pattern.
+//! With no document open, the view navigates a virtual 30 000² document
+//! ([`crate::view::VIRTUAL_DOC`]) drawn as a test pattern (M0).
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, Sender, select_biased};
+use fx_io::{ImportedImage, IoError};
 use fx_protocol::{DocId, EngineToUi, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
+use fx_tiles::TileStore;
 
-use crate::render::RenderRequest;
+use crate::documents::{Documents, OpenDoc};
+use crate::render::{Frame, MipWork, RenderRequest};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{EngineInput, EngineOutput, OutputSink, PointerKind};
+use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -19,35 +25,65 @@ const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
 /// The virtual M0 document's id in `view` messages.
 const VIRTUAL_DOC_ID: DocId = DocId(0);
 
+/// Work finished on other threads, reported back to the engine thread.
+pub(crate) enum Internal {
+	/// Import progress, 0..=1.
+	Progress { task: u64, label: String, fraction: f32 },
+	/// An import finished (mips included) or failed.
+	Imported {
+		task: u64,
+		path: PathBuf,
+		result: Result<ImportedImage, IoError>,
+	},
+}
+
 struct Engine {
 	output: OutputSink,
 	render: Sender<RenderRequest>,
-	state: ViewState,
-	/// When the last `view` message went out, and whether a newer view is
-	/// waiting for the throttle interval to pass.
+	internal: Sender<Internal>,
+	store: Arc<TileStore>,
+	docs: Documents,
+	/// View of the virtual document, used while no document is open.
+	virtual_view: ViewState,
+	next_task: u64,
 	last_view_message: Option<Instant>,
 	view_message_pending: bool,
 }
 
 /// Body of the engine thread.
-pub(crate) fn run(inputs: Receiver<EngineInput>, render: Sender<RenderRequest>, output: OutputSink) {
+pub(crate) fn run(
+	inputs: Receiver<EngineInput>,
+	internal_rx: Receiver<Internal>,
+	internal: Sender<Internal>,
+	mips_rx: Receiver<MipWork>,
+	render: Sender<RenderRequest>,
+	store: Arc<TileStore>,
+	output: OutputSink,
+) {
 	let mut engine = Engine {
 		output,
 		render,
-		state: ViewState::new(VIRTUAL_DOC),
+		internal,
+		store,
+		docs: Documents::default(),
+		virtual_view: ViewState::new(VIRTUAL_DOC),
+		next_task: 0,
 		last_view_message: None,
 		view_message_pending: false,
 	};
 
 	loop {
-		let received = match engine.view_message_deadline() {
-			Some(deadline) => inputs.recv_deadline(deadline),
-			None => inputs.recv().map_err(|_| RecvTimeoutError::Disconnected),
-		};
-		match received {
-			Ok(EngineInput::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-			Ok(input) => engine.handle(input),
-			Err(RecvTimeoutError::Timeout) => {}
+		let timeout = engine
+			.view_message_deadline()
+			.map_or(Duration::from_secs(3600), |d| d.saturating_duration_since(Instant::now()));
+		select_biased! {
+			recv(inputs) -> input => match input {
+				Ok(EngineInput::Shutdown) | Err(_) => break,
+				Ok(input) => engine.handle(input),
+			},
+			recv(internal_rx) -> msg => if let Ok(msg) = msg { engine.internal(msg) },
+			recv(mips_rx) -> work => if let Ok(work) = work { engine.compute_mips(work) },
+			default(timeout) => {}
 		}
 		engine.flush_view_message();
 	}
@@ -57,11 +93,19 @@ pub(crate) fn run(inputs: Receiver<EngineInput>, render: Sender<RenderRequest>, 
 }
 
 impl Engine {
+	/// The view of the active document, or of the virtual one.
+	fn view_mut(&mut self) -> &mut ViewState {
+		match self.docs.active_mut() {
+			Some(doc) => &mut doc.view,
+			None => &mut self.virtual_view,
+		}
+	}
+
 	fn handle(&mut self, input: EngineInput) {
 		let changed = match input {
 			EngineInput::Ui(message) => self.ui_message(message),
 			EngineInput::Pointer(pointer) => {
-				if pointer.kind != PointerKind::Move || self.state.dragging() {
+				if pointer.kind != PointerKind::Move || self.view_mut().dragging() {
 					tracing::trace!(
 						"pointer {:?} at ({:.1}, {:.1}) pressure {:.3} tilt ({}, {}) buttons {:#05b}",
 						pointer.kind,
@@ -73,12 +117,29 @@ impl Engine {
 						pointer.buttons
 					);
 				}
-				self.state.pointer(&pointer)
+				self.view_mut().pointer(&pointer)
 			}
-			EngineInput::Wheel { x, y, dx, dy, modifiers } => self.state.wheel(x, y, dx, dy, modifiers),
-			EngineInput::ViewportResized { width, height } => self.state.resize(width, height),
+			EngineInput::Wheel { x, y, dx, dy, modifiers } => self.view_mut().wheel(x, y, dx, dy, modifiers),
+			EngineInput::ViewportResized { width, height } => {
+				// Every document shares the one viewport.
+				let mut changed = self.virtual_view.resize(width, height);
+				for doc in self.docs.iter_mut() {
+					changed.view |= doc.view.resize(width, height).view;
+				}
+				changed
+			}
+			EngineInput::Open(paths) => {
+				for path in paths {
+					self.open(path);
+				}
+				Changed::default()
+			}
 			EngineInput::Shutdown => Changed::default(),
 		};
+		self.apply(changed);
+	}
+
+	fn apply(&mut self, changed: Changed) {
 		if let Some(cursor) = changed.cursor {
 			(self.output)(EngineOutput::Cursor(cursor));
 		}
@@ -95,27 +156,37 @@ impl Engine {
 				self.to_ui(&EngineToUi::Toast {
 					text: "Engine connected".into(),
 				});
-				// A reloaded page needs the current view straight away.
+				// A reloaded page needs the documents and the view again.
+				let ids = self.docs.ids();
+				for id in ids {
+					if let Some(doc) = self.docs.get_mut(id) {
+						let info = doc.info();
+						self.to_ui(&EngineToUi::DocumentOpened { info });
+					}
+				}
+				self.to_ui(&EngineToUi::ActiveDocument { doc: self.docs.active_id() });
+				self.send_layers();
 				self.view_message_pending = true;
 				Changed::default()
 			}
-			UiToEngine::Action { id, .. } => {
-				if let Some(changed) = self.state.action(&id) {
-					return changed;
-				}
-				if UI_LOCAL_ACTION_PREFIXES.iter().any(|prefix| id.starts_with(prefix)) {
-					tracing::debug!("UI-local action {id}");
-				} else {
-					tracing::debug!("action {id} is not implemented yet");
-					self.to_ui(&EngineToUi::Toast {
-						text: format!("{id}: not implemented yet"),
-					});
+			UiToEngine::Action { id, .. } => self.action(&id),
+			UiToEngine::SetZoom { doc, zoom } => match self.docs.get_mut(doc) {
+				Some(open) => open.view.set_zoom(zoom),
+				None if doc == VIRTUAL_DOC_ID => self.virtual_view.set_zoom(zoom),
+				None => Changed::default(),
+			},
+			UiToEngine::ActivateDocument { doc } => {
+				if self.docs.activate(doc) {
+					self.after_active_change();
 				}
 				Changed::default()
 			}
-			UiToEngine::SetZoom { zoom, .. } => self.state.set_zoom(zoom),
-			// Shell messages never reach the engine; everything else needs
-			// documents (M1+).
+			UiToEngine::CloseDocument { doc } => {
+				self.close(doc);
+				Changed::default()
+			}
+			// Shell messages never reach the engine; documents commands, undo
+			// and thumbnails arrive with M2.
 			other => {
 				tracing::debug!("not handled yet: {other:?}");
 				Changed::default()
@@ -123,15 +194,203 @@ impl Engine {
 		}
 	}
 
-	fn request_frame(&self) {
-		let Some(viewport) = self.state.viewport else {
-			return;
-		};
-		let _ = self.render.send(RenderRequest::Frame {
-			view: self.state.view,
-			viewport,
-			doc: self.state.doc,
+	fn action(&mut self, id: &str) -> Changed {
+		match id {
+			"tab:close" => {
+				if let Some(active) = self.docs.active_id() {
+					self.close(active);
+				}
+				return Changed::default();
+			}
+			"tab:close-all" => {
+				for doc in self.docs.ids() {
+					self.close(doc);
+				}
+				return Changed::default();
+			}
+			// The shell answers dlg:open with the native file dialog and sends
+			// the chosen files as `EngineInput::Open`.
+			"dlg:open" => return Changed::default(),
+			_ => {}
+		}
+		if let Some(changed) = self.view_mut().action(id) {
+			return changed;
+		}
+		if UI_LOCAL_ACTION_PREFIXES.iter().any(|prefix| id.starts_with(prefix)) {
+			tracing::debug!("UI-local action {id}");
+		} else {
+			tracing::debug!("action {id} is not implemented yet");
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("{id}: not implemented yet"),
+			});
+		}
+		Changed::default()
+	}
+
+	// ------------------------------------------------------------ documents
+
+	/// Import `path` as a job: decode + mip pyramid on worker threads, with
+	/// `progress` messages; the document appears when it is complete.
+	fn open(&mut self, path: PathBuf) {
+		self.next_task += 1;
+		let task = self.next_task;
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		let label = format!(
+			"Opening {}",
+			path.file_name()
+				.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+		);
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: label.clone(),
+			fraction: 0.0,
 		});
+		let spawned = std::thread::Builder::new().name(format!("import-{task}")).spawn(move || {
+			let mut last = 0.0f32;
+			let mut report = |fraction: f32| {
+				// ~1 % steps are plenty for a progress bar.
+				if fraction - last >= 0.01 || fraction >= 1.0 {
+					last = fraction;
+					let _ = internal.send(Internal::Progress {
+						task,
+						label: label.clone(),
+						fraction: fraction * 0.9,
+					});
+				}
+				true
+			};
+			let result = fx_io::import_file(&path, &store, &mut report).and_then(|mut imported| {
+				let _ = internal.send(Internal::Progress {
+					task,
+					label: format!("{label}: building previews"),
+					fraction: 0.9,
+				});
+				mips::ensure_all_mips(&mut imported.image, &store)?;
+				Ok(imported)
+			});
+			let _ = internal.send(Internal::Imported { task, path, result });
+		});
+		if let Err(error) = spawned {
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot start the import: {error}"),
+			});
+		}
+	}
+
+	fn internal(&mut self, message: Internal) {
+		match message {
+			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
+			Internal::Imported { task, path, result } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				match result {
+					Ok(imported) => {
+						let id = self.docs.allocate_id();
+						let mut doc = OpenDoc::from_import(id, &path, imported);
+						if let Some(viewport) = self.virtual_view.viewport {
+							doc.view.resize(viewport.width, viewport.height);
+						}
+						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
+						let info = doc.info();
+						self.docs.add(doc);
+						self.to_ui(&EngineToUi::DocumentOpened { info });
+						self.after_active_change();
+					}
+					Err(IoError::Cancelled) => {}
+					Err(error) => {
+						tracing::warn!("cannot open {}: {error}", path.display());
+						self.to_ui(&EngineToUi::Error {
+							text: format!("Could not open {}: {error}", path.display()),
+						});
+					}
+				}
+			}
+		}
+	}
+
+	fn close(&mut self, id: DocId) {
+		if self.docs.close(id).is_some() {
+			// Dropping the document drops its tile handles: memory is freed.
+			self.to_ui(&EngineToUi::DocumentClosed { doc: id });
+			self.after_active_change();
+		}
+	}
+
+	fn after_active_change(&mut self) {
+		self.to_ui(&EngineToUi::ActiveDocument { doc: self.docs.active_id() });
+		self.send_layers();
+		self.request_frame();
+		self.view_message_pending = true;
+	}
+
+	fn send_layers(&mut self) {
+		if let Some(doc) = self.docs.active_mut() {
+			let message = EngineToUi::Layers {
+				doc: doc.id,
+				revision: doc.doc.revision,
+				layers: layers::layer_infos(&doc.doc),
+			};
+			self.to_ui(&message);
+		}
+	}
+
+	/// Compute the dirty mip tiles a frame asked for, then redraw. Mips are
+	/// derived data: no undo step, no revision bump (only a new snapshot).
+	fn compute_mips(&mut self, work: MipWork) {
+		let store = self.store.clone();
+		let Some(doc) = self.docs.get_mut(work.doc) else { return };
+		if doc.doc.revision != work.revision {
+			// The document changed meanwhile; the next frame asks again.
+			return;
+		}
+		for request in &work.requests {
+			let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
+			let image = if request.mask {
+				match layer.mask.as_mut() {
+					Some(mask) => &mut mask.image,
+					None => continue,
+				}
+			} else {
+				match &mut layer.kind {
+					fx_core::LayerKind::Pixel { image, .. } => image,
+					_ => continue,
+				}
+			};
+			if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
+				tracing::warn!("mip {request:?} failed: {error}");
+			}
+		}
+		doc.invalidate_snapshot();
+		if self.docs.active_id() == Some(work.doc) {
+			self.request_frame();
+		}
+	}
+
+	// ------------------------------------------------------------ output
+
+	fn request_frame(&mut self) {
+		let virtual_view = self.virtual_view.clone();
+		let frame = match self.docs.active_mut() {
+			Some(doc) => {
+				let Some(viewport) = doc.view.viewport else { return };
+				Frame {
+					view: doc.view.view,
+					viewport,
+					doc: Some((doc.id, doc.snapshot())),
+					virtual_doc: VIRTUAL_DOC,
+				}
+			}
+			None => {
+				let Some(viewport) = virtual_view.viewport else { return };
+				Frame {
+					view: virtual_view.view,
+					viewport,
+					doc: None,
+					virtual_doc: VIRTUAL_DOC,
+				}
+			}
+		};
+		let _ = self.render.send(RenderRequest::Frame(frame));
 	}
 
 	fn view_message_deadline(&self) -> Option<Instant> {
@@ -146,9 +405,12 @@ impl Engine {
 		if !self.view_message_pending || self.view_message_deadline().is_some_and(|deadline| Instant::now() < deadline) {
 			return;
 		}
-		let view = self.state.view;
+		let (doc, view) = match self.docs.active_mut() {
+			Some(doc) => (doc.id, doc.view.view),
+			None => (VIRTUAL_DOC_ID, self.virtual_view.view),
+		};
 		self.to_ui(&EngineToUi::View {
-			doc: VIRTUAL_DOC_ID,
+			doc,
 			zoom: view.zoom,
 			center_x: view.center_x,
 			center_y: view.center_y,
