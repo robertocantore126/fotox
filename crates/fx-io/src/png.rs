@@ -92,7 +92,7 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 		while let Some(row) = reader.next_row().map_err(decode)? {
 			push(y, row.data(), &mut band, &mut image)?;
 			y += 1;
-			if y % 256 == 0 && !progress(y as f32 / height as f32) {
+			if y.is_multiple_of(256) && !progress(y as f32 / height as f32) {
 				return Err(IoError::Cancelled);
 			}
 		}
