@@ -14,7 +14,9 @@ use half::f16;
 
 use crate::frame::{FramePlan, TileDraw};
 use crate::gpu::viewport::ViewportRenderer;
+use crate::overlay::{Overlay, OverlayItem, OverlayStyle, OverlayVertex, tessellate};
 use crate::test_pattern::VIEWPORT_FORMAT;
+use crate::viewport::{ViewTransform, ViewportSize};
 
 const SIZE: u32 = 256;
 
@@ -103,7 +105,7 @@ fn plan() -> FramePlan {
 }
 
 /// Render the pass and read the target back as RGBA8 rows.
-fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::TextureView, lut: Option<&Lut3d>) -> Vec<[u8; 4]> {
+fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::TextureView, lut: Option<&Lut3d>, overlay: &[OverlayVertex]) -> Vec<[u8; 4]> {
 	let mut renderer = ViewportRenderer::new(device, queue, VIEWPORT_FORMAT);
 	let target = device.create_texture(&wgpu::TextureDescriptor {
 		label: Some("fx-test-viewport"),
@@ -123,7 +125,16 @@ fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::Texture
 		label: Some("fx-test-viewport"),
 	});
 	renderer.set_display_lut(lut);
-	renderer.render(&mut encoder, &target.create_view(&Default::default()), (SIZE, SIZE), &plan(), 1.0, tiles);
+	renderer.render(
+		&mut encoder,
+		&target.create_view(&Default::default()),
+		(SIZE, SIZE),
+		&plan(),
+		1.0,
+		tiles,
+		overlay,
+		0.0,
+	);
 	let readback = device.create_buffer(&wgpu::BufferDescriptor {
 		label: Some("fx-test-viewport-readback"),
 		size: (SIZE * SIZE * 4) as u64,
@@ -163,7 +174,7 @@ fn without_a_lut_the_document_reaches_the_screen_untouched() {
 	// (no LUT) is displayed bit-exactly.
 	let (device, queue) = gpu_or_skip!();
 	let tiles = tiles_texture(&device, &queue, [0.5, 0.5, 0.5, 1.0]);
-	let pixels = render(&device, &queue, &tiles, None);
+	let pixels = render(&device, &queue, &tiles, None, &[]);
 	assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
 	// The document's 0.5 reaches the screen as 128 ± 1: the remaining step is
 	// the float → 8-bit unorm conversion of the swapchain format, not the
@@ -188,8 +199,8 @@ fn the_display_lut_maps_the_tile_colour() {
 	let colour = [0.9, 0.25, 0.4];
 	let lut = display_lut(&ColorProfile::AdobeRgb1998, &ColorProfile::Srgb, Intent::RelativeColorimetric, true).expect("transform");
 	let tiles = tiles_texture(&device, &queue, [colour[0], colour[1], colour[2], 1.0]);
-	let mapped = render(&device, &queue, &tiles, Some(&lut));
-	let plain = render(&device, &queue, &tiles, None);
+	let mapped = render(&device, &queue, &tiles, Some(&lut), &[]);
+	let plain = render(&device, &queue, &tiles, None, &[]);
 	let expected = lut.sample(colour.map(f64::from)).map(to_u8);
 	let got = mapped[0];
 	for c in 0..3 {
@@ -216,7 +227,7 @@ fn the_lut_runs_on_straight_colour_before_the_checkerboard() {
 	let alpha = 0.5f32;
 	let tiles = tiles_texture(&device, &queue, [colour[0] * alpha, colour[1] * alpha, colour[2] * alpha, alpha]);
 	let lut = display_lut(&ColorProfile::AdobeRgb1998, &ColorProfile::Srgb, Intent::RelativeColorimetric, true).expect("transform");
-	let pixels = render(&device, &queue, &tiles, Some(&lut));
+	let pixels = render(&device, &queue, &tiles, Some(&lut), &[]);
 	// Pixel (10, 10) sits in checkerboard cell (1, 1): odd + odd = even → white.
 	let mapped = lut.sample(colour.map(f64::from));
 	for c in 0..3 {
@@ -229,4 +240,39 @@ fn the_lut_runs_on_straight_colour_before_the_checkerboard() {
 			"channel {c}: {at} vs {expected} (mapped {mapped:?})"
 		);
 	}
+}
+
+#[test]
+fn an_overlay_line_lands_on_the_expected_pixels() {
+	// M5-T02: the overlay pass draws after the tiles, in screen space. At zoom
+	// 1 with the view centred on the viewport the document and screen
+	// coordinates coincide, so a line at y = 128.5 must light up row 128.
+	let (device, queue) = gpu_or_skip!();
+	let tiles = tiles_texture(&device, &queue, [0.25, 0.25, 0.25, 1.0]);
+	let overlay = Overlay {
+		items: vec![OverlayItem::Polyline {
+			points: vec![(10.0, 128.5), (200.0, 128.5)],
+			closed: false,
+			style: OverlayStyle::Solid([1.0, 1.0, 1.0, 1.0]),
+		}],
+	};
+	let view = ViewTransform {
+		zoom: 1.0,
+		center_x: 128.0,
+		center_y: 128.0,
+	};
+	let viewport = ViewportSize { width: SIZE, height: SIZE };
+	let vertices = tessellate(&overlay, &view, viewport);
+	let pixels = render(&device, &queue, &tiles, None, &vertices);
+	let at = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
+	assert_eq!(at(100, 128), [255, 255, 255, 255], "the line's row");
+	let background = at(100, 120);
+	for c in 0..3 {
+		assert!(
+			(i32::from(background[c]) - i32::from(to_u8(0.25))).abs() <= 1,
+			"above the line the tile shows through: {background:?}"
+		);
+	}
+	assert!(at(5, 128)[0] < 128, "the line starts at x = 10");
+	assert!(at(210, 128)[0] < 128, "the line ends at x = 200");
 }

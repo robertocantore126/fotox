@@ -3,7 +3,17 @@
 import { setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
 import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
+import { isPopupOpen } from "./popup.js";
+import { optionValue, setOption, showModeHint } from "./optionsbar.js";
 import { toolSlots } from "./data/tools.js";
+import * as bridge from "./native/bridge.js";
+import { UI } from "./native/protocol.js";
+
+// Keys the viewport tools own (M5-T04): Escape cancels the marquee or lasso
+// being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last
+// point. Everything else stays with the menus and the shortcut map below, and
+// the engine ignores these when no tool has anything in progress.
+const VIEWPORT_KEYS = new Set(["Escape", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]);
 
 const combos = [
   ["ctrl+n", "New...", "dlg:new-doc"],
@@ -22,6 +32,16 @@ const combos = [
   ["ctrl+k", "Preferences...", "dlg:prefs"],
   ["ctrl+t", "Free Transform", "misc:free-transform"],
   ["ctrl+j", "Layer via Copy", "layer:via-copy"],
+  ["ctrl+shift+j", "Layer via Cut", "layer:via-cut"],
+  ["ctrl+c", "Copy", "clip:copy"],
+  ["ctrl+x", "Cut", "clip:cut"],
+  ["ctrl+v", "Paste", "clip:paste"],
+  ["ctrl+shift+v", "Paste in Place", "clip:paste-special"],
+  ["shift+f5", "Fill...", "dlg:fill"],
+  ["alt+backspace", "Fill with Foreground", "edit:fill-fg"],
+  ["ctrl+backspace", "Fill with Background", "edit:fill-bg"],
+  ["alt+shift+backspace", "Fill with Foreground (Preserve Transparency)", "edit:fill-fg-preserve"],
+  ["ctrl+shift+backspace", "Fill with Background (Preserve Transparency)", "edit:fill-bg-preserve"],
   ["ctrl+g", "Group Layers", "layer:group"],
   ["ctrl+e", "Merge Layers", "layer:merge"],
   ["ctrl+y", "Proof Colors", "view:proof-colors"],
@@ -31,6 +51,8 @@ const combos = [
   ["ctrl+a", "Select All", "sel:all"],
   ["ctrl+d", "Deselect", "sel:none"],
   ["ctrl+shift+i", "Inverse Selection", "sel:inverse"],
+  ["ctrl+shift+d", "Reselect", "sel:reselect"],
+  ["shift+f6", "Feather...", "dlg:sel-feather"],
   ["ctrl+p", "Print...", "dlg:print"],
   ["ctrl+f", "Last Filter", "filter:last"],
   ["ctrl+w", "Close", "tab:close"],
@@ -68,7 +90,54 @@ function comboOf(e) {
   return parts.join("+");
 }
 
+/** The next brush size for `[` (down) or `]` (up), in Photoshop's steps. */
+function sizeStep(size, up) {
+  const step = (v) => (v < 10 ? 1 : v < 100 ? 10 : v < 200 ? 25 : v < 500 ? 50 : 100);
+  if (up) return Math.min(5000, size + step(size));
+  const down = size - step(size - 1);
+  return Math.max(1, down);
+}
+
+let lastDigit = null;
+
+/** Handle a painting shortcut; `true` when the key was one. */
+function brushKey(e) {
+  if (e.code === "BracketLeft" || e.code === "BracketRight") {
+    const up = e.code === "BracketRight";
+    if (e.shiftKey) {
+      const hardness = optionValue("Hardness");
+      if (hardness == null) return false;
+      return setOption("Hardness", Math.max(0, Math.min(100, hardness + (up ? 25 : -25))));
+    }
+    const size = optionValue("Size");
+    if (size == null) return false;
+    return setOption("Size", sizeStep(size, up));
+  }
+  if (!e.shiftKey && /^Digit[0-9]$/.test(e.code) && optionValue("Opacity") != null) {
+    const digit = Number(e.code.slice(5));
+    const now = performance.now();
+    let value = digit === 0 ? 100 : digit * 10;
+    if (lastDigit && now - lastDigit.at < 600) {
+      value = lastDigit.digit * 10 + digit;
+      lastDigit = null;
+    } else {
+      lastDigit = { digit, at: now };
+    }
+    return setOption("Opacity", value);
+  }
+  return false;
+}
+
+/** While Shift/Alt are held, the Mode buttons show the mode they select (M5-T10). */
+function modeHint(e) {
+  const index = e.shiftKey && e.altKey ? 3 : e.shiftKey ? 1 : e.altKey ? 2 : null;
+  showModeHint(index);
+}
+
 export function initShortcuts() {
+  document.addEventListener("keydown", modeHint, true);
+  document.addEventListener("keyup", modeHint, true);
+  window.addEventListener("blur", () => showModeHint(null));
   document.addEventListener("keydown", (e) => {
     const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
 
@@ -77,7 +146,24 @@ export function initShortcuts() {
       if (typing) { e.target.blur(); return; }
     }
 
+    // A viewport key (M5-T04): the tools get it before the menus do.
+    // Arrow keys move the selection outline (Shift = 10 px): the engine
+    // gets "Shift+ArrowLeft". Menus keep their own arrow navigation.
+    if (!typing && !isDialogOpen() && !isPopupOpen() && !e.ctrlKey && !e.metaKey && !e.altKey && VIEWPORT_KEYS.has(e.key)) {
+      bridge.send({ type: UI.KEY, key: e.shiftKey && e.key.startsWith("Arrow") ? `Shift+${e.key}` : e.key });
+      e.preventDefault();
+      return;
+    }
+
     if (typing) return;
+
+    // Painting shortcuts (M5-T09): [ and ] change the size, Shift+[ and ]
+    // the hardness by 25 %, the number keys the opacity (1 = 10 % … 0 = 100 %;
+    // two digits typed quickly = that exact value).
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !isDialogOpen() && brushKey(e)) {
+      e.preventDefault();
+      return;
+    }
 
     if (e.key === "Tab" && !e.ctrlKey && !e.altKey) {
       runAction({ label: "Panels", a: "toggle:panels" });

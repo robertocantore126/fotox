@@ -145,7 +145,9 @@ function showStatus(s) {
     fpsOverlay.textContent =
       `${s.fps.toFixed(0)} fps\n` +
       `frame p50 ${s.frame_ms_p50.toFixed(1)} ms · p99 ${s.frame_ms_p99.toFixed(1)} ms\n` +
-      `uploads ${s.uploads} · loading ${s.pending_loads}`;
+      `uploads ${s.uploads} · loading ${s.pending_loads}` +
+      // Brush input → pixels (M5-T11), while painting.
+      (s.input_latency_ms_p99 ? `\ninput p50 ${s.input_latency_ms_p50.toFixed(1)} ms · p99 ${s.input_latency_ms_p99.toFixed(1)} ms` : "");
   }
 }
 

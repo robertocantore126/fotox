@@ -14,6 +14,7 @@ use bytemuck::{Pod, Zeroable};
 use fx_color::{LUT_GRID, Lut3d};
 
 use crate::frame::FramePlan;
+use crate::overlay::OverlayVertex;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -35,6 +36,29 @@ struct GpuDraw {
 	dst: [f32; 4],
 	slot: u32,
 	_pad: [u32; 3],
+}
+
+/// Uniforms of the overlay pass (M5-T02): viewport size and the animation
+/// time for the marching ants.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct OverlayGlobals {
+	size: [f32; 2],
+	time: f32,
+	_pad: f32,
+}
+
+/// One overlay vertex as the shader's `Vertex` (matching padding: WGSL aligns
+/// `vec2` to 8 and `vec4` to 16, giving a 48-byte stride).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct GpuOverlayVertex {
+	pos: [f32; 2],
+	_pad0: [f32; 2],
+	color: [f32; 4],
+	arc: f32,
+	ants: f32,
+	_pad1: [f32; 2],
 }
 
 /// Background outside the document (Photoshop's default dark grey).
@@ -64,6 +88,11 @@ pub struct ViewportRenderer {
 	lut_key: Option<u64>,
 	/// Gamut warning on (needs a proof LUT, M4-T04).
 	gamut_warning: bool,
+	/// Overlay pass (M5-T02): ants, lasso, brush outline, handles.
+	overlay_pipeline: wgpu::RenderPipeline,
+	overlay_layout: wgpu::BindGroupLayout,
+	overlay_globals: wgpu::Buffer,
+	overlay_verts: wgpu::Buffer,
 }
 
 impl ViewportRenderer {
@@ -158,6 +187,63 @@ impl ViewportRenderer {
 			multiview_mask: None,
 			cache: None,
 		});
+		// Overlay pass (M5-T02): screen-space vertices from a storage buffer.
+		let overlay_module = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
+		let overlay_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+			label: Some("fx-overlay"),
+			entries: &[
+				wgpu::BindGroupLayoutEntry {
+					binding: 0,
+					visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+					ty: wgpu::BindingType::Buffer {
+						ty: wgpu::BufferBindingType::Uniform,
+						has_dynamic_offset: false,
+						min_binding_size: None,
+					},
+					count: None,
+				},
+				wgpu::BindGroupLayoutEntry {
+					binding: 1,
+					visibility: wgpu::ShaderStages::VERTEX,
+					ty: wgpu::BindingType::Buffer {
+						ty: wgpu::BufferBindingType::Storage { read_only: true },
+						has_dynamic_offset: false,
+						min_binding_size: None,
+					},
+					count: None,
+				},
+			],
+		});
+		let overlay_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+			label: Some("fx-overlay"),
+			bind_group_layouts: &[Some(&overlay_layout)],
+			immediate_size: 0,
+		});
+		let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+			label: Some("fx-overlay"),
+			layout: Some(&overlay_pipeline_layout),
+			vertex: wgpu::VertexState {
+				module: &overlay_module,
+				entry_point: Some("vs_main"),
+				compilation_options: Default::default(),
+				buffers: &[],
+			},
+			fragment: Some(wgpu::FragmentState {
+				module: &overlay_module,
+				entry_point: Some("fs_main"),
+				compilation_options: Default::default(),
+				targets: &[Some(wgpu::ColorTargetState {
+					format,
+					blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+					write_mask: wgpu::ColorWrites::ALL,
+				})],
+			}),
+			primitive: wgpu::PrimitiveState::default(),
+			depth_stencil: None,
+			multisample: wgpu::MultisampleState::default(),
+			multiview_mask: None,
+			cache: None,
+		});
 		let sampler = |filter| {
 			device.create_sampler(&wgpu::SamplerDescriptor {
 				label: Some("fx-viewport"),
@@ -224,6 +310,15 @@ impl ViewportRenderer {
 			placeholder,
 			lut_key: None,
 			gamut_warning: false,
+			overlay_pipeline,
+			overlay_layout,
+			overlay_globals: device.create_buffer(&wgpu::BufferDescriptor {
+				label: Some("fx-overlay-globals"),
+				size: std::mem::size_of::<OverlayGlobals>() as u64,
+				usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+				mapped_at_creation: false,
+			}),
+			overlay_verts: overlay_buffer(device, 256),
 		}
 	}
 
@@ -268,7 +363,12 @@ impl ViewportRenderer {
 	/// `zoom >= 1` draws hard pixels like Photoshop. The display transform is
 	/// whatever the last [`set_display_lut`] call chose.
 	///
+	/// `overlay` is the tool overlay, already tessellated to screen pixels
+	/// (M5-T02, [`crate::overlay::tessellate`]); it is drawn in the same pass,
+	/// after the tiles, and `time` (seconds) animates the marching ants.
+	///
 	/// [`set_display_lut`]: Self::set_display_lut
+	#[allow(clippy::too_many_arguments)]
 	pub fn render(
 		&mut self,
 		encoder: &mut wgpu::CommandEncoder,
@@ -277,6 +377,8 @@ impl ViewportRenderer {
 		plan: &FramePlan,
 		zoom: f64,
 		tiles: &wgpu::TextureView,
+		overlay: &[OverlayVertex],
+		time: f32,
 	) {
 		let draws: Vec<GpuDraw> = plan
 			.draws
@@ -356,12 +458,66 @@ impl ViewportRenderer {
 		pass.set_pipeline(&self.pipeline);
 		pass.set_bind_group(0, &bind_group, &[]);
 		pass.draw(0..6, 0..(1 + draws.len() as u32));
+
+		// Overlay (M5-T02), after the tiles, in the same pass.
+		if !overlay.is_empty() {
+			let verts: Vec<GpuOverlayVertex> = overlay
+				.iter()
+				.map(|v| GpuOverlayVertex {
+					pos: v.pos,
+					color: v.color,
+					arc: v.arc,
+					ants: v.ants,
+					..Default::default()
+				})
+				.collect();
+			let bytes: &[u8] = bytemuck::cast_slice(&verts);
+			if self.overlay_verts.size() < bytes.len() as u64 {
+				self.overlay_verts = overlay_buffer(&self.device, (bytes.len() as u64).next_power_of_two());
+			}
+			self.queue.write_buffer(&self.overlay_verts, 0, bytes);
+			self.queue.write_buffer(
+				&self.overlay_globals,
+				0,
+				bytemuck::bytes_of(&OverlayGlobals {
+					size: [size.0 as f32, size.1 as f32],
+					time,
+					_pad: 0.0,
+				}),
+			);
+			let overlay_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+				label: Some("fx-overlay"),
+				layout: &self.overlay_layout,
+				entries: &[
+					wgpu::BindGroupEntry {
+						binding: 0,
+						resource: self.overlay_globals.as_entire_binding(),
+					},
+					wgpu::BindGroupEntry {
+						binding: 1,
+						resource: self.overlay_verts.as_entire_binding(),
+					},
+				],
+			});
+			pass.set_pipeline(&self.overlay_pipeline);
+			pass.set_bind_group(0, &overlay_bind, &[]);
+			pass.draw(0..verts.len() as u32, 0..1);
+		}
 	}
 }
 
 fn draws_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
 	device.create_buffer(&wgpu::BufferDescriptor {
 		label: Some("fx-viewport-draws"),
+		size: size.max(256),
+		usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+		mapped_at_creation: false,
+	})
+}
+
+fn overlay_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+	device.create_buffer(&wgpu::BufferDescriptor {
+		label: Some("fx-overlay-verts"),
 		size: size.max(256),
 		usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
 		mapped_at_creation: false,

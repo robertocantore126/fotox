@@ -115,6 +115,29 @@ pub enum UiToEngine {
 		doc: DocId,
 		answer: CloseAnswer,
 	},
+	/// The active tool's option-bar values (M5-T01). `options` is a JSON object
+	/// keyed by the option bar's field text without the trailing colon
+	/// (`{"Size": 40, "Hardness": 75, "Mode": "Normal"}`). Sent when a tool
+	/// becomes active and on every change.
+	ToolOptions {
+		tool: String,
+		options: serde_json::Value,
+	},
+	/// The foreground and background colours (M5-T01), 16-bit RGBA. Sent on
+	/// every swatch change, on X (swap) and on D (defaults).
+	SetColors {
+		fg: [u16; 4],
+		bg: [u16; 4],
+	},
+	/// A key the UI's shortcut map did not consume, for the viewport tools
+	/// (M5-T04): `"Escape"`, `"Enter"`, `"Backspace"`, `"ArrowLeft"`… named
+	/// like the DOM's `KeyboardEvent.key`, the tools match on those names.
+	/// The engine forwards it to the active tool, which uses it to finish or
+	/// cancel an operation that is under way (the polygonal lasso closes on
+	/// Enter, cancels on Escape).
+	Key {
+		key: String,
+	},
 }
 
 /// Answer to the "save changes before closing?" prompt (M3-T06).
@@ -177,6 +200,12 @@ pub struct LayerInfo {
 	/// The two locks separately (the panel's lock buttons).
 	#[serde(default)]
 	pub locked_pixels: bool,
+	/// "Lock transparent pixels" (M5, D-049).
+	#[serde(default)]
+	pub locked_transparency: bool,
+	/// Painting goes to this layer's mask (its mask thumbnail was clicked, M5-T09).
+	#[serde(default)]
+	pub edit_mask: bool,
 	#[serde(default)]
 	pub locked_position: bool,
 	pub expanded: bool,
@@ -256,6 +285,12 @@ pub enum EngineToUi {
 		/// Tiles being loaded from warm/cold storage right now.
 		#[serde(default)]
 		pending_loads: u32,
+		/// Brush input → pixels on screen, median and 99th percentile over the
+		/// last 2 s, in ms (M5-T11; 0 when nothing was painted).
+		#[serde(default)]
+		input_latency_ms_p50: f32,
+		#[serde(default)]
+		input_latency_ms_p99: f32,
 	},
 	Progress {
 		task: u64,
@@ -269,6 +304,17 @@ pub enum EngineToUi {
 		text: String,
 	},
 	Error {
+		text: String,
+	},
+	/// The eyedropper sampled a colour (M5-T01). `target` is `"fg"` or `"bg"`;
+	/// the UI updates that swatch.
+	ColorPicked {
+		rgba: [u16; 4],
+		target: String,
+	},
+	/// A tool's status line (M5-T10): the marquee's size while it is dragged.
+	/// Empty = clear it.
+	ToolInfo {
 		text: String,
 	},
 	/// The CMYK profiles for proofing and export (M4-T04), sent after `hello`.
@@ -409,5 +455,42 @@ mod tests {
 		let (back, payload): (EngineToUi, _) = decode(&frame).unwrap();
 		assert_eq!(back, header);
 		assert_eq!(payload, &pixels);
+	}
+
+	#[test]
+	fn tool_options_round_trip() {
+		let msg = UiToEngine::ToolOptions {
+			tool: "brush".into(),
+			options: serde_json::json!({"Size": 40, "Hardness": 75, "Mode": "Normal"}),
+		};
+		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
+	}
+
+	#[test]
+	fn set_colors_round_trip() {
+		let msg = UiToEngine::SetColors {
+			fg: [0, 65535, 0, 65535],
+			bg: [65535, 65535, 65535, 65535],
+		};
+		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
+	}
+
+	#[test]
+	fn key_round_trip() {
+		let msg = UiToEngine::Key { key: "Backspace".into() };
+		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
+	}
+
+	#[test]
+	fn color_picked_round_trip() {
+		let msg = EngineToUi::ColorPicked {
+			rgba: [1, 2, 3, 65535],
+			target: "fg".into(),
+		};
+		let (back, _): (EngineToUi, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
 	}
 }

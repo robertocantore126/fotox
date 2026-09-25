@@ -69,6 +69,10 @@ pub(crate) struct App {
 	engine_cursor: CursorShape,
 	/// The monitor whose ICC profile the engine has (M4-T02).
 	display_monitor: Option<isize>,
+	/// The Windows clipboard's sequence number after Fotox's own last copy
+	/// (M5-T05): a paste with a different number pastes what another program
+	/// copied.
+	clipboard_sequence: Option<u32>,
 	/// A drop whose file list is being fetched.
 	pending_drop: Option<AsyncRequestSerial>,
 	startup_time: Option<Instant>,
@@ -108,6 +112,7 @@ impl App {
 			ui_cursor: None,
 			engine_cursor: CursorShape::Default,
 			display_monitor: None,
+			clipboard_sequence: None,
 			pending_drop: None,
 			startup_time: None,
 			exiting: Arc::new(AtomicBool::new(false)),
@@ -253,6 +258,15 @@ impl App {
 						"export:png" => self.export_file_dialog("PNG", "png", None),
 						"export:tiff" => self.export_file_dialog("TIFF", "tif", None),
 						"export:jpg" => self.export_file_dialog("JPEG", "jpg", None),
+						// Paste what another program copied since Fotox's own last
+						// copy: the image goes to the engine instead of the action.
+						"clip:paste" | "clip:paste-special" if self.clipboard_sequence != Some(Window::clipboard_sequence()) => {
+							if let Some((width, height, rgba8)) = Window::read_clipboard() {
+								self.clipboard_sequence = Some(Window::clipboard_sequence());
+								self.engine.send(EngineInput::PasteImage { width, height, rgba8 });
+								return;
+							}
+						}
 						// The Export As dialog (M3-T07): its options, then the save dialog.
 						"export:as" => {
 							let (name, extension, choice) = export_choice(args);
@@ -339,6 +353,15 @@ impl App {
 			// The engine asked about every unsaved document (M3-T06).
 			EngineOutput::MayClose(true) => self.exit(ExitReason::Shutdown),
 			EngineOutput::MayClose(false) => {}
+			EngineOutput::ClipboardCopied { image } => {
+				// Either the copy goes to Windows too, or Windows' current image
+				// is older than it: remember the sequence number either way.
+				self.clipboard_sequence = match (&self.window, image) {
+					(Some(window), Some((width, height, rgba8))) => window.write_clipboard(width, height, &rgba8),
+					_ => None,
+				}
+				.or_else(|| Some(Window::clipboard_sequence()));
+			}
 		}
 	}
 
@@ -534,6 +557,7 @@ fn engine_cursor(shape: CursorShape) -> Cursor {
 		CursorShape::Grabbing => Cursor::Icon(CursorIcon::Grabbing),
 		CursorShape::ZoomIn => Cursor::Icon(CursorIcon::ZoomIn),
 		CursorShape::ZoomOut => Cursor::Icon(CursorIcon::ZoomOut),
+		CursorShape::Move => Cursor::Icon(CursorIcon::Move),
 		CursorShape::None => Cursor::None,
 	}
 }

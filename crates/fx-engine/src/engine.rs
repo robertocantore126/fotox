@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
-use fx_core::command::{LayerPropsPatch, NewLayer};
-use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef};
+use fx_core::command::{LayerPropsPatch, MaskFill, NewLayer};
+use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef, PixelOps};
 use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
@@ -25,8 +25,9 @@ use crate::ops::EngineOps;
 use crate::render::{Frame, MipWork, RenderRequest};
 use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
+use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, filters, layers, mips};
+use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -110,6 +111,11 @@ pub(crate) enum Internal {
 		generation: u64,
 		result: Result<Arc<FxdFile>, IoError>,
 	},
+	/// Copy Merged finished (M5-T05).
+	Copied {
+		task: u64,
+		result: Result<Option<fx_core::pixels::ClipboardImage>, String>,
+	},
 	/// The B3 layers are built (M2-T08).
 	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
 	/// A batch of filter-preview tiles (M4-T05).
@@ -176,13 +182,25 @@ struct Engine {
 	/// Display LUTs built so far, most recent last: `(key, table)`.
 	/// `None` = that transform is (nearly) the identity: no LUT.
 	display_luts: Vec<(u64, Option<Arc<fx_color::Lut3d>>)>,
+	/// The viewport tools, created on first use (M5-T01).
+	tools: Tools,
+	/// Colours and option-bar values the tools read (M5-T01).
+	settings: ToolSettings,
+	/// The marching-ants overlay of the selection, cached per document,
+	/// generation, view level and visible rectangle (M5-T03).
+	selection_overlay: Option<(SelectionOverlayKey, Arc<fx_render::Overlay>)>,
+	/// The brush stroke being painted (M5-T07).
+	stroke: Option<crate::stroke::Session>,
 }
+
+/// Cache key of the selection contour (M5-T03).
+type SelectionOverlayKey = (DocId, u64, usize, (i64, i64, i64, i64));
 
 /// What makes two consecutive edits "the same" for history merging.
 #[derive(Clone, Debug, PartialEq)]
 enum EditKey {
 	/// `set_layer_props` of the same layer touching the same fields.
-	Props(LayerRef, [bool; 8]),
+	Props(LayerRef, [bool; 9]),
 	/// `set_adjustment` of the same layer.
 	Adjustment(LayerRef),
 }
@@ -199,6 +217,7 @@ impl EditKey {
 					blend,
 					clipped,
 					locked_pixels,
+					locked_transparency,
 					locked_position,
 				} = props;
 				Some(Self::Props(
@@ -211,6 +230,7 @@ impl EditKey {
 						blend.is_some(),
 						clipped.is_some(),
 						locked_pixels.is_some(),
+						locked_transparency.is_some(),
 						locked_position.is_some(),
 					],
 				))
@@ -269,6 +289,10 @@ pub(crate) fn run(ctx: EngineContext) {
 		window_close_pending: false,
 		display_profile: None,
 		display_luts: Vec::new(),
+		tools: Tools::default(),
+		settings: ToolSettings::default(),
+		selection_overlay: None,
+		stroke: None,
 	};
 
 	loop {
@@ -321,7 +345,12 @@ impl Engine {
 						pointer.buttons
 					);
 				}
-				self.view_mut().pointer(&pointer)
+				let outcome = self.view_mut().pointer(&pointer);
+				let mut changed = outcome.changed;
+				if !outcome.consumed {
+					changed = self.tool_pointer(&pointer, changed);
+				}
+				changed
 			}
 			EngineInput::Wheel { x, y, dx, dy, modifiers } => self.view_mut().wheel(x, y, dx, dy, modifiers),
 			EngineInput::ViewportResized { width, height } => {
@@ -365,6 +394,10 @@ impl Engine {
 				self.set_display_profile(bytes);
 				Changed { view: true, cursor: None }
 			}
+			EngineInput::PasteImage { width, height, rgba8 } => {
+				self.paste_image(width, height, &rgba8);
+				Changed::default()
+			}
 			EngineInput::Shutdown => Changed::default(),
 		};
 		self.apply(changed);
@@ -378,6 +411,297 @@ impl Engine {
 			self.refresh_preview();
 			self.request_frame();
 			self.view_message_pending = true;
+		}
+	}
+
+	/// Route a pointer event the view did not consume to the active tool
+	/// (M5-T01): the event is mapped into document coordinates, the tool's
+	/// answer is applied here (a command, a cursor, a picked colour).
+	fn tool_pointer(&mut self, input: &crate::PointerInput, changed: Changed) -> Changed {
+		let mut changed = changed;
+		let Some(doc_id) = self.docs.active_id() else {
+			return changed;
+		};
+		// Map the event through the inverse of the view transform.
+		let (tool_id, event) = {
+			let Some(open) = self.docs.get_mut(doc_id) else {
+				return changed;
+			};
+			let Some(viewport) = open.view.viewport else {
+				return changed;
+			};
+			let (x, y) = open.view.view.screen_to_doc(viewport, input.x, input.y);
+			(
+				open.view.tool.clone(),
+				DocPointer {
+					kind: input.kind,
+					x,
+					y,
+					pressure: input.pressure,
+					tilt_x: input.tilt_x,
+					tilt_y: input.tilt_y,
+					buttons: input.buttons,
+					modifiers: input.modifiers,
+					time_us: input.time_us,
+				},
+			)
+		};
+		let store = self.store.clone();
+		let (result, idle_cursor) = {
+			let Some(tool) = self.tools.get(&tool_id) else {
+				return changed;
+			};
+			let idle = tool.cursor(event.modifiers);
+			let Some(open) = self.docs.get_mut(doc_id) else {
+				return changed;
+			};
+			let mask_target = open.paints_mask();
+			let mut ctx = ToolContext {
+				doc: &mut open.doc,
+				store: &store,
+				ops: &self.ops,
+				settings: &self.settings,
+				view: open.view.view,
+				mask_target,
+			};
+			(tool.pointer(&mut ctx, &event), idle)
+		};
+		// The view puts `Default` in for a plain hover (no gesture owns the
+		// cursor). A tool that has an idle cursor — the marquee's crosshair —
+		// takes that slot instead; a pan's Grab/Grabbing keeps it.
+		if changed.cursor == Some(CursorShape::Default) {
+			changed.cursor = Some(idle_cursor);
+		}
+		self.apply_tool_result(doc_id, result, &mut changed);
+		changed
+	}
+
+	/// Route a key the UI's shortcut map did not consume to the active tool
+	/// (M5-T04): Escape cancels the operation under way, Enter closes a
+	/// polygonal lasso, Backspace drops its last point.
+	fn tool_key(&mut self, key: &str) -> Changed {
+		let mut changed = Changed::default();
+		let Some(doc_id) = self.docs.active_id() else {
+			return changed;
+		};
+		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
+		let store = self.store.clone();
+		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
+			(Some(tool), Some(open)) => {
+				let mask_target = open.paints_mask();
+				let mut ctx = ToolContext {
+					doc: &mut open.doc,
+					store: &store,
+					ops: &self.ops,
+					settings: &self.settings,
+					view: open.view.view,
+					mask_target,
+				};
+				tool.key(&mut ctx, key)
+			}
+			// A tool Fotox does not implement uses no key.
+			_ => ToolResult::default(),
+		};
+		// Delete / Backspace that no tool used: Edit ▸ Clear (M5-T05).
+		let unused = result.command.is_none() && !result.redraw && result.info.is_none() && result.cursor.is_none();
+		if unused && matches!(key, "Delete" | "Backspace") {
+			self.edit_action("clip:clear", &serde_json::Value::Null);
+			return changed;
+		}
+		self.apply_tool_result(doc_id, result, &mut changed);
+		changed
+	}
+
+	/// Apply what a tool answered (M5-T01): the cursor, a status line, a picked
+	/// colour for the UI, a command to execute (R1), or an overlay redraw
+	/// (M5-T04: a marquee or lasso rubber band, which needs no re-composite).
+	fn apply_tool_result(&mut self, doc_id: DocId, result: ToolResult, changed: &mut Changed) {
+		if let Some(cursor) = result.cursor {
+			changed.cursor = Some(cursor);
+		}
+		if let Some(info) = result.info {
+			self.to_ui(&EngineToUi::Toast { text: info });
+		}
+		if let Some(text) = result.status {
+			self.to_ui(&EngineToUi::ToolInfo { text });
+		}
+		if let Some((rgba, target)) = result.picked {
+			match target {
+				ColorTarget::Foreground => self.settings.fg = rgba,
+				ColorTarget::Background => self.settings.bg = rgba,
+			}
+			self.to_ui(&EngineToUi::ColorPicked {
+				rgba,
+				target: target.as_str().into(),
+			});
+		}
+		for event in result.strokes {
+			self.stroke_event(doc_id, event);
+		}
+		if result.redraw {
+			self.request_frame();
+		}
+		if let Some(command) = result.command {
+			self.command(doc_id, command);
+		}
+	}
+
+	/// A painting tool's stroke event (M5-T07): start, paint, record.
+	fn stroke_event(&mut self, doc_id: DocId, event: crate::tools::StrokeEvent) {
+		use crate::tools::StrokeEvent;
+		match event {
+			StrokeEvent::Begin {
+				target,
+				tool,
+				brush,
+				color,
+				samples,
+			} => {
+				self.end_stroke();
+				let store = self.store.clone();
+				let Some(open) = self.docs.get_mut(doc_id) else { return };
+				if let Some(job) = &open.busy {
+					let text = format!("Wait until {job} is finished");
+					self.to_ui(&EngineToUi::Toast { text });
+					return;
+				}
+				let Some(layer) = open.doc.active_layer() else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Select a layer to paint on".into(),
+					});
+					return;
+				};
+				if open.doc.layer(layer).is_some_and(|l| l.locked_pixels) {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Could not paint: the layer's pixels are locked".into(),
+					});
+					return;
+				}
+				let before = open.doc.clone();
+				let prepared = match crate::stroke::prepare(&before, layer, target, &tool, &store) {
+					Ok(prepared) => prepared,
+					Err(error) => {
+						self.to_ui(&EngineToUi::Toast { text: error.to_string() });
+						return;
+					}
+				};
+				let stroke = match fx_ops::brush::Stroke::begin(crate::stroke::setup(&prepared, &before, tool, brush, color), &store) {
+					Ok(stroke) => stroke,
+					Err(error) => {
+						self.to_ui(&EngineToUi::Toast { text: error.to_string() });
+						return;
+					}
+				};
+				// The layer holds the (possibly grown) image while the stroke runs.
+				let (image, offset) = stroke.start();
+				set_stroke_image(&mut open.doc, layer, target, image.clone(), offset);
+				self.stroke = Some(crate::stroke::Session {
+					doc: doc_id,
+					layer,
+					target,
+					tool,
+					brush,
+					color,
+					before,
+					stroke,
+					pending_input: None,
+				});
+				self.paint_samples(&samples);
+			}
+			StrokeEvent::Add(samples) => self.paint_samples(&samples),
+			StrokeEvent::End => self.end_stroke(),
+		}
+	}
+
+	/// Paint samples of the live stroke and show them.
+	fn paint_samples(&mut self, samples: &[fx_core::stroke::StrokeSample]) {
+		let Some(session) = &mut self.stroke else { return };
+		if samples.is_empty() {
+			return;
+		}
+		let tiles = match session.stroke.add(samples) {
+			Ok(tiles) => tiles,
+			Err(error) => {
+				tracing::warn!("a stroke could not paint: {error}");
+				return;
+			}
+		};
+		// The input arrived now (the shell forwards pointer events at once).
+		session.pending_input.get_or_insert_with(Instant::now);
+		let (doc_id, layer, target) = (session.doc, session.layer, session.target);
+		let store = self.store.clone();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		let level = open.view.view.mip_level(usize::MAX);
+		if let Some(image) = stroke_image(&mut open.doc, layer, target) {
+			for ((tx, ty), buffer) in tiles.iter().cloned() {
+				image.put_buffer(&store, tx, ty, buffer);
+			}
+			// Visible at fit right away (S15): the touched tiles' mips up to the
+			// view level, only those.
+			let level = level.min(image.level_count().saturating_sub(1));
+			if level > 0 {
+				let mut ancestors: Vec<(u32, u32)> = tiles.iter().map(|((tx, ty), _)| (tx >> level, ty >> level)).collect();
+				ancestors.sort_unstable();
+				ancestors.dedup();
+				for (ax, ay) in ancestors {
+					if let Err(error) = crate::mips::ensure_mip(image, &store, level, ax, ay) {
+						tracing::debug!("stroke mip: {error}");
+					}
+				}
+			}
+		}
+		open.doc.revision += 1;
+		open.changed();
+		open.note_edits(&[layer], Instant::now());
+		self.request_frame();
+	}
+
+	/// Finish the live stroke, if any: its final pixels, one History step.
+	fn end_stroke(&mut self) {
+		let Some(session) = self.stroke.take() else { return };
+		let crate::stroke::Session {
+			doc: doc_id,
+			layer,
+			target,
+			tool,
+			brush,
+			color,
+			before,
+			stroke,
+			..
+		} = session;
+		let samples = stroke.samples().to_vec();
+		let finished = stroke.finish();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		match finished {
+			Ok((image, offset)) => {
+				set_stroke_image(&mut open.doc, layer, target, image, offset);
+				open.doc.revision += 1;
+				let command = Command::Stroke {
+					layer: LayerRef::Id(layer),
+					target,
+					tool,
+					brush,
+					color,
+					samples,
+				};
+				open.history.record(before, command, tool.label().to_owned());
+				open.dirty = true;
+				open.changed();
+				open.note_edits(&[layer], Instant::now());
+				self.last_edit = None;
+				self.after_edit(doc_id, true);
+				self.refresh_thumbnail(doc_id, layer);
+			}
+			Err(error) => {
+				// Put the document back as it was before the stroke.
+				open.doc = before;
+				open.changed();
+				self.to_ui(&EngineToUi::Error {
+					text: format!("The stroke failed: {error}"),
+				});
+				self.request_frame();
+			}
 		}
 	}
 
@@ -409,7 +733,13 @@ impl Engine {
 				self.view_message_pending = true;
 				Changed::default()
 			}
-			UiToEngine::Action { id, .. } => self.action(&id),
+			UiToEngine::Action { id, args } => {
+				if self.edit_action(&id, &args) {
+					Changed::default()
+				} else {
+					self.action(&id)
+				}
+			}
 			UiToEngine::SetZoom { doc, zoom } => match self.docs.get_mut(doc) {
 				Some(open) => open.view.set_zoom(zoom),
 				None if doc == VIRTUAL_DOC_ID => self.virtual_view.set_zoom(zoom),
@@ -456,6 +786,16 @@ impl Engine {
 				self.cancel_preview(doc);
 				Changed::default()
 			}
+			UiToEngine::ToolOptions { tool, options } => {
+				self.settings.options.insert(tool, options);
+				Changed::default()
+			}
+			UiToEngine::SetColors { fg, bg } => {
+				self.settings.fg = fg;
+				self.settings.bg = bg;
+				Changed::default()
+			}
+			UiToEngine::Key { key } => self.tool_key(&key),
 			UiToEngine::ProofSetup {
 				doc,
 				path,
@@ -506,6 +846,24 @@ impl Engine {
 				}
 				return Changed::default();
 			}
+			// Select ▸ All / Deselect / Reselect / Inverse (M5-T04): the four
+			// selection commands the M5-T03 core added. Deselect and Reselect
+			// are quiet when there is nothing to do: Photoshop greys the items
+			// out, and the UI cannot know the selection state yet (T05/T10).
+			"sel:all" | "sel:none" | "sel:reselect" | "sel:inverse" => {
+				if let Some(doc) = self.docs.active_id() {
+					let command = match id {
+						"sel:all" => Some(Command::SelectAll),
+						"sel:none" => self.docs.get(doc).filter(|open| open.doc.selection.is_some()).map(|_| Command::Deselect),
+						"sel:reselect" => self.docs.get(doc).filter(|open| open.doc.reselect.is_some()).map(|_| Command::Reselect),
+						_ => Some(Command::InvertSelection),
+					};
+					if let Some(command) = command {
+						self.command(doc, command);
+					}
+				}
+				return Changed::default();
+			}
 			"debug:load-b3" => {
 				self.load_b3();
 				return Changed::default();
@@ -553,6 +911,13 @@ impl Engine {
 			_ => {}
 		}
 		if let Some(changed) = self.view_mut().action(id) {
+			let mut changed = changed;
+			// A tool change also sets the tool's cursor (M5-T01).
+			if let Some(tool) = id.strip_prefix("tool:")
+				&& let Some(t) = self.tools.get(tool)
+			{
+				changed.cursor = Some(t.cursor(Modifiers::default()));
+			}
 			return changed;
 		}
 		if UI_LOCAL_ACTION_PREFIXES.iter().any(|prefix| id.starts_with(prefix)) {
@@ -815,6 +1180,7 @@ impl Engine {
 			fraction: 0.0,
 		});
 		let (store, internal) = (self.store.clone(), self.internal.clone());
+		let clipboard = self.ops.clipboard.clone();
 		let spawned = std::thread::Builder::new().name(format!("pixel-job-{task}")).spawn(move || {
 			let progress_internal = internal.clone();
 			let progress_label = label.clone();
@@ -826,6 +1192,7 @@ impl Engine {
 						fraction,
 					});
 				})),
+				clipboard,
 			};
 			let mut after = before;
 			let mut ctx = CommandContext {
@@ -870,11 +1237,19 @@ impl Engine {
 				let Some(open) = self.docs.get_mut(id) else { return };
 				let before = std::mem::replace(&mut open.doc, *after);
 				open.history.record(before, command, effect.label.clone());
-				open.dirty = true;
-				open.changed();
-				open.note_edits(&effect.pixels_changed, Instant::now());
+				// A selection reshape (M5) is a history step, not a content change.
+				let content = !effect.history_only;
+				if content {
+					open.dirty = true;
+					open.changed();
+					open.note_edits(&effect.pixels_changed, Instant::now());
+				}
 				self.last_edit = None;
-				self.after_edit(id, true);
+				self.after_edit(id, content);
+				if !content {
+					self.selection_overlay = None;
+					self.request_frame();
+				}
 				for layer in effect.pixels_changed {
 					self.refresh_thumbnail(id, layer);
 				}
@@ -931,6 +1306,16 @@ impl Engine {
 							text: format!("Could not export {}: {error}", path.display()),
 						});
 					}
+				}
+			}
+			Internal::Copied { task, result } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				match result {
+					Ok(Some(clip)) => self.set_clipboard(clip),
+					Ok(None) => self.to_ui(&EngineToUi::Toast {
+						text: "Could not copy: the selected area is empty".into(),
+					}),
+					Err(text) => self.to_ui(&EngineToUi::Error { text }),
 				}
 			}
 			Internal::B3Built { task, doc, layers } => {
@@ -1223,6 +1608,7 @@ impl Engine {
 
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
+		self.end_stroke();
 		let store = self.store.clone();
 		let Some(doc) = self.docs.get_mut(id) else {
 			tracing::warn!("command for unknown document {id:?}");
@@ -1265,14 +1651,28 @@ impl Engine {
 		};
 		match result {
 			Ok(effect) => {
-				if !effect.selection_only {
+				// A pixel-selection command is a history step but not a document
+				// change (M5-T03): it must not mark the document dirty (D-028),
+				// but the ants have to be redrawn.
+				let content = !effect.selection_only && !effect.history_only;
+				if content {
 					doc.dirty = true;
 					doc.changed();
 					let edited: Vec<LayerId> = effect.props_changed.iter().chain(&effect.pixels_changed).copied().collect();
 					doc.note_edits(&edited, Instant::now());
 				}
 				let pixels = effect.pixels_changed.clone();
-				self.after_edit(id, !effect.selection_only);
+				self.after_edit(id, content);
+				if effect.history_only {
+					// The selection is not part of the content generation (it is
+					// not saved, D-028), so the cached ants are stale now. Drop
+					// them rather than bump the generation: a bump would make the
+					// render thread recomposite the frame.
+					self.selection_overlay = None;
+					if self.docs.active_id() == Some(id) {
+						self.request_frame();
+					}
+				}
 				for layer in pixels {
 					self.refresh_thumbnail(id, layer);
 				}
@@ -1286,6 +1686,7 @@ impl Engine {
 
 	/// Undo (`redo == false`) or redo one step.
 	fn step_history(&mut self, id: DocId, redo: bool) {
+		self.end_stroke();
 		let Some(doc) = self.docs.get_mut(id) else { return };
 		if let Some(job) = &doc.busy {
 			let text = format!("Wait until {job} is finished");
@@ -1316,7 +1717,7 @@ impl Engine {
 		let layers = EngineToUi::Layers {
 			doc: id,
 			revision: doc.doc.revision,
-			layers: layers::layer_infos(&doc.doc),
+			layers: layer_list(doc),
 		};
 		let history = EngineToUi::History {
 			doc: id,
@@ -1507,6 +1908,249 @@ impl Engine {
 		true
 	}
 
+	/// Edit and Layer menu actions that use the selection or the clipboard
+	/// (M5-T05). `true` when `id` was one of them.
+	fn edit_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
+		let Some(doc_id) = self.docs.active_id() else {
+			return matches!(
+				id,
+				"clip:copy" | "clip:copy-merged" | "clip:cut" | "clip:paste" | "clip:paste-special" | "clip:clear" | "edit:fill"
+			);
+		};
+		let has_selection = self.docs.get(doc_id).is_some_and(|open| open.doc.selection.is_some());
+		match id {
+			"clip:copy" | "clip:cut" => {
+				if id == "clip:cut" && !has_selection {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Could not cut: nothing is selected".into(),
+					});
+					return true;
+				}
+				if self.copy_layer(doc_id) && id == "clip:cut" {
+					self.command(
+						doc_id,
+						Command::Clear {
+							layer: LayerRef::Active,
+							cut: true,
+						},
+					);
+				}
+			}
+			"clip:copy-merged" => self.copy_merged(doc_id),
+			"clip:paste" | "clip:paste-special" => {
+				let in_place = id == "clip:paste-special";
+				let Some(clip) = PixelOps::clipboard(&self.ops) else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "The clipboard is empty".into(),
+					});
+					return true;
+				};
+				let center = if in_place { None } else { self.paste_center(doc_id, clip.bounds) };
+				self.command(doc_id, Command::Paste { in_place, center });
+			}
+			"clip:clear" if has_selection => self.command(
+				doc_id,
+				Command::Clear {
+					layer: LayerRef::Active,
+					cut: false,
+				},
+			),
+			"clip:clear" => {}
+			// Edit ▸ Fill (Shift+F5) with the dialog's values, and the shortcuts:
+			// Alt+Backspace foreground, Ctrl+Backspace background, Shift keeps
+			// transparency.
+			"edit:fill" | "edit:fill-fg" | "edit:fill-bg" | "edit:fill-fg-preserve" | "edit:fill-bg-preserve" => {
+				let command = self.fill_command(id, args);
+				self.command(doc_id, command);
+			}
+			"layer:via-copy" | "layer:via-cut" if has_selection => self.command(doc_id, Command::LayerViaCopy { cut: id == "layer:via-cut" }),
+			"layer:via-cut" => self.to_ui(&EngineToUi::Toast {
+				text: "Layer via Cut needs a selection".into(),
+			}),
+			// A click on a layer's thumbnail (pixels) or its mask's (M5-T09).
+			"layer:edit-mask" => {
+				let layer = args.get("layer").and_then(serde_json::Value::as_u64).map(LayerId);
+				let mask = args.get("mask").and_then(serde_json::Value::as_bool).unwrap_or(false);
+				if let Some(open) = self.docs.get_mut(doc_id) {
+					open.mask_target = if mask { layer } else { None };
+				}
+				if let Some(layer) = layer
+					&& self.docs.get(doc_id).is_some_and(|open| open.doc.active_layer() != Some(layer))
+				{
+					self.command(
+						doc_id,
+						Command::SelectLayers {
+							layers: vec![LayerRef::Id(layer)],
+						},
+					);
+				} else {
+					self.send_layers();
+				}
+			}
+			// The Layers panel's mask button: from the selection when there is
+			// one, Alt hides (Photoshop).
+			"mask:add" => {
+				let alt = args.get("alt").and_then(serde_json::Value::as_bool).unwrap_or(false);
+				let fill = match (has_selection, alt) {
+					(true, false) => MaskFill::RevealSelection,
+					(true, true) => MaskFill::HideSelection,
+					(false, false) => MaskFill::RevealAll,
+					(false, true) => MaskFill::HideAll,
+				};
+				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
+			}
+			"mask:reveal-sel" | "mask:hide-sel" => {
+				let fill = if id == "mask:hide-sel" {
+					MaskFill::HideSelection
+				} else {
+					MaskFill::RevealSelection
+				};
+				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
+			}
+			_ => return false,
+		}
+		true
+	}
+
+	/// The Fill command an action asks for; colours come from the swatches.
+	fn fill_command(&self, id: &str, args: &serde_json::Value) -> Command {
+		let text = |key: &str| args.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+		let (color, preserve) = match id {
+			"edit:fill-fg" => (self.settings.fg, false),
+			"edit:fill-bg" => (self.settings.bg, false),
+			"edit:fill-fg-preserve" => (self.settings.fg, true),
+			"edit:fill-bg-preserve" => (self.settings.bg, true),
+			_ => {
+				let color = match text("use").as_str() {
+					"Background Colour" => self.settings.bg,
+					"Black" => [0, 0, 0, u16::MAX],
+					"White" => [u16::MAX; 4],
+					"50% Grey" => [32768, 32768, 32768, u16::MAX],
+					_ => self.settings.fg,
+				};
+				(color, args.get("preserve").and_then(serde_json::Value::as_bool).unwrap_or(false))
+			}
+		};
+		let mode =
+			serde_json::from_value::<fx_core::BlendMode>(serde_json::Value::String(text("mode").to_lowercase().replace([' ', '-'], "_"))).unwrap_or_default();
+		let opacity = args
+			.get("opacity")
+			.and_then(serde_json::Value::as_f64)
+			.map_or(1.0, |v| (v / 100.0).clamp(0.0, 1.0));
+		Command::Fill {
+			layer: LayerRef::Active,
+			color,
+			mode,
+			opacity,
+			preserve_transparency: preserve,
+		}
+	}
+
+	/// Copy the active layer's selected pixels (M5-T05). `false` when there is
+	/// nothing to copy (a toast says why).
+	fn copy_layer(&mut self, doc_id: DocId) -> bool {
+		let store = self.store.clone();
+		let result = {
+			let Some(open) = self.docs.get(doc_id) else { return false };
+			let Some((image, offset)) = crate::clipboard::active_pixels(&open.doc) else {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Could not copy: the layer has no pixels".into(),
+				});
+				return false;
+			};
+			crate::clipboard::copy_layer(image, offset, open.doc.selection.as_ref(), (open.doc.width, open.doc.height), &store)
+		};
+		match result {
+			Ok(Some(clip)) => {
+				self.set_clipboard(clip);
+				true
+			}
+			Ok(None) => {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Could not copy: the selected area is empty".into(),
+				});
+				false
+			}
+			Err(error) => {
+				self.to_ui(&EngineToUi::Error { text: error.to_string() });
+				false
+			}
+		}
+	}
+
+	/// Edit ▸ Copy Merged (M5-T05): the composite of the visible layers under
+	/// the selection. The composite runs on a helper thread.
+	fn copy_merged(&mut self, doc_id: DocId) {
+		let Some(open) = self.docs.get(doc_id) else { return };
+		let doc = open.doc.clone();
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		self.next_task += 1;
+		let task = self.next_task;
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: "Copy Merged".into(),
+			fraction: 0.0,
+		});
+		let spawned = std::thread::Builder::new().name("copy-merged".into()).spawn(move || {
+			let ids: Vec<LayerId> = doc.layers.iter().map(|l| l.id).collect();
+			let result = crate::export::composite_layers(&doc, &ids, None, &store, None)
+				.map_err(|e| e.to_string())
+				.and_then(|merged| {
+					crate::clipboard::copy_layer(&merged, (0, 0), doc.selection.as_ref(), (doc.width, doc.height), &store).map_err(|e| e.to_string())
+				});
+			let _ = internal.send(Internal::Copied { task, result });
+		});
+		if let Err(error) = spawned {
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot copy: {error}"),
+			});
+		}
+	}
+
+	/// Keep `clip` as the clipboard, and share a small one with Windows.
+	fn set_clipboard(&mut self, clip: fx_core::pixels::ClipboardImage) {
+		let image = crate::clipboard::os_pixels(&clip, &self.store).unwrap_or_else(|error| {
+			tracing::warn!("the clipboard copy for Windows failed: {error}");
+			None
+		});
+		(self.output)(EngineOutput::ClipboardCopied { image });
+		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clip);
+	}
+
+	/// Where Paste centres the clipboard: `None` (keep the source position)
+	/// when that position is in view, else the view's centre (Photoshop).
+	fn paste_center(&self, doc_id: DocId, bounds: (i32, i32, i32, i32)) -> Option<(f64, f64)> {
+		let open = self.docs.get(doc_id)?;
+		let view = open.view.view;
+		let visible = open
+			.view
+			.viewport
+			.and_then(|viewport| view.visible_doc_rect(viewport, open.doc.width, open.doc.height));
+		let (x0, y0, x1, y1) = (f64::from(bounds.0), f64::from(bounds.1), f64::from(bounds.2), f64::from(bounds.3));
+		let in_view = visible.is_some_and(|(vx0, vy0, vx1, vy1)| x0 < vx1 && x1 > vx0 && y0 < vy1 && y1 > vy0);
+		let on_canvas = x0 < f64::from(open.doc.width) && y0 < f64::from(open.doc.height) && x1 > 0.0 && y1 > 0.0;
+		if in_view && on_canvas { None } else { Some((view.center_x, view.center_y)) }
+	}
+
+	/// An image from the Windows clipboard: it becomes the clipboard, then a
+	/// new layer (M5-T05).
+	fn paste_image(&mut self, width: u32, height: u32, rgba8: &[u8]) {
+		let Some(doc_id) = self.docs.active_id() else { return };
+		if rgba8.len() != (width as usize) * (height as usize) * 4 || width == 0 || height == 0 {
+			tracing::warn!("a clipboard image of the wrong size was ignored");
+			return;
+		}
+		let format = self
+			.docs
+			.get(doc_id)
+			.map_or(fx_tiles::PixelFormat::Rgba8, |open| open.doc.color.depth.rgba_format());
+		let clip = crate::clipboard::from_os(width, height, rgba8, format, &self.store);
+		let center = self.docs.get(doc_id).map(|open| (open.view.view.center_x, open.view.view.center_y));
+		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clip);
+		self.command(doc_id, Command::Paste { in_place: false, center });
+	}
+
 	fn load_b3(&mut self) {
 		let Some(doc) = self.docs.active_mut() else {
 			self.to_ui(&EngineToUi::Error {
@@ -1559,7 +2203,7 @@ impl Engine {
 			let message = EngineToUi::Layers {
 				doc: doc.id,
 				revision: doc.doc.revision,
-				layers: layers::layer_infos(&doc.doc),
+				layers: layer_list(doc),
 			};
 			self.to_ui(&message);
 		}
@@ -1601,6 +2245,9 @@ impl Engine {
 
 	fn request_frame(&mut self) {
 		let virtual_view = self.virtual_view.clone();
+		// The stroke input this frame will show (M5-T11).
+		let input_since = self.stroke.as_mut().and_then(|s| s.pending_input.take());
+		let overlay = self.active_overlay();
 		// The display transform needs the cache on `self`, so build it before
 		// borrowing the active document mutably (and only for a real document:
 		// the virtual test pattern has no profile).
@@ -1628,6 +2275,8 @@ impl Engine {
 					virtual_doc: VIRTUAL_DOC,
 					display_lut,
 					gamut_warning,
+					overlay,
+					input_since,
 				}
 			}
 			None => {
@@ -1641,10 +2290,72 @@ impl Engine {
 					virtual_doc: VIRTUAL_DOC,
 					display_lut: None,
 					gamut_warning: false,
+					overlay,
+					input_since: None,
 				}
 			}
 		};
 		let _ = self.render.send(RenderRequest::Frame(frame));
+	}
+
+	/// Everything to draw over the image: the active tool's overlay plus the
+	/// selection's marching ants (M5-T02/T03). `None` when there is nothing.
+	fn active_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
+		let mut items = Vec::new();
+		let mut nudge = None;
+		if let Some(tool_id) = self.docs.active_mut().map(|doc| doc.view.tool.clone())
+			&& let Some(tool) = self.tools.get(&tool_id)
+		{
+			if let Some(overlay) = tool.overlay() {
+				items.extend(overlay.items);
+			}
+			nudge = tool.selection_nudge();
+		}
+		if let Some(selection) = self.selection_overlay() {
+			match nudge {
+				// The outline is being dragged (M5-T04): the ants follow.
+				Some((dx, dy)) => items.extend(selection.items.iter().map(|item| item.translated(f64::from(dx), f64::from(dy)))),
+				None => items.extend(selection.items.iter().cloned()),
+			}
+		}
+		(!items.is_empty()).then(|| Arc::new(fx_render::Overlay { items }))
+	}
+
+	/// The selection's marching-ants contour, cached (M5-T03): recomputed only
+	/// when the document, its content generation, the view level or the visible
+	/// rectangle changes — panning is the only common invalidator, and a
+	/// selection command clears the cache explicitly (`command`), because it
+	/// does not move the generation.
+	fn selection_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
+		let store = self.store.clone();
+		let (key, selection) = {
+			let doc = self.docs.active_mut()?;
+			let viewport = doc.view.viewport?;
+			let selection = doc.doc.selection.clone()?;
+			let level = doc.view.view.mip_level(selection.image.level_count());
+			let visible = doc.view.view.visible_doc_rect(viewport, doc.doc.width, doc.doc.height)?;
+			let rect = (
+				visible.0.floor() as i64,
+				visible.1.floor() as i64,
+				visible.2.ceil() as i64,
+				visible.3.ceil() as i64,
+			);
+			((doc.id, doc.render_generation(), level, rect), selection)
+		};
+		if let Some((cached, overlay)) = &self.selection_overlay
+			&& *cached == key
+		{
+			return Some(overlay.clone());
+		}
+		let overlay = match crate::selection::contour(&selection, &store, key.2, key.3) {
+			Ok(overlay) => Arc::new(overlay),
+			Err(error) => {
+				tracing::warn!("the selection contour failed: {error}");
+				return None;
+			}
+		};
+		self.selection_overlay = Some((key, overlay.clone()));
+		Some(overlay)
 	}
 
 	/// The monitor profile the shell reported (M4-T02), or `None` while it has
@@ -1837,9 +2548,15 @@ impl Engine {
 		}
 		self.next_status = now + STATUS_INTERVAL;
 		let tiles = self.store.stats();
-		let (frames, uploads, pending_loads, gpu_bytes) = {
+		let (frames, uploads, pending_loads, gpu_bytes, latency) = {
 			let mut stats = self.stats.lock().expect("render stats poisoned");
-			(stats.summary(now), stats.uploads, stats.pending_loads, stats.gpu_bytes)
+			(
+				stats.summary(now),
+				stats.uploads,
+				stats.pending_loads,
+				stats.gpu_bytes,
+				stats.input_latency(now),
+			)
 		};
 		self.to_ui(&EngineToUi::Status {
 			memory: MemoryStats {
@@ -1853,6 +2570,8 @@ impl Engine {
 			frame_ms_p99: frames.p99_ms,
 			uploads,
 			pending_loads,
+			input_latency_ms_p50: latency.0,
+			input_latency_ms_p99: latency.1,
 		});
 	}
 
@@ -1886,6 +2605,47 @@ fn display_transform(profile: &ColorProfile, monitor: Option<&[u8]>) -> Result<O
 	Ok((!lut.is_identity(1.0 / 255.0)).then_some(lut))
 }
 
+/// The Layers panel's list, with the mask painting goes to marked (M5-T09).
+fn layer_list(doc: &crate::documents::OpenDoc) -> Vec<fx_protocol::LayerInfo> {
+	let mut list = layers::layer_infos(&doc.doc);
+	if let Some(target) = doc.mask_target {
+		for info in &mut list {
+			info.edit_mask = info.id == target && info.has_mask;
+		}
+	}
+	list
+}
+
+/// The image a stroke paints on: the layer's pixels or its mask.
+fn stroke_image(doc: &mut Document, layer: LayerId, target: fx_core::stroke::StrokeTarget) -> Option<&mut fx_tiles::TiledImage> {
+	let layer = doc.layer_mut(layer)?;
+	match target {
+		fx_core::stroke::StrokeTarget::Pixels => match &mut layer.kind {
+			LayerKind::Pixel { image, .. } => Some(image),
+			_ => None,
+		},
+		fx_core::stroke::StrokeTarget::Mask => layer.mask.as_mut().map(|m| &mut m.image),
+	}
+}
+
+/// Put a stroke's image (and, for pixels, its offset) into the layer.
+fn set_stroke_image(doc: &mut Document, layer: LayerId, target: fx_core::stroke::StrokeTarget, new_image: fx_tiles::TiledImage, new_offset: (i32, i32)) {
+	let Some(layer) = doc.layer_mut(layer) else { return };
+	match target {
+		fx_core::stroke::StrokeTarget::Pixels => {
+			if let LayerKind::Pixel { image, offset } = &mut layer.kind {
+				*image = new_image;
+				*offset = new_offset;
+			}
+		}
+		fx_core::stroke::StrokeTarget::Mask => {
+			if let Some(mask) = &mut layer.mask {
+				mask.image = new_image;
+			}
+		}
+	}
+}
+
 /// The CMYK profiles for proofing and export (D-032): Windows' colour folder
 /// and `%APPDATA%/Fotox/profiles`.
 fn cmyk_profile_files() -> Vec<fx_color::CmykProfileFile> {
@@ -1899,7 +2659,13 @@ fn cmyk_profile_files() -> Vec<fx_color::CmykProfileFile> {
 fn is_pixel_job(command: &Command) -> bool {
 	matches!(
 		command,
-		Command::ApplyFilter { .. } | Command::MergeLayers { .. } | Command::Flatten | Command::StampVisible | Command::ConvertProfile { .. }
+		Command::ApplyFilter { .. }
+			| Command::MergeLayers { .. }
+			| Command::Flatten
+			| Command::StampVisible
+			| Command::ConvertProfile { .. }
+			| Command::ModifySelection { .. }
+			| Command::MagicWand { .. }
 	)
 }
 
@@ -1911,6 +2677,8 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::Flatten => "Flatten Image".to_owned(),
 		Command::StampVisible => "Stamp Visible".to_owned(),
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
+		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
+		Command::MagicWand { .. } => "Magic Wand".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }

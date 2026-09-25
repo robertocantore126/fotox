@@ -262,6 +262,7 @@ function renderLayers() {
   layersRoot.append(h("div", { class: "phead-row" },
     h("span", { class: "plock-row" },
       h("span", { class: "pf-label", text: "Lock:" }),
+      lockBtn("i-grid", "Lock transparent pixels", a && a.locked_transparency, locks, () => setProps(a.id, { locked_transparency: !a.locked_transparency })),
       lockBtn("i-image", "Lock image pixels", a && a.locked_pixels, locks, () => setProps(a.id, { locked_pixels: !a.locked_pixels })),
       lockBtn("i-layers", "Lock position", a && a.locked_position, locks, () => setProps(a.id, { locked_position: !a.locked_position })),
       lockBtn("i-lock", "Lock all", a && a.locked_pixels && a.locked_position, locks, () => {
@@ -281,10 +282,11 @@ function renderLayers() {
   layersRoot.append(listEl);
 
   layersRoot.append(h("div", { class: "pbar" },
-    barBtn("i-mask", "Add layer mask", () => {
+    barBtn("i-mask", "Add layer mask (Alt: hide)", (btn, e) => {
       if (!a) return;
       if (a.has_mask) toast("The layer already has a mask");
-      else send({ op: "add_mask", layer: ref(a.id), fill: "reveal_all" });
+      // The engine makes it from the selection when there is one (M5-T05).
+      else bridge.send({ type: UI.ACTION, id: "mask:add", args: { alt: !!(e && e.altKey) } });
     }),
     barBtn("i-adjust", "Create new fill or adjustment layer", (btn) => openDropdown({
       anchor: btn, items: NEW_ADJUSTMENTS.map(([n]) => n), value: "", width: 200,
@@ -366,8 +368,20 @@ function row(i, v) {
   if (l.blend !== "normal" && l.blend !== "pass_through") meta.push(blendName(l.blend));
   if (l.opacity < 1) meta.push(Math.round(l.opacity * 100) + "%");
   // The DOM's own append() would print a null child as "null": use add().
+  // Clicking a thumbnail picks what painting edits (M5-T09): the layer's
+  // pixels or its mask, marked with a border like Photoshop.
+  if (l.kind === "pixel") {
+    thumb.classList.toggle("edit-target", !!l.selected && !l.edit_mask);
+    thumb.addEventListener("click", () => bridge.send({ type: UI.ACTION, id: "layer:edit-mask", args: { layer: l.id, mask: false } }));
+  }
+  const maskThumb = l.has_mask
+    ? h("span", {
+      class: "pthumb nmask" + (l.edit_mask ? " edit-target" : ""), "data-tip": "Layer mask (click to paint on it)",
+      onclick: () => bridge.send({ type: UI.ACTION, id: "layer:edit-mask", args: { layer: l.id, mask: true } }),
+    }, icon("i-mask", "ic xs"))
+    : null;
   add(el, [eye, expander, thumb,
-    l.has_mask ? h("span", { class: "pthumb nmask", "data-tip": "Layer mask" }, icon("i-mask", "ic xs")) : null,
+    maskThumb,
     name,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
     l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
@@ -514,7 +528,7 @@ function lockBtn(ic, tip, on, enabled, fn) {
 }
 
 function barBtn(ic, tip, fn) {
-  return h("button", { class: "pbar-btn", type: "button", "data-tip": tip, onclick: (e) => { e.stopPropagation(); fn(e.currentTarget); } }, icon(ic, "ic sm"));
+  return h("button", { class: "pbar-btn", type: "button", "data-tip": tip, onclick: (e) => { e.stopPropagation(); fn(e.currentTarget, e); } }, icon(ic, "ic sm"));
 }
 
 function requestThumbnails() {

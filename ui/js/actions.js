@@ -12,6 +12,7 @@ import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
 import { isEngineFilter, openFilterDialog } from "./native/filters.js";
 import { cmykProfiles, isColorDialog, openColorDialog } from "./native/color.js";
+import { activeDocument } from "./native/documents.js";
 import { dialogDef } from "./data/dialogs.js";
 
 export function runAction(item) {
@@ -38,6 +39,32 @@ export function runAction(item) {
     return;
   }
 
+  // In the app, Select ▸ Modify sends the command (M5-T10).
+  const modify = { "dlg:sel-border": "border", "dlg:sel-smooth": "smooth", "dlg:sel-expand": "expand", "dlg:sel-contract": "contract", "dlg:sel-feather": "feather" }[a];
+  if (modify && bridge.isNative) {
+    openDialog(a.slice(4), {
+      onOk: (v) => {
+        const px = Number(v["Amount:"]);
+        const doc = activeDocument();
+        if (doc == null || !(px > 0)) return;
+        bridge.send({ type: UI.COMMAND, doc, command: { op: "modify_selection", modify: { kind: modify, px } } });
+      },
+    });
+    return;
+  }
+  // In the app, Edit ▸ Fill (Shift+F5) sends its values to the engine, which
+  // resolves the swatch colours (M5-T05).
+  if (a === "dlg:fill" && bridge.isNative) {
+    openDialog("fill", {
+      onOk: (v) => bridge.send({
+        type: UI.ACTION, id: "edit:fill",
+        args: { use: v["Use:"], mode: v["Mode:"], opacity: Number(v["Opacity:"]), preserve: !!v["Preserve Transparency"] },
+      }),
+    });
+    return;
+  }
+  // Clipboard, Fill shortcuts and masks from the selection are the engine's.
+  if (bridge.isNative && (a.startsWith("clip:") || a.startsWith("edit:fill") || a === "mask:reveal-sel" || a === "mask:hide-sel")) return;
   // In the app, Export As collects the options, then the shell shows the save
   // dialog for the chosen format and the engine exports (M3-T07).
   if (a === "dlg:export-as" && bridge.isNative) {

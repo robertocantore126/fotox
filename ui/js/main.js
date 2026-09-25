@@ -8,7 +8,7 @@ import { menus } from "./data/menus.js";
 import { toolSlots, findTool } from "./data/tools.js";
 import { initPopupEngine, openDropdown, openPopup, closeAll, isPopupOpen } from "./popup.js";
 import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
-import { renderOptionsBar } from "./optionsbar.js";
+import { renderOptionsBar, onOptionsChange, readOptions } from "./optionsbar.js";
 import { renderDock, focusPanel, togglePanel } from "./panels.js";
 import { openDialog, isDialogOpen } from "./dialogs.js";
 import { initWorkspace, zoomTo } from "./canvas.js";
@@ -19,6 +19,7 @@ import * as bridge from "./native/bridge.js";
 import { UI, ENGINE } from "./native/protocol.js";
 import { initNativePanels } from "./native/layers-panel.js";
 import { initColor } from "./native/color.js";
+import { initTools, sendColors } from "./native/tools.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -113,6 +114,12 @@ function buildToolbar(container) {
   refreshSwatches();
 }
 
+// The engine keeps the active tool's option-bar values (M5-T01).
+function sendToolOptions(options) {
+  if (!bridge.isNative) return;
+  bridge.send({ type: UI.TOOL_OPTIONS, tool: state.tool, options });
+}
+
 function pickTool(toolId, slotId) {
   slotCurrent.set(slotId, toolId);
   setTool(toolId);
@@ -192,6 +199,7 @@ async function boot() {
   setMenuAction((item) => runAction(item));
 
   renderOptionsBar(shell.optionsbar, state.tool);
+  onOptionsChange(shell.optionsbar, sendToolOptions);
   buildToolbar(shell.toolbar);
   renderDock(shell.dock);
   initWorkspace(shell.workspace);
@@ -209,6 +217,7 @@ async function boot() {
     // route viewport input to the active tool (docs/tasks/M5.md, M5-T01).
     if (bridge.isNative) bridge.send({ type: UI.ACTION, id: "tool:" + id });
     renderOptionsBar(shell.optionsbar, id);
+    sendToolOptions(readOptions());
     document.querySelectorAll(".toolbtn[data-slot]").forEach((b) => {
       const slot = toolSlots.find((s) => s.id === b.dataset.slot);
       const on_ = slot && (slot.id === id || slot.flyout.some((f) => f.id === id));
@@ -218,7 +227,7 @@ async function boot() {
     status(`${tool.name} (${tool.key})`);
   });
 
-  on("colors", refreshSwatches);
+  on("colors", () => { refreshSwatches(); sendColors(); });
   on("mock", (msg) => toast(msg));
   on("ask-dialog", (id) => openDialog(id));
   on("panel:open", (id) => focusPanel(id));
@@ -232,6 +241,7 @@ async function boot() {
   if (bridge.isNative) {
     initNativePanels();
     initColor();
+    initTools();
   }
   bridge.on(ENGINE.TOAST, (m) => toast(m.text));
   bridge.on(ENGINE.ERROR, (m) => toast(m.text, "error"));
@@ -247,6 +257,7 @@ async function boot() {
   bridge.send({ type: UI.HELLO, ui_version: UI_VERSION });
 
   emit("tool", state.tool);
+  sendColors();
   status("Fotox 1.0 — interface mock · press Alt for the menus, F for screen modes");
 
   // Il bootstrap diagnostico di index.html resta in ascolto per 1,5 s: se il

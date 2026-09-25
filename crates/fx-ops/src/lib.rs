@@ -15,8 +15,12 @@
 //! accumulation), `clone`, `heal`, `blur`, `sharpen`, `noise`, `transform`
 //! (resampling: bicubic / Lanczos), `fill`.
 
+pub mod brush;
 pub mod filter;
 #[cfg(test)]
 mod filter_tests;
+pub mod flood;
 pub mod gaussian;
+pub mod morph;
 pub mod neighbourhood;
+pub mod raster;

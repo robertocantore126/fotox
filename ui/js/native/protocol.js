@@ -29,6 +29,12 @@ export const UI = Object.freeze({
   PROOF_SETUP: "proof_setup",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
+  TOOL_OPTIONS: "tool_options",
+  SET_COLORS: "set_colors",
+  // A key the shortcut map did not consume, for the viewport tools (M5-T04):
+  // Escape cancels a lasso, Enter closes a polygonal one, Backspace drops its
+  // last point. `key` is the DOM's `KeyboardEvent.key`.
+  KEY: "key",
 });
 
 /** Engine → UI message types (`EngineToUi`). */
@@ -38,6 +44,7 @@ export const ENGINE = Object.freeze({
   CLOSE_DIRTY_DOCUMENT: "close_dirty_document",
   CMYK_PROFILES: "cmyk_profiles",
   PROOF_STATE: "proof_state",
+  TOOL_INFO: "tool_info",
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
@@ -48,6 +55,7 @@ export const ENGINE = Object.freeze({
   PROGRESS_DONE: "progress_done",
   TOAST: "toast",
   ERROR: "error",
+  COLOR_PICKED: "color_picked",
   THUMBNAIL: "thumbnail",
 });
 

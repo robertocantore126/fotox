@@ -3,7 +3,11 @@
 
 const MODES = ["Normal", "Dissolve", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Darken", "Lighten", "Difference", "Exclusion", "Hue", "Saturation", "Color", "Luminosity"];
 
-const SELECTION_MODE = { type: "btngroup", icons: ["i-marquee", "i-plus", "i-minus", "i-object-select"], titles: ["New selection", "Add to selection", "Subtract from selection", "Intersect with selection"], active: 0 };
+// The Selection Mode button group (M5-T04). `key` gives the control a name in
+// `readOptions()`, which is what the engine reads as the tool's "Mode"; the
+// value is the index of the pressed button (0 New, 1 Add, 2 Subtract,
+// 3 Intersect).
+const SELECTION_MODE = { type: "btngroup", key: "Mode", icons: ["i-marquee", "i-plus", "i-minus", "i-object-select"], titles: ["New selection", "Add to selection", "Subtract from selection", "Intersect with selection"], active: 0 };
 
 export const optionBars = {
   _default: [{ type: "label", text: "No options for this tool" }],
@@ -20,9 +24,9 @@ export const optionBars = {
   marquee: [
     SELECTION_MODE, { type: "gap" },
     { type: "num", text: "Feather:", value: "0", unit: "px", width: 40 },
-    { type: "select", text: "Style:", options: ["Normal", "Fixed Ratio", "Fixed Size"], value: "Normal" },
-    { type: "num", text: "Width:", value: "", width: 48, disabled: true },
-    { type: "num", text: "Height:", value: "", width: 48, disabled: true },
+    { type: "select", text: "Style:", options: ["Normal", "Fixed Ratio", "Fixed Size"], value: "Normal", enables: ["Width", "Height"] },
+    { type: "num", text: "Width:", value: "64", width: 48 },
+    { type: "num", text: "Height:", value: "64", width: 48 },
     { type: "toggle", text: "Anti-alias", on: true },
   ],
   "marquee-ellipse": null, "marquee-row": null, "marquee-col": null,
@@ -30,7 +34,7 @@ export const optionBars = {
   "lasso-poly": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Feather:", value: "0", unit: "px", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }],
   "lasso-magnet": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Width:", value: "10", unit: "px", width: 40 }, { type: "select", text: "Contrast:", options: ["1%", "5%", "10%", "25%", "50%", "75%", "100%"], value: "10%" }, { type: "num", text: "Frequency:", value: "57", width: 40 }],
   "quick-select": [SELECTION_MODE, { type: "gap" }, { type: "toggle", text: "Sample All Layers", on: false }, { type: "toggle", text: "Auto-Enhance", on: true }, { type: "gap" }, { type: "num", text: "Size:", value: "30", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "100", unit: "%", width: 40 }],
-  "magic-wand": [{ type: "btngroup", icons: ["i-marquee", "i-plus", "i-minus", "i-object-select"], titles: ["New selection", "Add to selection", "Subtract from selection", "Intersect with selection"], active: 0 }, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
+  "magic-wand": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
   "object-select": [{ type: "btngroup", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "toggle", text: "Sample All Layers", on: false }],
 
   crop: [
@@ -52,8 +56,8 @@ export const optionBars = {
   "note-tool": [{ type: "btngroup", icons: ["i-note"], titles: ["Note"], active: 0 }, { type: "btn", text: "Clear All" }],
   counting: [{ type: "btngroup", icons: ["i-counting"], titles: ["Counting"], active: 0 }, { type: "btn", text: "Reset Count" }],
 
-  heal: [{ type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Type:", options: ["Content-Aware", "Create Texture", "Proximity Match"], value: "Content-Aware" }, { type: "toggle", text: "Sample All Layers", on: true }],
-  "heal-brush": [{ type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Normal", "Replace", "Multiply", "Screen"], value: "Normal" }, { type: "toggle", text: "Aligned", on: true }, { type: "toggle", text: "Sample All Layers", on: true }],
+  heal: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Type:", options: ["Proximity Match"], value: "Proximity Match" }],
+  "heal-brush": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Normal", "Multiply", "Screen"], value: "Normal" }, { type: "toggle", text: "Aligned", on: true }, { type: "toggle", text: "Sample All Layers", on: true }, { type: "toggle", text: "Pressure for size", on: false }],
   patch: [{ type: "btngroup", icons: ["i-patch", "i-patch"], titles: ["Source", "Destination"], active: 0 }, { type: "toggle", text: "Transparent", on: false }],
   "content-move": [{ type: "btngroup", icons: ["i-content-move"], titles: ["Move"], active: 0 }, { type: "select", text: "Mode:", options: ["Move", "Extend", "Duplicate"], value: "Move" }, { type: "select", text: "Structure:", options: ["1", "2", "3", "4", "5"], value: "1" }, { type: "num", text: "Color:", value: "0", width: 36 }],
   "red-eye": [{ type: "num", text: "Pupil Size:", value: "50", unit: "%", width: 40 }, { type: "num", text: "Darken Amount:", value: "50", unit: "%", width: 40 }],
@@ -64,17 +68,19 @@ export const optionBars = {
     { type: "num", text: "Hardness:", value: "75", unit: "%", width: 40 },
     { type: "select", text: "Mode:", options: MODES, value: "Normal" },
     { type: "range", text: "Opacity:", value: 100 },
+    { type: "toggle", text: "Pressure for opacity", on: false },
     { type: "range", text: "Flow:", value: 100 },
-    { type: "toggle", text: "Airbrush", on: false },
+    { type: "num", text: "Smoothing:", value: "10", unit: "%", width: 36 },
+    { type: "toggle", text: "Pressure for size", on: false },
   ],
-  pencil: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "3", unit: "px", width: 40 }, { type: "select", text: "Mode:", options: MODES, value: "Normal" }, { type: "range", text: "Opacity:", value: 100 }, { type: "toggle", text: "Auto Erase", on: false }],
+  pencil: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "3", unit: "px", width: 40 }, { type: "select", text: "Mode:", options: MODES, value: "Normal" }, { type: "range", text: "Opacity:", value: 100 }, { type: "toggle", text: "Pressure for opacity", on: false }, { type: "num", text: "Smoothing:", value: "0", unit: "%", width: 36 }, { type: "toggle", text: "Pressure for size", on: false }],
   "color-replace": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "30", unit: "px", width: 40 }, { type: "select", text: "Mode:", options: ["Color", "Hue", "Saturation", "Luminosity"], value: "Color" }, { type: "select", text: "Limits:", options: ["Contiguous", "Discontiguous", "Find Edges"], value: "Contiguous" }, { type: "range", text: "Tolerance:", value: 30 }],
   "mixer-brush": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "60", unit: "px", width: 40 }, { type: "select", text: "Preset:", options: ["Dry", "Moist", "Wet", "Very Wet"], value: "Wet" }, { type: "range", text: "Mix:", value: 50 }, { type: "range", text: "Flow:", value: 100 }],
-  clone: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "60", unit: "px", width: 40 }, { type: "select", text: "Mode:", options: MODES, value: "Normal" }, { type: "range", text: "Opacity:", value: 100 }, { type: "range", text: "Flow:", value: 100 }, { type: "toggle", text: "Aligned", on: true }, { type: "select", text: "Sample:", options: ["Current Layer", "Current & Below", "All Layers"], value: "All Layers" }],
+  clone: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "60", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: MODES, value: "Normal" }, { type: "range", text: "Opacity:", value: 100 }, { type: "range", text: "Flow:", value: 100 }, { type: "toggle", text: "Aligned", on: true }, { type: "select", text: "Sample:", options: ["Current Layer", "All Layers"], value: "All Layers" }, { type: "toggle", text: "Pressure for size", on: false }],
   "pattern-stamp": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "60", unit: "px", width: 40 }, { type: "toggle", text: "Aligned", on: true }, { type: "toggle", text: "Impressionist", on: false }],
   "history-brush": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "select", text: "Mode:", options: MODES, value: "Normal" }, { type: "range", text: "Opacity:", value: 50 }],
   "art-history": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "select", text: "Style:", options: ["Tight Short", "Tight Medium", "Loose Long", "Dab", "Tight Curl"], value: "Tight Medium" }, { type: "range", text: "Opacity:", value: 100 }],
-  eraser: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Brush", "Pencil", "Block"], value: "Brush" }, { type: "range", text: "Opacity:", value: 100 }, { type: "toggle", text: "Erase All Layers", on: false }],
+  eraser: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Brush", "Pencil", "Block"], value: "Brush" }, { type: "range", text: "Opacity:", value: 100 }, { type: "toggle", text: "Pressure for opacity", on: false }, { type: "range", text: "Flow:", value: 100 }, { type: "num", text: "Smoothing:", value: "0", unit: "%", width: 36 }, { type: "toggle", text: "Pressure for size", on: false }],
   "eraser-bg": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "select", text: "Limits:", options: ["Contiguous", "Discontiguous", "Find Edges"], value: "Contiguous" }, { type: "range", text: "Tolerance:", value: 50 }, { type: "toggle", text: "Protect Foreground Color", on: false }],
   "eraser-magic": [{ type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
   gradient: [{ type: "gradient" }, { type: "select", text: "Mode:", options: MODES, value: "Normal" }, { type: "range", text: "Opacity:", value: 100 }, { type: "toggle", text: "Reverse", on: false }, { type: "toggle", text: "Dither", on: true }, { type: "toggle", text: "Transparency", on: true }],

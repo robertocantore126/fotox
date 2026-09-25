@@ -119,12 +119,14 @@ export const menus = [
       it("Redo", "Ctrl+Shift+Z", "hist:redo", { dis: true }),
       it("Toggle Last State", "Ctrl+Alt+Z", "hist:toggle", { dis: true }),
       sep,
-      it("Cut", "Ctrl+X", "clip:cut", { dis: true }),
+      it("Cut", "Ctrl+X", "clip:cut"),
       it("Copy", "Ctrl+C", "clip:copy"),
       it("Copy Merged", "Ctrl+Shift+C", "clip:copy-merged"),
-      it("Paste", "Ctrl+V", "clip:paste", { dis: true }),
-      it("Paste Special", "", "clip:paste-special", { dis: true }),
-      it("Clear", "Delete", "clip:clear", { dis: true }),
+      it("Paste", "Ctrl+V", "clip:paste"),
+      sub("Paste Special", [
+        it("Paste in Place", "Shift+Ctrl+V", "clip:paste-special"),
+      ]),
+      it("Clear", "Delete", "clip:clear"),
       sep,
       it("Fill...", "Shift+F5", "dlg:fill"),
       it("Stroke...", "", "dlg:stroke"),
@@ -264,8 +266,8 @@ export const menus = [
         it("Group...", "", "layer:new-group"),
         it("Group from Layers...", "", "layer:group-from"),
         sep,
-        it("Layer via Copy", "Ctrl+J", "layer:via-copy", { dis: true }),
-        it("Layer via Cut", "Shift+Ctrl+J", "layer:via-cut", { dis: true }),
+        it("Layer via Copy", "Ctrl+J", "layer:via-copy"),
+        it("Layer via Cut", "Shift+Ctrl+J", "layer:via-cut"),
       ]),
       it("Duplicate Layer...", "Ctrl+Shift+D", "layer:duplicate"),
       sub("Delete", [
@@ -294,8 +296,8 @@ export const menus = [
       sub("Layer Mask", [
         it("Reveal All", "", "mask:reveal-all"),
         it("Hide All", "", "mask:hide-all"),
-        it("Reveal Selection", "", "mask:reveal-sel", { dis: true }),
-        it("Hide Selection", "", "mask:hide-sel", { dis: true }),
+        it("Reveal Selection", "", "mask:reveal-sel"),
+        it("Hide Selection", "", "mask:hide-sel"),
         sep,
         it("Delete", "", "mask:delete"),
         it("Apply", "", "mask:apply"),
@@ -402,9 +404,12 @@ export const menus = [
   {
     id: "select", label: "Select", items: [
       it("All", "Ctrl+A", "sel:all"),
-      it("Deselect", "Ctrl+D", "sel:none", { dis: true }),
-      it("Reselect", "Shift+Ctrl+D", "sel:reselect", { dis: true }),
-      it("Inverse", "Shift+Ctrl+I", "sel:inverse", { dis: true }),
+      // The pixel selection works (M5-T03/T04): these four are live. They
+      // stay enabled even when there is nothing to deselect — the engine
+      // ignores the no-op.
+      it("Deselect", "Ctrl+D", "sel:none"),
+      it("Reselect", "Shift+Ctrl+D", "sel:reselect"),
+      it("Inverse", "Shift+Ctrl+I", "sel:inverse"),
       sep,
       it("All Layers", "Alt+Ctrl+A", "sel:all-layers"),
       it("Deselect Layers", "", "sel:none-layers", { dis: true }),

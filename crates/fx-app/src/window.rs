@@ -18,6 +18,8 @@ use crate::consts::APP_NAME;
 use crate::ui::Cursor;
 
 #[cfg(target_os = "windows")]
+mod clipboard;
+#[cfg(target_os = "windows")]
 mod win;
 #[cfg(target_os = "windows")]
 use win as native;
@@ -81,6 +83,22 @@ impl Window {
 	/// The id of the monitor the window is on (cheap; no profile read).
 	pub(crate) fn monitor_id(&self) -> Option<isize> {
 		self.hwnd().map(native::monitor_id)
+	}
+
+	/// Put a copy on the Windows clipboard (M5-T05). Returns the clipboard's
+	/// sequence number after the write.
+	pub(crate) fn write_clipboard(&self, width: u32, height: u32, rgba8: &[u8]) -> Option<u32> {
+		clipboard::write_image(self.hwnd()?, width, height, rgba8)
+	}
+
+	/// The clipboard's change counter (M5-T05).
+	pub(crate) fn clipboard_sequence() -> u32 {
+		clipboard::sequence()
+	}
+
+	/// An image another program put on the clipboard (M5-T05).
+	pub(crate) fn read_clipboard() -> Option<(u32, u32, Vec<u8>)> {
+		clipboard::read_image()
 	}
 
 	/// Make the window visible and give it focus.

@@ -45,6 +45,16 @@ pub struct Changed {
 	pub cursor: Option<CursorShape>,
 }
 
+/// What a pointer event did to the view (M5-T01).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PointerOutcome {
+	/// The view changed (or wants the cursor updated).
+	pub changed: Changed,
+	/// The view handled the event as a pan gesture. `false` means the event
+	/// must go on to the active tool.
+	pub consumed: bool,
+}
+
 impl ViewState {
 	pub fn new(doc: (u32, u32)) -> Self {
 		Self {
@@ -135,46 +145,58 @@ impl ViewState {
 
 	/// Pointer input over the viewport. Panning starts with the middle button,
 	/// Space + left button, or the left button with the hand tool, and lasts
-	/// until every button is released.
-	pub fn pointer(&mut self, input: &PointerInput) -> Changed {
+	/// until every button is released. Events the view does not consume as a
+	/// pan (`outcome.consumed == false`) go on to the active tool (M5-T01).
+	pub fn pointer(&mut self, input: &PointerInput) -> PointerOutcome {
 		match input.kind {
 			PointerKind::Down => {
 				let pan = input.buttons & BUTTON_MIDDLE != 0 || (input.buttons & BUTTON_LEFT != 0 && self.hand_active(input.modifiers));
 				if pan && self.drag.is_none() {
 					self.drag = Some((input.x, input.y));
-					return Changed {
-						view: false,
-						cursor: Some(CursorShape::Grabbing),
+					return PointerOutcome {
+						changed: Changed {
+							view: false,
+							cursor: Some(CursorShape::Grabbing),
+						},
+						consumed: true,
 					};
 				}
-				Changed::default()
+				PointerOutcome::default()
 			}
 			PointerKind::Move => {
 				if let Some((lx, ly)) = self.drag {
 					self.drag = Some((input.x, input.y));
 					let (dx, dy) = (input.x - lx, input.y - ly);
-					if dx != 0.0 || dy != 0.0 {
+					let changed = if dx != 0.0 || dy != 0.0 {
 						self.view.pan_screen(dx, dy);
-						return Changed { view: true, cursor: None };
-					}
-					return Changed::default();
+						Changed { view: true, cursor: None }
+					} else {
+						Changed::default()
+					};
+					return PointerOutcome { changed, consumed: true };
 				}
-				Changed {
-					view: false,
-					cursor: Some(self.hover_cursor(input.modifiers)),
+				PointerOutcome {
+					changed: Changed {
+						view: false,
+						cursor: Some(self.hover_cursor(input.modifiers)),
+					},
+					consumed: false,
 				}
 			}
 			PointerKind::Up => {
 				if self.drag.is_some() && input.buttons == 0 {
 					self.drag = None;
-					return Changed {
-						view: false,
-						cursor: Some(self.hover_cursor(input.modifiers)),
+					return PointerOutcome {
+						changed: Changed {
+							view: false,
+							cursor: Some(self.hover_cursor(input.modifiers)),
+						},
+						consumed: true,
 					};
 				}
-				Changed::default()
+				PointerOutcome::default()
 			}
-			PointerKind::Leave => Changed::default(),
+			PointerKind::Leave => PointerOutcome::default(),
 		}
 	}
 
@@ -277,9 +299,10 @@ mod tests {
 			..Default::default()
 		};
 		let down = s.pointer(&pointer(PointerKind::Down, 100.0, 100.0, BUTTON_LEFT, space));
-		assert_eq!(down.cursor, Some(CursorShape::Grabbing));
+		assert_eq!(down.changed.cursor, Some(CursorShape::Grabbing));
+		assert!(down.consumed);
 		let before = s.view;
-		assert!(s.pointer(&pointer(PointerKind::Move, 150.0, 80.0, BUTTON_LEFT, space)).view);
+		assert!(s.pointer(&pointer(PointerKind::Move, 150.0, 80.0, BUTTON_LEFT, space)).changed.view);
 		let zoom = s.view.zoom;
 		assert!((s.view.center_x - (before.center_x - 50.0 / zoom)).abs() < 1e-9);
 		assert!((s.view.center_y - (before.center_y + 20.0 / zoom)).abs() < 1e-9);
@@ -290,8 +313,9 @@ mod tests {
 	#[test]
 	fn left_drag_without_space_or_hand_does_not_pan() {
 		let mut s = state();
-		s.pointer(&pointer(PointerKind::Down, 100.0, 100.0, BUTTON_LEFT, Modifiers::default()));
+		let down = s.pointer(&pointer(PointerKind::Down, 100.0, 100.0, BUTTON_LEFT, Modifiers::default()));
 		assert!(!s.dragging());
+		assert!(!down.consumed, "a plain left click goes to the active tool (M5-T01)");
 		s.action("tool:hand");
 		s.pointer(&pointer(PointerKind::Down, 100.0, 100.0, BUTTON_LEFT, Modifiers::default()));
 		assert!(s.dragging(), "the hand tool pans with the left button");

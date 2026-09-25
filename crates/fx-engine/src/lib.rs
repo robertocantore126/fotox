@@ -15,13 +15,17 @@
 //! most engine features are tested and benchmarked.
 
 pub mod b3;
+pub mod clipboard;
 pub mod documents;
 pub mod export;
 pub mod filters;
 pub mod layers;
 pub mod mips;
 pub mod ops;
+pub mod selection;
+pub mod stroke;
 pub mod thumbs;
+pub mod tools;
 pub mod view;
 
 mod engine;
@@ -142,6 +146,13 @@ pub enum EngineInput {
 	/// Sent at start-up and whenever the window moves to another monitor, so
 	/// the viewport can transform the document into the display's space.
 	DisplayProfile(Option<Vec<u8>>),
+	/// An image another program put on the Windows clipboard (straight RGBA8,
+	/// rows top to bottom): paste it as a new layer (M5-T05, D-048).
+	PasteImage {
+		width: u32,
+		height: u32,
+		rgba8: Vec<u8>,
+	},
 	Shutdown,
 }
 
@@ -163,6 +174,11 @@ pub enum EngineOutput {
 	/// The answer to [`EngineInput::CloseRequested`]: `true` when the shell may
 	/// close the window, `false` while a document still needs to be saved. M3-T06.
 	MayClose(bool),
+	/// Fotox copied (M5-T05). `image`: a copy small enough to share with other
+	/// programs, for the Windows clipboard (`width`, `height`, straight RGBA8,
+	/// rows top to bottom); `None` = the copy stays internal (D-048), but a
+	/// later paste must still prefer it to an older Windows clipboard image.
+	ClipboardCopied { image: Option<(u32, u32, Vec<u8>)> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +189,8 @@ pub enum CursorShape {
 	Grabbing,
 	ZoomIn,
 	ZoomOut,
+	/// Four arrows: something is being moved (the selection outline, M5).
+	Move,
 	/// Brush outline is drawn by the viewport overlay; hide the OS cursor.
 	None,
 }

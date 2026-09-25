@@ -27,6 +27,8 @@ use crate::color::{ColorProfile, RenderingIntent};
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
+use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
+use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -58,6 +60,8 @@ pub struct LayerPropsPatch {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub locked_pixels: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub locked_transparency: Option<bool>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub locked_position: Option<bool>,
 }
 
@@ -80,6 +84,8 @@ pub enum MaskFill {
 	HideAll,
 	/// From the current pixel selection (M5).
 	RevealSelection,
+	/// The inverse of the current pixel selection (M5).
+	HideSelection,
 }
 
 /// Every document mutation. Variants are added milestone by milestone; the
@@ -139,6 +145,67 @@ pub enum Command {
 	/// Run a destructive filter on a pixel layer (level 0; the engine shows a
 	/// live preview first). M4
 	ApplyFilter { layer: LayerRef, filter: FilterParams },
+	/// Combine a shape into the pixel selection (M5-T03). `feather` blurs the
+	/// new shape's edge before combining.
+	Select {
+		shape: SelectionShape,
+		mode: SelectMode,
+		feather: f64,
+		anti_alias: bool,
+	},
+	/// Select the whole canvas. M5
+	SelectAll,
+	/// Remove the pixel selection; `Reselect` brings it back. M5
+	Deselect,
+	/// Restore the selection the last `Deselect` removed. M5
+	Reselect,
+	/// Invert the pixel selection across the canvas. M5
+	InvertSelection,
+	/// Expand / contract / border / smooth / feather the selection. M5
+	ModifySelection { modify: SelectModify },
+	/// Move the selection outline by whole pixels (never rewrites tiles). M5
+	OffsetSelection { dx: i32, dy: i32 },
+	/// Select what the Magic Wand finds at a point, combined with the
+	/// current selection by `mode`. M5
+	MagicWand { params: WandParams, mode: SelectMode },
+	/// Edit ▸ Fill a pixel layer through the selection (the whole canvas
+	/// without one). `color` is straight 16-bit RGBA; the engine resolves the
+	/// dialog's "Foreground Colour" etc. before sending. M5
+	Fill {
+		layer: LayerRef,
+		color: [u16; 4],
+		mode: BlendMode,
+		/// `0..=1`.
+		opacity: f64,
+		preserve_transparency: bool,
+	},
+	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
+	/// `cut` only changes the History label ("Cut"). M5
+	Clear {
+		layer: LayerRef,
+		#[serde(default)]
+		cut: bool,
+	},
+	/// Layer ▸ New ▸ Layer via Copy / via Cut (Ctrl+J / Shift+Ctrl+J): the
+	/// selected pixels of the active layer on a new layer above it. M5
+	LayerViaCopy { cut: bool },
+	/// A brush stroke (M5-T07): the samples after smoothing, replayed through
+	/// the brush engine; the live stroke painted exactly these pixels.
+	Stroke {
+		layer: LayerRef,
+		#[serde(default)]
+		target: StrokeTarget,
+		tool: StrokeTool,
+		brush: BrushParams,
+		/// Straight 16-bit RGBA (for a mask, the grey is `color[0]`).
+		color: [u16; 4],
+		samples: Vec<StrokeSample>,
+	},
+	/// Edit ▸ Paste: the clipboard as a new layer above the active one. `in_place`
+	/// keeps its canvas position; otherwise its bounds are centred on
+	/// `center` (the view centre, when the source position is not visible),
+	/// or kept where they were when `center` is `None`. M5
+	Paste { in_place: bool, center: Option<(f64, f64)> },
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -155,6 +222,11 @@ pub struct CommandEffect {
 	pub structure_changed: bool,
 	/// Only the layer selection changed: do not create an undo step.
 	pub selection_only: bool,
+	/// The command is a real history step but does not change the document
+	/// (M5-T03: the pixel selection is recorded like Photoshop records it, yet
+	/// it is not saved — D-028 — so making a selection must not dirty the
+	/// document).
+	pub history_only: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -194,7 +266,7 @@ impl Command {
 			Command::GroupLayers { layers, name } => group_layers(doc, layers, name.as_deref()),
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
-			Command::AddMask { layer, fill } => add_mask(doc, layer, *fill),
+			Command::AddMask { layer, fill } => add_mask(doc, layer, *fill, ctx.tiles),
 			Command::DeleteMask { layer, apply } => delete_mask(doc, layer, *apply, ctx.tiles),
 			Command::SetAdjustment { layer, adjustment } => set_adjustment(doc, layer, adjustment),
 			Command::ApplyFilter { layer, filter } => apply_filter(doc, layer, filter, ctx),
@@ -203,6 +275,37 @@ impl Command {
 			Command::StampVisible => stamp_visible(doc, ctx),
 			Command::AssignProfile { profile } => assign_profile(doc, profile),
 			Command::ConvertProfile { profile, intent, bpc } => convert_profile(doc, profile, *intent, *bpc, ctx),
+			Command::Select {
+				shape,
+				mode,
+				feather,
+				anti_alias,
+			} => select(doc, shape, *mode, *feather, *anti_alias, ctx),
+			Command::SelectAll => select_all(doc),
+			Command::Deselect => deselect(doc),
+			Command::Reselect => reselect(doc),
+			Command::InvertSelection => invert_selection(doc, ctx),
+			Command::ModifySelection { modify } => modify_selection(doc, modify, ctx),
+			Command::OffsetSelection { dx, dy } => offset_selection(doc, *dx, *dy),
+			Command::MagicWand { params, mode } => magic_wand(doc, params, *mode, ctx),
+			Command::Fill {
+				layer,
+				color,
+				mode,
+				opacity,
+				preserve_transparency,
+			} => fill(doc, layer, *color, *mode, *opacity, *preserve_transparency, ctx),
+			Command::Clear { layer, cut } => clear(doc, layer, *cut, ctx),
+			Command::LayerViaCopy { cut } => layer_via_copy(doc, *cut, ctx),
+			Command::Paste { in_place, center } => paste(doc, *in_place, *center, ctx),
+			Command::Stroke {
+				layer,
+				target,
+				tool,
+				brush,
+				color,
+				samples,
+			} => stroke(doc, layer, *target, tool, brush, *color, samples, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -443,6 +546,9 @@ fn set_layer_props(doc: &mut Document, layer: &LayerRef, props: &LayerPropsPatch
 	if let Some(v) = props.clipped {
 		target.clipped = v;
 	}
+	if let Some(v) = props.locked_transparency {
+		target.locked_transparency = v;
+	}
 	if let Some(v) = props.locked_pixels {
 		target.locked_pixels = v;
 	}
@@ -480,15 +586,18 @@ fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Resul
 	})
 }
 
-fn add_mask(doc: &mut Document, layer: &LayerRef, fill: MaskFill) -> Result<CommandEffect, CommandError> {
+fn add_mask(doc: &mut Document, layer: &LayerRef, fill: MaskFill, store: &TileStore) -> Result<CommandEffect, CommandError> {
 	let id = resolve(doc, layer)?;
-	let reveal = match fill {
-		MaskFill::RevealAll => true,
-		MaskFill::HideAll => false,
-		MaskFill::RevealSelection => {
-			return Err(CommandError::NotAllowed("a mask from the pixel selection arrives with selections (M5)".into()));
+	let from_selection = match fill {
+		MaskFill::RevealAll | MaskFill::HideAll => None,
+		MaskFill::RevealSelection | MaskFill::HideSelection => {
+			let Some(selection) = doc.selection.as_ref() else {
+				return Err(CommandError::NotAllowed("nothing is selected".into()));
+			};
+			Some((selection.clone(), fill == MaskFill::HideSelection))
 		}
 	};
+	let reveal = matches!(fill, MaskFill::RevealAll | MaskFill::RevealSelection);
 	{
 		let target = doc.layer(id).expect("resolved id exists");
 		if matches!(target.kind, LayerKind::Group { .. }) {
@@ -498,14 +607,36 @@ fn add_mask(doc: &mut Document, layer: &LayerRef, fill: MaskFill) -> Result<Comm
 			return Err(CommandError::NotAllowed("the layer already has a mask".into()));
 		}
 	}
+	let format = doc.color.depth.gray_format();
+	let image = match &from_selection {
+		// A linked mask sits at the layer's offset (M5-T05).
+		Some((selection, hide)) => {
+			let origin = match &doc.layer(id).expect("resolved id exists").kind {
+				LayerKind::Pixel { offset, .. } => *offset,
+				_ => (0, 0),
+			};
+			crate::pixels::mask_from_selection(selection, (doc.width, doc.height), origin, (doc.width, doc.height), *hide, format, store)?
+		}
+		None => mask_image(doc.width, doc.height, format, reveal),
+	};
 	let mask = Mask {
-		image: mask_image(doc.width, doc.height, doc.color.depth.gray_format(), reveal),
+		image,
 		enabled: true,
 		// Photoshop links a new mask to its layer.
 		linked: true,
-		// The mask covers the document, so no pixel is "outside" it; keep the
-		// value consistent with the fill anyway.
-		outside_value: if reveal { u16::MAX } else { 0 },
+		// Outside the mask image: hidden for a selection mask (nothing outside
+		// the canvas was selected), else the fill's value.
+		outside_value: match (&from_selection, reveal) {
+			(Some((_, hide)), _) => {
+				if *hide {
+					u16::MAX
+				} else {
+					0
+				}
+			}
+			(None, true) => u16::MAX,
+			(None, false) => 0,
+		},
 	};
 	doc.layer_mut(id).expect("resolved id exists").mask = Some(mask);
 	Ok(CommandEffect {
@@ -928,7 +1059,12 @@ fn apply_filter(doc: &mut Document, layer: &LayerRef, filter: &FilterParams, ctx
 	let ops = ctx
 		.ops
 		.ok_or_else(|| CommandError::NotAllowed("filters need the engine's pixel operations".into()))?;
-	let filtered = ops.filter(image, *offset, (doc.width, doc.height), filter, ctx.tiles)?;
+	let mut filtered = ops.filter(image, *offset, (doc.width, doc.height), filter, ctx.tiles)?;
+	// With a selection the filter shows only through it (M5-T05).
+	if let Some(selection) = &doc.selection {
+		let before = crate::pixels::Placed { image, offset: *offset };
+		filtered = crate::pixels::blend_through(before, &filtered, selection, (doc.width, doc.height), ctx.tiles)?;
+	}
 	if let LayerKind::Pixel { image, .. } = &mut doc.layer_mut(id).expect("resolved id exists").kind {
 		*image = filtered;
 	}
@@ -1134,6 +1270,341 @@ fn checked_offset(value: i32, delta: i32) -> Result<i32, CommandError> {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// The pixel selection (M5-T03)
+// ---------------------------------------------------------------------------
+
+/// A selection command's effect: a real history step, but not a document
+/// change (the selection is not saved — D-028).
+fn selection_effect(label: &str) -> CommandEffect {
+	CommandEffect {
+		label: label.into(),
+		history_only: true,
+		..Default::default()
+	}
+}
+
+/// The Photoshop History label of a rasterised shape.
+fn shape_label(shape: &SelectionShape) -> &'static str {
+	match shape {
+		SelectionShape::Rect { .. } => "Rectangular Marquee",
+		SelectionShape::Ellipse { .. } => "Elliptical Marquee",
+		SelectionShape::Polygon { .. } => "Lasso",
+		SelectionShape::RowPixel { .. } => "Single Row Marquee",
+		SelectionShape::ColumnPixel { .. } => "Single Column Marquee",
+	}
+}
+
+fn select(
+	doc: &mut Document,
+	shape: &SelectionShape,
+	mode: SelectMode,
+	feather: f64,
+	anti_alias: bool,
+	ctx: &mut CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if !feather.is_finite() || feather < 0.0 {
+		return Err(CommandError::InvalidValue {
+			field: "feather",
+			reason: format!("{feather} is not a distance"),
+		});
+	}
+	let size = (doc.width, doc.height);
+	let depth = doc.color.depth;
+	let Some(ops) = ctx.ops else {
+		return Err(CommandError::NotAllowed("a selection needs the engine's rasteriser".into()));
+	};
+	let mut shape_selection = ops.rasterise(shape, size, depth, anti_alias, ctx.tiles)?;
+	if feather > 0.0 {
+		shape_selection = ops
+			.modify_selection(&shape_selection, &SelectModify::Feather(feather), size, depth, ctx.tiles)?
+			.unwrap_or_else(|| Selection::empty(size, depth));
+	}
+	doc.selection = selection::combine(size, doc.selection.as_ref(), &shape_selection, mode, ctx.tiles)?;
+	Ok(selection_effect(shape_label(shape)))
+}
+
+fn magic_wand(doc: &mut Document, params: &WandParams, mode: SelectMode, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if !(0.0..=255.0).contains(&params.tolerance) {
+		return Err(CommandError::InvalidValue {
+			field: "tolerance",
+			reason: format!("{} is not in 0..=255", params.tolerance),
+		});
+	}
+	let Some(ops) = ctx.ops else {
+		return Err(CommandError::NotAllowed("the Magic Wand needs the engine".into()));
+	};
+	let size = (doc.width, doc.height);
+	let found = ops.magic_wand(doc, params, ctx.tiles)?;
+	doc.selection = match found {
+		Some(found) => selection::combine(size, doc.selection.as_ref(), &found, mode, ctx.tiles)?,
+		// Nothing found: Replace and Intersect leave no selection, Add and
+		// Subtract keep the current one.
+		None => match mode {
+			SelectMode::Replace | SelectMode::Intersect => None,
+			SelectMode::Add | SelectMode::Subtract => doc.selection.take(),
+		},
+	};
+	Ok(selection_effect("Magic Wand"))
+}
+
+/// The pixel layer a pixel edit targets: its id, image and offset. Locked
+/// pixels and layers without pixels are refused.
+fn pixel_target(doc: &Document, layer: &LayerRef) -> Result<(LayerId, TiledImage, (i32, i32)), CommandError> {
+	let id = resolve(doc, layer)?;
+	let target = doc.layer(id).expect("resolved id exists");
+	if target.locked_pixels {
+		return Err(CommandError::Locked(id));
+	}
+	match &target.kind {
+		LayerKind::Pixel { image, offset } => Ok((id, image.clone(), *offset)),
+		_ => Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into())),
+	}
+}
+
+/// Replace a pixel layer's image (and offset).
+fn set_pixels(doc: &mut Document, id: LayerId, new_image: TiledImage, new_offset: (i32, i32)) {
+	if let LayerKind::Pixel { image, offset } = &mut doc.layer_mut(id).expect("resolved id exists").kind {
+		*image = new_image;
+		*offset = new_offset;
+	}
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill(
+	doc: &mut Document,
+	layer: &LayerRef,
+	color: [u16; 4],
+	mode: BlendMode,
+	opacity: f64,
+	preserve_transparency: bool,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if !(0.0..=1.0).contains(&opacity) {
+		return Err(CommandError::InvalidValue {
+			field: "opacity",
+			reason: format!("{opacity} is not in 0..=1"),
+		});
+	}
+	let (id, image, offset) = pixel_target(doc, layer)?;
+	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let spec = crate::pixels::FillSpec {
+		color,
+		mode,
+		opacity,
+		preserve_transparency: preserve_transparency || locked_alpha,
+	};
+	let placed = crate::pixels::Placed { image: &image, offset };
+	let (filled, offset) = crate::pixels::fill(placed, doc.selection.as_ref(), (doc.width, doc.height), &spec, ctx.tiles)?;
+	set_pixels(doc, id, filled, offset);
+	Ok(CommandEffect {
+		label: "Fill".into(),
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}
+
+fn clear(doc: &mut Document, layer: &LayerRef, cut: bool, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.selection.as_ref() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	let (id, image, offset) = pixel_target(doc, layer)?;
+	let cleared = crate::pixels::clear(crate::pixels::Placed { image: &image, offset }, selection, (doc.width, doc.height), ctx.tiles)?;
+	set_pixels(doc, id, cleared, offset);
+	Ok(CommandEffect {
+		label: if cut { "Cut".into() } else { "Clear".into() },
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}
+
+fn layer_via_copy(doc: &mut Document, cut: bool, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.selection.clone() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	let Some(active) = doc.active_layer() else {
+		return Err(CommandError::NotAllowed("no active layer".into()));
+	};
+	let (id, image, offset) = if cut {
+		pixel_target(doc, &LayerRef::Id(active))?
+	} else {
+		// Copying reads the pixels only: a locked layer may be copied.
+		match &doc.layer(active).expect("the active layer exists").kind {
+			LayerKind::Pixel { image, offset } => (active, image.clone(), *offset),
+			_ => return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into())),
+		}
+	};
+	let canvas = (doc.width, doc.height);
+	let placed = crate::pixels::Placed { image: &image, offset };
+	let taken = crate::pixels::extract(placed, Some(&selection), canvas, ctx.tiles)?;
+	if taken.grid(0).non_empty().next().is_none() {
+		return Err(CommandError::NotAllowed("the selected area is empty".into()));
+	}
+	if cut {
+		let cleared = crate::pixels::clear(placed, &selection, canvas, ctx.tiles)?;
+		set_pixels(doc, id, cleared, offset);
+	}
+	let name = doc.next_default_name(NameKind::Pixel);
+	let new_id = doc.allocate_layer_id();
+	let layer = Arc::new(Layer::new(new_id, name, LayerKind::Pixel { image: taken, offset }));
+	insert_above_active(doc, layer);
+	doc.selected = vec![new_id];
+	Ok(CommandEffect {
+		label: if cut { "Layer Via Cut".into() } else { "Layer Via Copy".into() },
+		structure_changed: true,
+		pixels_changed: if cut { vec![id] } else { Vec::new() },
+		..Default::default()
+	})
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke(
+	doc: &mut Document,
+	layer: &LayerRef,
+	target: StrokeTarget,
+	tool: &StrokeTool,
+	brush: &BrushParams,
+	color: [u16; 4],
+	samples: &[StrokeSample],
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if samples.is_empty() {
+		return Err(CommandError::NotAllowed("a stroke needs at least one sample".into()));
+	}
+	let id = resolve(doc, layer)?;
+	let layer = doc.layer(id).expect("resolved id exists");
+	if layer.locked_pixels {
+		return Err(CommandError::Locked(id));
+	}
+	match target {
+		StrokeTarget::Pixels if !matches!(layer.kind, LayerKind::Pixel { .. }) => {
+			return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
+		}
+		StrokeTarget::Mask if layer.mask.is_none() => return Err(CommandError::NotAllowed("the layer has no mask".into())),
+		_ => {}
+	}
+	let (image, offset) = pixel_ops(ctx, "painting")?.stroke(doc, id, target, tool, brush, color, samples, ctx.tiles)?;
+	let target_layer = doc.layer_mut(id).expect("resolved id exists");
+	match target {
+		StrokeTarget::Pixels => {
+			if let LayerKind::Pixel {
+				image: old,
+				offset: old_offset,
+			} = &mut target_layer.kind
+			{
+				*old = image;
+				*old_offset = offset;
+			}
+		}
+		StrokeTarget::Mask => {
+			if let Some(mask) = &mut target_layer.mask {
+				mask.image = image;
+			}
+		}
+	}
+	Ok(CommandEffect {
+		label: tool.label().into(),
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}
+
+fn paste(doc: &mut Document, in_place: bool, center: Option<(f64, f64)>, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let ops = pixel_ops(ctx, "Paste")?;
+	let Some(clip) = ops.clipboard() else {
+		return Err(CommandError::NotAllowed("the clipboard is empty".into()));
+	};
+	let image = crate::pixels::convert_depth(&clip.image, doc.color.depth.rgba_format(), ctx.tiles)?;
+	let (bx0, by0, bx1, by1) = clip.bounds;
+	let offset = match (in_place, center) {
+		(false, Some((cx, cy))) => {
+			let dx = (cx - f64::from(bx0 + bx1) / 2.0).round() as i32;
+			let dy = (cy - f64::from(by0 + by1) / 2.0).round() as i32;
+			(clip.offset.0.saturating_add(dx), clip.offset.1.saturating_add(dy))
+		}
+		_ => clip.offset,
+	};
+	let name = doc.next_default_name(NameKind::Pixel);
+	let id = doc.allocate_layer_id();
+	let layer = Arc::new(Layer::new(id, name, LayerKind::Pixel { image, offset }));
+	insert_above_active(doc, layer);
+	doc.selected = vec![id];
+	Ok(CommandEffect {
+		label: if in_place { "Paste in Place".into() } else { "Paste".into() },
+		structure_changed: true,
+		..Default::default()
+	})
+}
+
+fn select_all(doc: &mut Document) -> Result<CommandEffect, CommandError> {
+	if doc.width == 0 || doc.height == 0 {
+		return Err(CommandError::NotAllowed("the document is empty".into()));
+	}
+	doc.selection = Some(Selection::full((doc.width, doc.height), doc.color.depth));
+	Ok(selection_effect("Select All"))
+}
+
+fn deselect(doc: &mut Document) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.selection.take() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	doc.reselect = Some(selection);
+	Ok(selection_effect("Deselect"))
+}
+
+fn reselect(doc: &mut Document) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.reselect.take() else {
+		return Err(CommandError::NotAllowed("no deselected selection to restore".into()));
+	};
+	doc.selection = Some(selection);
+	Ok(selection_effect("Reselect"))
+}
+
+fn invert_selection(doc: &mut Document, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if doc.width == 0 || doc.height == 0 {
+		return Err(CommandError::NotAllowed("the document is empty".into()));
+	}
+	let size = (doc.width, doc.height);
+	let Some(source) = doc.selection.take() else {
+		// Inverting nothing selects everything, like Photoshop.
+		doc.selection = Some(Selection::full(size, doc.color.depth));
+		return Ok(selection_effect("Inverse"));
+	};
+	doc.selection = selection::invert(size, &source, ctx.tiles)?;
+	Ok(selection_effect("Inverse"))
+}
+
+fn modify_selection(doc: &mut Document, op: &SelectModify, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let size = (doc.width, doc.height);
+	let depth = doc.color.depth;
+	let Some(ops) = ctx.ops else {
+		return Err(CommandError::NotAllowed("a selection change needs the engine's distance transform".into()));
+	};
+	let Some(current) = doc.selection.as_ref() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	let modified = ops.modify_selection(current, op, size, depth, ctx.tiles)?;
+	let label = match op {
+		SelectModify::Expand(_) => "Expand Selection",
+		SelectModify::Contract(_) => "Contract Selection",
+		SelectModify::Border(_) => "Border Selection",
+		SelectModify::Smooth(_) => "Smooth Selection",
+		SelectModify::Feather(_) => "Feather Selection",
+	};
+	doc.selection = modified;
+	Ok(selection_effect(label))
+}
+
+fn offset_selection(doc: &mut Document, dx: i32, dy: i32) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.selection.as_mut() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	let x = checked_offset(selection.offset.0, dx)?;
+	let y = checked_offset(selection.offset.1, dy)?;
+	selection.offset = (x, y);
+	Ok(selection_effect("Move Selection"))
+}
+
 #[cfg(test)]
 mod tests {
 	use fx_tiles::{TILE_SIZE, TileStoreConfig};
@@ -1141,6 +1612,7 @@ mod tests {
 	use super::*;
 	use crate::color::{BitDepth, ColorProfile, DocumentColor};
 	use crate::history::History;
+	use crate::selection::{SelectMode, SelectModify, SelectionShape, gray_at, set_gray as set_coverage};
 
 	/// Stands in for the engine's pixel operations: a composite is a solid
 	/// image whose value counts the layers composited; a filter returns the
@@ -1167,6 +1639,61 @@ mod tests {
 		fn convert_color(&self, rgba: [u16; 4], _: &crate::ops::Conversion<'_>) -> Result<[u16; 4], CommandError> {
 			// "Converted": the red and blue channels swap, so the test can see it.
 			Ok([rgba[2], rgba[1], rgba[0], rgba[3]])
+		}
+
+		fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, _: bool, store: &TileStore) -> Result<Selection, CommandError> {
+			// Rectangles only: enough to drive the selection commands the tests
+			// below exercise. The real rasteriser is tested in `fx-ops`.
+			let (x0, y0, x1, y1) = match shape {
+				SelectionShape::Rect { x, y, w, h } => (x.floor() as i64, y.floor() as i64, (x + w).ceil() as i64, (y + h).ceil() as i64),
+				_ => return Ok(Selection::empty(size, depth)),
+			};
+			let format = depth.gray_format();
+			let mut selection = Selection::empty(size, depth);
+			let (tw, th) = (size.0.div_ceil(TILE_SIZE), size.1.div_ceil(TILE_SIZE));
+			for ty in 0..th {
+				for tx in 0..tw {
+					let mut buffer = TileBuffer::zeroed(format);
+					let mut used = false;
+					for py in 0..TILE_SIZE {
+						for px in 0..TILE_SIZE {
+							let (x, y) = (i64::from(tx * TILE_SIZE + px), i64::from(ty * TILE_SIZE + py));
+							if x >= x0 && x < x1 && y >= y0 && y < y1 {
+								set_coverage(&mut buffer, format, px, py, 1.0);
+								used = true;
+							}
+						}
+					}
+					if used {
+						selection.image.put_buffer(store, tx, ty, buffer);
+					}
+				}
+			}
+			Ok(selection)
+		}
+
+		fn modify_selection(
+			&self,
+			selection: &Selection,
+			_: &SelectModify,
+			_: (u32, u32),
+			_: BitDepth,
+			_: &TileStore,
+		) -> Result<Option<Selection>, CommandError> {
+			// Identity: the commands only need to see their own plumbing here;
+			// the reshaping algorithms are tested in `fx-ops`.
+			Ok(Some(selection.clone()))
+		}
+
+		fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+			// "Finds" a 10 × 10 square at the click; the flood is tested in `fx-ops`.
+			let shape = SelectionShape::Rect {
+				x: params.x.floor(),
+				y: params.y.floor(),
+				w: 10.0,
+				h: 10.0,
+			};
+			self.rasterise(&shape, (doc.width, doc.height), doc.color.depth, true, store).map(Some)
 		}
 	}
 
@@ -1223,6 +1750,17 @@ mod tests {
 				ops: Some(&ops),
 			};
 			self.history.execute(&mut self.doc, command, &mut ctx)
+		}
+
+		fn ok_with_ops(&mut self, command: Command) -> CommandEffect {
+			self.run_with_ops(command.clone()).unwrap_or_else(|error| panic!("{command:?} failed: {error}"))
+		}
+
+		fn fail_with_ops(&mut self, command: Command) -> CommandError {
+			match self.run_with_ops(command.clone()) {
+				Err(error) => error,
+				Ok(effect) => panic!("{command:?} unexpectedly succeeded: {effect:?}"),
+			}
 		}
 
 		/// Add a layer and return its id (`AddLayer` selects it).
@@ -2017,6 +2555,7 @@ mod tests {
 				blend: Some(BlendMode::Multiply),
 				clipped: Some(false),
 				locked_pixels: Some(true),
+				locked_transparency: Some(true),
 				locked_position: Some(true),
 			},
 		});
@@ -2028,7 +2567,7 @@ mod tests {
 		assert_eq!((layer.opacity, layer.fill), (0.5, 0.25));
 		assert_eq!(layer.blend, BlendMode::Multiply);
 		assert!(!layer.clipped);
-		assert!(layer.locked_pixels && layer.locked_position);
+		assert!(layer.locked_pixels && layer.locked_position && layer.locked_transparency);
 	}
 
 	#[test]
@@ -2275,7 +2814,7 @@ mod tests {
 			layer: LayerRef::Id(g),
 			fill: MaskFill::RevealSelection,
 		});
-		assert!(matches!(error, CommandError::NotAllowed(_)), "M5: {error:?}");
+		assert!(error.to_string().contains("nothing is selected"), "M5: {error:?}");
 		assert!(f.layer(g).mask.is_none());
 	}
 
@@ -2772,5 +3311,512 @@ mod tests {
 		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [300, 200, 100, 65535] }));
 		f.history.undo(&mut f.doc);
 		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998, "undo restores the profile");
+	}
+
+	// -----------------------------------------------------------------------
+	// The pixel selection (M5-T03)
+	// -----------------------------------------------------------------------
+
+	/// Coverage of the fixture's current selection at one document pixel.
+	fn coverage(f: &Fixture, x: u32, y: u32) -> f32 {
+		let Some(selection) = &f.doc.selection else {
+			return 0.0;
+		};
+		let format = selection.image.format();
+		let (ix, iy) = (i64::from(x) - i64::from(selection.offset.0), i64::from(y) - i64::from(selection.offset.1));
+		if ix < 0 || iy < 0 || ix >= i64::from(selection.image.width()) || iy >= i64::from(selection.image.height()) {
+			return 0.0;
+		}
+		match selection.image.slot(0, ix as u32 / TILE_SIZE, iy as u32 / TILE_SIZE) {
+			TileSlot::Empty => 0.0,
+			TileSlot::Solid(value) => f32::from(value.0[0]) / 65535.0,
+			TileSlot::Data(handle) => gray_at(&f.store.get(handle).unwrap(), format, ix as u32 % TILE_SIZE, iy as u32 % TILE_SIZE),
+		}
+	}
+
+	/// `Select` with a rectangle, the one shape [`FakeOps`] rasterises.
+	fn rect_select(x: f64, y: f64, w: f64, h: f64, mode: SelectMode) -> Command {
+		Command::Select {
+			shape: SelectionShape::Rect { x, y, w, h },
+			mode,
+			feather: 0.0,
+			anti_alias: true,
+		}
+	}
+
+	#[test]
+	fn a_rectangular_selection_is_one_history_step_that_undoes() {
+		let mut f = Fixture::new();
+		let effect = f.ok_with_ops(rect_select(10.0, 20.0, 30.0, 40.0, SelectMode::Replace));
+		assert_eq!(effect.label, "Rectangular Marquee");
+		// A real history step, but not a document change: the engine saves the
+		// document only for the latter (D-028, `CommandEffect::history_only`).
+		assert!(effect.history_only && !effect.selection_only);
+		assert!(effect.pixels_changed.is_empty() && effect.props_changed.is_empty());
+		assert_eq!(f.history.labels().collect::<Vec<_>>(), ["Rectangular Marquee"]);
+		assert_eq!(coverage(&f, 15, 25), 1.0, "inside");
+		assert_eq!(coverage(&f, 5, 25), 0.0, "left of the rectangle");
+		assert_eq!(coverage(&f, 39, 59), 1.0, "the last row and column");
+		assert_eq!(coverage(&f, 40, 20), 0.0, "just past the right edge");
+		assert!(f.history.undo(&mut f.doc));
+		assert!(f.doc.selection.is_none(), "undo takes the selection away");
+		assert!(f.history.redo(&mut f.doc));
+		assert_eq!(coverage(&f, 15, 25), 1.0, "redo brings it back");
+	}
+
+	#[test]
+	fn selection_commands_need_the_engine_and_reject_bad_values() {
+		let mut f = Fixture::new();
+		let error = f.fail(rect_select(0.0, 0.0, 10.0, 10.0, SelectMode::Replace));
+		assert!(matches!(error, CommandError::NotAllowed(_)), "without PixelOps: {error}");
+		assert!(f.doc.selection.is_none(), "nothing was selected");
+		let error = f.fail_with_ops(Command::Select {
+			shape: SelectionShape::Rect {
+				x: 0.0,
+				y: 0.0,
+				w: 1.0,
+				h: 1.0,
+			},
+			mode: SelectMode::Replace,
+			feather: -1.0,
+			anti_alias: true,
+		});
+		assert!(matches!(error, CommandError::InvalidValue { field: "feather", .. }), "{error}");
+		assert!(f.fail(Command::Deselect).to_string().contains("nothing is selected"));
+		assert!(f.fail(Command::Reselect).to_string().contains("no deselected selection"));
+		// These are pure model code: they need no PixelOps.
+		f.ok(Command::SelectAll);
+		let error = f.fail(Command::ModifySelection {
+			modify: SelectModify::Expand(2.0),
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error}");
+	}
+
+	#[test]
+	fn select_all_deselect_and_reselect_each_undo() {
+		let mut f = Fixture::new();
+		f.ok(Command::SelectAll);
+		assert_eq!((coverage(&f, 0, 0), coverage(&f, 399, 299)), (1.0, 1.0), "the whole canvas");
+		f.ok(Command::Deselect);
+		assert!(f.doc.selection.is_none());
+		assert!(f.doc.reselect.is_some(), "kept for Reselect");
+		f.ok(Command::Reselect);
+		assert_eq!(coverage(&f, 100, 100), 1.0);
+		assert!(f.doc.reselect.is_none(), "restored, so there is nothing left to restore");
+		// Walk the three steps back.
+		assert!(f.history.undo(&mut f.doc), "Reselect");
+		assert!(f.doc.selection.is_none());
+		assert!(f.history.undo(&mut f.doc), "Deselect");
+		assert_eq!(coverage(&f, 100, 100), 1.0);
+		assert!(f.history.undo(&mut f.doc), "Select All");
+		assert!(f.doc.selection.is_none());
+		assert!(!f.history.can_undo(), "three commands, three steps");
+	}
+
+	#[test]
+	fn inverting_selects_everything_but_the_old_selection() {
+		let mut f = Fixture::new();
+		// Inverting nothing selects everything, like Photoshop.
+		assert_eq!(f.ok(Command::InvertSelection).label, "Inverse");
+		assert_eq!(coverage(&f, 399, 299), 1.0);
+		f.ok_with_ops(rect_select(0.0, 0.0, 100.0, 100.0, SelectMode::Replace));
+		f.ok(Command::InvertSelection);
+		assert_eq!(coverage(&f, 50, 50), 0.0, "the rectangle is gone");
+		assert_eq!(coverage(&f, 150, 50), 1.0, "everything else is selected");
+		assert_eq!(coverage(&f, 300, 250), 1.0, "to the far corner");
+		f.history.undo(&mut f.doc);
+		assert_eq!(coverage(&f, 50, 50), 1.0, "undo restores the rectangle");
+		assert_eq!(coverage(&f, 150, 50), 0.0);
+		// Inverting everything selected leaves an empty selection (the ants
+		// disappear), like Photoshop's "no pixels are selected".
+		f.ok(Command::SelectAll);
+		f.ok(Command::InvertSelection);
+		assert!(f.doc.selection.is_none(), "nothing is left selected");
+	}
+
+	#[test]
+	fn a_moved_selection_keeps_its_coverage_and_inverts_in_document_space() {
+		let mut f = Fixture::new();
+		f.ok_with_ops(rect_select(0.0, 0.0, 100.0, 100.0, SelectMode::Replace));
+		assert_eq!(f.ok(Command::OffsetSelection { dx: 5, dy: 7 }).label, "Move Selection");
+		assert_eq!(f.doc.selection.as_ref().unwrap().offset, (5, 7), "the tiles never moved");
+		assert_eq!(coverage(&f, 50, 50), 1.0, "the rectangle reads at its new place");
+		assert_eq!(coverage(&f, 3, 3), 0.0, "and no longer at the old one");
+		f.ok(Command::InvertSelection);
+		assert_eq!(coverage(&f, 50, 50), 0.0);
+		assert_eq!(coverage(&f, 3, 3), 1.0, "inverted in document space");
+		assert_eq!(coverage(&f, 104, 106), 0.0, "the moved rectangle's last pixel");
+		assert_eq!(coverage(&f, 105, 106), 1.0, "just past it");
+	}
+
+	#[test]
+	fn a_new_shape_combines_with_the_current_selection_by_mode() {
+		let mut f = Fixture::new();
+		f.ok_with_ops(rect_select(0.0, 0.0, 100.0, 100.0, SelectMode::Replace));
+		f.ok_with_ops(rect_select(50.0, 0.0, 100.0, 100.0, SelectMode::Add));
+		assert_eq!((coverage(&f, 25, 25), coverage(&f, 75, 25), coverage(&f, 120, 25)), (1.0, 1.0, 1.0));
+		f.ok_with_ops(rect_select(50.0, 0.0, 100.0, 100.0, SelectMode::Subtract));
+		assert_eq!((coverage(&f, 25, 25), coverage(&f, 75, 25), coverage(&f, 120, 25)), (1.0, 0.0, 0.0));
+		f.ok_with_ops(rect_select(0.0, 0.0, 60.0, 60.0, SelectMode::Intersect));
+		assert_eq!((coverage(&f, 25, 25), coverage(&f, 75, 25)), (1.0, 0.0));
+		f.ok_with_ops(rect_select(200.0, 200.0, 50.0, 50.0, SelectMode::Replace));
+		assert_eq!((coverage(&f, 225, 225), coverage(&f, 25, 25)), (1.0, 0.0), "Replace drops the old one");
+		assert_eq!(f.history.labels().collect::<Vec<_>>(), ["Rectangular Marquee"; 5], "one step each");
+	}
+
+	#[test]
+	fn every_selection_command_round_trips_through_json() {
+		let commands = vec![
+			rect_select(1.5, 2.5, 3.0, 4.0, SelectMode::Add),
+			Command::Select {
+				shape: SelectionShape::Ellipse {
+					x: 0.0,
+					y: 1.0,
+					w: 10.0,
+					h: 20.0,
+				},
+				mode: SelectMode::Subtract,
+				feather: 2.5,
+				anti_alias: false,
+			},
+			Command::Select {
+				shape: SelectionShape::Polygon {
+					points: vec![(0.0, 0.0), (10.0, 0.0), (5.0, 8.0)],
+				},
+				mode: SelectMode::Intersect,
+				feather: 0.0,
+				anti_alias: true,
+			},
+			Command::Select {
+				shape: SelectionShape::RowPixel { y: 3.0 },
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: true,
+			},
+			Command::Select {
+				shape: SelectionShape::ColumnPixel { x: 3.0 },
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: true,
+			},
+			Command::SelectAll,
+			Command::Deselect,
+			Command::Reselect,
+			Command::InvertSelection,
+			Command::ModifySelection {
+				modify: SelectModify::Expand(2.0),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Contract(2.0),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Border(4.0),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Smooth(1.5),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Feather(3.0),
+			},
+			Command::OffsetSelection { dx: -2, dy: 5 },
+		];
+		for command in commands {
+			let json = serde_json::to_string(&command).unwrap();
+			assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), command, "{json}");
+		}
+		// Pin the wire shapes: they are part of saved macros and of the
+		// `command` message the UI sends (docs/PROTOCOL.md §4).
+		assert_eq!(serde_json::to_string(&Command::SelectAll).unwrap(), r#"{"op":"select_all"}"#);
+		assert_eq!(
+			serde_json::to_string(&rect_select(1.5, 2.5, 3.0, 4.0, SelectMode::Add)).unwrap(),
+			r#"{"op":"select","shape":{"shape":"rect","x":1.5,"y":2.5,"w":3.0,"h":4.0},"mode":"add","feather":0.0,"anti_alias":true}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::ModifySelection {
+				modify: SelectModify::Feather(3.0)
+			})
+			.unwrap(),
+			r#"{"op":"modify_selection","modify":{"kind":"feather","px":3.0}}"#
+		);
+	}
+}
+
+#[cfg(test)]
+mod using_the_selection_tests {
+	//! Fill, Clear, Layer via Copy/Cut, masks from the selection and a filter
+	//! limited by it (M5-T05), through the commands.
+
+	use fx_tiles::{TILE_SIZE, TileStoreConfig};
+
+	use super::*;
+	use crate::color::{BitDepth, ColorProfile, DocumentColor};
+	use crate::history::History;
+
+	struct Ops;
+
+	impl PixelOps for Ops {
+		fn filter(&self, image: &TiledImage, _: (i32, i32), _: (u32, u32), _: &FilterParams, _: &TileStore) -> Result<TiledImage, CommandError> {
+			// "Filtered" = every tile painted solid green.
+			let mut out = image.clone();
+			for ty in 0..image.grid(0).rows() {
+				for tx in 0..image.grid(0).cols() {
+					out.set_slot(tx, ty, TileSlot::Solid(PixelValue([0, 65535, 0, 65535])));
+				}
+			}
+			Ok(out)
+		}
+		fn composite(&self, _: &Document, _: &[LayerId], _: Option<[u16; 4]>, _: &TileStore) -> Result<TiledImage, CommandError> {
+			unreachable!()
+		}
+		fn convert(&self, _: &TiledImage, _: &crate::ops::Conversion<'_>, _: &TileStore) -> Result<TiledImage, CommandError> {
+			unreachable!()
+		}
+		fn convert_color(&self, _: [u16; 4], _: &crate::ops::Conversion<'_>) -> Result<[u16; 4], CommandError> {
+			unreachable!()
+		}
+		fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, _: bool, store: &TileStore) -> Result<Selection, CommandError> {
+			let SelectionShape::Rect { x, y, w, h } = shape else { unreachable!() };
+			let mut selection = Selection::empty(size, depth);
+			for ty in 0..size.1.div_ceil(TILE_SIZE) {
+				for tx in 0..size.0.div_ceil(TILE_SIZE) {
+					let mut buffer = TileBuffer::zeroed(depth.gray_format());
+					for py in 0..TILE_SIZE {
+						for px in 0..TILE_SIZE {
+							let (cx, cy) = (f64::from(tx * TILE_SIZE + px), f64::from(ty * TILE_SIZE + py));
+							if cx >= *x && cx < x + w && cy >= *y && cy < y + h {
+								selection::set_gray(&mut buffer, depth.gray_format(), px, py, 1.0);
+							}
+						}
+					}
+					selection.image.put_buffer(store, tx, ty, buffer);
+				}
+			}
+			Ok(selection)
+		}
+		fn modify_selection(&self, s: &Selection, _: &SelectModify, _: (u32, u32), _: BitDepth, _: &TileStore) -> Result<Option<Selection>, CommandError> {
+			Ok(Some(s.clone()))
+		}
+		fn magic_wand(&self, _: &Document, _: &WandParams, _: &TileStore) -> Result<Option<Selection>, CommandError> {
+			Ok(None)
+		}
+		fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {
+			let mut image = TiledImage::new(300, 300, PixelFormat::Rgba16);
+			image.set_slot(0, 0, TileSlot::Solid(PixelValue([100, 200, 300, 65535])));
+			Some(crate::pixels::ClipboardImage {
+				image,
+				offset: (10, 20),
+				bounds: (10, 20, 266, 276),
+			})
+		}
+	}
+
+	struct F {
+		doc: Document,
+		store: TileStore,
+		history: History,
+	}
+
+	impl F {
+		fn new() -> Self {
+			let dir = std::env::temp_dir().join("fx-core-using-selection-tests");
+			std::fs::create_dir_all(&dir).unwrap();
+			Self {
+				doc: Document::new(
+					600,
+					400,
+					DocumentColor {
+						depth: BitDepth::U16,
+						profile: ColorProfile::Srgb,
+					},
+					72.0,
+				),
+				store: TileStore::new(TileStoreConfig::for_tests(dir)).unwrap(),
+				history: History::default(),
+			}
+		}
+
+		fn run(&mut self, command: Command) -> Result<CommandEffect, CommandError> {
+			let mut ctx = CommandContext {
+				tiles: &self.store,
+				ops: Some(&Ops),
+			};
+			self.history.execute(&mut self.doc, command, &mut ctx)
+		}
+
+		fn ok(&mut self, command: Command) -> CommandEffect {
+			self.run(command.clone()).unwrap_or_else(|e| panic!("{command:?}: {e}"))
+		}
+
+		fn layer(&mut self) -> LayerId {
+			self.ok(Command::AddLayer {
+				layer: NewLayer::Pixel,
+				name: None,
+			});
+			self.doc.active_layer().unwrap()
+		}
+
+		fn select(&mut self, x: f64, y: f64, w: f64, h: f64) {
+			self.ok(Command::Select {
+				shape: SelectionShape::Rect { x, y, w, h },
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: true,
+			});
+		}
+
+		/// Straight RGBA16 of `layer` at canvas pixel `(x, y)`.
+		fn px(&self, layer: LayerId, x: i32, y: i32) -> [u16; 4] {
+			let LayerKind::Pixel { image, offset } = &self.doc.layer(layer).unwrap().kind else {
+				panic!()
+			};
+			let (lx, ly) = (x - offset.0, y - offset.1);
+			if lx < 0 || ly < 0 || lx as u32 >= image.width() || ly as u32 >= image.height() {
+				return [0; 4];
+			}
+			let (lx, ly) = (lx as u32, ly as u32);
+			match image.slot(0, lx / TILE_SIZE, ly / TILE_SIZE) {
+				TileSlot::Empty => [0; 4],
+				TileSlot::Solid(v) => v.0,
+				TileSlot::Data(h) => {
+					let b = self.store.get(h).unwrap();
+					let i = (((ly % TILE_SIZE) * TILE_SIZE + lx % TILE_SIZE) * 4) as usize;
+					let s = &b.as_u16()[i..i + 4];
+					[s[0], s[1], s[2], s[3]]
+				}
+			}
+		}
+	}
+
+	fn red_fill(layer: LayerId) -> Command {
+		Command::Fill {
+			layer: LayerRef::Id(layer),
+			color: [65535, 0, 0, 65535],
+			mode: BlendMode::Normal,
+			opacity: 1.0,
+			preserve_transparency: false,
+		}
+	}
+
+	#[test]
+	fn fill_paints_the_selection_and_undoes() {
+		let mut f = F::new();
+		let a = f.layer();
+		f.select(100.0, 100.0, 50.0, 50.0);
+		assert_eq!(f.ok(red_fill(a)).label, "Fill");
+		assert_eq!(f.px(a, 120, 120), [65535, 0, 0, 65535]);
+		assert_eq!(f.px(a, 90, 120), [0; 4], "outside the selection");
+		f.history.undo(&mut f.doc);
+		assert_eq!(f.px(a, 120, 120), [0; 4]);
+		// Without a selection: the whole canvas.
+		f.ok(Command::Deselect);
+		f.ok(red_fill(a));
+		assert_eq!(f.px(a, 599, 399), [65535, 0, 0, 65535]);
+	}
+
+	#[test]
+	fn preserve_transparency_leaves_empty_pixels_empty() {
+		let mut f = F::new();
+		let a = f.layer();
+		f.select(0.0, 0.0, 10.0, 10.0);
+		f.ok(red_fill(a));
+		f.ok(Command::Deselect);
+		f.ok(Command::Fill {
+			layer: LayerRef::Id(a),
+			color: [0, 0, 65535, 65535],
+			mode: BlendMode::Normal,
+			opacity: 1.0,
+			preserve_transparency: true,
+		});
+		assert_eq!(f.px(a, 5, 5), [0, 0, 65535, 65535], "painted pixels take the colour");
+		assert_eq!(f.px(a, 50, 50)[3], 0, "transparent pixels stay transparent");
+	}
+
+	#[test]
+	fn clear_and_cut_remove_the_selected_pixels() {
+		let mut f = F::new();
+		let a = f.layer();
+		f.ok(red_fill(a));
+		f.select(0.0, 0.0, 300.0, 100.0);
+		assert_eq!(
+			f.ok(Command::Clear {
+				layer: LayerRef::Id(a),
+				cut: false
+			})
+			.label,
+			"Clear"
+		);
+		assert_eq!(f.px(a, 10, 10)[3], 0);
+		assert_eq!(f.px(a, 10, 150)[3], 65535);
+		f.ok(Command::Deselect);
+		let error = f
+			.run(Command::Clear {
+				layer: LayerRef::Id(a),
+				cut: true,
+			})
+			.unwrap_err();
+		assert!(error.to_string().contains("nothing is selected"));
+	}
+
+	#[test]
+	fn layer_via_copy_and_cut_lift_the_selected_pixels() {
+		let mut f = F::new();
+		let a = f.layer();
+		f.ok(red_fill(a));
+		f.select(200.0, 100.0, 64.0, 32.0);
+		assert_eq!(f.ok(Command::LayerViaCopy { cut: false }).label, "Layer Via Copy");
+		let copy = f.doc.active_layer().unwrap();
+		assert_ne!(copy, a);
+		assert_eq!(f.px(copy, 210, 110), [65535, 0, 0, 65535]);
+		assert_eq!(f.px(copy, 190, 110)[3], 0, "only the selection");
+		assert_eq!(f.px(a, 210, 110)[3], 65535, "copy leaves the source");
+		f.doc.selected = vec![a];
+		assert_eq!(f.ok(Command::LayerViaCopy { cut: true }).label, "Layer Via Cut");
+		assert_eq!(f.px(a, 210, 110)[3], 0, "cut clears the source");
+		assert_eq!(f.doc.layers.len(), 3);
+	}
+
+	#[test]
+	fn masks_reveal_or_hide_the_selection() {
+		let mut f = F::new();
+		let a = f.layer();
+		f.select(0.0, 0.0, 256.0, 400.0);
+		f.ok(Command::AddMask {
+			layer: LayerRef::Id(a),
+			fill: MaskFill::HideSelection,
+		});
+		let mask = f.doc.layer(a).unwrap().mask.as_ref().unwrap();
+		assert!(matches!(mask.image.slot(0, 0, 0), TileSlot::Empty), "hidden where selected");
+		assert!(matches!(mask.image.slot(0, 1, 0), TileSlot::Solid(_)), "revealed elsewhere");
+	}
+
+	#[test]
+	fn a_filter_shows_only_through_the_selection() {
+		let mut f = F::new();
+		let a = f.layer();
+		f.ok(red_fill(a));
+		f.select(0.0, 0.0, 100.0, 100.0);
+		f.ok(Command::ApplyFilter {
+			layer: LayerRef::Id(a),
+			filter: FilterParams::GaussianBlur { radius: 1.0 },
+		});
+		assert_eq!(f.px(a, 50, 50), [0, 65535, 0, 65535], "filtered inside");
+		assert_eq!(f.px(a, 150, 50), [65535, 0, 0, 65535], "untouched outside");
+	}
+
+	#[test]
+	fn paste_centres_the_clipboard_or_keeps_its_place() {
+		let mut f = F::new();
+		f.layer();
+		assert_eq!(f.ok(Command::Paste { in_place: true, center: None }).label, "Paste in Place");
+		let pasted = f.doc.active_layer().unwrap();
+		assert_eq!(f.px(pasted, 10, 20), [100, 200, 300, 65535]);
+		f.ok(Command::Paste {
+			in_place: false,
+			center: Some((300.0, 200.0)),
+		});
+		let centred = f.doc.active_layer().unwrap();
+		// Bounds (10, 20)–(266, 276) centred on (300, 200): moved by (162, 52).
+		assert_eq!(f.px(centred, 172, 72), [100, 200, 300, 65535]);
+		assert_eq!(f.px(centred, 171, 72)[3], 0);
 	}
 }

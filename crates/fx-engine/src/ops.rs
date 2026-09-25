@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fx_core::{CommandError, Conversion, Document, FilterParams, LayerId, PixelOps};
+use fx_core::{BitDepth, CommandError, Conversion, Document, FilterParams, LayerId, LayerKind, PixelOps, SelectModify, Selection, SelectionShape, WandParams};
 use fx_ops::filter::{self, Geometry};
 use fx_ops::neighbourhood::{LevelSource, TileRef};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
@@ -24,6 +24,8 @@ pub type ProgressFn = dyn Fn(f32) + Send + Sync;
 #[derive(Default)]
 pub struct EngineOps {
 	pub progress: Option<Arc<ProgressFn>>,
+	/// What Edit ▸ Copy put aside (M5-T05); jobs share it.
+	pub clipboard: fx_core::pixels::SharedClipboard,
 }
 
 impl PixelOps for EngineOps {
@@ -109,6 +111,183 @@ impl PixelOps for EngineOps {
 		rgb_transform(conversion)?.apply(&mut px);
 		Ok(px[0])
 	}
+
+	fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, anti_alias: bool, store: &TileStore) -> Result<Selection, CommandError> {
+		fx_ops::raster::rasterise(shape, size, depth, anti_alias, store)
+	}
+
+	fn modify_selection(
+		&self,
+		selection: &Selection,
+		op: &SelectModify,
+		size: (u32, u32),
+		depth: BitDepth,
+		store: &TileStore,
+	) -> Result<Option<Selection>, CommandError> {
+		fx_ops::morph::modify(selection, op, size, depth, store)
+	}
+
+	fn stroke(
+		&self,
+		doc: &Document,
+		layer: LayerId,
+		target: fx_core::stroke::StrokeTarget,
+		tool: &fx_core::stroke::StrokeTool,
+		brush: &fx_core::stroke::BrushParams,
+		color: [u16; 4],
+		samples: &[fx_core::stroke::StrokeSample],
+		store: &TileStore,
+	) -> Result<(TiledImage, (i32, i32)), CommandError> {
+		let prepared = crate::stroke::prepare(doc, layer, target, tool, store)?;
+		fx_ops::brush::replay(crate::stroke::setup(&prepared, doc, *tool, *brush, color), samples, store)
+	}
+
+	fn clipboard(&self) -> Option<fx_core::pixels::ClipboardImage> {
+		self.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+	}
+
+	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+		if !params.x.is_finite() || !params.y.is_finite() || params.x < 0.0 || params.y < 0.0 {
+			return Ok(None);
+		}
+		let wand = fx_ops::flood::Wand {
+			seed: (params.x.floor() as u32, params.y.floor() as u32),
+			tolerance: (params.tolerance / 255.0) as f32,
+			contiguous: params.contiguous,
+			anti_alias: params.anti_alias,
+		};
+		let size = (doc.width, doc.height);
+		let depth = doc.color.depth;
+		if params.sample_all_layers {
+			return fx_ops::flood::magic_wand(&CompositeSource::new(doc.clone(), store), size, &wand, depth, store);
+		}
+		let Some(id) = doc.active_layer() else {
+			return Err(CommandError::NotAllowed("no active layer to sample".into()));
+		};
+		let layer = doc.layer(id).ok_or(CommandError::NotAllowed("no active layer to sample".into()))?;
+		match &layer.kind {
+			// A pixel layer's own pixels, whatever its opacity or blend mode.
+			LayerKind::Pixel { image, offset } => fx_ops::flood::magic_wand(&LayerSource { image, offset: *offset, store }, size, &wand, depth, store),
+			// Anything else: that layer alone, composited.
+			_ => {
+				let mut sub = doc.clone();
+				sub.layers = crate::export::keep_layers(&doc.layers, &std::iter::once(id).collect());
+				fx_ops::flood::magic_wand(&CompositeSource::new(sub, store), size, &wand, depth, store)
+			}
+		}
+	}
+}
+
+/// The Magic Wand reads the composite of a document through the CPU
+/// reference compositor, one canvas tile at a time (M5-T04).
+struct CompositeSource<'a> {
+	doc: Document,
+	store: &'a TileStore,
+	luts: std::sync::Mutex<fx_render::adjust::LutCache>,
+}
+
+impl<'a> CompositeSource<'a> {
+	fn new(doc: Document, store: &'a TileStore) -> Self {
+		Self {
+			doc,
+			store,
+			luts: std::sync::Mutex::new(Default::default()),
+		}
+	}
+}
+
+impl fx_ops::flood::WandSource for CompositeSource<'_> {
+	fn tile(&self, tx: u32, ty: u32) -> Result<fx_ops::flood::WandTile, CommandError> {
+		let program = {
+			let mut luts = self.luts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			fx_render::build_program(&self.doc, 0, tx, ty, &mut |a| luts.get(a))
+				.map_err(|_| CommandError::NotAllowed("full-resolution tiles are missing".into()))?
+		};
+		if program.is_empty() {
+			return Ok(fx_ops::flood::WandTile::Uniform([0.0; 4]));
+		}
+		let fetch = |h: &fx_tiles::TileHandle| self.store.get(h).expect("tile of a live document");
+		let pixels = fx_render::reference::render_tile(&program, &fetch);
+		Ok(fx_ops::flood::WandTile::Data(pixels.iter().map(|p| p.map(|v| v as f32)).collect()))
+	}
+}
+
+/// The Magic Wand reads one pixel layer's own pixels (M5-T04): canvas tile
+/// `(tx, ty)` assembled from the layer's tiles at its offset.
+struct LayerSource<'a> {
+	image: &'a TiledImage,
+	offset: (i32, i32),
+	store: &'a TileStore,
+}
+
+impl fx_ops::flood::WandSource for LayerSource<'_> {
+	fn tile(&self, tx: u32, ty: u32) -> Result<fx_ops::flood::WandTile, CommandError> {
+		let tile = i64::from(TILE_SIZE);
+		let ix = i64::from(tx) * tile - i64::from(self.offset.0);
+		let iy = i64::from(ty) * tile - i64::from(self.offset.1);
+		let format = self.image.format();
+		let (cols, rows) = (i64::from(self.image.grid(0).cols()), i64::from(self.image.grid(0).rows()));
+		let (iw, ih) = (i64::from(self.image.width()), i64::from(self.image.height()));
+		// Aligned and inside: one layer tile, and a solid one needs no pixels.
+		if ix.rem_euclid(tile) == 0 && iy.rem_euclid(tile) == 0 {
+			let (sx, sy) = (ix / tile, iy / tile);
+			if sx < 0 || sy < 0 || sx >= cols || sy >= rows {
+				return Ok(fx_ops::flood::WandTile::Uniform([0.0; 4]));
+			}
+			match self.image.slot(0, sx as u32, sy as u32) {
+				TileSlot::Empty => return Ok(fx_ops::flood::WandTile::Uniform([0.0; 4])),
+				TileSlot::Solid(v) if ix + tile <= iw && iy + tile <= ih => return Ok(fx_ops::flood::WandTile::Uniform(premul(v.0))),
+				_ => {}
+			}
+		}
+		let mut pixels = vec![[0.0f32; 4]; fx_tiles::TILE_PIXELS];
+		let mut cache: std::collections::HashMap<(i64, i64), Option<Arc<fx_tiles::TileBuffer>>> = std::collections::HashMap::new();
+		for y in 0..tile {
+			let sy = iy + y;
+			if sy < 0 || sy >= ih {
+				continue;
+			}
+			for x in 0..tile {
+				let sx = ix + x;
+				if sx < 0 || sx >= iw {
+					continue;
+				}
+				let key = (sx.div_euclid(tile), sy.div_euclid(tile));
+				if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+					entry.insert(match self.image.slot(0, key.0 as u32, key.1 as u32) {
+						TileSlot::Empty => None,
+						TileSlot::Solid(v) => Some(Arc::new(fx_tiles::TileBuffer::filled(format, *v))),
+						TileSlot::Data(handle) => Some(self.store.get(handle).map_err(|e| CommandError::NotAllowed(e.to_string()))?),
+					});
+				}
+				let Some(buffer) = &cache[&key] else { continue };
+				let i = (sy.rem_euclid(tile) * tile + sx.rem_euclid(tile)) as usize;
+				let px = match format {
+					PixelFormat::Rgba16 => {
+						let s = &buffer.as_u16()[i * 4..i * 4 + 4];
+						[s[0], s[1], s[2], s[3]]
+					}
+					_ => {
+						let s = &buffer.bytes()[i * 4..i * 4 + 4];
+						[u16::from(s[0]) * 257, u16::from(s[1]) * 257, u16::from(s[2]) * 257, u16::from(s[3]) * 257]
+					}
+				};
+				pixels[(y * tile + x) as usize] = premul(px);
+			}
+		}
+		Ok(fx_ops::flood::WandTile::Data(pixels))
+	}
+}
+
+/// Straight 16-bit RGBA as premultiplied `0..=1`.
+fn premul(px: [u16; 4]) -> [f32; 4] {
+	let a = f32::from(px[3]) / 65535.0;
+	[
+		f32::from(px[0]) / 65535.0 * a,
+		f32::from(px[1]) / 65535.0 * a,
+		f32::from(px[2]) / 65535.0 * a,
+		a,
+	]
 }
 
 fn rgb_transform(conversion: &Conversion<'_>) -> Result<fx_color::RgbTransform, CommandError> {

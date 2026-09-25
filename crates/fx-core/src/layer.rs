@@ -176,6 +176,9 @@ pub struct Layer {
 	/// Clipped to the layer below (clipping mask).
 	pub clipped: bool,
 	pub locked_pixels: bool,
+	/// Photoshop's "Lock transparent pixels" (D-049): painting and fills keep
+	/// every pixel's alpha.
+	pub locked_transparency: bool,
 	pub locked_position: bool,
 	pub mask: Option<Mask>,
 	pub kind: LayerKind,
@@ -197,6 +200,7 @@ impl Layer {
 			blend,
 			clipped: false,
 			locked_pixels: false,
+			locked_transparency: false,
 			locked_position: false,
 			mask: None,
 			kind,

@@ -10,10 +10,11 @@
 use fx_tiles::{TileStore, TiledImage};
 use serde::{Deserialize, Serialize};
 
-use crate::color::{ColorProfile, RenderingIntent};
+use crate::color::{BitDepth, ColorProfile, RenderingIntent};
 use crate::command::CommandError;
 use crate::document::Document;
 use crate::layer::LayerId;
+use crate::selection::{SelectModify, Selection, SelectionShape, WandParams};
 
 /// A destructive filter and its parameters. Serialised in commands, so macros
 /// replay it; variant names are stable.
@@ -87,6 +88,52 @@ pub trait PixelOps: Send + Sync {
 
 	/// One straight RGBA16 colour converted (solid fill layers).
 	fn convert_color(&self, rgba: [u16; 4], conversion: &Conversion<'_>) -> Result<[u16; 4], CommandError>;
+
+	/// Rasterise `shape` (document pixels, fractional coordinates allowed)
+	/// into a fresh selection coverage image (M5-T03). `anti_alias` off makes
+	/// coverage ≥ 0.5 opaque, 0 otherwise. The result selects nothing when the
+	/// shape lies outside the canvas.
+	fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, anti_alias: bool, store: &TileStore) -> Result<Selection, CommandError>;
+
+	/// `selection` after a reshape (M5-T03): feather, expand, contract, border
+	/// or smooth. `None` when the result selects nothing.
+	fn modify_selection(
+		&self,
+		selection: &Selection,
+		op: &SelectModify,
+		size: (u32, u32),
+		depth: BitDepth,
+		store: &TileStore,
+	) -> Result<Option<Selection>, CommandError>;
+
+	/// The pixels the Magic Wand selects in `doc` (M5-T04): the active layer's
+	/// own pixels, or the composite with `sample_all_layers`. `None` when
+	/// nothing matches.
+	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError>;
+
+	/// Replay a brush stroke on `layer` of `doc` (M5-T07): the layer's (or
+	/// its mask's) new image and offset. The engine implements it with the
+	/// brush engine of `fx-ops`, the same code its live strokes run.
+	#[allow(clippy::too_many_arguments)]
+	fn stroke(
+		&self,
+		_doc: &Document,
+		_layer: LayerId,
+		_target: crate::stroke::StrokeTarget,
+		_tool: &crate::stroke::StrokeTool,
+		_brush: &crate::stroke::BrushParams,
+		_color: [u16; 4],
+		_samples: &[crate::stroke::StrokeSample],
+		_store: &TileStore,
+	) -> Result<(TiledImage, (i32, i32)), CommandError> {
+		Err(CommandError::NotAllowed("painting needs the engine's brush engine".into()))
+	}
+
+	/// What Edit ▸ Paste pastes (M5-T05): the engine's clipboard. `None` =
+	/// empty.
+	fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {
+		None
+	}
 }
 
 /// A colour conversion between two RGB spaces.
