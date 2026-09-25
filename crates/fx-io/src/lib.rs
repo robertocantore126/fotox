@@ -88,11 +88,17 @@ pub fn import_file(path: &Path, store: &TileStore, progress: Progress<'_>) -> Re
 	};
 	match sniff(&header[..read]) {
 		Some(Sniffed::Tiff) => tiff::import(path, store, progress),
-		Some(Sniffed::Png) | Some(Sniffed::Jpeg) => Err(IoError::Unsupported("PNG and JPEG import arrive in M1-T09".into())),
+		Some(Sniffed::Png) => png::import(path, store, progress),
+		Some(Sniffed::Jpeg) => jpeg::import(path, store, progress),
 		None => Err(IoError::UnsupportedFormat),
 	}
 }
 
+mod band;
+mod jpeg;
+mod png;
+#[cfg(test)]
+mod png_jpeg_tests;
 mod tiff;
 #[cfg(test)]
 mod tiff_tests;
