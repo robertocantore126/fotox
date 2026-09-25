@@ -19,6 +19,7 @@ pub mod ops;
 pub mod pixels;
 pub mod selection;
 pub mod stroke;
+pub mod transform;
 
 pub use blend::BlendMode;
 pub use color::{BitDepth, ColorProfile, DocumentColor, RenderingIntent};
@@ -29,3 +30,4 @@ pub use history::History;
 pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
 pub use ops::{Conversion, FilterParams, PixelOps};
 pub use selection::{SelectMode, SelectModify, Selection, SelectionShape, WandParams};
+pub use transform::{BezierPatch, Filter, Mapping};

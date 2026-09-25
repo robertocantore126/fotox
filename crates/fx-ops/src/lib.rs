@@ -11,9 +11,10 @@
 //! replaces the preview when done (docs/ARCHITECTURE.md §4.5 — preview/final
 //! consistency rules).
 //!
-//! Planned modules: `brush` (dab engine, pressure, spacing, 16-bit
-//! accumulation), `clone`, `heal`, `blur`, `sharpen`, `noise`, `transform`
-//! (resampling: bicubic / Lanczos), `fill`.
+//! Modules: `brush` (dab engine, pressure, spacing, 16-bit accumulation),
+//! `filter` (Gaussian blur, unsharp mask), `flood`, `gaussian`, `morph`,
+//! `neighbourhood`, `raster`, and `resample` (M6-T01: Free Transform, Warp,
+//! Image Size — the one place a transform's geometry meets pixels).
 
 pub mod brush;
 pub mod filter;
@@ -24,3 +25,4 @@ pub mod gaussian;
 pub mod morph;
 pub mod neighbourhood;
 pub mod raster;
+pub mod resample;
