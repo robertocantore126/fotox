@@ -230,11 +230,40 @@ impl App {
 			Routed::Engine(message) => {
 				// The shell owns native dialogs: the chosen files go to the
 				// engine as `Open` (docs/tasks/M1.md, M1-T08).
-				if matches!(&message, UiToEngine::Action { id, .. } if id == "dlg:open") {
-					self.open_file_dialog();
+				if let UiToEngine::Action { id, .. } = &message {
+					match id.as_str() {
+						"dlg:open" => self.open_file_dialog(),
+						"export:png" => self.export_file_dialog("PNG", "png"),
+						"export:tiff" => self.export_file_dialog("TIFF", "tif"),
+						_ => {}
+					}
 				}
 				self.engine.send(EngineInput::Ui(message));
 			}
+		}
+	}
+
+	/// Show the native save dialog for an export (helper thread, like
+	/// [`open_file_dialog`](Self::open_file_dialog)); the chosen file comes
+	/// back as `AppEvent::ExportTo`.
+	fn export_file_dialog(&self, name: &'static str, extension: &'static str) {
+		let scheduler = self.app_event_scheduler.clone();
+		let spawned = std::thread::Builder::new().name("export-dialog".into()).spawn(move || {
+			let dialog = rfd::AsyncFileDialog::new()
+				.set_title(format!("Export As {name}"))
+				.set_file_name(format!("Untitled.{extension}"))
+				.add_filter(name, &[extension]);
+			if let Some(file) = futures::executor::block_on(dialog.save_file()) {
+				let mut path = file.path().to_path_buf();
+				// A name typed without the extension still gets the chosen format.
+				if path.extension().is_none() {
+					path.set_extension(extension);
+				}
+				scheduler.schedule(AppEvent::ExportTo(path));
+			}
+		});
+		if let Err(error) = spawned {
+			tracing::error!("cannot show the export dialog: {error}");
 		}
 	}
 
@@ -325,6 +354,7 @@ impl App {
 			}
 			AppEvent::Engine(output) => self.engine_output(event_loop, output),
 			AppEvent::OpenFiles(paths) => self.engine.send(EngineInput::Open(paths)),
+			AppEvent::ExportTo(path) => self.engine.send(EngineInput::Export(path)),
 			AppEvent::UiMessage(frame) => self.ui_message(&frame),
 			AppEvent::UiCrashed => {
 				tracing::error!("the UI crashed, exiting");

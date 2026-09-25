@@ -16,6 +16,7 @@
 
 pub mod b3;
 pub mod documents;
+pub mod export;
 pub mod layers;
 pub mod mips;
 pub mod thumbs;
@@ -94,6 +95,9 @@ pub enum EngineInput {
 	},
 	/// Open these files (native file dialog, drag and drop, command line).
 	Open(Vec<PathBuf>),
+	/// Export the active document, flattened, to this file (the shell's save
+	/// dialog; the format comes from the extension). M3.
+	Export(PathBuf),
 	Shutdown,
 }
 

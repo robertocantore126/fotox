@@ -44,7 +44,7 @@ Some UI messages are for the **shell** (`fx-app`), not the engine:
 | `hello` | `ui_version` | page loaded and receiver installed |
 | `direct_input` | `enabled` | a popup/menu/dialog opens (`false`) or all close (`true`) |
 | `viewport_bounds` | `x, y, width, height` (physical px) | layout change (`ResizeObserver` on `#viewport`, window resize, panel dock resize, screen mode change) |
-| `action` | `id`, `args?` | any Fotox action id from `js/data/menus.js` (`"doc:save"`, `"zoom:in"`, `"dlg:open"`, `"tool:brush"`…). Unknown ids → engine answers `toast`. |
+| `action` | `id`, `args?` | any Fotox action id from `js/data/menus.js` (`"doc:save"`, `"zoom:in"`, `"dlg:open"`, `"tool:brush"`…). Unknown ids → engine answers `toast`. The shell also answers `dlg:open` (native open dialog), `export:png` and `export:tiff` (native save dialog, then the engine exports the flattened document with `progress` and a `toast`). |
 | `command` | `doc`, `command` (an `fx_core::Command` JSON) | panels acting directly on the document (Layers panel opacity, visibility eye, rename…) |
 | `undo` / `redo` | `doc` | |
 | `activate_document` / `close_document` | `doc` | document tabs |

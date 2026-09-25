@@ -95,6 +95,7 @@ pub fn import_file(path: &Path, store: &TileStore, progress: Progress<'_>) -> Re
 }
 
 mod band;
+pub mod export;
 mod jpeg;
 mod png;
 #[cfg(test)]
@@ -102,3 +103,4 @@ mod png_jpeg_tests;
 mod tiff;
 #[cfg(test)]
 mod tiff_tests;
+pub mod tiff_write;

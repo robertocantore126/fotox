@@ -6,7 +6,6 @@
 mod bench;
 mod r#gen;
 mod info;
-mod tiffw;
 
 use std::path::PathBuf;
 
