@@ -27,7 +27,7 @@ use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
 use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
+use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -433,6 +433,43 @@ impl Engine {
 			)
 		};
 		let store = self.store.clone();
+		let (result, idle_cursor) = {
+			let Some(tool) = self.tools.get(&tool_id) else {
+				return changed;
+			};
+			let idle = tool.cursor(event.modifiers);
+			let Some(open) = self.docs.get_mut(doc_id) else {
+				return changed;
+			};
+			let mut ctx = ToolContext {
+				doc: &mut open.doc,
+				store: &store,
+				ops: &self.ops,
+				settings: &self.settings,
+				view: open.view.view,
+			};
+			(tool.pointer(&mut ctx, &event), idle)
+		};
+		// The view puts `Default` in for a plain hover (no gesture owns the
+		// cursor). A tool that has an idle cursor — the marquee's crosshair —
+		// takes that slot instead; a pan's Grab/Grabbing keeps it.
+		if changed.cursor == Some(CursorShape::Default) {
+			changed.cursor = Some(idle_cursor);
+		}
+		self.apply_tool_result(doc_id, result, &mut changed);
+		changed
+	}
+
+	/// Route a key the UI's shortcut map did not consume to the active tool
+	/// (M5-T04): Escape cancels the operation under way, Enter closes a
+	/// polygonal lasso, Backspace drops its last point.
+	fn tool_key(&mut self, key: &str) -> Changed {
+		let mut changed = Changed::default();
+		let Some(doc_id) = self.docs.active_id() else {
+			return changed;
+		};
+		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
+		let store = self.store.clone();
 		let result = {
 			let Some(tool) = self.tools.get(&tool_id) else {
 				return changed;
@@ -445,15 +482,17 @@ impl Engine {
 				store: &store,
 				ops: &self.ops,
 				settings: &self.settings,
+				view: open.view.view,
 			};
-			tool.pointer(&mut ctx, &event)
+			tool.key(&mut ctx, key)
 		};
 		self.apply_tool_result(doc_id, result, &mut changed);
 		changed
 	}
 
 	/// Apply what a tool answered (M5-T01): the cursor, a status line, a picked
-	/// colour for the UI, or a command to execute (R1).
+	/// colour for the UI, a command to execute (R1), or an overlay redraw
+	/// (M5-T04: a marquee or lasso rubber band, which needs no re-composite).
 	fn apply_tool_result(&mut self, doc_id: DocId, result: ToolResult, changed: &mut Changed) {
 		if let Some(cursor) = result.cursor {
 			changed.cursor = Some(cursor);
@@ -470,6 +509,9 @@ impl Engine {
 				rgba,
 				target: target.as_str().into(),
 			});
+		}
+		if result.redraw {
+			self.request_frame();
 		}
 		if let Some(command) = result.command {
 			self.command(doc_id, command);
@@ -560,6 +602,7 @@ impl Engine {
 				self.settings.bg = bg;
 				Changed::default()
 			}
+			UiToEngine::Key { key } => self.tool_key(&key),
 			UiToEngine::ProofSetup {
 				doc,
 				path,
@@ -607,6 +650,24 @@ impl Engine {
 					_ => self.to_ui(&EngineToUi::Toast {
 						text: "No filter applied yet".into(),
 					}),
+				}
+				return Changed::default();
+			}
+			// Select ▸ All / Deselect / Reselect / Inverse (M5-T04): the four
+			// selection commands the M5-T03 core added. Deselect and Reselect
+			// are quiet when there is nothing to do: Photoshop greys the items
+			// out, and the UI cannot know the selection state yet (T05/T10).
+			"sel:all" | "sel:none" | "sel:reselect" | "sel:inverse" => {
+				if let Some(doc) = self.docs.active_id() {
+					let command = match id {
+						"sel:all" => Some(Command::SelectAll),
+						"sel:none" => self.docs.get(doc).filter(|open| open.doc.selection.is_some()).map(|_| Command::Deselect),
+						"sel:reselect" => self.docs.get(doc).filter(|open| open.doc.reselect.is_some()).map(|_| Command::Reselect),
+						_ => Some(Command::InvertSelection),
+					};
+					if let Some(command) = command {
+						self.command(doc, command);
+					}
 				}
 				return Changed::default();
 			}

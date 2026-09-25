@@ -3,7 +3,11 @@
 
 const MODES = ["Normal", "Dissolve", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Darken", "Lighten", "Difference", "Exclusion", "Hue", "Saturation", "Color", "Luminosity"];
 
-const SELECTION_MODE = { type: "btngroup", icons: ["i-marquee", "i-plus", "i-minus", "i-object-select"], titles: ["New selection", "Add to selection", "Subtract from selection", "Intersect with selection"], active: 0 };
+// The Selection Mode button group (M5-T04). `key` gives the control a name in
+// `readOptions()`, which is what the engine reads as the tool's "Mode"; the
+// value is the index of the pressed button (0 New, 1 Add, 2 Subtract,
+// 3 Intersect).
+const SELECTION_MODE = { type: "btngroup", key: "Mode", icons: ["i-marquee", "i-plus", "i-minus", "i-object-select"], titles: ["New selection", "Add to selection", "Subtract from selection", "Intersect with selection"], active: 0 };
 
 export const optionBars = {
   _default: [{ type: "label", text: "No options for this tool" }],
@@ -20,9 +24,9 @@ export const optionBars = {
   marquee: [
     SELECTION_MODE, { type: "gap" },
     { type: "num", text: "Feather:", value: "0", unit: "px", width: 40 },
-    { type: "select", text: "Style:", options: ["Normal", "Fixed Ratio", "Fixed Size"], value: "Normal" },
-    { type: "num", text: "Width:", value: "", width: 48, disabled: true },
-    { type: "num", text: "Height:", value: "", width: 48, disabled: true },
+    { type: "select", text: "Style:", options: ["Normal", "Fixed Ratio", "Fixed Size"], value: "Normal", enables: ["Width", "Height"] },
+    { type: "num", text: "Width:", value: "64", width: 48 },
+    { type: "num", text: "Height:", value: "64", width: 48 },
     { type: "toggle", text: "Anti-alias", on: true },
   ],
   "marquee-ellipse": null, "marquee-row": null, "marquee-col": null,

@@ -17,11 +17,28 @@ export function renderOptionsBar(container, toolId) {
   clear(container);
   fields = [];
   const schema = optionsFor(toolId) || [];
+  // Style ▸ Width/Height: a schema entry may name the fields it enables
+  // (`enables`), so the marquee's size fields are greyed out under Normal
+  // (M5-T04). A dropdown pick has to re-run it: the value lives in a popup,
+  // not in the container, so no DOM event reaches us from there.
+  const sync = () => {
+    for (const { spec, el } of fields) {
+      if (spec?.type !== "select" || !spec.enables) continue;
+      const value = el.querySelector(".ob-value").textContent;
+      for (const field of fields) {
+        if (!spec.enables.includes(field.key)) continue;
+        field.el.classList.toggle("off", !value || value === "Normal");
+        const input = field.el.querySelector("input");
+        if (input) input.disabled = !value || value === "Normal";
+      }
+    }
+  };
   for (const spec of schema) {
-    const { el, read } = control(spec);
-    fields.push({ key: keyOf(spec), read });
+    const { el, read } = control(spec, sync);
+    fields.push({ key: keyOf(spec), spec, el, read });
     container.append(el);
   }
+  sync();
   container.append(h("span", { class: "ob-tail" }));
 }
 
@@ -54,14 +71,21 @@ export function onOptionsChange(container, cb) {
   container.addEventListener("click", notify);
 }
 
-/** The option key of a control: its label text without the trailing colon. */
+/**
+ * The option key of a control: `key` when the schema names one (a button
+ * group has no label to borrow), else its label text without the colon.
+ */
 function keyOf(spec) {
+  if (spec.key) return spec.key;
   if (!spec.text) return null;
   return spec.text.replace(/:\s*$/, "");
 }
 
-/** Build one control; `read` returns its value (or `null` when valueless). */
-function control(spec) {
+/**
+ * Build one control; `read` returns its value (or `null` when valueless), and
+ * `changed` is called after a pick that a `select` has to react to.
+ */
+function control(spec, changed) {
   switch (spec.type) {
     case "gap": return { el: h("span", { class: "ob-gap" }), read: null };
     case "sep": return { el: h("span", { class: "ob-sep" }), read: null };
@@ -71,7 +95,7 @@ function control(spec) {
     case "num": return num(spec);
     case "text": return textField(spec);
     case "range": return range(spec);
-    case "select": return select(spec);
+    case "select": return select(spec, changed);
     case "btngroup": return buttonGroup(spec);
     case "swatch": return swatch(spec);
     case "gradient": return gradient("Black to White");
@@ -124,7 +148,7 @@ function range(spec) {
   return { el, read: () => number(input.value) };
 }
 
-function select(spec) {
+function select(spec, changed) {
   const valueEl = h("span", { class: "ob-value", text: spec.value ?? (spec.options && spec.options[0]) ?? "" });
   const btn = h("button", {
     class: "ob-select" + (spec.disabled ? " off" : ""), type: "button", "data-tip": spec.label || spec.text || spec.value,
@@ -134,7 +158,11 @@ function select(spec) {
       openDropdown({
         anchor: btn, items: spec.options, value: valueEl.textContent,
         width: Math.max(120, btn.offsetWidth),
-        onPick: (v) => { valueEl.textContent = v; emit("mock", `${spec.label || "Value"}: ${v}`); },
+        onPick: (v) => {
+          valueEl.textContent = v;
+          if (changed) changed();
+          emit("mock", `${spec.label || "Value"}: ${v}`);
+        },
       });
     },
   }, spec.label ? h("span", { class: "ob-label", text: spec.label }) : null, valueEl, icon("i-chevron-down", "ic xs"));

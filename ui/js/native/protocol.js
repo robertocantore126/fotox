@@ -31,6 +31,10 @@ export const UI = Object.freeze({
   REQUEST_THUMBNAILS: "request_thumbnails",
   TOOL_OPTIONS: "tool_options",
   SET_COLORS: "set_colors",
+  // A key the shortcut map did not consume, for the viewport tools (M5-T04):
+  // Escape cancels a lasso, Enter closes a polygonal one, Backspace drops its
+  // last point. `key` is the DOM's `KeyboardEvent.key`.
+  KEY: "key",
 });
 
 /** Engine → UI message types (`EngineToUi`). */

@@ -129,6 +129,15 @@ pub enum UiToEngine {
 		fg: [u16; 4],
 		bg: [u16; 4],
 	},
+	/// A key the UI's shortcut map did not consume, for the viewport tools
+	/// (M5-T04): `"Escape"`, `"Enter"`, `"Backspace"`, `"ArrowLeft"`… named
+	/// like the DOM's `KeyboardEvent.key`, the tools match on those names.
+	/// The engine forwards it to the active tool, which uses it to finish or
+	/// cancel an operation that is under way (the polygonal lasso closes on
+	/// Enter, cancels on Escape).
+	Key {
+		key: String,
+	},
 }
 
 /// Answer to the "save changes before closing?" prompt (M3-T06).
@@ -447,6 +456,13 @@ mod tests {
 			fg: [0, 65535, 0, 65535],
 			bg: [65535, 65535, 65535, 65535],
 		};
+		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
+		assert_eq!(back, msg);
+	}
+
+	#[test]
+	fn key_round_trip() {
+		let msg = UiToEngine::Key { key: "Backspace".into() };
 		let (back, _): (UiToEngine, _) = decode(&encode_json(&msg)).unwrap();
 		assert_eq!(back, msg);
 	}

@@ -402,9 +402,12 @@ export const menus = [
   {
     id: "select", label: "Select", items: [
       it("All", "Ctrl+A", "sel:all"),
-      it("Deselect", "Ctrl+D", "sel:none", { dis: true }),
-      it("Reselect", "Shift+Ctrl+D", "sel:reselect", { dis: true }),
-      it("Inverse", "Shift+Ctrl+I", "sel:inverse", { dis: true }),
+      // The pixel selection works (M5-T03/T04): these four are live. They
+      // stay enabled even when there is nothing to deselect — the engine
+      // ignores the no-op; the UI learns the selection state later (T05).
+      it("Deselect", "Ctrl+D", "sel:none"),
+      it("Reselect", "Shift+Ctrl+D", "sel:reselect"),
+      it("Inverse", "Shift+Ctrl+I", "sel:inverse"),
       sep,
       it("All Layers", "Alt+Ctrl+A", "sel:all-layers"),
       it("Deselect Layers", "", "sel:none-layers", { dis: true }),

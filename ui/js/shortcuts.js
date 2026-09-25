@@ -4,6 +4,14 @@ import { setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
 import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
 import { toolSlots } from "./data/tools.js";
+import * as bridge from "./native/bridge.js";
+import { UI } from "./native/protocol.js";
+
+// Keys the viewport tools own (M5-T04): Escape cancels the marquee or lasso
+// being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last
+// point. Everything else stays with the menus and the shortcut map below, and
+// the engine ignores these when no tool has anything in progress.
+const VIEWPORT_KEYS = new Set(["Escape", "Enter", "Backspace", "Delete"]);
 
 const combos = [
   ["ctrl+n", "New...", "dlg:new-doc"],
@@ -75,6 +83,13 @@ export function initShortcuts() {
     if (e.key === "Escape") {
       if (isDialogOpen()) { closeAllDialogs(); e.preventDefault(); return; }
       if (typing) { e.target.blur(); return; }
+    }
+
+    // A viewport key (M5-T04): the tools get it before the menus do.
+    if (!typing && !isDialogOpen() && !e.ctrlKey && !e.metaKey && !e.altKey && VIEWPORT_KEYS.has(e.key)) {
+      bridge.send({ type: UI.KEY, key: e.key });
+      e.preventDefault();
+      return;
     }
 
     if (typing) return;

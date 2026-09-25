@@ -56,6 +56,7 @@ Some UI messages are for the **shell** (`fx-app`), not the engine:
 | `request_thumbnails` | `doc`, `layers`, `size` | Layers panel needs thumbnails |
 | `tool_options` | `tool`, `options` (a JSON object) | the active tool's option-bar values, keyed by the field text without the colon (`{"Size": 40, "Hardness": 75, "Mode": "Normal"}`); sent when a tool becomes active and on every change (M5-T01) |
 | `set_colors` | `fg`, `bg` (16-bit RGBA arrays) | the foreground/background colours: every swatch change, X (swap), D (defaults) (M5-T01) |
+| `key` | `key` (a DOM `KeyboardEvent.key`: `"Escape"`, `"Enter"`, `"Backspace"`, `"Delete"`) | a key the UI's shortcut map did not consume, for the active viewport tool (M5-T04): Escape drops the marquee/lasso being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last point. The engine ignores it when no tool has anything in progress |
 
 Action routing rule for the UI (`ui/js/actions.js`): actions that only change
 UI state (panels, screen modes, tool selection display) stay in JS as today;
@@ -90,6 +91,7 @@ not handle. The engine is the authority for anything that touches a document.
 {"type":"layers","doc":1,"revision":12,"layers":[{"id":7,"name":"Sky","kind":"pixel","depth":0,"visible":true,"opacity":0.5,"fill":1.0,"blend":"normal","clipped":false,"has_mask":false,"locked":false,"expanded":false,"selected":true}]}
 {"type":"tool_options","tool":"eyedropper","options":{"Sample Size":"3 by 3 Average","Sample":"All Layers"}}
 {"type":"set_colors","fg":[30,30,34,65535],"bg":[65535,65535,65535,65535]}
+{"type":"key","key":"Backspace"}
 {"type":"color_picked","rgba":[65535,0,0,65535],"target":"fg"}
 ```
 

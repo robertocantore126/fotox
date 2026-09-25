@@ -28,6 +28,9 @@ export function handle(message) {
       return [{ type: ENGINE.TOAST, text: `${message.id}: not implemented (mock engine)` }];
     case UI.TOOL_OPTIONS:
     case UI.SET_COLORS:
+    // A viewport key (M5-T04): only a tool with an operation in progress
+    // answers it, and the mock has none.
+    case UI.KEY:
       // Tool state is kept by the engine; the mock accepts and stays quiet.
       return [];
     default:

@@ -314,6 +314,12 @@ impl Documents {
 		self.docs.iter_mut().find(|d| d.id == id)
 	}
 
+	/// The open document with this id, to look at it (M5-T04: whether it has a
+	/// selection, so Select ▸ Deselect can stay quiet when it has none).
+	pub fn get(&self, id: DocId) -> Option<&OpenDoc> {
+		self.docs.iter().find(|d| d.id == id)
+	}
+
 	pub fn ids(&self) -> Vec<DocId> {
 		self.docs.iter().map(|d| d.id).collect()
 	}

@@ -27,6 +27,9 @@ pub enum Seen {
 	Ui(EngineToUi),
 	NeedSavePath(DocId),
 	MayClose(bool),
+	/// The cursor the engine asked the shell for (M5-T04: the marquee tools'
+	/// crosshair, taken over from the view's plain-hover default).
+	Cursor(fx_engine::CursorShape),
 }
 
 pub struct Harness {
@@ -46,6 +49,7 @@ impl Harness {
 				},
 				EngineOutput::NeedSavePath { doc, .. } => Seen::NeedSavePath(doc),
 				EngineOutput::MayClose(may) => Seen::MayClose(may),
+				EngineOutput::Cursor(shape) => Seen::Cursor(shape),
 				_ => return,
 			};
 			sink.lock().unwrap().push(item);
