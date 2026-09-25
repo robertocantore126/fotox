@@ -9,7 +9,7 @@ use fx_tiles::{TILE_SIZE, TileHandle, TileStore};
 use crate::adjust::{Lut, LutCache};
 use crate::blend::Premul;
 use crate::program::{TileProgram, build_program};
-use crate::reference::render_tile;
+use crate::reference::{render_tile, try_render_tile};
 use crate::testing::*;
 
 fn build(doc: &Document, tx: u32, ty: u32) -> TileProgram {
@@ -58,6 +58,26 @@ fn single_layer_reproduces_its_pixels() {
 			assert!(close(px(&out, x, y), premul), "tile ({tx},{ty}) px ({x},{y})");
 		}
 	}
+}
+
+#[test]
+fn try_render_tile_propagates_a_fetch_error_and_matches_render_tile() {
+	let store = store();
+	let mut doc = doc(512, 256);
+	let f = |x: u32, y: u32| [hash16(x, y, 9), 1000, 2000, 65535];
+	let layer = pixel_layer(&mut doc, &store, &f);
+	doc.layers.push(Arc::new(layer));
+	let program = build(&doc, 0, 0);
+
+	// A fetch that fails (a corrupt chunk, a lost scratch file) is returned,
+	// not turned into a panic.
+	let error = try_render_tile(&program, &|_: &TileHandle| Err("corrupt tile")).unwrap_err();
+	assert_eq!(error, "corrupt tile");
+
+	// A fetch that succeeds produces exactly what the infallible helper does.
+	let fetch = |h: &TileHandle| store.get(h).unwrap();
+	let via_try = try_render_tile(&program, &|h: &TileHandle| store.get(h)).expect("the store has the tiles");
+	assert_eq!(via_try, render_tile(&program, &fetch));
 }
 
 #[test]

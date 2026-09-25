@@ -355,6 +355,22 @@ mod tests {
 	}
 
 	#[test]
+	fn zoom_fill_covers_the_viewport_and_fit_is_unchanged() {
+		let mut s = ViewState::new((4000, 1000));
+		s.resize(800, 600);
+		let fit = s.view.zoom;
+		assert!((fit - 800.0 / 4000.0).abs() < 1e-12, "fit is limited by the width");
+
+		assert!(s.action("zoom:fill").unwrap().view);
+		assert!((s.view.zoom - 0.6).abs() < 1e-12, "fill = 600/1000, limited by the height");
+		assert_eq!((s.view.center_x, s.view.center_y), (2000.0, 500.0), "centred on the document");
+
+		// Fit still computes the same zoom afterwards.
+		s.action("zoom:fit").unwrap();
+		assert!((s.view.zoom - fit).abs() < 1e-12);
+	}
+
+	#[test]
 	fn set_zoom_clamps_and_rejects_nonsense() {
 		let mut s = state();
 		s.set_zoom(1000.0);

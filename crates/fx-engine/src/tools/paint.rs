@@ -347,3 +347,76 @@ impl Tool for Paint {
 		self.hover = None;
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::tools::testing::Fixture;
+
+	/// Like [`Fixture::pointer`], but with explicit button bits: a hover move
+	/// carries none (the real window only sends those while a button is held).
+	fn pointer(f: &mut Fixture, tool: &mut dyn Tool, kind: PointerKind, x: f64, y: f64, buttons: u8, modifiers: Modifiers) -> ToolResult {
+		let event = DocPointer {
+			kind,
+			x,
+			y,
+			pressure: 1.0,
+			tilt_x: 0.0,
+			tilt_y: 0.0,
+			buttons,
+			modifiers,
+			time_us: 0,
+		};
+		let mut ctx = ToolContext {
+			doc: &mut f.doc,
+			store: &f.store,
+			ops: &f.ops,
+			settings: &f.settings,
+			view: f.view,
+			mask_target: false,
+		};
+		tool.pointer(&mut ctx, &event)
+	}
+
+	#[test]
+	fn a_move_without_the_button_ends_the_stroke() {
+		let mut f = Fixture::new("paint-hover", (200, 200), 1.0);
+		let mut tool = Paint::new("brush", Kind::Brush);
+		let down = f.pointer(&mut tool, PointerKind::Down, 10.0, 10.0, Modifiers::default());
+		assert!(matches!(down.strokes.as_slice(), [StrokeEvent::Begin { .. }]), "{:?}", down.strokes);
+
+		let hover = pointer(&mut f, &mut tool, PointerKind::Move, 30.0, 30.0, 0, Modifiers::default());
+		assert_eq!(hover.strokes, vec![StrokeEvent::End], "the lost release is recovered");
+	}
+
+	#[test]
+	fn cancel_ends_the_gesture_and_a_later_move_is_quiet() {
+		let mut f = Fixture::new("paint-cancel", (200, 200), 1.0);
+		let mut tool = Paint::new("brush", Kind::Brush);
+		f.pointer(&mut tool, PointerKind::Down, 10.0, 10.0, Modifiers::default());
+
+		assert!(tool.cancel(), "the gesture was dropped");
+		assert!(!tool.cancel(), "there is nothing left to cancel");
+
+		let after = pointer(&mut f, &mut tool, PointerKind::Move, 30.0, 30.0, 1, Modifiers::default());
+		assert!(after.strokes.is_empty(), "a cancelled stroke stays cancelled: {:?}", after.strokes);
+	}
+
+	#[test]
+	fn document_changed_forgets_the_clone_source() {
+		let mut f = Fixture::new("paint-clone", (200, 200), 1.0);
+		let mut tool = Paint::new("clone", Kind::Clone);
+		let alt = Modifiers {
+			alt: true,
+			..Default::default()
+		};
+		let set = f.pointer(&mut tool, PointerKind::Down, 50.0, 50.0, alt);
+		assert_eq!(set.info.as_deref(), Some("Clone source set"));
+
+		// The source was in the old document's coordinates, so a switch drops it.
+		tool.document_changed();
+		let down = f.pointer(&mut tool, PointerKind::Down, 10.0, 10.0, Modifiers::default());
+		assert_eq!(down.info.as_deref(), Some("Alt-click to define a source point"));
+		assert!(down.strokes.is_empty(), "no stroke started");
+	}
+}

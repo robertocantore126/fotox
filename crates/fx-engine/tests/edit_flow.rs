@@ -4,9 +4,61 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use common::{Harness, Seen, gpu, opened, tiff};
 use fx_engine::{EngineInput, Modifiers, PointerInput, PointerKind};
 use fx_protocol::{DocId, EngineToUi, UiToEngine};
+
+/// Wait until `pred` holds over everything the engine has said so far (the
+/// queue is not drained), or panic after `ms`.
+fn wait_until(harness: &Harness, what: &str, ms: u64, pred: impl Fn(&[Seen]) -> bool) {
+	let deadline = Instant::now() + Duration::from_millis(ms);
+	loop {
+		if pred(harness.seen.lock().unwrap().as_slice()) {
+			return;
+		}
+		assert!(
+			Instant::now() < deadline,
+			"timed out waiting for {what}; seen {:?}",
+			harness
+				.seen
+				.lock()
+				.unwrap()
+				.iter()
+				.filter_map(|s| match s {
+					Seen::Ui(EngineToUi::Toast { text }) => Some(format!("toast: {text}")),
+					Seen::Ui(EngineToUi::Error { text }) => Some(format!("error: {text}")),
+					Seen::Ui(EngineToUi::Progress { task, label, fraction }) => Some(format!("progress #{task} {label} {fraction}")),
+					Seen::Ui(EngineToUi::ProgressDone { task }) => Some(format!("progress done #{task}")),
+					_ => None,
+				})
+				.collect::<Vec<_>>()
+		);
+		std::thread::sleep(Duration::from_millis(10));
+	}
+}
+
+/// Wait up to `ms` for something `pick` accepts, without failing when it does
+/// not come. For "nothing else happened" assertions (the harness `wait`
+/// panics on timeout instead).
+fn wait_briefly<T>(harness: &Harness, ms: u64, pick: impl Fn(&Seen) -> Option<T>) -> Option<T> {
+	let deadline = Instant::now() + Duration::from_millis(ms);
+	loop {
+		{
+			let mut seen = harness.seen.lock().unwrap();
+			if let Some(i) = seen.iter().position(|s| pick(s).is_some()) {
+				let found = pick(&seen[i]);
+				seen.drain(..=i);
+				return found;
+			}
+		}
+		if Instant::now() >= deadline {
+			return None;
+		}
+		std::thread::sleep(Duration::from_millis(10));
+	}
+}
 
 /// The label of the step a History message reports, or the error/toast the
 /// engine answered with instead (so a failure says why).
@@ -157,4 +209,116 @@ fn painting_with_the_brush_eraser_and_on_a_mask_records_strokes() {
 		_ => None,
 	});
 	harness.engine.shutdown();
+}
+
+#[test]
+fn a_second_save_while_one_runs_is_refused_or_queued_behind_it() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-save-guard-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+
+	// Give the document a file first (Save As), so Save below is incremental
+	// rather than another "where do I write?" dialog.
+	let fxd = dir.join("out.fxd");
+	let saved = |s: &Seen| matches!(s, Seen::Ui(EngineToUi::Toast { text }) if text.starts_with("Saved "));
+	let refused = |s: &Seen| matches!(s, Seen::Ui(EngineToUi::Toast { text }) if text == "Wait until the save is finished");
+	harness.engine.send(EngineInput::SaveAs { doc, path: fxd.clone() });
+	harness.wait("the Save As", |s| saved(s).then_some(()));
+
+	// Two Saves right behind each other: the second must not run a second
+	// writer over the file while the first is still appending (S1-02).
+	action(&harness, "doc:save", serde_json::Value::Null);
+	action(&harness, "doc:save", serde_json::Value::Null);
+	// Either the second was refused, or it ran after the first finished.
+	wait_until(&harness, "the saves to settle", 30_000, |seen| {
+		seen.iter().any(refused) || seen.iter().filter(|s| saved(s)).count() >= 2
+	});
+	// No save may still be writing when the file is read.
+	wait_until(&harness, "a finished save", 30_000, |seen| seen.iter().any(saved));
+
+	// Either way the file must be a readable .fxd.
+	let store = fx_tiles::TileStore::new(fx_tiles::TileStoreConfig::for_tests(dir.join("reopen"))).unwrap();
+	let reopened = fx_io::fxd::open(&fxd, &store);
+	assert!(reopened.is_ok(), "reopening {fxd:?} failed: {:?}", reopened.err());
+
+	harness.engine.shutdown();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn switching_tool_mid_stroke_records_one_step_and_a_hover_records_none() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-tool-switch-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+
+	action(&harness, "tool:brush", serde_json::Value::Null);
+	harness.ui(UiToEngine::ToolOptions {
+		tool: "brush".into(),
+		options: serde_json::json!({ "Size": 30, "Smoothing": 0 }),
+	});
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Down, 100.0, 150.0, 1)));
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Move, 160.0, 170.0, 1)));
+	// The tool changes mid-stroke: the stroke is ended, the release goes to
+	// the marquee (which never saw a press, so it stays quiet).
+	action(&harness, "tool:marquee", serde_json::Value::Null);
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 160.0, 170.0, 0)));
+
+	let (labels, current) = harness.wait("the stroke step", |s| match s {
+		Seen::Ui(EngineToUi::History { doc: d, labels, current, .. }) if *d == doc => Some((labels.clone(), *current)),
+		_ => None,
+	});
+	assert_eq!(labels, vec!["Brush Tool".to_string()], "the gesture is one step");
+	assert_eq!(current, 1);
+
+	// Back to the brush; a plain hover (no button) must not paint or record.
+	action(&harness, "tool:brush", serde_json::Value::Null);
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Move, 300.0, 300.0, 0)));
+	let more = wait_briefly(&harness, 300, |s| match s {
+		Seen::Ui(EngineToUi::History { .. }) => Some(()),
+		_ => None,
+	});
+	assert!(more.is_none(), "a hover after the cancelled stroke records nothing");
+
+	harness.engine.shutdown();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zoom_fill_shows_more_of_the_document_than_fit() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-zoom-fill-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+
+	action(&harness, "zoom:fit", serde_json::Value::Null);
+	let fit = harness.wait("the fitted view", |s| match s {
+		Seen::Ui(EngineToUi::View { doc: d, zoom, .. }) if *d == doc => Some(*zoom),
+		_ => None,
+	});
+	action(&harness, "zoom:fill", serde_json::Value::Null);
+	let fill = harness.wait("the filled view", |s| match s {
+		Seen::Ui(EngineToUi::View { doc: d, zoom, .. }) if *d == doc => Some(*zoom),
+		_ => None,
+	});
+	assert!(fill > fit, "Fill Screen ({fill}) covers the viewport more than Fit ({fit})");
+
+	harness.engine.shutdown();
+	let _ = std::fs::remove_dir_all(&dir);
 }

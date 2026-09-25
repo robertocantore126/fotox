@@ -2904,6 +2904,50 @@ mod tests {
 	}
 
 	#[test]
+	fn delete_mask_apply_refuses_a_pixel_locked_layer_and_leaves_the_mask() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		f.paint(a, &[(0, 0, [500, 600, 700, 65535])]);
+		f.ok(Command::AddMask {
+			layer: LayerRef::Id(a),
+			fill: MaskFill::RevealAll,
+		});
+		f.fill_mask(a, (0, 0), 32768);
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(a),
+			props: LayerPropsPatch {
+				locked_pixels: Some(true),
+				..Default::default()
+			},
+		});
+
+		// Applying bakes the mask into the pixels, so the pixel lock refuses it
+		// and the mask stays linked to the layer.
+		let error = f.fail(Command::DeleteMask {
+			layer: LayerRef::Id(a),
+			apply: true,
+		});
+		assert!(matches!(error, CommandError::Locked(id) if id == a), "{error:?}");
+		assert!(f.layer(a).mask.is_some(), "the failed command put the mask back");
+		assert_eq!(f.read_pixel(a, 0, 0), [500, 600, 700, 65535], "no pixel was touched");
+
+		// Without the lock the very same command still applies.
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(a),
+			props: LayerPropsPatch {
+				locked_pixels: Some(false),
+				..Default::default()
+			},
+		});
+		f.ok(Command::DeleteMask {
+			layer: LayerRef::Id(a),
+			apply: true,
+		});
+		assert!(f.layer(a).mask.is_none());
+		assert_eq!(f.read_pixel(a, 0, 0), [500, 600, 700, scale_alpha16(65535, 32768)]);
+	}
+
+	#[test]
 	fn delete_mask_apply_scales_a_whole_tile_with_a_uniform_mask() {
 		let mut f = Fixture::new();
 		let a = f.add_pixel("A");

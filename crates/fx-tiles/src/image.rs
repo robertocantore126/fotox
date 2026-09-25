@@ -257,6 +257,23 @@ mod tests {
 	}
 
 	#[test]
+	fn slot_for_collapses_uniform_buffers_and_stores_the_rest() {
+		use crate::store::TileStoreConfig;
+
+		let store = TileStore::new(TileStoreConfig::for_tests(std::env::temp_dir().join("fx-tiles-image-tests"))).expect("test store");
+
+		let transparent = TileBuffer::zeroed(PixelFormat::Rgba8);
+		assert!(slot_for(&store, transparent).is_empty(), "a transparent buffer is Empty");
+
+		let opaque = TileBuffer::filled(PixelFormat::Rgba8, PixelValue::rgba8(10, 20, 30, 255));
+		assert!(matches!(slot_for(&store, opaque), TileSlot::Solid(_)), "a uniform opaque buffer is Solid");
+
+		let mut noisy = TileBuffer::filled(PixelFormat::Rgba8, PixelValue::rgba8(10, 20, 30, 255));
+		noisy.bytes_mut()[0] = 99;
+		assert!(matches!(slot_for(&store, noisy), TileSlot::Data(_)), "a non-uniform buffer is Data");
+	}
+
+	#[test]
 	fn clone_is_a_snapshot() {
 		let mut img = TiledImage::new(512, 512, PixelFormat::Rgba8);
 		let red = TileSlot::Solid(PixelValue::rgba8(255, 0, 0, 255));
