@@ -147,7 +147,9 @@ function control(spec, changed) {
     case "gap": return { el: h("span", { class: "ob-gap" }), read: null };
     case "sep": return { el: h("span", { class: "ob-sep" }), read: null };
     case "label": return { el: h("span", { class: "ob-label", text: spec.text }), read: null };
-    case "btn": return { el: h("button", { class: "ob-btn", type: "button", text: spec.text, onclick: () => emit("mock", spec.text) }), read: null };
+    // A button that acts (`action`) sends that action id instead of the mock
+    // toast, like the ✓/✗ groups above (M6-T05's Reset View).
+    case "btn": return { el: h("button", { class: "ob-btn", type: "button", text: spec.text, onclick: () => emit(spec.action ? "action" : "mock", spec.action || spec.text) }), read: null };
     case "toggle": return toggle(spec);
     case "num": return num(spec);
     case "text": return textField(spec);

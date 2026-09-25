@@ -540,6 +540,17 @@ impl Engine {
 			self.transform_update(doc_id, update);
 			return changed;
 		}
+		// Esc with the Rotate View tool (R) resets the rotation to 0°, the same
+		// as Rotate View ▸ Reset View (M6-T05).
+		if key == "Escape"
+			&& let Some(open) = self.docs.get_mut(doc_id)
+			&& open.view.tool == "rotate-view"
+		{
+			let reset = open.view.set_rotation(0.0);
+			if reset.view {
+				return reset;
+			}
+		}
 		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
 		let store = self.store.clone();
 		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
@@ -3070,7 +3081,7 @@ impl Engine {
 			zoom: view.zoom,
 			center_x: view.center_x,
 			center_y: view.center_y,
-			rotation_deg: 0.0,
+			rotation_deg: view.rotation.to_degrees(),
 		});
 		self.last_view_message = Some(Instant::now());
 		self.view_message_pending = false;

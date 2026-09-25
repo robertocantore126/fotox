@@ -405,6 +405,7 @@ impl TilePipeline {
 			(viewport.width, viewport.height),
 			&plan,
 			view.zoom,
+			view.rotation,
 			self.compositor.composite_view(),
 			&vertices,
 			time,

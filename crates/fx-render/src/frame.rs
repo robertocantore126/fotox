@@ -53,8 +53,12 @@ pub fn plan_frame(
 	level_count: usize,
 	ready: &dyn Fn(TileKey) -> Option<u32>,
 ) -> FramePlan {
-	let (dx0, dy0) = view.doc_to_screen(viewport, 0.0, 0.0);
-	let (dx1, dy1) = view.doc_to_screen(viewport, doc_w as f64, doc_h as f64);
+	// Quads are sent in the *unrotated* screen space; the viewport shader
+	// turns them about the viewport centre by `ViewTransform::rotation`
+	// (M6-T05), so a tile stays a rotated-quad draw.
+	let flat = view.unrotated();
+	let (dx0, dy0) = flat.doc_to_screen(viewport, 0.0, 0.0);
+	let (dx1, dy1) = flat.doc_to_screen(viewport, doc_w as f64, doc_h as f64);
 	let mut plan = FramePlan {
 		doc_rect: [dx0 as f32, dy0 as f32, dx1 as f32, dy1 as f32],
 		complete: true,
@@ -139,8 +143,10 @@ pub fn plan_frame(
 
 fn tile_screen_rect(view: &ViewTransform, viewport: ViewportSize, key: TileKey) -> [f32; 4] {
 	let size = (TILE_SIZE as f64) * (1u64 << key.level) as f64;
-	let (x0, y0) = view.doc_to_screen(viewport, key.tx as f64 * size, key.ty as f64 * size);
-	let (x1, y1) = view.doc_to_screen(viewport, (key.tx + 1) as f64 * size, (key.ty + 1) as f64 * size);
+	// Unrotated: the shader turns the quad (see `plan_frame`).
+	let flat = view.unrotated();
+	let (x0, y0) = flat.doc_to_screen(viewport, key.tx as f64 * size, key.ty as f64 * size);
+	let (x1, y1) = flat.doc_to_screen(viewport, (key.tx + 1) as f64 * size, (key.ty + 1) as f64 * size);
 	[x0 as f32, y0 as f32, x1 as f32, y1 as f32]
 }
 
@@ -158,6 +164,7 @@ mod tests {
 			zoom: 1.0,
 			center_x: 5000.0,
 			center_y: 5000.0,
+			rotation: 0.0,
 		};
 		let plan = plan_frame(&view, VP, 30_000, 30_000, 8, &|_| Some(0));
 		let range = view.visible_tiles(VP, 30_000, 30_000, 0).unwrap();
@@ -172,6 +179,7 @@ mod tests {
 			zoom: 1.0,
 			center_x: 1100.0,
 			center_y: 1100.0,
+			rotation: 0.0,
 		};
 		// Only level-2 tiles are ready.
 		let plan = plan_frame(&view, VP, 30_000, 30_000, 8, &|k| (k.level == 2).then_some(100 + k.tx + 10 * k.ty));
@@ -202,6 +210,7 @@ mod tests {
 			zoom: 1.0,
 			center_x: 1024.0,
 			center_y: 1024.0,
+			rotation: 0.0,
 		};
 		let ready: HashMap<TileKey, u32> = [(TileKey { level: 0, tx: 4, ty: 4 }, 1), (TileKey { level: 3, tx: 0, ty: 0 }, 2)].into();
 		let plan = plan_frame(&view, VP, 30_000, 30_000, 8, &|k| ready.get(&k).copied());

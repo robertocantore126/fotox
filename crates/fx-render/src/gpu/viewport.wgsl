@@ -15,11 +15,11 @@ struct Globals {
 	nearest: u32,           // 1 = hard pixels (zoom >= 100 %)
 	apply_lut: u32,         // 1 = run the composite through the display LUT
 	gamut_warning: f32,     // 1 = paint out-of-gamut colours grey (LUT alpha = 0)
+	rotation: f32,          // view rotation about the viewport centre, radians
 	// Scalars, not a vec3: a vec3 would align to 16 bytes and break the Rust layout.
 	_unused0: f32,
 	_unused1: f32,
-	_unused2: f32,
-	doc_rect: vec4<f32>,    // x0 y0 x1 y1, screen pixels
+	doc_rect: vec4<f32>,    // x0 y0 x1 y1, unrotated screen pixels
 }
 
 struct Draw {
@@ -55,6 +55,16 @@ fn to_clip(p: vec2<f32>) -> vec4<f32> {
 	return vec4<f32>(p.x / globals.size.x * 2.0 - 1.0, 1.0 - p.y / globals.size.y * 2.0, 0.0, 1.0);
 }
 
+// Rotate a screen point about the viewport centre (M6-T05). The frame plan
+// sends quads in the unrotated screen space; the shader turns them.
+fn turn_view(p: vec2<f32>) -> vec2<f32> {
+	let c = globals.size * 0.5;
+	let s = sin(globals.rotation);
+	let co = cos(globals.rotation);
+	let d = p - c;
+	return vec2<f32>(d.x * co - d.y * s, d.x * s + d.y * co) + c;
+}
+
 // Instance 0 = checkerboard over the document rect; instance i>0 = draws[i-1].
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
@@ -62,14 +72,14 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 	let c = corner(vi);
 	if ii == 0u {
 		let r = globals.doc_rect;
-		out.pos = to_clip(mix(r.xy, r.zw, c));
+		out.pos = to_clip(turn_view(mix(r.xy, r.zw, c)));
 		out.uv = c;
 		out.slot = 0u;
 		out.kind = 0u;
 		return out;
 	}
 	let d = draws[ii - 1u];
-	out.pos = to_clip(mix(d.dst.xy, d.dst.zw, c));
+	out.pos = to_clip(turn_view(mix(d.dst.xy, d.dst.zw, c)));
 	out.uv = mix(d.src.xy, d.src.zw, c);
 	out.slot = d.slot;
 	out.kind = 1u;

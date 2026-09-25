@@ -109,6 +109,19 @@ fn plan() -> FramePlan {
 
 /// Render the pass and read the target back as RGBA8 rows.
 fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::TextureView, lut: Option<&Lut3d>, overlay: &[OverlayVertex]) -> Vec<[u8; 4]> {
+	render_turned(device, queue, tiles, lut, overlay, 0.0)
+}
+
+/// The same, with a view rotation in radians about the viewport centre
+/// (M6-T05); the shader turns the quads the (unrotated) plan sends.
+fn render_turned(
+	device: &wgpu::Device,
+	queue: &wgpu_sync::Queue,
+	tiles: &wgpu::TextureView,
+	lut: Option<&Lut3d>,
+	overlay: &[OverlayVertex],
+	rotation: f64,
+) -> Vec<[u8; 4]> {
 	let mut renderer = ViewportRenderer::new(device, queue, VIEWPORT_FORMAT);
 	let target = device.create_texture(&wgpu::TextureDescriptor {
 		label: Some("fx-test-viewport"),
@@ -134,6 +147,7 @@ fn render(device: &wgpu::Device, queue: &wgpu_sync::Queue, tiles: &wgpu::Texture
 		(SIZE, SIZE),
 		&plan(),
 		1.0,
+		rotation,
 		tiles,
 		overlay,
 		0.0,
@@ -246,6 +260,43 @@ fn the_lut_runs_on_straight_colour_before_the_checkerboard() {
 }
 
 #[test]
+fn a_quarter_turn_moves_the_document_corners_off_screen() {
+	// M6-T05: the plan draws the tile over the whole viewport (unrotated); the
+	// shader turns it about the centre, so the centre keeps the document's
+	// colour and the corners fall outside the turned quad onto the background.
+	let (_gpu, device, queue) = gpu_or_skip!();
+	let tiles = tiles_texture(&device, &queue, [0.2, 0.6, 0.9, 1.0]);
+	let pixels = render_turned(&device, &queue, &tiles, None, &[], std::f64::consts::FRAC_PI_4);
+	let at = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
+	let document = [to_u8(0.2), to_u8(0.6), to_u8(0.9), 255];
+	let centre = at(SIZE / 2, SIZE / 2);
+	for c in 0..4 {
+		assert!(
+			(i32::from(centre[c]) - i32::from(document[c])).abs() <= 1,
+			"the centre stays the document: {centre:?} vs {document:?}"
+		);
+	}
+	let background = to_u8(crate::gpu::viewport::BACKGROUND.r);
+	let corner = at(1, 1);
+	for c in 0..3 {
+		assert!(
+			(i32::from(corner[c]) - i32::from(background)).abs() <= 2,
+			"a 45° turn must clear the corner: {corner:?} vs background {background}"
+		);
+	}
+	// Without the turn the same corner is the document's colour, so the test
+	// measures the rotation and nothing else.
+	let straight = render(&device, &queue, &tiles, None, &[]);
+	let flat = straight[SIZE as usize + 1];
+	for c in 0..3 {
+		assert!(
+			(i32::from(flat[c]) - i32::from(document[c])).abs() <= 1,
+			"unrotated the corner is the document: {flat:?}"
+		);
+	}
+}
+
+#[test]
 fn an_overlay_line_lands_on_the_expected_pixels() {
 	// M5-T02: the overlay pass draws after the tiles, in screen space. At zoom
 	// 1 with the view centred on the viewport the document and screen
@@ -263,6 +314,7 @@ fn an_overlay_line_lands_on_the_expected_pixels() {
 		zoom: 1.0,
 		center_x: 128.0,
 		center_y: 128.0,
+		rotation: 0.0,
 	};
 	let viewport = ViewportSize { width: SIZE, height: SIZE };
 	let vertices = tessellate(&overlay, &view, viewport);

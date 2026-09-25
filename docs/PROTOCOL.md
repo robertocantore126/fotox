@@ -76,7 +76,10 @@ M6 actions the engine owns: `img:rot90cw` / `img:rot90ccw` / `img:rot180` /
 `img:crop` (crop to the selection's bounds, M6-T03); `edit:trim`
 (`args: {based_on, away}` from the Trim dialog: `based_on` is the dialog's
 "Based On" label, `away` the ticked edges `"Top"`, `"Left"`, `"Bottom"`,
-`"Right"`); `tool:commit` / `tool:cancel` (the option bar's ✓ and ✗, the
+`"Right"`); `view:reset-rotation` (Rotate View ▸ Reset View, and Escape with
+the Rotate View tool active: the view rotation back to 0°; the `view`
+message carries the current angle in `rotation_deg`); `tool:commit` /
+`tool:cancel` (the option bar's ✓ and ✗, the
 same as Enter and Escape for the active tool). The crop tool's ✓ sends
 `{"op":"crop","rect":[x,y,w,h],"angle_deg":a,"delete_cropped":b}`.
 Free Transform (M6-T04): `xf:free` (Ctrl+T) puts a box over the active layer

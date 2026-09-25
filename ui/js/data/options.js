@@ -136,7 +136,7 @@ export const optionBars = {
   "shape-3d": [{ type: "label", text: "Drag to draw a 3D object, then use the 3D panel to rotate it" }],
 
   hand: [{ type: "toggle", text: "Scroll All Windows", on: false }, { type: "toggle", text: "Zoom to Fit on Resize", on: false }],
-  "rotate-view": [{ type: "btn", text: "Reset View" }, { type: "toggle", text: "Rotate All Windows", on: false }],
+  "rotate-view": [{ type: "btn", text: "Reset View", action: "view:reset-rotation" }, { type: "toggle", text: "Rotate All Windows", on: false }],
   zoom: [{ type: "btngroup", icons: ["i-zoom-in", "i-zoom-out"], titles: ["Zoom In", "Zoom Out"], active: 0 }, { type: "toggle", text: "Resize Windows to Fit", on: true }, { type: "toggle", text: "Scrubby Zoom", on: false }, { type: "btn", text: "Fit on Screen" }, { type: "btn", text: "100%" }],
   "quick-mask": [{ type: "label", text: "Masked areas are protected while you paint" }, { type: "btn", text: "Exit Quick Mask" }],
   screen: [{ type: "label", text: "Press F repeatedly: Standard · Full Screen with Menu · Full Screen" }],

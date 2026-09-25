@@ -482,6 +482,7 @@ fn viewport_pass_draws_background_checkerboard_and_tiles() {
 		zoom: 0.25,
 		center_x: 256.0,
 		center_y: 128.0,
+		rotation: 0.0,
 	};
 	// Level-0 tiles only exist, so ask the planner at a level-0 zoom for the lookup.
 	let plan = crate::plan_frame(&view, vp, 512, 256, 1, &|k| slots.get(&(k.tx, k.ty)).copied());
@@ -504,7 +505,17 @@ fn viewport_pass_draws_background_checkerboard_and_tiles() {
 	let view_tex = texture.create_view(&Default::default());
 	let mut renderer = super::ViewportRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 	let mut encoder = device.create_command_encoder(&Default::default());
-	renderer.render(&mut encoder, &view_tex, (vp.width, vp.height), &plan, view.zoom, gpu.composite_view(), &[], 0.0);
+	renderer.render(
+		&mut encoder,
+		&view_tex,
+		(vp.width, vp.height),
+		&plan,
+		view.zoom,
+		view.rotation,
+		gpu.composite_view(),
+		&[],
+		0.0,
+	);
 	let readback = device.create_buffer(&wgpu::BufferDescriptor {
 		label: None,
 		size: (512 * vp.height) as u64,

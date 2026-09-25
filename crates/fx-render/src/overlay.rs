@@ -135,7 +135,8 @@ pub fn tessellate(overlay: &Overlay, view: &ViewTransform, viewport: ViewportSiz
 			OverlayItem::Circle { centre, radius, style } => {
 				let (cx, cy) = *centre;
 				// A circle in document space stays a circle on screen at any
-				// zoom (the view has no rotation yet).
+				// zoom, and at any view rotation: the mapping is a rigid
+				// transform (M6-T05).
 				let points: Vec<[f32; 2]> = (0..CIRCLE_SEGMENTS)
 					.map(|i| {
 						let angle = std::f64::consts::TAU * (i as f64) / (CIRCLE_SEGMENTS as f64);
@@ -332,6 +333,7 @@ mod tests {
 			zoom,
 			center_x: 5.0,
 			center_y: 5.0,
+			rotation: 0.0,
 		}
 	}
 

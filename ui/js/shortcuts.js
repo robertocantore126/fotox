@@ -1,6 +1,6 @@
 // Fotox — scorciatoie da tastiera.
 
-import { setTool, emit } from "./state.js";
+import { state, setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
 import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
 import { isPopupOpen } from "./popup.js";
@@ -78,6 +78,13 @@ const combos = [
 
 const toolKeys = {};
 for (const slot of toolSlots) toolKeys[slot.key.toLowerCase()] = slot.id;
+
+// Every tool a slot's letter groups together, the slot first (M6-T05): Shift +
+// the letter cycles them, Photoshop's way of reaching a flyout tool without
+// stealing a letter from another slot (the Rotate View tool, in the Hand
+// group, is the one that matters here).
+const toolGroups = new Map();
+for (const slot of toolSlots) toolGroups.set(slot.key.toLowerCase(), [slot, ...slot.flyout]);
 
 function comboOf(e) {
   const parts = [];
@@ -183,6 +190,18 @@ export function initShortcuts() {
       runAction({ label: "Screen Mode", a: "screen:cycle" });
       e.preventDefault();
       return;
+    }
+
+    // Shift + a slot's letter steps to the next tool in that slot's group
+    // (M6-T05): with the Hand slot it reaches the Rotate View tool.
+    if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+      const group = toolGroups.get(e.key.toLowerCase());
+      if (group && group.length > 1) {
+        const at = group.findIndex((t) => t.id === state.tool);
+        setTool(group[(at + 1) % group.length].id);
+        e.preventDefault();
+        return;
+      }
     }
 
     if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {

@@ -449,6 +449,7 @@ pub(crate) mod testing {
 					zoom,
 					center_x: f64::from(size.0) / 2.0,
 					center_y: f64::from(size.1) / 2.0,
+					rotation: 0.0,
 				},
 				time_us: 0,
 			}

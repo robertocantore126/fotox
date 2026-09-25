@@ -739,7 +739,10 @@ mod tests {
 		assert_eq!((w, h), (30, 29), "ceil of the mapped box each way");
 		assert_eq!((x, y), (-8, 0));
 		// A warp is boxed by its control points (M6-T04).
-		assert_eq!(dest_rect(&Mapping::Warp(BezierPatch::identity(10, 10)), [0.0, 0.0, 10.0, 10.0]), Some(((0, 0), (10, 10))));
+		assert_eq!(
+			dest_rect(&Mapping::Warp(BezierPatch::identity(10, 10)), [0.0, 0.0, 10.0, 10.0]),
+			Some(((0, 0), (10, 10)))
+		);
 	}
 
 	#[test]
