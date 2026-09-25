@@ -21,6 +21,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use fx_core::{Document, LayerId};
@@ -30,6 +31,7 @@ use fx_render::gpu::{CompositorConfig, GpuCompositor, TileOutcome, ViewportRende
 use fx_render::{FramePlan, MipRequest, TestPatternRenderer, TileKey, TileProgram, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame};
 use fx_tiles::{TILE_SIZE, TileId, TileStore};
 
+use crate::stats::RenderStats;
 use crate::{EngineOutput, OutputSink};
 
 /// Programs built per frame, at most (the rest wait for the next frame).
@@ -38,6 +40,9 @@ const MAX_REQUESTS_PER_FRAME: usize = 256;
 /// `plan_frame` has no notion of "ready but fully transparent": such tiles
 /// are reported with this slot and their draws are dropped before rendering.
 const EMPTY_SLOT: u32 = u32::MAX;
+
+/// Bytes of one tile in the compositor's `Rgba16Float` textures.
+const TILE_F16_BYTES: u64 = (TILE_SIZE as u64) * (TILE_SIZE as u64) * 8;
 
 /// What to draw.
 #[derive(Clone)]
@@ -75,6 +80,8 @@ pub(crate) struct RenderContext {
 	pub wake: Sender<RenderRequest>,
 	pub mips: Sender<MipWork>,
 	pub output: OutputSink,
+	/// Frame statistics for the `status` message (M1-T11).
+	pub stats: Arc<Mutex<RenderStats>>,
 }
 
 /// Body of the render thread. Returns on [`RenderRequest::Stop`] or when the
@@ -104,6 +111,7 @@ pub(crate) fn run(ctx: RenderContext) {
 		if viewport.width == 0 || viewport.height == 0 {
 			continue;
 		}
+		let started = Instant::now();
 
 		let reuse = textures[next]
 			.as_ref()
@@ -118,12 +126,16 @@ pub(crate) fn run(ctx: RenderContext) {
 		});
 
 		let mut again = false;
+		let mut uploads = 0;
 		match &f.doc {
 			None => pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc),
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
 				match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, *id, doc) {
-					Ok(more) => again = more,
+					Ok(more) => {
+						again = more;
+						uploads = pipeline.frame_uploads;
+					}
 					Err(error) => {
 						tracing::error!("cannot composite the document: {error}");
 						// Show the pattern rather than a stale frame.
@@ -135,6 +147,15 @@ pub(crate) fn run(ctx: RenderContext) {
 		ctx.queue.submit(std::iter::once(encoder.finish()));
 		(ctx.output)(EngineOutput::ViewportFrame(texture.clone()));
 		next ^= 1;
+		{
+			let mut stats = ctx.stats.lock().expect("render stats poisoned");
+			stats.record(Instant::now(), started.elapsed().as_secs_f32() * 1000.0);
+			stats.uploads = uploads;
+			if let Some(pipeline) = &tiles {
+				stats.pending_loads = pipeline.loading.lock().expect("loader set poisoned").len() as u32;
+				stats.gpu_bytes = pipeline.gpu_bytes;
+			}
+		}
 		if again {
 			let _ = ctx.wake.send(RenderRequest::Wake);
 		}
@@ -165,12 +186,21 @@ struct TilePipeline {
 	mips_sent: HashSet<(LayerId, bool, usize, u32, u32)>,
 	/// Tiles being loaded by rayon jobs.
 	loading: Arc<Mutex<HashSet<TileId>>>,
+	/// Source tiles uploaded by the last frame, and the running total it is
+	/// computed from.
+	frame_uploads: u32,
+	total_uploads: u64,
+	/// VRAM held by the compositor (atlas + composite cache).
+	gpu_bytes: u64,
 }
 
 impl TilePipeline {
 	fn new(ctx: &RenderContext) -> Self {
+		let config = CompositorConfig::default();
+		// Both the atlas and the composite cache are allocated up front.
+		let gpu_bytes = config.atlas_budget + u64::from(config.composite_slots) * TILE_F16_BYTES;
 		Self {
-			compositor: GpuCompositor::new(&ctx.device, &ctx.queue, CompositorConfig::default()),
+			compositor: GpuCompositor::new(&ctx.device, &ctx.queue, config),
 			renderer: ViewportRenderer::new(&ctx.device, &ctx.queue, VIEWPORT_FORMAT),
 			luts: LutCache::default(),
 			ready: HashMap::new(),
@@ -179,6 +209,9 @@ impl TilePipeline {
 			snapshot: None,
 			mips_sent: HashSet::new(),
 			loading: Arc::new(Mutex::new(HashSet::new())),
+			frame_uploads: 0,
+			total_uploads: 0,
+			gpu_bytes,
 		}
 	}
 
@@ -260,6 +293,9 @@ impl TilePipeline {
 		// Composite. `hot` never blocks: RAM-resident tiles only.
 		let store = &ctx.store;
 		let outcomes = self.compositor.composite(&programs, &|handle| store.try_get_hot(handle))?;
+		let total = self.compositor.stats().uploads;
+		self.frame_uploads = u32::try_from(total - self.total_uploads).unwrap_or(u32::MAX);
+		self.total_uploads = total;
 		let mut progressed = false;
 		let mut budget_spent = false;
 		for (key, outcome) in program_keys.into_iter().zip(outcomes) {

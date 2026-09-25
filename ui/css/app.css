@@ -414,6 +414,22 @@ body.native .workspace-body,
 body.native .workspace-main { background: transparent; }
 body.native #viewport { flex: 1; min-width: 0; min-height: 0; }
 
+/* Frame-time overlay (Ctrl+Alt+F), top-left corner of the viewport. */
+.fps-overlay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.62);
+  color: #e8f0e8;
+  font: 11px/1.45 Consolas, "Cascadia Mono", monospace;
+  white-space: pre;
+  pointer-events: none;
+}
+.fps-overlay[hidden] { display: none; }
+
 /* ----------------------------------------------------------- barra di stato */
 
 .statusbar {

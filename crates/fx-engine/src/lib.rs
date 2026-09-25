@@ -21,9 +21,10 @@ pub mod view;
 
 mod engine;
 mod render;
+mod stats;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crossbeam_channel::Sender;
@@ -149,6 +150,7 @@ impl EngineHandle {
 		let (render_requests, render_inbox) = crossbeam_channel::unbounded();
 		let (internal, internal_rx) = crossbeam_channel::unbounded();
 		let (mips, mips_rx) = crossbeam_channel::unbounded();
+		let stats = Arc::new(Mutex::new(stats::RenderStats::default()));
 
 		let context = render::RenderContext {
 			device,
@@ -158,11 +160,20 @@ impl EngineHandle {
 			wake: render_requests.clone(),
 			mips,
 			output: output.clone(),
+			stats: stats.clone(),
 		};
 		let render_thread = std::thread::Builder::new().name("fx-render".into()).spawn(move || render::run(context))?;
-		let engine_thread = std::thread::Builder::new()
-			.name("fx-engine".into())
-			.spawn(move || engine::run(inputs, internal_rx, internal, mips_rx, render_requests, store, output))?;
+		let context = engine::EngineContext {
+			inputs,
+			internal_rx,
+			internal,
+			mips_rx,
+			render: render_requests,
+			store,
+			stats,
+			output,
+		};
+		let engine_thread = std::thread::Builder::new().name("fx-engine".into()).spawn(move || engine::run(context))?;
 
 		Ok(Self {
 			input,

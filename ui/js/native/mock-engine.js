@@ -10,7 +10,7 @@ import { UI, ENGINE } from "./protocol.js";
 // screen modes, dialogs, zoom, workspaces). The engine has nothing to say
 // about them, so the mock stays quiet instead of toasting on every click.
 // Mirror of `fx_protocol::UI_LOCAL_ACTION_PREFIXES`.
-const UI_LOCAL_PREFIXES = ["panel:", "panels:", "tool:", "toggle:", "screen:", "dlg:", "zoom:", "ws:", "par:"];
+const UI_LOCAL_PREFIXES = ["panel:", "panels:", "tool:", "toggle:", "screen:", "dlg:", "zoom:", "ws:", "par:", "debug:"];
 
 /** Answer one UI → engine message; returns the replies (possibly none). */
 export function handle(message) {

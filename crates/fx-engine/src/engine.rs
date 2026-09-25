@@ -6,21 +6,25 @@
 //! ([`crate::view::VIRTUAL_DOC`]) drawn as a test pattern (M0).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
 use fx_io::{ImportedImage, IoError};
-use fx_protocol::{DocId, EngineToUi, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
+use fx_protocol::{DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
 use fx_tiles::TileStore;
 
 use crate::documents::{Documents, OpenDoc};
 use crate::render::{Frame, MipWork, RenderRequest};
+use crate::stats::RenderStats;
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
 use crate::{EngineInput, EngineOutput, OutputSink, PointerKind, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
+
+/// How often the `status` message (memory, frame statistics) goes out.
+const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The virtual M0 document's id in `view` messages.
 const VIRTUAL_DOC_ID: DocId = DocId(0);
@@ -42,6 +46,8 @@ struct Engine {
 	render: Sender<RenderRequest>,
 	internal: Sender<Internal>,
 	store: Arc<TileStore>,
+	stats: Arc<Mutex<RenderStats>>,
+	next_status: Instant,
 	docs: Documents,
 	/// View of the virtual document, used while no document is open.
 	virtual_view: ViewState,
@@ -50,21 +56,38 @@ struct Engine {
 	view_message_pending: bool,
 }
 
+/// Channels and shared state the engine thread works with.
+pub(crate) struct EngineContext {
+	pub inputs: Receiver<EngineInput>,
+	pub internal_rx: Receiver<Internal>,
+	/// Handed to import jobs so they can report back.
+	pub internal: Sender<Internal>,
+	pub mips_rx: Receiver<MipWork>,
+	pub render: Sender<RenderRequest>,
+	pub store: Arc<TileStore>,
+	pub stats: Arc<Mutex<RenderStats>>,
+	pub output: OutputSink,
+}
+
 /// Body of the engine thread.
-pub(crate) fn run(
-	inputs: Receiver<EngineInput>,
-	internal_rx: Receiver<Internal>,
-	internal: Sender<Internal>,
-	mips_rx: Receiver<MipWork>,
-	render: Sender<RenderRequest>,
-	store: Arc<TileStore>,
-	output: OutputSink,
-) {
+pub(crate) fn run(ctx: EngineContext) {
+	let EngineContext {
+		inputs,
+		internal_rx,
+		internal,
+		mips_rx,
+		render,
+		store,
+		stats,
+		output,
+	} = ctx;
 	let mut engine = Engine {
 		output,
 		render,
 		internal,
 		store,
+		stats,
+		next_status: Instant::now() + STATUS_INTERVAL,
 		docs: Documents::default(),
 		virtual_view: ViewState::new(VIRTUAL_DOC),
 		next_task: 0,
@@ -73,9 +96,8 @@ pub(crate) fn run(
 	};
 
 	loop {
-		let timeout = engine
-			.view_message_deadline()
-			.map_or(Duration::from_secs(3600), |d| d.saturating_duration_since(Instant::now()));
+		let deadline = engine.view_message_deadline().map_or(engine.next_status, |d| d.min(engine.next_status));
+		let timeout = deadline.saturating_duration_since(Instant::now());
 		select_biased! {
 			recv(inputs) -> input => match input {
 				Ok(EngineInput::Shutdown) | Err(_) => break,
@@ -86,6 +108,7 @@ pub(crate) fn run(
 			default(timeout) => {}
 		}
 		engine.flush_view_message();
+		engine.send_status_if_due();
 	}
 
 	let _ = engine.render.send(RenderRequest::Stop);
@@ -418,6 +441,33 @@ impl Engine {
 		});
 		self.last_view_message = Some(Instant::now());
 		self.view_message_pending = false;
+	}
+
+	/// Memory and frame statistics, twice per second (M1-T11).
+	fn send_status_if_due(&mut self) {
+		let now = Instant::now();
+		if now < self.next_status {
+			return;
+		}
+		self.next_status = now + STATUS_INTERVAL;
+		let tiles = self.store.stats();
+		let (frames, uploads, pending_loads, gpu_bytes) = {
+			let mut stats = self.stats.lock().expect("render stats poisoned");
+			(stats.summary(now), stats.uploads, stats.pending_loads, stats.gpu_bytes)
+		};
+		self.to_ui(&EngineToUi::Status {
+			memory: MemoryStats {
+				hot_bytes: tiles.hot_bytes,
+				warm_bytes: tiles.warm_bytes,
+				scratch_bytes: tiles.cold_bytes,
+				gpu_bytes,
+			},
+			fps: frames.fps,
+			frame_ms_p50: frames.p50_ms,
+			frame_ms_p99: frames.p99_ms,
+			uploads,
+			pending_loads,
+		});
 	}
 
 	fn to_ui(&self, message: &EngineToUi) {
