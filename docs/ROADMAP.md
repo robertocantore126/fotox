@@ -19,4 +19,4 @@ tiles, filters, measurements): `docs/tasks/HOWTO.md`.
 | M7 | PSD/PSB import | Open layered PSD/PSB; verify blend modes against Photoshop | TBD |
 | M8 | Automation and custom workflows | Actions panel (record/replay), batch processing, Rob's custom tools | TBD |
 
-Current milestone: **M3** (M0–M2 coded, acceptance measurements pending — `docs/reports/STATUS-2026-09-25.md`).
+Current milestone: **M5** (M0–M4 coded and merged; acceptance measurements for M1–M4 are Rob's, see `docs/reports/STATUS-2026-09-25.md` and the per-task reports).

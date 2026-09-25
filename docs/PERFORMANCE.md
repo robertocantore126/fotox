@@ -86,8 +86,9 @@ Files go to `bench/data/` (git-ignored). Results are appended to
 | S11 | B1: Gaussian Blur 10 px, OK | level-0 result ≤ 60 s, UI responsive | M4 |
 | S12 | B1 with a non-sRGB display profile | S2 still met (LUT < 0.5 ms/frame) | M4 |
 
-**Proposed** with the M5–M6 draft cards (not binding until Rob approves the
-cards; the cards hold the details):
+**M5's scenarios S13–S15 are accepted** (D-040…D-049, 2026-09-25).
+**Proposed** with the M6 draft card (not binding until Rob approves the card;
+the card holds the details):
 
 | Id | Scenario | Target | Milestone |
 | --- | --- | --- | --- |
