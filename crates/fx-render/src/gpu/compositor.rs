@@ -37,6 +37,7 @@ const OUTSIDE: u32 = 0xFFFF_FFFD;
 
 const K_LAYER: u32 = 0;
 const K_ADJUST_LUT: u32 = 1;
+const K_ADJUST_HUESAT: u32 = 2;
 const K_BEGIN_ISOLATED: u32 = 3;
 const K_BEGIN_PASS: u32 = 4;
 const K_END_ISOLATED: u32 = 5;
@@ -653,7 +654,15 @@ impl GpuCompositor {
 						g.kind = K_ADJUST_LUT;
 						g.lut_row = *self.lut_rows.get(&lut.key).expect("ensure_luts ran before encoding");
 					}
-					AdjustKind::HueSaturation { .. } => unreachable!("rejected by check_supported"),
+					AdjustKind::HueSaturation {
+						hue,
+						saturation,
+						lightness,
+						colorize,
+					} => {
+						g.kind = K_ADJUST_HUESAT;
+						g.params = [*hue, *saturation, *lightness, if *colorize { 1.0 } else { 0.0 }];
+					}
 				}
 				self.encode_mask(mask, &mut g);
 			}
@@ -854,10 +863,6 @@ fn check_supported(program: &TileProgram) -> Result<(), CompositeError> {
 				}
 			}
 			Op::EndIsolated { .. } | Op::EndPassThrough { .. } => depth = depth.saturating_sub(1),
-			Op::Adjust {
-				adjust: AdjustKind::HueSaturation { .. },
-				..
-			} => return Err(CompositeError::Unsupported("Hue/Saturation (M2-T04)")),
 			_ => {}
 		}
 	}

@@ -157,6 +157,63 @@ fn groups_clipping_masks_offsets_adjustments_match() {
 	assert!(over < 0.002);
 }
 
+#[test]
+fn hue_saturation_and_brightness_contrast_match_the_reference() {
+	let (device, queue) = gpu_or_skip!();
+	let store = store();
+	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
+	let mut luts = LutCache::default();
+	let mut doc = doc(512, 256);
+	let bg = busy_layer(&mut doc, &store, 31);
+
+	let hs_id = doc.allocate_layer_id();
+	let mut hs = Layer::new(
+		hs_id,
+		"Hue/Saturation",
+		LayerKind::Adjustment(Adjustment::HueSaturation {
+			hue: 47.0,
+			saturation: 35.0,
+			lightness: -12.0,
+			colorize: false,
+		}),
+	);
+	hs.mask = Some(mask(&doc, &store, &|x, y| hash16(x / 20, y / 20, 9)));
+
+	let tint_id = doc.allocate_layer_id();
+	let mut tint = Layer::new(
+		tint_id,
+		"Colorize",
+		LayerKind::Adjustment(Adjustment::HueSaturation {
+			hue: 210.0,
+			saturation: 40.0,
+			lightness: 15.0,
+			colorize: true,
+		}),
+	);
+	tint.opacity = 0.5;
+
+	let bc_id = doc.allocate_layer_id();
+	let bc = Layer::new(
+		bc_id,
+		"Brightness/Contrast",
+		LayerKind::Adjustment(Adjustment::BrightnessContrast {
+			brightness: 40.0,
+			contrast: 30.0,
+			legacy: false,
+		}),
+	);
+	for layer in [bg, hs, tint, bc] {
+		doc.layers.push(Arc::new(layer));
+	}
+
+	let programs = programs(&doc, &mut luts);
+	gpu.begin_frame();
+	let outcomes = gpu.composite(&programs, &|h| store.try_get_hot(h)).unwrap();
+	let (max_err, over) = compare(&gpu, &programs, &outcomes, &store);
+	eprintln!("hue/saturation + brightness/contrast: max error {max_err:.5}, {:.4} % > 2/1024", over * 100.0);
+	assert!(over < 0.002, "{:.3} % of channels differ", over * 100.0);
+}
+
 /// Background, isolated + pass-through groups, clipping, masks, offsets,
 /// solid fills, LUT adjustments, nested groups.
 fn complex_doc(store: &TileStore) -> Document {
