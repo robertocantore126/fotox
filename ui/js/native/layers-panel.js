@@ -39,7 +39,48 @@ const NEW_ADJUSTMENTS = [
   ["Exposure...", () => ({ adjustment: { kind: "exposure", exposure: 0, offset: 0, gamma: 1 } })],
   ["Hue/Saturation...", () => ({ adjustment: { kind: "hue_saturation", hue: 0, saturation: 0, lightness: 0, colorize: false } })],
   ["Invert", () => ({ adjustment: { kind: "invert" } })],
+  // M4-T07
+  ["Vibrance...", () => ({ adjustment: { kind: "vibrance", vibrance: 0, saturation: 0 } })],
+  ["Color Balance...", () => ({ adjustment: { kind: "color_balance", shadows: [0, 0, 0], midtones: [0, 0, 0], highlights: [0, 0, 0], preserve_luminosity: true } })],
+  ["Black & White...", () => ({ adjustment: { kind: "black_white", reds: 40, yellows: 60, greens: 40, cyans: 60, blues: 20, magentas: 80, tint: false, tint_hue: 35, tint_saturation: 25 } })],
+  ["Photo Filter...", () => ({ adjustment: { kind: "photo_filter", color: PHOTO_FILTERS["Warming Filter (85)"], density: 0.25, preserve_luminosity: true } })],
+  ["Channel Mixer...", () => ({ adjustment: { kind: "channel_mixer", red: [100, 0, 0, 0], green: [0, 100, 0, 0], blue: [0, 0, 100, 0], monochrome: false } })],
+  ["Posterize...", () => ({ adjustment: { kind: "posterize", levels: 4 } })],
+  ["Threshold...", () => ({ adjustment: { kind: "threshold", level: 128 } })],
+  ["Gradient Map...", () => ({ adjustment: { kind: "gradient_map", stops: GRADIENTS["Black, White"], reverse: false } })],
 ];
+
+// Photo Filter colours (straight 0..1). VERIFY (M7): Photoshop's exact values.
+const rgb8 = (r, g, b) => [r / 255, g / 255, b / 255];
+const PHOTO_FILTERS = {
+  "Warming Filter (85)": rgb8(236, 138, 0),
+  "Warming Filter (81)": rgb8(235, 177, 19),
+  "Cooling Filter (80)": rgb8(0, 109, 255),
+  "Cooling Filter (82)": rgb8(0, 181, 255),
+  "Sepia": rgb8(172, 122, 51),
+  "Red": rgb8(234, 26, 26),
+  "Orange": rgb8(243, 132, 23),
+  "Yellow": rgb8(249, 227, 28),
+  "Green": rgb8(25, 201, 25),
+  "Cyan": rgb8(29, 203, 234),
+  "Blue": rgb8(29, 53, 234),
+  "Violet": rgb8(155, 29, 234),
+  "Magenta": rgb8(227, 24, 227),
+  "Underwater": rgb8(0, 194, 177),
+};
+
+// Gradient Map presets: stops of { position, color }.
+const stop = (position, r, g, b) => ({ position, color: rgb8(r, g, b) });
+const GRADIENTS = {
+  "Black, White": [stop(0, 0, 0, 0), stop(1, 255, 255, 255)],
+  "Violet, Orange": [stop(0, 41, 10, 89), stop(1, 255, 124, 0)],
+  "Blue, Red, Yellow": [stop(0, 10, 0, 178), stop(0.5, 255, 0, 0), stop(1, 255, 252, 0)],
+  "Copper": [stop(0, 151, 70, 26), stop(0.5, 251, 216, 197), stop(1, 108, 46, 22)],
+  "Sepia": [stop(0, 0, 0, 0), stop(0.6, 172, 122, 51), stop(1, 255, 240, 214)],
+};
+// Values come back from the engine as f32: compare rounded to 4 decimals.
+const rounded = (value) => JSON.stringify(value, (_, v) => (typeof v === "number" ? Math.round(v * 1e4) / 1e4 : v));
+const nameOf = (table, value) => Object.keys(table).find((k) => rounded(table[k]) === rounded(value));
 
 let doc = null;          // active document id
 let layers = [];         // LayerInfo[] of the active document, top → bottom
@@ -115,6 +156,18 @@ function send(command) {
 const ref = (id) => ({ id });
 const setProps = (id, props) => send({ op: "set_layer_props", layer: ref(id), props });
 const selectedIds = () => layers.filter((l) => l.selected).map((l) => l.id);
+/** The id of the active layer of the active document, or null (M4 filters). */
+export function activeLayerId() {
+  const a = active();
+  return a ? a.id : null;
+}
+
+/** The kind of the active layer ("pixel", "group", …), or null. */
+export function activeLayerKind() {
+  const a = active();
+  return a ? a.kind : null;
+}
+
 const active = () => {
   // The active layer is the last one selected; `layers` does not carry the
   // selection order, so fall back to the topmost selected row.
@@ -488,6 +541,42 @@ const ADJUSTMENT_DIALOGS = {
     toValues: (a) => ({ "Hue:": a.hue, "Saturation:": a.saturation, "Lightness:": a.lightness, Colorize: a.colorize }),
     fromValues: (v) => ({ kind: "hue_saturation", hue: v["Hue:"], saturation: v["Saturation:"], lightness: v["Lightness:"], colorize: !!v.Colorize }),
   },
+  vibrance: {
+    dialog: "vibrance",
+    toValues: (a) => ({ "Vibrance:": a.vibrance, "Saturation:": a.saturation }),
+    fromValues: (v) => ({ kind: "vibrance", vibrance: v["Vibrance:"], saturation: v["Saturation:"] }),
+  },
+  black_white: {
+    dialog: "black-white",
+    toValues: (a) => ({
+      "Reds:": a.reds, "Yellows:": a.yellows, "Greens:": a.greens, "Cyans:": a.cyans, "Blues:": a.blues, "Magentas:": a.magentas,
+      Tint: a.tint, "Tint Hue:": a.tint_hue, "Tint Saturation:": a.tint_saturation,
+    }),
+    fromValues: (v) => ({
+      kind: "black_white", reds: v["Reds:"], yellows: v["Yellows:"], greens: v["Greens:"], cyans: v["Cyans:"], blues: v["Blues:"], magentas: v["Magentas:"],
+      tint: !!v.Tint, tint_hue: v["Tint Hue:"], tint_saturation: v["Tint Saturation:"],
+    }),
+  },
+  photo_filter: {
+    dialog: "photo-filter",
+    toValues: (a) => ({ "Filter:": nameOf(PHOTO_FILTERS, a.color) || "Warming Filter (85)", "Density:": Math.round(a.density * 100), "Preserve Luminosity": a.preserve_luminosity }),
+    fromValues: (v) => ({ kind: "photo_filter", color: PHOTO_FILTERS[v["Filter:"]] || PHOTO_FILTERS["Warming Filter (85)"], density: v["Density:"] / 100, preserve_luminosity: !!v["Preserve Luminosity"] }),
+  },
+  posterize: {
+    dialog: "posterize",
+    toValues: (a) => ({ "Levels:": a.levels }),
+    fromValues: (v) => ({ kind: "posterize", levels: Math.min(255, Math.max(2, Math.round(v["Levels:"]))) }),
+  },
+  threshold: {
+    dialog: "threshold",
+    toValues: (a) => ({ "Threshold Level:": a.level }),
+    fromValues: (v) => ({ kind: "threshold", level: Math.min(255, Math.max(1, Math.round(v["Threshold Level:"]))) }),
+  },
+  gradient_map: {
+    dialog: "gradient-map",
+    toValues: (a) => ({ "Gradient:": nameOf(GRADIENTS, a.stops) || "Black, White", Reverse: a.reverse }),
+    fromValues: (v) => ({ kind: "gradient_map", stops: GRADIENTS[v["Gradient:"]] || GRADIENTS["Black, White"], reverse: !!v.Reverse }),
+  },
   exposure: {
     dialog: "exposure",
     // The dialog's sliders are integers: offset in hundredths, gamma in hundredths.
@@ -496,12 +585,16 @@ const ADJUSTMENT_DIALOGS = {
   },
 };
 
-// Levels and Curves hold one setting per channel (0 = composite, 1..3 = R, G, B);
-// the dialog's Channel menu picks the one its fields show.
+// Adjustments with one setting per channel (Levels, Curves: composite, R, G,
+// B), per output channel (Channel Mixer) or per tone range (Color Balance):
+// the dialog's menu (`selector`) picks the part its fields show.
+// `parts(adj)` → the editable parts, `make(adj, parts, values)` → the adjustment.
 const CHANNELS = ["RGB", "Red", "Green", "Blue"];
 const PER_CHANNEL_DIALOGS = {
   levels: {
     dialog: "levels",
+    selector: "Channel:", names: CHANNELS,
+    parts: (a) => a.channels, make: (a, parts) => ({ kind: a.kind, channels: parts }),
     toValues: (c) => ({
       "Input Black:": Math.round(c.in_black * 255), "Gamma (x100):": Math.round(c.gamma * 100), "Input White:": Math.round(c.in_white * 255),
       "Output Black:": Math.round(c.out_black * 255), "Output White:": Math.round(c.out_white * 255),
@@ -514,8 +607,28 @@ const PER_CHANNEL_DIALOGS = {
   },
   curves: {
     dialog: "curves",
+    selector: "Channel:", names: CHANNELS,
+    parts: (a) => a.channels, make: (a, parts) => ({ kind: a.kind, channels: parts }),
     toValues: (points) => ({ curve: points.length < 2 ? [[0, 0], [1, 1]] : points }),
     fromValues: (v) => v.curve,
+  },
+  channel_mixer: {
+    dialog: "channel-mixer",
+    selector: "Output Channel:", names: ["Red", "Green", "Blue"],
+    parts: (a) => [a.red, a.green, a.blue],
+    make: (a, parts, v) => ({ kind: "channel_mixer", red: parts[0], green: parts[1], blue: parts[2], monochrome: !!v.Monochrome }),
+    extra: (a) => ({ Monochrome: a.monochrome }),
+    toValues: (row) => ({ "Red:": row[0], "Green:": row[1], "Blue:": row[2], "Constant:": row[3] }),
+    fromValues: (v) => [v["Red:"], v["Green:"], v["Blue:"], v["Constant:"]],
+  },
+  color_balance: {
+    dialog: "color-balance",
+    selector: "Tone:", names: ["Shadows", "Midtones", "Highlights"], first: 1,
+    parts: (a) => [a.shadows, a.midtones, a.highlights],
+    make: (a, parts, v) => ({ kind: "color_balance", shadows: parts[0], midtones: parts[1], highlights: parts[2], preserve_luminosity: !!v["Preserve Luminosity"] }),
+    extra: (a) => ({ "Preserve Luminosity": a.preserve_luminosity }),
+    toValues: (t) => ({ "Cyan–Red:": t[0], "Magenta–Green:": t[1], "Yellow–Blue:": t[2] }),
+    fromValues: (v) => [v["Cyan–Red:"], v["Magenta–Green:"], v["Yellow–Blue:"]],
   },
 };
 
@@ -543,21 +656,24 @@ function editAdjustment(l) {
 
 function editPerChannel(l, spec) {
   const original = l.adjustment;
-  const channels = original.channels.map((c) => JSON.parse(JSON.stringify(c)));
-  let shown = 0;
+  const parts = spec.parts(original).map((c) => JSON.parse(JSON.stringify(c)));
+  let shown = spec.first || 0;
+  let last = {};
   const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
-  const current = () => ({ kind: original.kind, channels });
+  const current = () => spec.make(original, parts, last);
+  last = spec.extra ? spec.extra(original) : {};
   openDialog(spec.dialog, {
     title: `${l.name}`,
-    values: { "Channel:": CHANNELS[0], ...spec.toValues(channels[0]) },
+    values: { [spec.selector]: spec.names[shown], ...last, ...spec.toValues(parts[shown]) },
     onChange: (values, dialog) => {
-      const picked = CHANNELS.indexOf(values["Channel:"]);
+      last = values;
+      const picked = spec.names.indexOf(values[spec.selector]);
       if (picked >= 0 && picked !== shown) {
         shown = picked;
-        dialog.set(spec.toValues(channels[shown]));
+        dialog.set(spec.toValues(parts[shown]));
         return;
       }
-      channels[shown] = spec.fromValues(values);
+      parts[shown] = spec.fromValues(values);
       set(values.Preview === false ? original : current());
     },
     onOk: () => set(current()),

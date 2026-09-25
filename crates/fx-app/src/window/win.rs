@@ -45,3 +45,66 @@ pub(crate) fn init() {
 pub(crate) fn can_render(window: &dyn winit::window::Window) -> bool {
 	window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false)
 }
+
+/// The monitor the window is mostly on, as an opaque id (changes when the
+/// window is moved to another monitor).
+pub(crate) fn monitor_id(hwnd: isize) -> isize {
+	use windows::Win32::Foundation::HWND;
+	use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+	// SAFETY: `MonitorFromWindow` only reads the window handle, which is the
+	// live main window; with DEFAULTTONEAREST it always returns a monitor.
+	unsafe { MonitorFromWindow(HWND(hwnd as *mut _), MONITOR_DEFAULTTONEAREST).0 as isize }
+}
+
+/// The ICC profile bytes of the monitor the window is on (M4-T02, D-031):
+/// the monitor's device name → a device context for it → its colour profile
+/// path (`GetICMProfileW`) → the file. `None` when Windows reports no profile
+/// or the file cannot be read; the engine then assumes sRGB.
+pub(crate) fn monitor_icc_profile(hwnd: isize) -> Option<Vec<u8>> {
+	use windows::Win32::Foundation::HWND;
+	use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow};
+	use windows::Win32::UI::ColorSystem::GetICMProfileW;
+	use windows::core::{PCWSTR, PWSTR};
+
+	let mut info = MONITORINFOEXW::default();
+	info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+	// SAFETY: `info` is a properly sized MONITORINFOEXW (cbSize set), which
+	// GetMonitorInfoW fills; the monitor handle comes from MonitorFromWindow.
+	let ok = unsafe {
+		let monitor = MonitorFromWindow(HWND(hwnd as *mut _), MONITOR_DEFAULTTONEAREST);
+		GetMonitorInfoW(monitor, (&mut info as *mut MONITORINFOEXW).cast::<MONITORINFO>()).as_bool()
+	};
+	if !ok {
+		return None;
+	}
+	let device = PCWSTR(info.szDevice.as_ptr());
+	let mut path = [0u16; 1024];
+	let mut len = path.len() as u32;
+	// SAFETY: `device` points into `info.szDevice`, a NUL-terminated device
+	// name that outlives the call; the DC is deleted before returning;
+	// `path`/`len` describe a writable buffer of `len` UTF-16 units.
+	let found = unsafe {
+		let dc = CreateDCW(device, device, PCWSTR::null(), None);
+		if dc.is_invalid() {
+			return None;
+		}
+		let found = GetICMProfileW(dc, &mut len, Some(PWSTR(path.as_mut_ptr()))).as_bool();
+		let _ = DeleteDC(dc);
+		found
+	};
+	if !found {
+		return None;
+	}
+	let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+	let path = String::from_utf16_lossy(&path[..end]);
+	match std::fs::read(&path) {
+		Ok(bytes) => {
+			tracing::info!("display profile: {path}");
+			Some(bytes)
+		}
+		Err(error) => {
+			tracing::warn!("cannot read the display profile {path}: {error}");
+			None
+		}
+	}
+}

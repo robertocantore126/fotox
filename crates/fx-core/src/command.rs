@@ -23,8 +23,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::blend::BlendMode;
+use crate::color::{ColorProfile, RenderingIntent};
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
+use crate::ops::{FilterParams, PixelOps};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -113,10 +115,30 @@ pub enum Command {
 	DeleteMask { layer: LayerRef, apply: bool },
 	/// Change the parameters of an adjustment layer. M2
 	SetAdjustment { layer: LayerRef, adjustment: Adjustment },
-	/// Merge the given layers into one pixel layer (rasterises). M4
+	/// Merge the given layers into one pixel layer (rasterises). The result
+	/// takes the place, id and name of the bottom-most of them (Photoshop's
+	/// Merge Down), Normal, 100 %. M4
 	MergeLayers { layers: Vec<LayerRef> },
-	/// Flatten the whole document into one pixel layer. M4
+	/// Flatten the whole document into one "Background" pixel layer, the
+	/// transparency filled with white; hidden layers are discarded. M4
 	Flatten,
+	/// A new pixel layer above the active one with the composite of every
+	/// visible layer; nothing else changes. M4
+	StampVisible,
+	/// Give the document another profile without touching the numbers (the
+	/// look changes). M4
+	AssignProfile { profile: ColorProfile },
+	/// Convert every pixel layer (level 0) and solid fill colour to `profile`,
+	/// keeping the look. Masks and adjustment parameters stay as they are
+	/// (Photoshop does the same). M4
+	ConvertProfile {
+		profile: ColorProfile,
+		intent: RenderingIntent,
+		bpc: bool,
+	},
+	/// Run a destructive filter on a pixel layer (level 0; the engine shows a
+	/// live preview first). M4
+	ApplyFilter { layer: LayerRef, filter: FilterParams },
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -154,6 +176,10 @@ pub enum CommandError {
 /// Services a command may need while applying.
 pub struct CommandContext<'a> {
 	pub tiles: &'a TileStore,
+	/// The engine's pixel algorithms (filters, compositing — `ops.rs`).
+	/// `None` in `fx-core`'s own tests: commands that need it return
+	/// `NotAllowed`.
+	pub ops: Option<&'a dyn PixelOps>,
 }
 
 impl Command {
@@ -171,7 +197,12 @@ impl Command {
 			Command::AddMask { layer, fill } => add_mask(doc, layer, *fill),
 			Command::DeleteMask { layer, apply } => delete_mask(doc, layer, *apply, ctx.tiles),
 			Command::SetAdjustment { layer, adjustment } => set_adjustment(doc, layer, adjustment),
-			other => todo!("{other:?}: see docs/tasks for the milestone that implements it"),
+			Command::ApplyFilter { layer, filter } => apply_filter(doc, layer, filter, ctx),
+			Command::MergeLayers { layers } => merge_layers(doc, layers, ctx),
+			Command::Flatten => flatten(doc, ctx),
+			Command::StampVisible => stamp_visible(doc, ctx),
+			Command::AssignProfile { profile } => assign_profile(doc, profile),
+			Command::ConvertProfile { profile, intent, bpc } => convert_profile(doc, profile, *intent, *bpc, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -882,6 +913,168 @@ fn scale_alpha8(alpha: u8, mask: u16) -> u8 {
 
 /// The effect of removing a mask: the layer's pixels changed only when the
 /// mask was actually baked into them.
+/// `ApplyFilter`: validate, then replace the layer's pixels with the
+/// filtered image computed by the engine's [`PixelOps`].
+fn apply_filter(doc: &mut Document, layer: &LayerRef, filter: &FilterParams, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	filter.validate()?;
+	let id = resolve(doc, layer)?;
+	let target = doc.layer(id).expect("resolved id exists");
+	if target.locked_pixels {
+		return Err(CommandError::Locked(id));
+	}
+	let LayerKind::Pixel { image, offset } = &target.kind else {
+		return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
+	};
+	let ops = ctx
+		.ops
+		.ok_or_else(|| CommandError::NotAllowed("filters need the engine's pixel operations".into()))?;
+	let filtered = ops.filter(image, *offset, (doc.width, doc.height), filter, ctx.tiles)?;
+	if let LayerKind::Pixel { image, .. } = &mut doc.layer_mut(id).expect("resolved id exists").kind {
+		*image = filtered;
+	}
+	Ok(CommandEffect {
+		label: filter.label().into(),
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}
+
+/// The engine's pixel operations, or the error a command without them gives.
+fn pixel_ops<'a>(ctx: &CommandContext<'a>, what: &str) -> Result<&'a dyn PixelOps, CommandError> {
+	ctx.ops
+		.ok_or_else(|| CommandError::NotAllowed(format!("{what} needs the engine's pixel operations")))
+}
+
+/// `MergeLayers` (M4-T08): composite the layers, then replace the bottom-most
+/// of them with the result and remove the others.
+fn merge_layers(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let ids = resolve_all(doc, layers, true)?;
+	if ids.len() < 2 {
+		return Err(CommandError::NotAllowed("select at least two layers to merge".into()));
+	}
+	let panel = doc.panel_order();
+	let bottom = *ids.iter().max_by_key(|id| panel.iter().position(|p| p == *id)).expect("at least two ids");
+	let image = pixel_ops(ctx, "merging")?.composite(doc, &ids, None, ctx.tiles)?;
+	// Mutate only now: everything that can fail has run.
+	let name = doc.layer(bottom).expect("resolved id exists").name.clone();
+	for &id in ids.iter().filter(|&&id| id != bottom) {
+		remove_layer(doc, id);
+	}
+	let path = doc.path_of(bottom).expect("the bottom layer stays");
+	let parent = id_at_path(doc, &path[..path.len() - 1]);
+	children_mut(doc, parent)[path[path.len() - 1]] = Arc::new(Layer::new(bottom, name, LayerKind::Pixel { image, offset: (0, 0) }));
+	doc.selected = vec![bottom];
+	Ok(CommandEffect {
+		label: "Merge Layers".into(),
+		pixels_changed: vec![bottom],
+		structure_changed: true,
+		..Default::default()
+	})
+}
+
+/// `Flatten` (M4-T08): one "Background" layer with the visible composite on white.
+fn flatten(doc: &mut Document, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if doc.layers.is_empty() {
+		return Err(CommandError::NotAllowed("the document has no layers".into()));
+	}
+	let roots: Vec<LayerId> = doc.layers.iter().map(|l| l.id).collect();
+	let image = pixel_ops(ctx, "flattening")?.composite(doc, &roots, Some([u16::MAX; 4]), ctx.tiles)?;
+	let id = doc.allocate_layer_id();
+	let mut layer = Layer::new(id, "Background", LayerKind::Pixel { image, offset: (0, 0) });
+	layer.locked_position = true;
+	doc.layers = vec![Arc::new(layer)];
+	doc.selected = vec![id];
+	Ok(CommandEffect {
+		label: "Flatten Image".into(),
+		pixels_changed: vec![id],
+		structure_changed: true,
+		..Default::default()
+	})
+}
+
+/// `StampVisible` (M4-T08): a new layer with the composite of the visible layers.
+fn stamp_visible(doc: &mut Document, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let roots: Vec<LayerId> = doc.layers.iter().map(|l| l.id).collect();
+	if roots.is_empty() {
+		return Err(CommandError::NotAllowed("the document has no layers".into()));
+	}
+	let image = pixel_ops(ctx, "stamping")?.composite(doc, &roots, None, ctx.tiles)?;
+	add_layer(doc, &NewLayer::Pixel, None)?;
+	let id = *doc.selected.first().expect("add_layer selects the new layer");
+	if let LayerKind::Pixel { image: target, .. } = &mut doc.layer_mut(id).expect("just added").kind {
+		*target = image;
+	}
+	Ok(CommandEffect {
+		label: "Stamp Visible".into(),
+		pixels_changed: vec![id],
+		structure_changed: true,
+		..Default::default()
+	})
+}
+
+/// `AssignProfile` (M4-T03): metadata only.
+fn assign_profile(doc: &mut Document, profile: &ColorProfile) -> Result<CommandEffect, CommandError> {
+	doc.color.profile = profile.clone();
+	Ok(CommandEffect {
+		label: "Assign Profile".into(),
+		// Every layer looks different on screen.
+		props_changed: doc.panel_order(),
+		..Default::default()
+	})
+}
+
+/// `ConvertProfile` (M4-T03): the pixels of every pixel layer and the colour
+/// of every solid fill, converted; then the document's profile.
+fn convert_profile(
+	doc: &mut Document,
+	profile: &ColorProfile,
+	intent: RenderingIntent,
+	bpc: bool,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	let ops = pixel_ops(ctx, "converting")?;
+	let from = doc.color.profile.clone();
+	let conversion = crate::ops::Conversion {
+		from: &from,
+		to: profile,
+		intent,
+		bpc,
+	};
+	// Compute everything first (all or nothing), then install.
+	let mut converted: Vec<(LayerId, LayerKind)> = Vec::new();
+	let mut failure = None;
+	doc.walk(|layer, _| {
+		if failure.is_some() {
+			return;
+		}
+		let kind = match &layer.kind {
+			LayerKind::Pixel { image, offset } => ops
+				.convert(image, &conversion, ctx.tiles)
+				.map(|image| LayerKind::Pixel { image, offset: *offset }),
+			LayerKind::SolidFill { rgba } => ops.convert_color(*rgba, &conversion).map(|rgba| LayerKind::SolidFill { rgba }),
+			_ => return,
+		};
+		match kind {
+			Ok(kind) => converted.push((layer.id, kind)),
+			Err(error) => failure = Some(error),
+		}
+	});
+	if let Some(error) = failure {
+		return Err(error);
+	}
+	let changed: Vec<LayerId> = converted.iter().map(|(id, _)| *id).collect();
+	for (id, kind) in converted {
+		doc.layer_mut(id).expect("walked layer exists").kind = kind;
+	}
+	doc.color.profile = profile.clone();
+	Ok(CommandEffect {
+		label: "Convert to Profile".into(),
+		pixels_changed: changed,
+		props_changed: doc.panel_order(),
+		..Default::default()
+	})
+}
+
 fn delete_mask_effect(id: LayerId, pixels_changed: bool) -> CommandEffect {
 	CommandEffect {
 		label: "Delete Layer Mask".into(),
@@ -949,6 +1142,34 @@ mod tests {
 	use crate::color::{BitDepth, ColorProfile, DocumentColor};
 	use crate::history::History;
 
+	/// Stands in for the engine's pixel operations: a composite is a solid
+	/// image whose value counts the layers composited; a filter returns the
+	/// image unchanged.
+	struct FakeOps;
+
+	impl PixelOps for FakeOps {
+		fn filter(&self, image: &TiledImage, _: (i32, i32), _: (u32, u32), _: &FilterParams, _: &TileStore) -> Result<TiledImage, CommandError> {
+			Ok(image.clone())
+		}
+
+		fn composite(&self, doc: &Document, layers: &[LayerId], background: Option<[u16; 4]>, _: &TileStore) -> Result<TiledImage, CommandError> {
+			let mut image = TiledImage::new(doc.width, doc.height, doc.color.depth.rgba_format());
+			let n = layers.len() as u16;
+			let value = background.map_or([n, n, n, n], |_| [n, n, n, u16::MAX]);
+			image.set_slot(0, 0, TileSlot::Solid(PixelValue(value)));
+			Ok(image)
+		}
+
+		fn convert(&self, image: &TiledImage, _: &crate::ops::Conversion<'_>, _: &TileStore) -> Result<TiledImage, CommandError> {
+			Ok(image.clone())
+		}
+
+		fn convert_color(&self, rgba: [u16; 4], _: &crate::ops::Conversion<'_>) -> Result<[u16; 4], CommandError> {
+			// "Converted": the red and blue channels swap, so the test can see it.
+			Ok([rgba[2], rgba[1], rgba[0], rgba[3]])
+		}
+	}
+
 	/// A document, the store its commands need and its history.
 	///
 	/// Layers are built *through the commands* (the only way to change a
@@ -979,7 +1200,7 @@ mod tests {
 		}
 
 		fn run(&mut self, command: Command) -> Result<CommandEffect, CommandError> {
-			let mut ctx = CommandContext { tiles: &self.store };
+			let mut ctx = CommandContext { tiles: &self.store, ops: None };
 			self.history.execute(&mut self.doc, command, &mut ctx)
 		}
 
@@ -992,6 +1213,16 @@ mod tests {
 				Err(error) => error,
 				Ok(effect) => panic!("{command:?} unexpectedly succeeded: {effect:?}"),
 			}
+		}
+
+		/// Run `command` with a fake [`PixelOps`] (the real one is the engine's).
+		fn run_with_ops(&mut self, command: Command) -> Result<CommandEffect, CommandError> {
+			let ops = FakeOps;
+			let mut ctx = CommandContext {
+				tiles: &self.store,
+				ops: Some(&ops),
+			};
+			self.history.execute(&mut self.doc, command, &mut ctx)
 		}
 
 		/// Add a layer and return its id (`AddLayer` selects it).
@@ -2447,5 +2678,99 @@ mod tests {
 		assert_eq!(scale_alpha8(255, 32768), 128);
 		assert_eq!(scale_alpha8(255, 0), 0);
 		assert_eq!(scale_alpha8(1, 32768), 1);
+	}
+
+	#[test]
+	fn merge_down_keeps_the_lower_layers_place_id_and_name() {
+		let mut f = Fixture::new();
+		let bottom = f.add(NewLayer::Pixel, "Bottom");
+		let top = f.add(NewLayer::Pixel, "Top");
+		let effect = f
+			.run_with_ops(Command::MergeLayers {
+				layers: vec![LayerRef::Id(top), LayerRef::Id(bottom)],
+			})
+			.unwrap();
+		assert_eq!(effect.label, "Merge Layers");
+		assert_eq!(f.doc.layers.len(), 1);
+		let merged = &f.doc.layers[0];
+		assert_eq!(
+			(merged.id, merged.name.as_str(), merged.blend, merged.opacity),
+			(bottom, "Bottom", BlendMode::Normal, 1.0)
+		);
+		assert_eq!(f.doc.selected, vec![bottom]);
+		let LayerKind::Pixel { image, .. } = &merged.kind else {
+			panic!("a pixel layer")
+		};
+		assert!(
+			matches!(image.slot(0, 0, 0), TileSlot::Solid(v) if v.0[0] == 2),
+			"the composite of the two layers"
+		);
+		// Undo restores both.
+		f.history.undo(&mut f.doc);
+		assert_eq!(f.doc.layers.len(), 2);
+	}
+
+	#[test]
+	fn merge_needs_two_layers_and_the_engine() {
+		let mut f = Fixture::new();
+		let only = f.add(NewLayer::Pixel, "Only");
+		let error = f
+			.run_with_ops(Command::MergeLayers {
+				layers: vec![LayerRef::Id(only)],
+			})
+			.unwrap_err();
+		assert!(matches!(error, CommandError::NotAllowed(_)));
+		let other = f.add(NewLayer::Pixel, "Other");
+		let error = f.fail(Command::MergeLayers {
+			layers: vec![LayerRef::Id(only), LayerRef::Id(other)],
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "without PixelOps: {error}");
+		assert_eq!(f.doc.layers.len(), 2, "nothing changed");
+	}
+
+	#[test]
+	fn flatten_leaves_one_opaque_background_and_stamp_adds_a_layer() {
+		let mut f = Fixture::new();
+		f.add(NewLayer::Pixel, "A");
+		f.add(NewLayer::Pixel, "B");
+		let effect = f.run_with_ops(Command::StampVisible).unwrap();
+		assert_eq!(effect.label, "Stamp Visible");
+		assert_eq!(f.doc.layers.len(), 3);
+		let effect = f.run_with_ops(Command::Flatten).unwrap();
+		assert_eq!(effect.label, "Flatten Image");
+		assert_eq!(f.doc.layers.len(), 1);
+		let background = &f.doc.layers[0];
+		assert_eq!(background.name, "Background");
+		assert!(background.locked_position);
+		let LayerKind::Pixel { image, .. } = &background.kind else {
+			panic!("a pixel layer")
+		};
+		assert!(
+			matches!(image.slot(0, 0, 0), TileSlot::Solid(v) if v.0 == [3, 3, 3, u16::MAX]),
+			"every layer, on an opaque background"
+		);
+	}
+
+	#[test]
+	fn assign_changes_only_the_profile_and_convert_converts_fills() {
+		let mut f = Fixture::new();
+		let fill = f.add(NewLayer::SolidFill { rgba: [100, 200, 300, 65535] }, "Fill");
+		f.ok(Command::AssignProfile {
+			profile: ColorProfile::AdobeRgb1998,
+		});
+		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998);
+		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [100, 200, 300, 65535] }));
+		let effect = f
+			.run_with_ops(Command::ConvertProfile {
+				profile: ColorProfile::Srgb,
+				intent: RenderingIntent::RelativeColorimetric,
+				bpc: true,
+			})
+			.unwrap();
+		assert_eq!(effect.label, "Convert to Profile");
+		assert_eq!(f.doc.color.profile, ColorProfile::Srgb);
+		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [300, 200, 100, 65535] }));
+		f.history.undo(&mut f.doc);
+		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998, "undo restores the profile");
 	}
 }

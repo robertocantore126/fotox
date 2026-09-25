@@ -41,6 +41,33 @@ pub struct OpenDoc {
 	pub file: Option<Arc<FxdFile>>,
 	/// The `.fxd`'s path (the Save target while `file` is set).
 	pub path: Option<PathBuf>,
+	/// A filter dialog's live preview (M4-T05).
+	pub preview: Option<crate::filters::FilterPreview>,
+	/// Bumped whenever the preview's pixels change (the render thread's
+	/// caches must not reuse tiles composited from the old preview).
+	pub preview_rev: u64,
+	/// A pixel job (filter, merge, flatten) is running on this document: its
+	/// label. Commands and undo wait until it is done (M4-T05).
+	pub busy: Option<String>,
+	/// `(revision, preview_rev)` of `snapshot`.
+	snapshot_key: (u64, u64),
+	/// View ▸ Proof Setup (M4-T04): the press to simulate.
+	pub proof: Option<ProofSettings>,
+	/// View ▸ Proof Colors (Ctrl+Y).
+	pub proof_colors: bool,
+	/// View ▸ Gamut Warning (Shift+Ctrl+Y).
+	pub gamut_warning: bool,
+}
+
+/// A soft-proof set-up (M4-T04).
+#[derive(Clone, Debug)]
+pub struct ProofSettings {
+	pub path: PathBuf,
+	/// The CMYK profile's bytes.
+	pub icc: Arc<[u8]>,
+	pub intent: fx_core::RenderingIntent,
+	pub bpc: bool,
+	pub simulate_paper: bool,
 }
 
 impl OpenDoc {
@@ -86,6 +113,13 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: None,
 			path: None,
+			preview: None,
+			preview_rev: 0,
+			busy: None,
+			snapshot_key: (0, 0),
+			proof: None,
+			proof_colors: false,
+			gamut_warning: false,
 		}
 	}
 
@@ -110,20 +144,43 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: Some(opened.file),
 			path: Some(path.to_path_buf()),
+			preview: None,
+			preview_rev: 0,
+			busy: None,
+			snapshot_key: (0, 0),
+			proof: None,
+			proof_colors: false,
+			gamut_warning: false,
 		}
 	}
 
 	/// The document as the render thread should see it now.
 	pub fn snapshot(&mut self) -> Arc<Document> {
+		let key = (self.doc.revision, self.preview_rev);
 		match &self.snapshot {
-			Some(s) if s.revision == self.doc.revision && !self.snapshot_stale => s.clone(),
+			Some(s) if self.snapshot_key == key && !self.snapshot_stale => s.clone(),
 			_ => {
-				let s = Arc::new(self.doc.clone());
+				let mut doc = self.doc.clone();
+				// A filter preview replaces the layer's pixels on screen only.
+				if let Some(preview) = &self.preview
+					&& let Some(layer) = doc.layer_mut(preview.layer)
+					&& let LayerKind::Pixel { image, .. } = &mut layer.kind
+				{
+					*image = preview.image.clone();
+				}
+				let s = Arc::new(doc);
 				self.snapshot = Some(s.clone());
+				self.snapshot_key = key;
 				self.snapshot_stale = false;
 				s
 			}
 		}
+	}
+
+	/// The render thread's cache key: changes with the content *and* with the
+	/// preview's pixels.
+	pub fn render_generation(&self) -> u64 {
+		self.generation.wrapping_mul(1_000_003).wrapping_add(self.preview_rev)
 	}
 
 	/// Tell [`snapshot`](Self::snapshot) that derived data (mips) changed
@@ -183,7 +240,7 @@ impl OpenDoc {
 			width: self.doc.width,
 			height: self.doc.height,
 			depth: self.doc.color.depth,
-			profile_name: profile_name(&self.doc.color.profile).into(),
+			profile_name: profile_name(&self.doc.color.profile),
 			ppi: self.doc.ppi,
 			dirty: self.dirty,
 		}
@@ -195,13 +252,14 @@ pub const HOT_AFTER: Duration = Duration::from_secs(1);
 /// The hot layer cools down after this long without edits.
 pub const HOT_IDLE: Duration = Duration::from_secs(2);
 
-fn profile_name(profile: &ColorProfile) -> &'static str {
+fn profile_name(profile: &ColorProfile) -> String {
 	match profile {
-		ColorProfile::Srgb => "sRGB IEC61966-2.1",
-		ColorProfile::AdobeRgb1998 => "Adobe RGB (1998)",
-		ColorProfile::DisplayP3 => "Display P3",
-		ColorProfile::ProPhotoRgb => "ProPhoto RGB",
-		ColorProfile::Icc(_) => "Embedded profile",
+		ColorProfile::Srgb => "sRGB IEC61966-2.1".into(),
+		ColorProfile::AdobeRgb1998 => "Adobe RGB (1998)".into(),
+		ColorProfile::DisplayP3 => "Display P3".into(),
+		ColorProfile::ProPhotoRgb => "ProPhoto RGB".into(),
+		// The name the profile gives itself, like Photoshop shows it.
+		ColorProfile::Icc(bytes) => fx_color::icc_description(bytes).unwrap_or_else(|| "Embedded profile".into()),
 	}
 }
 

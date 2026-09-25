@@ -10,6 +10,9 @@ import * as panels from "./panels.js";
 import { dockGroups } from "./data/panels.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
+import { isEngineFilter, openFilterDialog } from "./native/filters.js";
+import { cmykProfiles, isColorDialog, openColorDialog } from "./native/color.js";
+import { dialogDef } from "./data/dialogs.js";
 
 export function runAction(item) {
   const a = item && item.a ? item.a : "";
@@ -38,11 +41,17 @@ export function runAction(item) {
   // In the app, Export As collects the options, then the shell shows the save
   // dialog for the chosen format and the engine exports (M3-T07).
   if (a === "dlg:export-as" && bridge.isNative) {
+    // The CMYK menu lists the profiles the engine found (M4-T04).
+    const cmyk = cmykProfiles();
+    const withCmyk = (fields) => fields.map((f) => (f.fields ? { ...f, fields: withCmyk(f.fields) } : f.label === "CMYK:" ? { ...f, options: ["None", ...cmyk.map((p) => p.name)] } : f));
     openDialog("export-as", {
+      fields: withCmyk(dialogDef("export-as").fields || []),
       onOk: (v) => bridge.send({
         type: UI.ACTION, id: "export:as",
         args: {
-          format: { JPG: "jpg", TIFF: "tif" }[v["Format:"]] || "png",
+          // CMYK is written as TIFF.
+          format: (cmyk.find((p) => p.name === v["CMYK:"]) ? "tif" : { JPG: "jpg", TIFF: "tif" }[v["Format:"]]) || "png",
+          cmyk: (cmyk.find((p) => p.name === v["CMYK:"]) || {}).path || "",
           eight_bit: v["Bit Depth:"] === "8 bits/channel",
           transparency: { On: "on", Off: "off" }[v["Transparency:"]] || "auto",
           quality: v["Quality:"],
@@ -52,6 +61,12 @@ export function runAction(item) {
     });
     return;
   }
+  // In the app, colour management dialogs and the proof toggles (M4-T03/T04).
+  if (a.startsWith("dlg:") && bridge.isNative && isColorDialog(a.slice(4))) { openColorDialog(a.slice(4)); return; }
+  if ((a === "view:proof-colors" || a === "view:gamut-warning") && bridge.isNative) return;
+  // In the app, Gaussian Blur and Unsharp Mask preview live and apply as a
+  // job in the engine (M4-T05).
+  if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }

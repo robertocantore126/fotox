@@ -157,6 +157,9 @@ export const menus = [
       sep,
       it("Purge", "", "misc:purge", { dis: true }),
       sep,
+      it("Assign Profile...", "", "dlg:assign-profile"),
+      it("Convert to Profile...", "", "dlg:convert-profile"),
+      sep,
       it("Search...", "Ctrl+F", "dlg:search"),
       sub("Preferences", [
         it("General...", "Ctrl+K", "dlg:prefs"),
@@ -352,6 +355,7 @@ export const menus = [
       it("Flatten Image", "", "layer:flatten"),
       it("Merge Layers", "Ctrl+E", "layer:merge"),
       it("Merge Visible", "Shift+Ctrl+E", "layer:merge-visible"),
+      it("Stamp Visible", "Alt+Shift+Ctrl+E", "layer:stamp-visible"),
       sep,
       sub("Matting", [
         it("Defringe...", "", "dlg:defringe"),
@@ -527,6 +531,10 @@ export const menus = [
       it("Fill Screen", "", "zoom:fill"),
       it("Actual Pixels", "Ctrl+1", "zoom:100"),
       it("Print Size", "", "zoom:print"),
+      sep,
+      it("Proof Setup...", "", "dlg:proof-setup"),
+      it("Proof Colors", "Ctrl+Y", "view:proof-colors", { chk: "view:proof-colors" }),
+      it("Gamut Warning", "Shift+Ctrl+Y", "view:gamut-warning", { chk: "view:gamut-warning" }),
       sep,
       it("Rulers", "Ctrl+R", "toggle:rulers", { chk: "rulers" }),
       it("Grid", "Ctrl+'", "toggle:grid", { chk: "grid" }),

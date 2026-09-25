@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use fx_core::GradientStop;
 use fx_core::layer::{Adjustment, LevelsChannel};
 
 pub const LUT_SIZE: usize = 4096;
@@ -66,7 +67,28 @@ pub fn bake(adjustment: &Adjustment) -> Lut {
 			let (b, c, legacy) = (*brightness as f64, *contrast as f64, *legacy);
 			Box::new(move |_, x| brightness_contrast(x, b, c, legacy))
 		}
-		Adjustment::HueSaturation { .. } => panic!("Hue/Saturation is not a per-channel LUT"),
+		Adjustment::Posterize { levels } => {
+			let n = f64::from((*levels).max(2));
+			// VERIFY (M7): Photoshop's level boundaries.
+			Box::new(move |_, x| ((x * n).floor().min(n - 1.0)) / (n - 1.0))
+		}
+		// Luminance LUTs: entry `i` is the RGB output for luminance `i`
+		// (`AdjustKind::LumaLut`, the channel index picks the output channel).
+		Adjustment::Threshold { level } => {
+			let t = f64::from(*level) / 255.0;
+			Box::new(move |_, y| if y >= t { 1.0 } else { 0.0 })
+		}
+		Adjustment::GradientMap { stops, reverse } => {
+			let stops = sorted_stops(stops);
+			let reverse = *reverse;
+			Box::new(move |c, y| gradient_at(&stops, if reverse { 1.0 - y } else { y })[c])
+		}
+		Adjustment::HueSaturation { .. }
+		| Adjustment::ChannelMixer { .. }
+		| Adjustment::PhotoFilter { .. }
+		| Adjustment::ColorBalance { .. }
+		| Adjustment::Vibrance { .. }
+		| Adjustment::BlackWhite { .. } => panic!("{adjustment:?} is not a LUT adjustment"),
 	};
 	let entries = (0..LUT_SIZE)
 		.map(|i| {
@@ -167,6 +189,110 @@ pub fn hue_saturation(rgb: [f64; 3], hue: f64, saturation: f64, lightness: f64, 
 	};
 	let k = (lightness / 100.0).clamp(-1.0, 1.0);
 	out.map(|v| if k >= 0.0 { v + (1.0 - v) * k } else { v * (1.0 + k) })
+}
+
+/// Luminance weights (Rec. 601), for Threshold, Gradient Map, Vibrance and
+/// "preserve luminosity". VERIFY (M7): Photoshop's exact weights.
+pub const LUMA: [f64; 3] = [0.299, 0.587, 0.114];
+
+/// Luminance of straight RGB.
+pub fn luma(rgb: [f64; 3]) -> f64 {
+	rgb[0] * LUMA[0] + rgb[1] * LUMA[1] + rgb[2] * LUMA[2]
+}
+
+/// `rows · rgb + constant` (Channel Mixer, Photo Filter); `preserve_luma`
+/// shifts the result back to the input's luminance. Clamped to 0..=1.
+pub fn apply_matrix(rgb: [f64; 3], rows: &[[f32; 4]; 3], preserve_luma: bool) -> [f64; 3] {
+	let mut out = rows.map(|r| f64::from(r[0]) * rgb[0] + f64::from(r[1]) * rgb[1] + f64::from(r[2]) * rgb[2] + f64::from(r[3]));
+	if preserve_luma {
+		let d = luma(rgb) - luma(out);
+		out = out.map(|v| v + d);
+	}
+	out.map(|v| v.clamp(0.0, 1.0))
+}
+
+/// Color Balance: GIMP's colour-balance transfer (documented reconstruction;
+/// VERIFY against Photoshop in M7). Shifts are −1..=1 per channel for each
+/// tone range, weighted by the pixel's HSL lightness; "preserve luminosity"
+/// keeps the HSL lightness.
+pub fn color_balance(rgb: [f64; 3], shadows: [f32; 3], midtones: [f32; 3], highlights: [f32; 3], preserve_luma: bool) -> [f64; 3] {
+	let (_, _, l) = rgb_to_hsl(rgb);
+	let (a, b, scale) = (0.25, 0.333, 0.7);
+	let ws = ((l - b) / -a + 0.5).clamp(0.0, 1.0) * scale;
+	let wm = ((l - b) / a + 0.5).clamp(0.0, 1.0) * ((l + b - 1.0) / -a + 0.5).clamp(0.0, 1.0) * scale;
+	let wh = ((l + b - 1.0) / a + 0.5).clamp(0.0, 1.0) * scale;
+	let out: [f64; 3] =
+		std::array::from_fn(|c| (rgb[c] + f64::from(shadows[c]) * ws + f64::from(midtones[c]) * wm + f64::from(highlights[c]) * wh).clamp(0.0, 1.0));
+	if preserve_luma {
+		let (h, s, _) = rgb_to_hsl(out);
+		hsl_to_rgb(h, s, l)
+	} else {
+		out
+	}
+}
+
+/// Vibrance: saturation raised more where it is low (−1..=1 each; a
+/// reconstruction, VERIFY in M7), then the plain saturation factor.
+pub fn vibrance(rgb: [f64; 3], vibrance: f32, saturation: f32) -> [f64; 3] {
+	let (v, s) = (f64::from(vibrance), f64::from(saturation));
+	let sat = rgb[0].max(rgb[1]).max(rgb[2]) - rgb[0].min(rgb[1]).min(rgb[2]);
+	let k = if v >= 0.0 { 1.0 + v * (1.0 - sat) } else { 1.0 + v };
+	let y = luma(rgb);
+	rgb.map(|c| (y + (c - y) * k * (1.0 + s)).clamp(0.0, 1.0))
+}
+
+/// Black & White: grey = min + (mid − min)·w(secondary) + (max − mid)·w(primary),
+/// the primary being the largest channel's hue (reds, greens, blues) and the
+/// secondary the two largest (yellows, cyans, magentas) — the widely used
+/// reconstruction of Photoshop's formula (VERIFY in M7). `weights` are
+/// fractions in the order reds, yellows, greens, cyans, blues, magentas.
+/// `tint`: `[hue°, saturation %]`, applied as HSL with the grey as lightness.
+pub fn black_white(rgb: [f64; 3], weights: [f32; 6], tint: Option<[f32; 2]>) -> [f64; 3] {
+	let mut order = [0usize, 1, 2];
+	order.sort_by(|&a, &b| rgb[b].total_cmp(&rgb[a]));
+	let (hi, mid, lo) = (order[0], order[1], order[2]);
+	let primary = [0usize, 2, 4][hi];
+	// The pair of the two largest channels: R+G yellows, G+B cyans, R+B magentas.
+	let secondary = match (hi.min(mid), hi.max(mid)) {
+		(0, 1) => 1,
+		(1, 2) => 3,
+		_ => 5,
+	};
+	let (max, midv, min) = (rgb[hi], rgb[mid], rgb[lo]);
+	let grey = (min + (midv - min) * f64::from(weights[secondary]) + (max - midv) * f64::from(weights[primary])).clamp(0.0, 1.0);
+	match tint {
+		Some([hue, sat]) => hsl_to_rgb((f64::from(hue) / 360.0).rem_euclid(1.0), (f64::from(sat) / 100.0).clamp(0.0, 1.0), grey),
+		None => [grey; 3],
+	}
+}
+
+/// Gradient stops sorted by position; black → white when there are none.
+fn sorted_stops(stops: &[GradientStop]) -> Vec<(f64, [f64; 3])> {
+	let mut out: Vec<(f64, [f64; 3])> = stops
+		.iter()
+		.map(|s| (f64::from(s.position).clamp(0.0, 1.0), s.color.map(|v| f64::from(v).clamp(0.0, 1.0))))
+		.collect();
+	out.sort_by(|a, b| a.0.total_cmp(&b.0));
+	if out.is_empty() {
+		out = vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])];
+	}
+	out
+}
+
+/// The gradient's colour at `t` (linear between stops, flat outside).
+fn gradient_at(stops: &[(f64, [f64; 3])], t: f64) -> [f64; 3] {
+	let first = stops[0];
+	let last = stops[stops.len() - 1];
+	if t <= first.0 {
+		return first.1;
+	}
+	if t >= last.0 {
+		return last.1;
+	}
+	let i = stops.partition_point(|s| s.0 <= t).saturating_sub(1).min(stops.len() - 2);
+	let (a, b) = (stops[i], stops[i + 1]);
+	let f = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
+	std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * f)
 }
 
 /// Straight RGB → (hue 0..1, saturation, lightness).
@@ -394,5 +520,52 @@ mod tests {
 		assert!(tinted[2] > tinted[0] && tinted[0] == tinted[1], "blue tint, got {tinted:?}");
 		let (_, _, l) = rgb_to_hsl(tinted);
 		assert!((l - 0.4).abs() < 1e-9);
+	}
+
+	#[test]
+	fn m4_identities_leave_colours_unchanged() {
+		let samples = [[0.2, 0.5, 0.9], [1.0, 0.0, 0.3], [0.4, 0.4, 0.4], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
+		let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+		for rgb in samples {
+			let close = |a: [f64; 3], what: &str| {
+				for c in 0..3 {
+					assert!((a[c] - rgb[c]).abs() < 1e-9, "{what}: {rgb:?} → {a:?}");
+				}
+			};
+			close(apply_matrix(rgb, &identity, false), "channel mixer identity");
+			close(apply_matrix(rgb, &identity, true), "photo filter density 0");
+			close(color_balance(rgb, [0.0; 3], [0.0; 3], [0.0; 3], false), "color balance at zero");
+			close(vibrance(rgb, 0.0, 0.0), "vibrance at zero");
+		}
+	}
+
+	#[test]
+	fn m4_hand_computed_values() {
+		// Black & White: greys stay the same grey; pure red weighs "reds".
+		let w = [0.4, 0.6, 0.4, 0.6, 0.2, 0.8];
+		assert_eq!(black_white([0.3, 0.3, 0.3], w, None), [0.3; 3]);
+		assert!((black_white([1.0, 0.0, 0.0], w, None)[0] - 0.4).abs() < 1e-6);
+		// Yellow (1, 1, 0): min 0, mid 1 (yellows 0.6), max 1 → 0.6.
+		assert!((black_white([1.0, 1.0, 0.0], w, None)[0] - 0.6).abs() < 1e-6);
+		// Threshold at 128/255 through its luminance LUT.
+		let lut = bake(&Adjustment::Threshold { level: 128 });
+		assert_eq!(lut.apply([0.49; 3]), [0.0; 3]);
+		assert_eq!(lut.apply([0.51; 3]), [1.0; 3]);
+		// Posterize 2: two levels, black and white.
+		let lut = bake(&Adjustment::Posterize { levels: 2 });
+		assert_eq!(lut.apply([0.2, 0.7, 0.6]), [0.0, 1.0, 1.0]);
+		// A black → white gradient map is the luminance.
+		let lut = bake(&Adjustment::GradientMap {
+			stops: Vec::new(),
+			reverse: false,
+		});
+		let y = luma([0.2, 0.5, 0.9]);
+		assert!((lut.apply([y; 3])[1] - y).abs() < 1e-3);
+		// Photo filter: a full-density red filter keeps only red.
+		let red = [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]];
+		assert_eq!(apply_matrix([0.5, 0.5, 0.5], &red, false), [0.5, 0.0, 0.0]);
+		// Vibrance −1: fully desaturated to the luminance.
+		let v = vibrance([1.0, 0.0, 0.0], -1.0, 0.0);
+		assert!((v[0] - v[1]).abs() < 1e-9 && (v[0] - LUMA[0]).abs() < 1e-9);
 	}
 }

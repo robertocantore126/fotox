@@ -53,6 +53,18 @@ impl History {
 		Ok(effect)
 	}
 
+	/// Record a command whose result was computed elsewhere (a filter job, a
+	/// live brush stroke — docs/tasks/HOWTO.md R1b): `before` is the document
+	/// as it was, the caller has already put the new state in place. Same
+	/// limit and redo rules as [`execute`](Self::execute).
+	pub fn record(&mut self, before: Document, command: Command, label: String) {
+		self.redo.clear();
+		self.undo.push(HistoryEntry { label, command, before });
+		if self.undo.len() > self.limit {
+			self.undo.remove(0);
+		}
+	}
+
 	/// Returns false if there is nothing to undo.
 	pub fn undo(&mut self, doc: &mut Document) -> bool {
 		let Some(mut entry) = self.undo.pop() else { return false };
@@ -102,7 +114,7 @@ mod tests {
 	#[test]
 	fn undo_redo_roundtrip() {
 		let tiles = TileStore::new(TileStoreConfig::for_tests(std::env::temp_dir())).unwrap();
-		let mut ctx = CommandContext { tiles: &tiles };
+		let mut ctx = CommandContext { tiles: &tiles, ops: None };
 		let mut doc = Document::new(
 			10,
 			10,

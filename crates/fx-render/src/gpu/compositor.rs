@@ -38,6 +38,14 @@ const OUTSIDE: u32 = 0xFFFF_FFFD;
 const K_LAYER: u32 = 0;
 const K_ADJUST_LUT: u32 = 1;
 const K_ADJUST_HUESAT: u32 = 2;
+// M4-T07 adjustments (after the structural kinds 3..=7 of the shader).
+const K_ADJUST_LUMA_LUT: u32 = 8;
+const K_ADJUST_MATRIX: u32 = 9;
+const K_ADJUST_BALANCE: u32 = 10;
+const K_ADJUST_VIBRANCE: u32 = 11;
+const K_ADJUST_BW: u32 = 12;
+/// Adjustment flag: keep the input's luminance (`composite.wgsl` F_PRESERVE).
+const F_PRESERVE: u32 = 8;
 const K_BEGIN_ISOLATED: u32 = 3;
 const K_BEGIN_PASS: u32 = 4;
 const K_END_ISOLATED: u32 = 5;
@@ -412,7 +420,8 @@ impl GpuCompositor {
 			.flat_map(|&i| programs[i].ops.iter())
 			.filter_map(|op| match op {
 				Op::Adjust {
-					adjust: AdjustKind::Lut(lut), ..
+					adjust: AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut),
+					..
 				} => Some(lut.clone()),
 				_ => None,
 			})
@@ -662,6 +671,47 @@ impl GpuCompositor {
 					} => {
 						g.kind = K_ADJUST_HUESAT;
 						g.params = [*hue, *saturation, *lightness, if *colorize { 1.0 } else { 0.0 }];
+					}
+					AdjustKind::LumaLut(lut) => {
+						g.kind = K_ADJUST_LUMA_LUT;
+						g.lut_row = *self.lut_rows.get(&lut.key).expect("ensure_luts ran before encoding");
+					}
+					AdjustKind::Matrix { rows, preserve_luma } => {
+						g.kind = K_ADJUST_MATRIX;
+						g.src_solid = [rows[0], rows[1], rows[2], [0.0; 4]];
+						if *preserve_luma {
+							g.flags |= F_PRESERVE;
+						}
+					}
+					AdjustKind::ColorBalance {
+						shadows,
+						midtones,
+						highlights,
+						preserve_luma,
+					} => {
+						g.kind = K_ADJUST_BALANCE;
+						let row = |v: &[f32; 3]| [v[0], v[1], v[2], 0.0];
+						g.src_solid = [row(shadows), row(midtones), row(highlights), [0.0; 4]];
+						if *preserve_luma {
+							g.flags |= F_PRESERVE;
+						}
+					}
+					AdjustKind::Vibrance { vibrance, saturation } => {
+						g.kind = K_ADJUST_VIBRANCE;
+						g.params = [*vibrance, *saturation, 0.0, 0.0];
+					}
+					AdjustKind::BlackWhite { weights, tint } => {
+						g.kind = K_ADJUST_BW;
+						g.src_solid = [
+							[weights[0], weights[1], weights[2], weights[3]],
+							[weights[4], weights[5], 0.0, 0.0],
+							[0.0; 4],
+							[0.0; 4],
+						];
+						g.params = match tint {
+							Some([hue, sat]) => [1.0, *hue, *sat, 0.0],
+							None => [0.0; 4],
+						};
 					}
 				}
 				self.encode_mask(mask, &mut g);

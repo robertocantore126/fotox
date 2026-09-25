@@ -1,13 +1,24 @@
-// Viewport pass: background, transparency checkerboard, composite tiles.
+// Viewport pass: background, transparency checkerboard, composite tiles, and
+// the display transform (M4-T02).
 // Output = document-encoded values (the shell's composite pass treats the
 // viewport texture as sRGB-encoded, like Graphite's). Target format must be a
 // non-sRGB format (Rgba8Unorm / Bgra8Unorm) so values are stored as-is.
+//
+// `apply_lut` = 0 means the document profile and the monitor profile are the
+// same, so the composite reaches the screen untouched (criterion C1); the
+// checkerboard and the background are UI colours and are never transformed.
+
+const LUT_GRID: f32 = 33.0;
 
 struct Globals {
 	size: vec2<f32>,        // viewport size in pixels
 	nearest: u32,           // 1 = hard pixels (zoom >= 100 %)
-	_pad: u32,
-	_unused: vec4<f32>,
+	apply_lut: u32,         // 1 = run the composite through the display LUT
+	gamut_warning: f32,     // 1 = paint out-of-gamut colours grey (LUT alpha = 0)
+	// Scalars, not a vec3: a vec3 would align to 16 bytes and break the Rust layout.
+	_unused0: f32,
+	_unused1: f32,
+	_unused2: f32,
 	doc_rect: vec4<f32>,    // x0 y0 x1 y1, screen pixels
 }
 
@@ -25,6 +36,7 @@ struct Draw {
 @group(0) @binding(2) var linear_sampler: sampler;
 @group(0) @binding(3) var nearest_sampler: sampler;
 @group(0) @binding(4) var<storage, read> draws: array<Draw>;
+@group(0) @binding(5) var display_lut: texture_3d<f32>;
 
 struct VsOut {
 	@builtin(position) pos: vec4<f32>,
@@ -74,8 +86,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 	}
 	// Explicit level 0: tiles have no mips, and this avoids derivative
 	// (uniform control flow) requirements after the branch above.
+	var c = textureSampleLevel(tiles, linear_sampler, in.uv, in.slot, 0.0); // premultiplied
 	if globals.nearest == 1u {
-		return textureSampleLevel(tiles, nearest_sampler, in.uv, in.slot, 0.0);
+		c = textureSampleLevel(tiles, nearest_sampler, in.uv, in.slot, 0.0);
 	}
-	return textureSampleLevel(tiles, linear_sampler, in.uv, in.slot, 0.0); // premultiplied
+	if globals.apply_lut == 0u || c.a <= 0.0 {
+		return c;
+	}
+	// The display transform works on straight colour: un-premultiply, sample
+	// the 3D LUT, premultiply again (docs/tasks/SNIPPETS.md §14). Node `i` of
+	// each axis sits at the centre of texel `i`, hence the 32/33 + 0.5/33
+	// coordinate mapping — sampling by the raw colour would be half a texel
+	// off and would make the identity LUT not the identity.
+	let straight = clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
+	let uvw = straight * ((LUT_GRID - 1.0) / LUT_GRID) + vec3<f32>(0.5 / LUT_GRID);
+	var mapped = textureSampleLevel(display_lut, linear_sampler, uvw, 0.0);
+	// Gamut warning (M4-T04): the proof LUT's alpha is 0 out of gamut.
+	if globals.gamut_warning > 0.5 && mapped.a < 0.5 {
+		mapped = vec4<f32>(0.5, 0.5, 0.5, 1.0);
+	}
+	return vec4<f32>(mapped.rgb * c.a, c.a);
 }

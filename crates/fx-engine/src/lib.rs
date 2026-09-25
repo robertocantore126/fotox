@@ -17,8 +17,10 @@
 pub mod b3;
 pub mod documents;
 pub mod export;
+pub mod filters;
 pub mod layers;
 pub mod mips;
+pub mod ops;
 pub mod thumbs;
 pub mod view;
 
@@ -56,7 +58,7 @@ pub struct PointerInput {
 }
 
 /// Options of the Export As dialog (M3-T07).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportChoice {
 	/// Write 8 bits per channel even for a 16-bit document.
 	pub eight_bit: bool,
@@ -66,6 +68,8 @@ pub struct ExportChoice {
 	pub quality: u8,
 	/// JPEG 4:2:0 chroma subsampling instead of 4:4:4.
 	pub chroma_half: bool,
+	/// Convert to CMYK with the profile at this path (TIFF only, M4-T04).
+	pub cmyk: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +137,11 @@ pub enum EngineInput {
 	/// The user asked to close the window; the engine answers
 	/// [`EngineOutput::MayClose`] once no document still needs an answer. M3-T06.
 	CloseRequested,
+	/// The ICC profile of the monitor the window is on, as raw ICC bytes
+	/// (M4-T02). `None` = the shell could not read one, and sRGB is assumed.
+	/// Sent at start-up and whenever the window moves to another monitor, so
+	/// the viewport can transform the document into the display's space.
+	DisplayProfile(Option<Vec<u8>>),
 	Shutdown,
 }
 

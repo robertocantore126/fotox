@@ -55,7 +55,7 @@ pub fn run(input: &Path, output: &Path, with_b3: bool) -> Result<()> {
 	let opaque = opaque_background(&doc, &store);
 	let options = options_for(&doc, output, opaque).map_err(|e| anyhow!("{e}"))?;
 	let mut last = 0.0;
-	export_document(&doc, &store, output, options, &mut |fraction| {
+	export_document(&doc, &store, output, options.clone(), &mut |fraction| {
 		if fraction - last >= 0.1 || fraction >= 1.0 {
 			last = fraction;
 			eprint!("\rexporting… {:3.0} %", fraction * 100.0);

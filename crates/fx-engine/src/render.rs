@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
+use fx_color::Lut3d;
 use fx_core::{Document, LayerId};
 use fx_protocol::DocId;
 use fx_render::adjust::LutCache;
@@ -59,6 +60,12 @@ pub(crate) struct Frame {
 	pub hot_layer: Option<LayerId>,
 	/// Size of the virtual document when `doc` is `None`.
 	pub virtual_doc: (u32, u32),
+	/// Display transform of this document (M4-T02), or `None` when the
+	/// document profile is already the monitor profile (identity shortcut).
+	/// Built on the engine thread: the render thread only uploads it.
+	pub display_lut: Option<Arc<Lut3d>>,
+	/// Paint out-of-gamut colours grey (with a proof LUT, M4-T04).
+	pub gamut_warning: bool,
 }
 
 /// Work for the render thread.
@@ -138,7 +145,17 @@ pub(crate) fn run(ctx: RenderContext) {
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
 				pipeline.compositor.set_hot_layer(f.hot_layer);
-				match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, (*id, f.generation), doc) {
+				match pipeline.frame(
+					&ctx,
+					&mut encoder,
+					&target,
+					&f.view,
+					viewport,
+					(*id, f.generation),
+					doc,
+					f.display_lut.as_deref(),
+					f.gamut_warning,
+				) {
 					Ok(more) => {
 						again = more;
 						uploads = pipeline.frame_uploads;
@@ -234,6 +251,8 @@ impl TilePipeline {
 		viewport: ViewportSize,
 		(id, generation): (DocId, u64),
 		doc: &Arc<Document>,
+		display_lut: Option<&Lut3d>,
+		gamut_warning: bool,
 	) -> Result<bool, fx_render::gpu::CompositeError> {
 		// A new document or content generation invalidates everything cached
 		// for it; a new snapshot of the same generation (mips committed) only
@@ -324,6 +343,8 @@ impl TilePipeline {
 		// Plan again with this frame's results, and draw.
 		let mut plan: FramePlan = plan_frame(view, viewport, doc.width, doc.height, levels, &|key| self.ready.get(&key).copied().map(slot_of));
 		plan.draws.retain(|d| d.slot != EMPTY_SLOT);
+		self.renderer.set_display_lut(display_lut);
+		self.renderer.set_gamut_warning(gamut_warning);
 		self.renderer.render(
 			encoder,
 			target,

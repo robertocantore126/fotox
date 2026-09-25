@@ -67,6 +67,8 @@ pub(crate) struct App {
 	/// whichever owns the pointer shows.
 	ui_cursor: Option<Cursor>,
 	engine_cursor: CursorShape,
+	/// The monitor whose ICC profile the engine has (M4-T02).
+	display_monitor: Option<isize>,
 	/// A drop whose file list is being fetched.
 	pending_drop: Option<AsyncRequestSerial>,
 	startup_time: Option<Instant>,
@@ -105,6 +107,7 @@ impl App {
 			web_communication_initialized: false,
 			ui_cursor: None,
 			engine_cursor: CursorShape::Default,
+			display_monitor: None,
 			pending_drop: None,
 			startup_time: None,
 			exiting: Arc::new(AtomicBool::new(false)),
@@ -130,6 +133,20 @@ impl App {
 		}
 		self.exit_reason = reason;
 		self.app_event_scheduler.schedule(AppEvent::Exit);
+	}
+
+	/// Send the engine the ICC profile of the monitor the window is on, when
+	/// that monitor changed (M4-T02; reading the profile only then keeps
+	/// window drags cheap).
+	fn update_display_profile(&mut self) {
+		let Some(window) = &self.window else { return };
+		if window.monitor_id().is_some() && window.monitor_id() == self.display_monitor {
+			return;
+		}
+		if let Some((monitor, profile)) = window.monitor() {
+			self.display_monitor = Some(monitor);
+			self.engine.send(EngineInput::DisplayProfile(profile));
+		}
 	}
 
 	/// Tell the UI and the renderer about the current window size and scale.
@@ -429,6 +446,7 @@ impl ApplicationHandler for App {
 		window.show();
 		self.window = Some(window);
 		self.render_state = Some(render_state);
+		self.update_display_profile();
 
 		self.resize();
 		self.startup_time = Some(Instant::now());
@@ -482,7 +500,12 @@ impl ApplicationHandler for App {
 			// The engine asks about unsaved documents first and answers
 			// `MayClose` (M3-T06).
 			WindowEvent::CloseRequested => self.engine.send(EngineInput::CloseRequested),
-			WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
+			WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+				self.resize();
+				self.update_display_profile();
+			}
+			// Moving to another monitor changes the display profile (M4-T02).
+			WindowEvent::Moved(_) => self.update_display_profile(),
 			WindowEvent::RedrawRequested => self.redraw(),
 			_ => {}
 		}
@@ -562,6 +585,11 @@ fn export_choice(args: &serde_json::Value) -> (&'static str, &'static str, fx_en
 		},
 		quality: args.get("quality").and_then(serde_json::Value::as_u64).map_or(90, |q| q.min(100) as u8),
 		chroma_half: text("chroma") == "420",
+		cmyk: args
+			.get("cmyk")
+			.and_then(serde_json::Value::as_str)
+			.filter(|p| !p.is_empty())
+			.map(std::path::PathBuf::from),
 	};
 	(name, extension, choice)
 }

@@ -24,6 +24,9 @@ export const UI = Object.freeze({
   ACTIVATE_DOCUMENT: "activate_document",
   CLOSE_DOCUMENT: "close_document",
   CLOSE_DOCUMENT_ANSWER: "close_document_answer",
+  FILTER_PREVIEW: "filter_preview",
+  FILTER_PREVIEW_CANCEL: "filter_preview_cancel",
+  PROOF_SETUP: "proof_setup",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
 });
@@ -33,6 +36,8 @@ export const ENGINE = Object.freeze({
   DOCUMENT_OPENED: "document_opened",
   DOCUMENT_CHANGED: "document_changed",
   CLOSE_DIRTY_DOCUMENT: "close_dirty_document",
+  CMYK_PROFILES: "cmyk_profiles",
+  PROOF_STATE: "proof_state",
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",

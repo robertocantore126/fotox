@@ -19,11 +19,17 @@ const K_BEGIN_PASS: u32 = 4u;
 const K_END_ISOLATED: u32 = 5u;
 const K_END_PASS: u32 = 6u;
 const K_LOAD_PREFIX: u32 = 7u;
+const K_ADJUST_LUMA_LUT: u32 = 8u;
+const K_ADJUST_MATRIX: u32 = 9u;
+const K_ADJUST_BALANCE: u32 = 10u;
+const K_ADJUST_VIBRANCE: u32 = 11u;
+const K_ADJUST_BW: u32 = 12u;
 
 // op flags
 const F_CLIP: u32 = 1u;
 const F_MASK: u32 = 2u;
 const F_DISSOLVE: u32 = 4u;
+const F_PRESERVE: u32 = 8u; // adjustments: keep the input's luminance
 
 const STACK: u32 = 12u;
 
@@ -309,6 +315,86 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
 	return vec3<f32>(hsl_channel(p, q, h + 1.0 / 3.0), hsl_channel(p, q, h), hsl_channel(p, q, h - 1.0 / 3.0));
 }
 
+// ---- M4-T07 adjustments: the same math as `adjust.rs` (f64 there).
+
+// Rec. 601 luminance (`adjust::LUMA`); not `lum()`, which is the blend modes'.
+fn luma601(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
+
+// `adjust::apply_matrix`: rows in src_solid[0..2] (xyz · rgb + w).
+fn adjust_matrix(i: u32, cb: vec3<f32>) -> vec3<f32> {
+	var out = vec3<f32>(
+		dot(ops[i].src_solid[0].xyz, cb) + ops[i].src_solid[0].w,
+		dot(ops[i].src_solid[1].xyz, cb) + ops[i].src_solid[1].w,
+		dot(ops[i].src_solid[2].xyz, cb) + ops[i].src_solid[2].w,
+	);
+	if (ops[i].flags & F_PRESERVE) != 0u {
+		out = out + vec3<f32>(luma601(cb) - luma601(out));
+	}
+	return clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// `adjust::color_balance`: shadows / midtones / highlights in src_solid[0..2].
+fn adjust_balance(i: u32, cb: vec3<f32>) -> vec3<f32> {
+	let l = rgb_to_hsl(cb).z;
+	let a = 0.25;
+	let b = 0.333;
+	let scale = 0.7;
+	let ws = clamp((l - b) / -a + 0.5, 0.0, 1.0) * scale;
+	let wm = clamp((l - b) / a + 0.5, 0.0, 1.0) * clamp((l + b - 1.0) / -a + 0.5, 0.0, 1.0) * scale;
+	let wh = clamp((l + b - 1.0) / a + 0.5, 0.0, 1.0) * scale;
+	let out = clamp(cb + ops[i].src_solid[0].xyz * ws + ops[i].src_solid[1].xyz * wm + ops[i].src_solid[2].xyz * wh, vec3<f32>(0.0), vec3<f32>(1.0));
+	if (ops[i].flags & F_PRESERVE) != 0u {
+		let hsl = rgb_to_hsl(out);
+		return hsl_to_rgb(hsl.x, hsl.y, l);
+	}
+	return out;
+}
+
+// `adjust::vibrance`: params = (vibrance, saturation), −1..=1.
+fn adjust_vibrance(cb: vec3<f32>, params: vec4<f32>) -> vec3<f32> {
+	let sat_now = max(cb.r, max(cb.g, cb.b)) - min(cb.r, min(cb.g, cb.b));
+	var k = 1.0 + params.x;
+	if params.x >= 0.0 {
+		k = 1.0 + params.x * (1.0 - sat_now);
+	}
+	let y = luma601(cb);
+	return clamp(vec3<f32>(y) + (cb - vec3<f32>(y)) * k * (1.0 + params.y), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// `adjust::black_white`: weights (reds, yellows, greens, cyans) in
+// src_solid[0], (blues, magentas) in src_solid[1].xy; params = (tint 0/1, hue°, sat %).
+fn adjust_bw(i: u32, cb: vec3<f32>) -> vec3<f32> {
+	let w0 = ops[i].src_solid[0];
+	let w1 = ops[i].src_solid[1];
+	// Channel order by value, ties broken like a stable sort (r, g, b).
+	var hi = 0u;
+	var mid = 1u;
+	var lo = 2u;
+	var v = array<f32, 3>(cb.r, cb.g, cb.b);
+	if v[mid] > v[hi] { let t = hi; hi = mid; mid = t; }
+	if v[lo] > v[mid] { let t = mid; mid = lo; lo = t; }
+	if v[mid] > v[hi] { let t = hi; hi = mid; mid = t; }
+	var wp: f32;
+	switch hi {
+		case 0u: { wp = w0.x; }
+		case 1u: { wp = w0.z; }
+		default: { wp = w1.x; }
+	}
+	let pair = min(hi, mid) * 3u + max(hi, mid);
+	var ws: f32;
+	switch pair {
+		case 1u: { ws = w0.y; } // (0, 1): yellows
+		case 5u: { ws = w0.w; } // (1, 2): cyans
+		default: { ws = w1.y; } // (0, 2): magentas
+	}
+	let grey = clamp(v[lo] + (v[mid] - v[lo]) * ws + (v[hi] - v[mid]) * wp, 0.0, 1.0);
+	let p = ops[i].params;
+	if p.x > 0.5 {
+		return hsl_to_rgb(fract(p.y / 360.0), clamp(p.z / 100.0, 0.0, 1.0), grey);
+	}
+	return vec3<f32>(grey);
+}
+
 fn lut_channel(row: u32, c: u32, v: f32) -> f32 {
 	let x = clamp(v, 0.0, 1.0) * f32(globals.lut_size - 1u);
 	let i = min(u32(floor(x)), globals.lut_size - 2u);
@@ -350,6 +436,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 			case K_ADJUST_HUESAT: {
 				let cb = unpremultiply(stack[sp]);
 				let f = hue_saturation(cb, ops[i].params);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_LUMA_LUT: {
+				let cb = unpremultiply(stack[sp]);
+				let y = luma601(cb);
+				let row = ops[i].lut_row;
+				let f = vec3<f32>(lut_channel(row, 0u, y), lut_channel(row, 1u, y), lut_channel(row, 2u, y));
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_MATRIX: {
+				let f = adjust_matrix(i, unpremultiply(stack[sp]));
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_BALANCE: {
+				let f = adjust_balance(i, unpremultiply(stack[sp]));
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_VIBRANCE: {
+				let f = adjust_vibrance(unpremultiply(stack[sp]), ops[i].params);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_BW: {
+				let f = adjust_bw(i, unpremultiply(stack[sp]));
 				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
 			}
 			case K_BEGIN_ISOLATED: {
