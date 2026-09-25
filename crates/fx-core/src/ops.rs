@@ -111,6 +111,24 @@ pub trait PixelOps: Send + Sync {
 	/// nothing matches.
 	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError>;
 
+	/// Replay a brush stroke on `layer` of `doc` (M5-T07): the layer's (or
+	/// its mask's) new image and offset. The engine implements it with the
+	/// brush engine of `fx-ops`, the same code its live strokes run.
+	#[allow(clippy::too_many_arguments)]
+	fn stroke(
+		&self,
+		_doc: &Document,
+		_layer: LayerId,
+		_target: crate::stroke::StrokeTarget,
+		_tool: &crate::stroke::StrokeTool,
+		_brush: &crate::stroke::BrushParams,
+		_color: [u16; 4],
+		_samples: &[crate::stroke::StrokeSample],
+		_store: &TileStore,
+	) -> Result<(TiledImage, (i32, i32)), CommandError> {
+		Err(CommandError::NotAllowed("painting needs the engine's brush engine".into()))
+	}
+
 	/// What Edit ▸ Paste pastes (M5-T05): the engine's clipboard. `None` =
 	/// empty.
 	fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {

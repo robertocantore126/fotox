@@ -4,6 +4,7 @@ import { setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
 import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
 import { isPopupOpen } from "./popup.js";
+import { optionValue, setOption } from "./optionsbar.js";
 import { toolSlots } from "./data/tools.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
@@ -87,6 +88,44 @@ function comboOf(e) {
   return parts.join("+");
 }
 
+/** The next brush size for `[` (down) or `]` (up), in Photoshop's steps. */
+function sizeStep(size, up) {
+  const step = (v) => (v < 10 ? 1 : v < 100 ? 10 : v < 200 ? 25 : v < 500 ? 50 : 100);
+  if (up) return Math.min(5000, size + step(size));
+  const down = size - step(size - 1);
+  return Math.max(1, down);
+}
+
+let lastDigit = null;
+
+/** Handle a painting shortcut; `true` when the key was one. */
+function brushKey(e) {
+  if (e.code === "BracketLeft" || e.code === "BracketRight") {
+    const up = e.code === "BracketRight";
+    if (e.shiftKey) {
+      const hardness = optionValue("Hardness");
+      if (hardness == null) return false;
+      return setOption("Hardness", Math.max(0, Math.min(100, hardness + (up ? 25 : -25))));
+    }
+    const size = optionValue("Size");
+    if (size == null) return false;
+    return setOption("Size", sizeStep(size, up));
+  }
+  if (!e.shiftKey && /^Digit[0-9]$/.test(e.code) && optionValue("Opacity") != null) {
+    const digit = Number(e.code.slice(5));
+    const now = performance.now();
+    let value = digit === 0 ? 100 : digit * 10;
+    if (lastDigit && now - lastDigit.at < 600) {
+      value = lastDigit.digit * 10 + digit;
+      lastDigit = null;
+    } else {
+      lastDigit = { digit, at: now };
+    }
+    return setOption("Opacity", value);
+  }
+  return false;
+}
+
 export function initShortcuts() {
   document.addEventListener("keydown", (e) => {
     const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
@@ -106,6 +145,14 @@ export function initShortcuts() {
     }
 
     if (typing) return;
+
+    // Painting shortcuts (M5-T09): [ and ] change the size, Shift+[ and ]
+    // the hardness by 25 %, the number keys the opacity (1 = 10 % … 0 = 100 %;
+    // two digits typed quickly = that exact value).
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !isDialogOpen() && brushKey(e)) {
+      e.preventDefault();
+      return;
+    }
 
     if (e.key === "Tab" && !e.ctrlKey && !e.altKey) {
       runAction({ label: "Panels", a: "toggle:panels" });

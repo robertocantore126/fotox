@@ -28,6 +28,7 @@ use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
 use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
+use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -58,6 +59,8 @@ pub struct LayerPropsPatch {
 	pub clipped: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub locked_pixels: Option<bool>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub locked_transparency: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub locked_position: Option<bool>,
 }
@@ -186,6 +189,18 @@ pub enum Command {
 	/// Layer ▸ New ▸ Layer via Copy / via Cut (Ctrl+J / Shift+Ctrl+J): the
 	/// selected pixels of the active layer on a new layer above it. M5
 	LayerViaCopy { cut: bool },
+	/// A brush stroke (M5-T07): the samples after smoothing, replayed through
+	/// the brush engine; the live stroke painted exactly these pixels.
+	Stroke {
+		layer: LayerRef,
+		#[serde(default)]
+		target: StrokeTarget,
+		tool: StrokeTool,
+		brush: BrushParams,
+		/// Straight 16-bit RGBA (for a mask, the grey is `color[0]`).
+		color: [u16; 4],
+		samples: Vec<StrokeSample>,
+	},
 	/// Edit ▸ Paste: the clipboard as a new layer above the active one. `in_place`
 	/// keeps its canvas position; otherwise its bounds are centred on
 	/// `center` (the view centre, when the source position is not visible),
@@ -283,6 +298,14 @@ impl Command {
 			Command::Clear { layer, cut } => clear(doc, layer, *cut, ctx),
 			Command::LayerViaCopy { cut } => layer_via_copy(doc, *cut, ctx),
 			Command::Paste { in_place, center } => paste(doc, *in_place, *center, ctx),
+			Command::Stroke {
+				layer,
+				target,
+				tool,
+				brush,
+				color,
+				samples,
+			} => stroke(doc, layer, *target, tool, brush, *color, samples, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -522,6 +545,9 @@ fn set_layer_props(doc: &mut Document, layer: &LayerRef, props: &LayerPropsPatch
 	}
 	if let Some(v) = props.clipped {
 		target.clipped = v;
+	}
+	if let Some(v) = props.locked_transparency {
+		target.locked_transparency = v;
 	}
 	if let Some(v) = props.locked_pixels {
 		target.locked_pixels = v;
@@ -1361,11 +1387,12 @@ fn fill(
 		});
 	}
 	let (id, image, offset) = pixel_target(doc, layer)?;
+	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
 	let spec = crate::pixels::FillSpec {
 		color,
 		mode,
 		opacity,
-		preserve_transparency,
+		preserve_transparency: preserve_transparency || locked_alpha,
 	};
 	let placed = crate::pixels::Placed { image: &image, offset };
 	let (filled, offset) = crate::pixels::fill(placed, doc.selection.as_ref(), (doc.width, doc.height), &spec, ctx.tiles)?;
@@ -1426,6 +1453,58 @@ fn layer_via_copy(doc: &mut Document, cut: bool, ctx: &CommandContext<'_>) -> Re
 		label: if cut { "Layer Via Cut".into() } else { "Layer Via Copy".into() },
 		structure_changed: true,
 		pixels_changed: if cut { vec![id] } else { Vec::new() },
+		..Default::default()
+	})
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke(
+	doc: &mut Document,
+	layer: &LayerRef,
+	target: StrokeTarget,
+	tool: &StrokeTool,
+	brush: &BrushParams,
+	color: [u16; 4],
+	samples: &[StrokeSample],
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if samples.is_empty() {
+		return Err(CommandError::NotAllowed("a stroke needs at least one sample".into()));
+	}
+	let id = resolve(doc, layer)?;
+	let layer = doc.layer(id).expect("resolved id exists");
+	if layer.locked_pixels {
+		return Err(CommandError::Locked(id));
+	}
+	match target {
+		StrokeTarget::Pixels if !matches!(layer.kind, LayerKind::Pixel { .. }) => {
+			return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
+		}
+		StrokeTarget::Mask if layer.mask.is_none() => return Err(CommandError::NotAllowed("the layer has no mask".into())),
+		_ => {}
+	}
+	let (image, offset) = pixel_ops(ctx, "painting")?.stroke(doc, id, target, tool, brush, color, samples, ctx.tiles)?;
+	let target_layer = doc.layer_mut(id).expect("resolved id exists");
+	match target {
+		StrokeTarget::Pixels => {
+			if let LayerKind::Pixel {
+				image: old,
+				offset: old_offset,
+			} = &mut target_layer.kind
+			{
+				*old = image;
+				*old_offset = offset;
+			}
+		}
+		StrokeTarget::Mask => {
+			if let Some(mask) = &mut target_layer.mask {
+				mask.image = image;
+			}
+		}
+	}
+	Ok(CommandEffect {
+		label: tool.label().into(),
+		pixels_changed: vec![id],
 		..Default::default()
 	})
 }
@@ -2476,6 +2555,7 @@ mod tests {
 				blend: Some(BlendMode::Multiply),
 				clipped: Some(false),
 				locked_pixels: Some(true),
+				locked_transparency: Some(true),
 				locked_position: Some(true),
 			},
 		});
@@ -2487,7 +2567,7 @@ mod tests {
 		assert_eq!((layer.opacity, layer.fill), (0.5, 0.25));
 		assert_eq!(layer.blend, BlendMode::Multiply);
 		assert!(!layer.clipped);
-		assert!(layer.locked_pixels && layer.locked_position);
+		assert!(layer.locked_pixels && layer.locked_position && layer.locked_transparency);
 	}
 
 	#[test]

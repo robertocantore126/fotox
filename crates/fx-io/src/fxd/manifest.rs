@@ -59,6 +59,9 @@ pub struct LayerEntry {
 	pub blend: BlendMode,
 	pub clipped: bool,
 	pub locked_pixels: bool,
+	/// M5 (D-049); files saved before read `false`.
+	#[serde(default)]
+	pub locked_transparency: bool,
 	pub locked_position: bool,
 	pub mask: Option<MaskEntry>,
 	#[serde(flatten)]
@@ -213,6 +216,7 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 		blend: layer.blend,
 		clipped: layer.clipped,
 		locked_pixels: layer.locked_pixels,
+		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
 		mask: layer.mask.as_ref().map(|mask| MaskEntry {
 			enabled: mask.enabled,
@@ -334,6 +338,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) 
 	layer.blend = entry.blend;
 	layer.clipped = entry.clipped;
 	layer.locked_pixels = entry.locked_pixels;
+	layer.locked_transparency = entry.locked_transparency;
 	layer.locked_position = entry.locked_position;
 	layer.mask = match &entry.mask {
 		Some(mask) => Some(Mask {

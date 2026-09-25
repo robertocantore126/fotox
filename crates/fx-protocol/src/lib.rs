@@ -200,6 +200,12 @@ pub struct LayerInfo {
 	/// The two locks separately (the panel's lock buttons).
 	#[serde(default)]
 	pub locked_pixels: bool,
+	/// "Lock transparent pixels" (M5, D-049).
+	#[serde(default)]
+	pub locked_transparency: bool,
+	/// Painting goes to this layer's mask (its mask thumbnail was clicked, M5-T09).
+	#[serde(default)]
+	pub edit_mask: bool,
 	#[serde(default)]
 	pub locked_position: bool,
 	pub expanded: bool,
@@ -279,6 +285,12 @@ pub enum EngineToUi {
 		/// Tiles being loaded from warm/cold storage right now.
 		#[serde(default)]
 		pending_loads: u32,
+		/// Brush input → pixels on screen, median and 99th percentile over the
+		/// last 2 s, in ms (M5-T11; 0 when nothing was painted).
+		#[serde(default)]
+		input_latency_ms_p50: f32,
+		#[serde(default)]
+		input_latency_ms_p99: f32,
 	},
 	Progress {
 		task: u64,

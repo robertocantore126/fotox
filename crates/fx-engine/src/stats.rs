@@ -18,6 +18,9 @@ pub struct RenderStats {
 	pub pending_loads: u32,
 	/// VRAM the compositor holds (atlas + composite cache), in bytes.
 	pub gpu_bytes: u64,
+	/// Input → pixels latency of the frames that showed stroke pixels
+	/// (M5-T11): when, and how long (ms).
+	inputs: VecDeque<(Instant, f32)>,
 }
 
 /// A summary of the last [`WINDOW`].
@@ -33,6 +36,29 @@ impl RenderStats {
 	pub fn record(&mut self, now: Instant, ms: f32) {
 		self.frames.push_back((now, ms));
 		self.prune(now);
+	}
+
+	/// Record the input → pixels latency of a frame that showed stroke pixels.
+	pub fn record_input(&mut self, now: Instant, ms: f32) {
+		self.inputs.push_back((now, ms));
+		while self.inputs.front().is_some_and(|&(t, _)| now.saturating_duration_since(t) > WINDOW) {
+			self.inputs.pop_front();
+		}
+	}
+
+	/// The input latency's median and 99th percentile over the last 2 s
+	/// (0 when nothing was painted).
+	pub fn input_latency(&mut self, now: Instant) -> (f32, f32) {
+		while self.inputs.front().is_some_and(|&(t, _)| now.saturating_duration_since(t) > WINDOW) {
+			self.inputs.pop_front();
+		}
+		if self.inputs.is_empty() {
+			return (0.0, 0.0);
+		}
+		let mut times: Vec<f32> = self.inputs.iter().map(|&(_, ms)| ms).collect();
+		times.sort_by(f32::total_cmp);
+		let at = |q: f32| times[((times.len() - 1) as f32 * q).round() as usize];
+		(at(0.5), at(0.99))
 	}
 
 	/// Frames per second and frame-time percentiles over the last 2 s.

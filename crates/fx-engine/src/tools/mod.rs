@@ -23,6 +23,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 pub mod eyedropper;
 pub mod lasso;
 pub mod marquee;
+pub mod paint;
 pub mod wand;
 
 pub use eyedropper::sample_pixel;
@@ -250,6 +251,25 @@ pub struct ToolResult {
 	/// The tool's overlay changed (M5-T04): redraw the viewport. The composited
 	/// tiles are reused, so this is the cheap path a rubber band needs.
 	pub redraw: bool,
+	/// Brush stroke events for the engine to paint (M5-T07), in order.
+	pub strokes: Vec<StrokeEvent>,
+}
+
+/// What a painting tool asks the engine to do with its stroke (M5-T07).
+#[derive(Clone, Debug, PartialEq)]
+pub enum StrokeEvent {
+	/// Pen down: start a stroke on the active layer (or its mask).
+	Begin {
+		target: fx_core::stroke::StrokeTarget,
+		tool: fx_core::stroke::StrokeTool,
+		brush: fx_core::stroke::BrushParams,
+		color: [u16; 4],
+		samples: Vec<fx_core::stroke::StrokeSample>,
+	},
+	/// More samples (document pixels, after smoothing).
+	Add(Vec<fx_core::stroke::StrokeSample>),
+	/// Pen up: record the stroke as one History step.
+	End,
 }
 
 /// The document and services a tool works with.
@@ -262,6 +282,9 @@ pub struct ToolContext<'a> {
 	/// work in screen units: a lasso drops a sample every 0.5 *screen* pixels,
 	/// a click is a drag under 3 *screen* pixels, whatever the document size.
 	pub view: ViewTransform,
+	/// Painting goes to the active layer's mask (the mask thumbnail was
+	/// clicked in the Layers panel, M5-T09).
+	pub mask_target: bool,
 }
 
 /// A viewport tool (M5-T01).
@@ -330,6 +353,12 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		// The card puts these out of scope for M5-T04 (the wand is a later
 		// step of it, the rest belongs to a milestone that is not planned).
 		"magic-wand" => Some(Box::new(wand::MagicWand::default())),
+		"brush" => Some(Box::new(paint::Paint::new("brush", paint::Kind::Brush))),
+		"pencil" => Some(Box::new(paint::Paint::new("pencil", paint::Kind::Pencil))),
+		"eraser" => Some(Box::new(paint::Paint::new("eraser", paint::Kind::Eraser))),
+		"clone" => Some(Box::new(paint::Paint::new("clone", paint::Kind::Clone))),
+		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
+		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
 		"quick-select" | "object-select" | "lasso-magnet" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		_ => None,
 	}
@@ -450,6 +479,7 @@ pub(crate) mod testing {
 				ops: &self.ops,
 				settings: &self.settings,
 				view: self.view,
+				mask_target: false,
 			};
 			tool.pointer(&mut ctx, &event)
 		}
@@ -462,6 +492,7 @@ pub(crate) mod testing {
 				ops: &self.ops,
 				settings: &self.settings,
 				view: self.view,
+				mask_target: false,
 			};
 			tool.key(&mut ctx, key)
 		}
@@ -524,7 +555,8 @@ mod tests {
 	#[test]
 	fn unknown_tools_have_no_implementation() {
 		let mut tools = Tools::default();
-		assert!(tools.get("brush").is_none(), "brush arrives with M5-T06");
+		assert!(tools.get("mixer-brush").is_none(), "not implemented");
+		assert!(tools.get("brush").is_some());
 		assert!(tools.get("eyedropper").is_some());
 		for id in ["marquee", "marquee-ellipse", "marquee-row", "marquee-col", "lasso", "lasso-poly", "magic-wand"] {
 			assert!(tools.get(id).is_some(), "{id}");
@@ -566,6 +598,7 @@ mod tests {
 			ops: &ops,
 			settings,
 			view,
+			mask_target: false,
 		};
 		assert_eq!(selection_mode(&ctx, "marquee"), SelectMode::Subtract, "the button group's index");
 		assert_eq!(selection_mode(&ctx, "lasso"), SelectMode::Replace, "no options: New selection");
@@ -596,6 +629,7 @@ mod tests {
 			ops: &ops,
 			settings,
 			view,
+			mask_target: false,
 		};
 		assert_eq!(selection_mode(&ctx, "lasso"), SelectMode::Add);
 	}

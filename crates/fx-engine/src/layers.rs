@@ -55,8 +55,10 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 		// The protocol carries one lock flag for `fx-core`'s two locks
 		// (`locked_pixels`, `locked_position`); it reads as "locked in some
 		// way", like Photoshop's row lock icon. See the report.
-		locked: layer.locked_pixels || layer.locked_position,
+		locked: layer.locked_pixels || layer.locked_position || layer.locked_transparency,
 		locked_pixels: layer.locked_pixels,
+		locked_transparency: layer.locked_transparency,
+		edit_mask: false,
 		locked_position: layer.locked_position,
 		// Only groups can collapse; for anything else the flag means nothing.
 		expanded: matches!(&layer.kind, LayerKind::Group { expanded: true, .. }),

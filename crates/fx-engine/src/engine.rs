@@ -189,6 +189,8 @@ struct Engine {
 	/// The marching-ants overlay of the selection, cached per document,
 	/// generation, view level and visible rectangle (M5-T03).
 	selection_overlay: Option<(SelectionOverlayKey, Arc<fx_render::Overlay>)>,
+	/// The brush stroke being painted (M5-T07).
+	stroke: Option<crate::stroke::Session>,
 }
 
 /// Cache key of the selection contour (M5-T03).
@@ -198,7 +200,7 @@ type SelectionOverlayKey = (DocId, u64, usize, (i64, i64, i64, i64));
 #[derive(Clone, Debug, PartialEq)]
 enum EditKey {
 	/// `set_layer_props` of the same layer touching the same fields.
-	Props(LayerRef, [bool; 8]),
+	Props(LayerRef, [bool; 9]),
 	/// `set_adjustment` of the same layer.
 	Adjustment(LayerRef),
 }
@@ -215,6 +217,7 @@ impl EditKey {
 					blend,
 					clipped,
 					locked_pixels,
+					locked_transparency,
 					locked_position,
 				} = props;
 				Some(Self::Props(
@@ -227,6 +230,7 @@ impl EditKey {
 						blend.is_some(),
 						clipped.is_some(),
 						locked_pixels.is_some(),
+						locked_transparency.is_some(),
 						locked_position.is_some(),
 					],
 				))
@@ -288,6 +292,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		tools: Tools::default(),
 		settings: ToolSettings::default(),
 		selection_overlay: None,
+		stroke: None,
 	};
 
 	loop {
@@ -450,12 +455,14 @@ impl Engine {
 			let Some(open) = self.docs.get_mut(doc_id) else {
 				return changed;
 			};
+			let mask_target = open.paints_mask();
 			let mut ctx = ToolContext {
 				doc: &mut open.doc,
 				store: &store,
 				ops: &self.ops,
 				settings: &self.settings,
 				view: open.view.view,
+				mask_target,
 			};
 			(tool.pointer(&mut ctx, &event), idle)
 		};
@@ -481,12 +488,14 @@ impl Engine {
 		let store = self.store.clone();
 		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
 			(Some(tool), Some(open)) => {
+				let mask_target = open.paints_mask();
 				let mut ctx = ToolContext {
 					doc: &mut open.doc,
 					store: &store,
 					ops: &self.ops,
 					settings: &self.settings,
 					view: open.view.view,
+					mask_target,
 				};
 				tool.key(&mut ctx, key)
 			}
@@ -523,11 +532,173 @@ impl Engine {
 				target: target.as_str().into(),
 			});
 		}
+		for event in result.strokes {
+			self.stroke_event(doc_id, event);
+		}
 		if result.redraw {
 			self.request_frame();
 		}
 		if let Some(command) = result.command {
 			self.command(doc_id, command);
+		}
+	}
+
+	/// A painting tool's stroke event (M5-T07): start, paint, record.
+	fn stroke_event(&mut self, doc_id: DocId, event: crate::tools::StrokeEvent) {
+		use crate::tools::StrokeEvent;
+		match event {
+			StrokeEvent::Begin {
+				target,
+				tool,
+				brush,
+				color,
+				samples,
+			} => {
+				self.end_stroke();
+				let store = self.store.clone();
+				let Some(open) = self.docs.get_mut(doc_id) else { return };
+				if let Some(job) = &open.busy {
+					let text = format!("Wait until {job} is finished");
+					self.to_ui(&EngineToUi::Toast { text });
+					return;
+				}
+				let Some(layer) = open.doc.active_layer() else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Select a layer to paint on".into(),
+					});
+					return;
+				};
+				if open.doc.layer(layer).is_some_and(|l| l.locked_pixels) {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Could not paint: the layer's pixels are locked".into(),
+					});
+					return;
+				}
+				let before = open.doc.clone();
+				let prepared = match crate::stroke::prepare(&before, layer, target, &tool, &store) {
+					Ok(prepared) => prepared,
+					Err(error) => {
+						self.to_ui(&EngineToUi::Toast { text: error.to_string() });
+						return;
+					}
+				};
+				let stroke = match fx_ops::brush::Stroke::begin(crate::stroke::setup(&prepared, &before, tool, brush, color), &store) {
+					Ok(stroke) => stroke,
+					Err(error) => {
+						self.to_ui(&EngineToUi::Toast { text: error.to_string() });
+						return;
+					}
+				};
+				// The layer holds the (possibly grown) image while the stroke runs.
+				let (image, offset) = stroke.start();
+				set_stroke_image(&mut open.doc, layer, target, image.clone(), offset);
+				self.stroke = Some(crate::stroke::Session {
+					doc: doc_id,
+					layer,
+					target,
+					tool,
+					brush,
+					color,
+					before,
+					stroke,
+					pending_input: None,
+				});
+				self.paint_samples(&samples);
+			}
+			StrokeEvent::Add(samples) => self.paint_samples(&samples),
+			StrokeEvent::End => self.end_stroke(),
+		}
+	}
+
+	/// Paint samples of the live stroke and show them.
+	fn paint_samples(&mut self, samples: &[fx_core::stroke::StrokeSample]) {
+		let Some(session) = &mut self.stroke else { return };
+		if samples.is_empty() {
+			return;
+		}
+		let tiles = match session.stroke.add(samples) {
+			Ok(tiles) => tiles,
+			Err(error) => {
+				tracing::warn!("a stroke could not paint: {error}");
+				return;
+			}
+		};
+		// The input arrived now (the shell forwards pointer events at once).
+		session.pending_input.get_or_insert_with(Instant::now);
+		let (doc_id, layer, target) = (session.doc, session.layer, session.target);
+		let store = self.store.clone();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		let level = open.view.view.mip_level(usize::MAX);
+		if let Some(image) = stroke_image(&mut open.doc, layer, target) {
+			for ((tx, ty), buffer) in tiles.iter().cloned() {
+				image.put_buffer(&store, tx, ty, buffer);
+			}
+			// Visible at fit right away (S15): the touched tiles' mips up to the
+			// view level, only those.
+			let level = level.min(image.level_count().saturating_sub(1));
+			if level > 0 {
+				let mut ancestors: Vec<(u32, u32)> = tiles.iter().map(|((tx, ty), _)| (tx >> level, ty >> level)).collect();
+				ancestors.sort_unstable();
+				ancestors.dedup();
+				for (ax, ay) in ancestors {
+					if let Err(error) = crate::mips::ensure_mip(image, &store, level, ax, ay) {
+						tracing::debug!("stroke mip: {error}");
+					}
+				}
+			}
+		}
+		open.doc.revision += 1;
+		open.changed();
+		open.note_edits(&[layer], Instant::now());
+		self.request_frame();
+	}
+
+	/// Finish the live stroke, if any: its final pixels, one History step.
+	fn end_stroke(&mut self) {
+		let Some(session) = self.stroke.take() else { return };
+		let crate::stroke::Session {
+			doc: doc_id,
+			layer,
+			target,
+			tool,
+			brush,
+			color,
+			before,
+			stroke,
+			..
+		} = session;
+		let samples = stroke.samples().to_vec();
+		let finished = stroke.finish();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		match finished {
+			Ok((image, offset)) => {
+				set_stroke_image(&mut open.doc, layer, target, image, offset);
+				open.doc.revision += 1;
+				let command = Command::Stroke {
+					layer: LayerRef::Id(layer),
+					target,
+					tool,
+					brush,
+					color,
+					samples,
+				};
+				open.history.record(before, command, tool.label().to_owned());
+				open.dirty = true;
+				open.changed();
+				open.note_edits(&[layer], Instant::now());
+				self.last_edit = None;
+				self.after_edit(doc_id, true);
+				self.refresh_thumbnail(doc_id, layer);
+			}
+			Err(error) => {
+				// Put the document back as it was before the stroke.
+				open.doc = before;
+				open.changed();
+				self.to_ui(&EngineToUi::Error {
+					text: format!("The stroke failed: {error}"),
+				});
+				self.request_frame();
+			}
 		}
 	}
 
@@ -1434,6 +1605,7 @@ impl Engine {
 
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
+		self.end_stroke();
 		let store = self.store.clone();
 		let Some(doc) = self.docs.get_mut(id) else {
 			tracing::warn!("command for unknown document {id:?}");
@@ -1511,6 +1683,7 @@ impl Engine {
 
 	/// Undo (`redo == false`) or redo one step.
 	fn step_history(&mut self, id: DocId, redo: bool) {
+		self.end_stroke();
 		let Some(doc) = self.docs.get_mut(id) else { return };
 		if let Some(job) = &doc.busy {
 			let text = format!("Wait until {job} is finished");
@@ -1541,7 +1714,7 @@ impl Engine {
 		let layers = EngineToUi::Layers {
 			doc: id,
 			revision: doc.doc.revision,
-			layers: layers::layer_infos(&doc.doc),
+			layers: layer_list(doc),
 		};
 		let history = EngineToUi::History {
 			doc: id,
@@ -1791,6 +1964,26 @@ impl Engine {
 			"layer:via-cut" => self.to_ui(&EngineToUi::Toast {
 				text: "Layer via Cut needs a selection".into(),
 			}),
+			// A click on a layer's thumbnail (pixels) or its mask's (M5-T09).
+			"layer:edit-mask" => {
+				let layer = args.get("layer").and_then(serde_json::Value::as_u64).map(LayerId);
+				let mask = args.get("mask").and_then(serde_json::Value::as_bool).unwrap_or(false);
+				if let Some(open) = self.docs.get_mut(doc_id) {
+					open.mask_target = if mask { layer } else { None };
+				}
+				if let Some(layer) = layer
+					&& self.docs.get(doc_id).is_some_and(|open| open.doc.active_layer() != Some(layer))
+				{
+					self.command(
+						doc_id,
+						Command::SelectLayers {
+							layers: vec![LayerRef::Id(layer)],
+						},
+					);
+				} else {
+					self.send_layers();
+				}
+			}
 			// The Layers panel's mask button: from the selection when there is
 			// one, Alt hides (Photoshop).
 			"mask:add" => {
@@ -2007,7 +2200,7 @@ impl Engine {
 			let message = EngineToUi::Layers {
 				doc: doc.id,
 				revision: doc.doc.revision,
-				layers: layers::layer_infos(&doc.doc),
+				layers: layer_list(doc),
 			};
 			self.to_ui(&message);
 		}
@@ -2049,6 +2242,8 @@ impl Engine {
 
 	fn request_frame(&mut self) {
 		let virtual_view = self.virtual_view.clone();
+		// The stroke input this frame will show (M5-T11).
+		let input_since = self.stroke.as_mut().and_then(|s| s.pending_input.take());
 		let overlay = self.active_overlay();
 		// The display transform needs the cache on `self`, so build it before
 		// borrowing the active document mutably (and only for a real document:
@@ -2078,6 +2273,7 @@ impl Engine {
 					display_lut,
 					gamut_warning,
 					overlay,
+					input_since,
 				}
 			}
 			None => {
@@ -2092,6 +2288,7 @@ impl Engine {
 					display_lut: None,
 					gamut_warning: false,
 					overlay,
+					input_since: None,
 				}
 			}
 		};
@@ -2348,9 +2545,15 @@ impl Engine {
 		}
 		self.next_status = now + STATUS_INTERVAL;
 		let tiles = self.store.stats();
-		let (frames, uploads, pending_loads, gpu_bytes) = {
+		let (frames, uploads, pending_loads, gpu_bytes, latency) = {
 			let mut stats = self.stats.lock().expect("render stats poisoned");
-			(stats.summary(now), stats.uploads, stats.pending_loads, stats.gpu_bytes)
+			(
+				stats.summary(now),
+				stats.uploads,
+				stats.pending_loads,
+				stats.gpu_bytes,
+				stats.input_latency(now),
+			)
 		};
 		self.to_ui(&EngineToUi::Status {
 			memory: MemoryStats {
@@ -2364,6 +2567,8 @@ impl Engine {
 			frame_ms_p99: frames.p99_ms,
 			uploads,
 			pending_loads,
+			input_latency_ms_p50: latency.0,
+			input_latency_ms_p99: latency.1,
 		});
 	}
 
@@ -2395,6 +2600,47 @@ fn display_transform(profile: &ColorProfile, monitor: Option<&[u8]>) -> Result<O
 	// file differ by at most 0.54/255, at the saturated green corner): within
 	// one 8-bit step everywhere, show the values as they are (criterion C1).
 	Ok((!lut.is_identity(1.0 / 255.0)).then_some(lut))
+}
+
+/// The Layers panel's list, with the mask painting goes to marked (M5-T09).
+fn layer_list(doc: &crate::documents::OpenDoc) -> Vec<fx_protocol::LayerInfo> {
+	let mut list = layers::layer_infos(&doc.doc);
+	if let Some(target) = doc.mask_target {
+		for info in &mut list {
+			info.edit_mask = info.id == target && info.has_mask;
+		}
+	}
+	list
+}
+
+/// The image a stroke paints on: the layer's pixels or its mask.
+fn stroke_image(doc: &mut Document, layer: LayerId, target: fx_core::stroke::StrokeTarget) -> Option<&mut fx_tiles::TiledImage> {
+	let layer = doc.layer_mut(layer)?;
+	match target {
+		fx_core::stroke::StrokeTarget::Pixels => match &mut layer.kind {
+			LayerKind::Pixel { image, .. } => Some(image),
+			_ => None,
+		},
+		fx_core::stroke::StrokeTarget::Mask => layer.mask.as_mut().map(|m| &mut m.image),
+	}
+}
+
+/// Put a stroke's image (and, for pixels, its offset) into the layer.
+fn set_stroke_image(doc: &mut Document, layer: LayerId, target: fx_core::stroke::StrokeTarget, new_image: fx_tiles::TiledImage, new_offset: (i32, i32)) {
+	let Some(layer) = doc.layer_mut(layer) else { return };
+	match target {
+		fx_core::stroke::StrokeTarget::Pixels => {
+			if let LayerKind::Pixel { image, offset } = &mut layer.kind {
+				*image = new_image;
+				*offset = new_offset;
+			}
+		}
+		fx_core::stroke::StrokeTarget::Mask => {
+			if let Some(mask) = &mut layer.mask {
+				mask.image = new_image;
+			}
+		}
+	}
 }
 
 /// The CMYK profiles for proofing and export (D-032): Windows' colour folder

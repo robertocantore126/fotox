@@ -57,6 +57,9 @@ pub struct OpenDoc {
 	pub proof_colors: bool,
 	/// View ▸ Gamut Warning (Shift+Ctrl+Y).
 	pub gamut_warning: bool,
+	/// The layer whose mask painting goes to (its mask thumbnail was clicked,
+	/// M5-T09); `None` = the layers' pixels.
+	pub mask_target: Option<LayerId>,
 }
 
 /// A soft-proof set-up (M4-T04).
@@ -120,6 +123,7 @@ impl OpenDoc {
 			proof: None,
 			proof_colors: false,
 			gamut_warning: false,
+			mask_target: None,
 		}
 	}
 
@@ -151,6 +155,7 @@ impl OpenDoc {
 			proof: None,
 			proof_colors: false,
 			gamut_warning: false,
+			mask_target: None,
 		}
 	}
 
@@ -175,6 +180,13 @@ impl OpenDoc {
 				s
 			}
 		}
+	}
+
+	/// Whether painting goes to the active layer's mask (M5-T09).
+	pub fn paints_mask(&self) -> bool {
+		self.mask_target.is_some()
+			&& self.mask_target == self.doc.active_layer()
+			&& self.doc.active_layer().and_then(|id| self.doc.layer(id)).is_some_and(|l| l.mask.is_some())
 	}
 
 	/// The render thread's cache key: changes with the content *and* with the

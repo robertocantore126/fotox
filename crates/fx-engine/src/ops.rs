@@ -127,6 +127,21 @@ impl PixelOps for EngineOps {
 		fx_ops::morph::modify(selection, op, size, depth, store)
 	}
 
+	fn stroke(
+		&self,
+		doc: &Document,
+		layer: LayerId,
+		target: fx_core::stroke::StrokeTarget,
+		tool: &fx_core::stroke::StrokeTool,
+		brush: &fx_core::stroke::BrushParams,
+		color: [u16; 4],
+		samples: &[fx_core::stroke::StrokeSample],
+		store: &TileStore,
+	) -> Result<(TiledImage, (i32, i32)), CommandError> {
+		let prepared = crate::stroke::prepare(doc, layer, target, tool, store)?;
+		fx_ops::brush::replay(crate::stroke::setup(&prepared, doc, *tool, *brush, color), samples, store)
+	}
+
 	fn clipboard(&self) -> Option<fx_core::pixels::ClipboardImage> {
 		self.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 	}

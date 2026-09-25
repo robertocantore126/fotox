@@ -76,6 +76,9 @@ pub(crate) struct Frame {
 	/// Tool overlay in document coordinates, tessellated by the render thread
 	/// (M5-T02). `None` = nothing to draw over the image.
 	pub overlay: Option<Arc<Overlay>>,
+	/// The earliest pointer input whose stroke pixels this frame shows
+	/// (M5-T11): the input → pixels latency statistic.
+	pub input_since: Option<Instant>,
 }
 
 /// Work for the render thread.
@@ -138,7 +141,13 @@ pub(crate) fn run(ctx: RenderContext) {
 		let mut stop = false;
 		for request in first.into_iter().chain(ctx.requests.try_iter()) {
 			match request {
-				RenderRequest::Frame(f) => frame = Some(f),
+				RenderRequest::Frame(mut f) => {
+					// A superseded frame's stroke input is shown by the newer one.
+					if let Some(old) = frame.as_ref().and_then(|old| old.input_since) {
+						f.input_since = Some(f.input_since.map_or(old, |new| new.min(old)));
+					}
+					frame = Some(f);
+				}
 				RenderRequest::Wake => {}
 				RenderRequest::Stop => stop = true,
 			}
@@ -146,6 +155,7 @@ pub(crate) fn run(ctx: RenderContext) {
 		if stop {
 			break;
 		}
+		let input_since = frame.as_mut().and_then(|f| f.input_since.take());
 		let Some(f) = &frame else {
 			animated = false;
 			continue;
@@ -208,7 +218,11 @@ pub(crate) fn run(ctx: RenderContext) {
 		next ^= 1;
 		{
 			let mut stats = ctx.stats.lock().expect("render stats poisoned");
-			stats.record(Instant::now(), started.elapsed().as_secs_f32() * 1000.0);
+			let now = Instant::now();
+			stats.record(now, started.elapsed().as_secs_f32() * 1000.0);
+			if let Some(input) = input_since {
+				stats.record_input(now, now.saturating_duration_since(input).as_secs_f32() * 1000.0);
+			}
 			stats.uploads = uploads;
 			if let Some(pipeline) = &tiles {
 				stats.pending_loads = pipeline.loading.lock().expect("loader set poisoned").len() as u32;

@@ -23,6 +23,7 @@ pub mod layers;
 pub mod mips;
 pub mod ops;
 pub mod selection;
+pub mod stroke;
 pub mod thumbs;
 pub mod tools;
 pub mod view;

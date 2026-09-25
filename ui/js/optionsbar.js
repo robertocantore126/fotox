@@ -12,6 +12,10 @@ const MODE_LIST = ["Normal", "Dissolve", "Multiply", "Screen", "Overlay", "Soft 
 let fields = [];
 let changeHandler = null;
 const wired = new WeakSet();
+// Each tool keeps its own values while the app runs, like Photoshop's option
+// bar (M5-T09): switching tools and back restores them.
+const memory = new Map();
+let currentTool = null;
 
 export function renderOptionsBar(container, toolId) {
   clear(container);
@@ -33,13 +37,41 @@ export function renderOptionsBar(container, toolId) {
       }
     }
   };
+  currentTool = toolId;
+  const remembered = memory.get(toolId) || {};
   for (const spec of schema) {
-    const { el, read } = control(spec, sync);
-    fields.push({ key: keyOf(spec), spec, el, read });
+    const { el, read, write } = control(spec, sync);
+    const key = keyOf(spec);
+    fields.push({ key, spec, el, read, write });
+    if (write && key in remembered) write(remembered[key]);
     container.append(el);
   }
   sync();
   container.append(h("span", { class: "ob-tail" }));
+}
+
+/** The value of option `key` of the active tool, or `null`. */
+export function optionValue(key) {
+  const field = fields.find((f) => f.key === key);
+  return field && field.read ? field.read() : null;
+}
+
+/**
+ * Set option `key` of the active tool (the `[`/`]` size keys, the number
+ * keys for opacity, brush presets — M5-T09) and tell the engine. Returns
+ * whether the bar has that option.
+ */
+export function setOption(key, value) {
+  const field = fields.find((f) => f.key === key);
+  if (!field || !field.write) return false;
+  field.write(value);
+  remember();
+  if (changeHandler) changeHandler(readOptions());
+  return true;
+}
+
+function remember() {
+  if (currentTool) memory.set(currentTool, readOptions());
 }
 
 /**
@@ -64,6 +96,7 @@ export function onOptionsChange(container, cb) {
   if (wired.has(container)) return;
   wired.add(container);
   const notify = () => {
+    remember();
     if (changeHandler) changeHandler(readOptions());
   };
   container.addEventListener("input", notify);
@@ -120,7 +153,14 @@ function toggle(spec) {
       wrap.setAttribute("aria-pressed", on ? "true" : "false");
     },
   }, box, h("span", { class: "ob-text", text: spec.text }));
-  return { el: wrap, read: () => wrap.getAttribute("aria-pressed") === "true" };
+  const write = (on) => {
+    box.classList.toggle("on", !!on);
+    box.setAttribute("aria-checked", on ? "true" : "false");
+    clear(box);
+    if (on) box.append(icon("i-check", "ic xs"));
+    wrap.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  return { el: wrap, read: () => wrap.getAttribute("aria-pressed") === "true", write };
 }
 
 function num(spec) {
@@ -129,7 +169,7 @@ function num(spec) {
     style: { width: (spec.width || 48) + "px" }, disabled: spec.disabled || false,
   });
   const el = h("span", { class: "ob-field" }, spec.label ? h("span", { class: "ob-label", text: spec.label }) : null, input, spec.unit ? h("span", { class: "ob-unit", text: spec.unit }) : null);
-  return { el, read: () => number(input.value) };
+  return { el, read: () => number(input.value), write: (v) => { input.value = String(v); } };
 }
 
 function textField(spec) {
@@ -145,7 +185,8 @@ function range(spec) {
   const input = h("input", { class: "ob-range", type: "range", min, max, value: spec.value });
   input.addEventListener("input", () => { out.textContent = input.value + "%"; });
   const el = h("span", { class: "ob-field" }, h("span", { class: "ob-label", text: spec.label }), input, out);
-  return { el, read: () => number(input.value) };
+  const write = (v) => { input.value = String(v); out.textContent = input.value + "%"; };
+  return { el, read: () => number(input.value), write };
 }
 
 function select(spec, changed) {
@@ -167,7 +208,7 @@ function select(spec, changed) {
     },
   }, spec.label ? h("span", { class: "ob-label", text: spec.label }) : null, valueEl, icon("i-chevron-down", "ic xs"));
   if (spec.width) btn.style.minWidth = spec.width + "px";
-  return { el: btn, read: () => String(valueEl.textContent) };
+  return { el: btn, read: () => String(valueEl.textContent), write: (v) => { valueEl.textContent = String(v); } };
 }
 
 function buttonGroup(spec) {
@@ -182,7 +223,8 @@ function buttonGroup(spec) {
     }, icon(ic, "ic"));
     group.append(b);
   });
-  return { el: group, read: () => [...group.children].findIndex((c) => c.classList.contains("on")) };
+  const write = (i) => [...group.children].forEach((c, j) => c.classList.toggle("on", j === i));
+  return { el: group, read: () => [...group.children].findIndex((c) => c.classList.contains("on")), write };
 }
 
 function swatch(spec) {
@@ -201,9 +243,28 @@ function gradient(label) {
   return { el, read: null };
 }
 
+// The built-in round brushes (M5-T09): name → [size px, hardness %].
+const PRESETS = [
+  ["Hard Round 5 px", 5, 100], ["Hard Round 19 px", 19, 100], ["Hard Round 60 px", 60, 100], ["Hard Round 200 px", 200, 100],
+  ["Soft Round 19 px", 19, 0], ["Soft Round 60 px", 60, 0], ["Soft Round 200 px", 200, 0], ["Soft Round 500 px", 500, 0],
+];
+
 function brushPreset() {
-  const el = h("button", { class: "ob-brush", type: "button", "data-tip": "Brush preset", onclick: () => emit("panel:open", "brush") },
-    h("span", { class: "brush-thumb" }, h("span", { class: "brush-dot" })));
+  const el = h("button", {
+    class: "ob-brush", type: "button", "data-tip": "Brush preset",
+    onclick: (e) => {
+      e.stopPropagation();
+      openDropdown({
+        anchor: el, items: PRESETS.map(([n]) => n), value: "", width: 180,
+        onPick: (name) => {
+          const preset = PRESETS.find(([n]) => n === name);
+          if (!preset) return;
+          setOption("Size", preset[1]);
+          setOption("Hardness", preset[2]);
+        },
+      });
+    },
+  }, h("span", { class: "brush-thumb" }, h("span", { class: "brush-dot" })));
   return { el, read: null };
 }
 

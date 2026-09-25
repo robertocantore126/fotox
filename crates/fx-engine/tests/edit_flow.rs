@@ -5,7 +5,7 @@
 mod common;
 
 use common::{Harness, Seen, gpu, opened, tiff};
-use fx_engine::EngineInput;
+use fx_engine::{EngineInput, Modifiers, PointerInput, PointerKind};
 use fx_protocol::{DocId, EngineToUi, UiToEngine};
 
 /// The label of the step a History message reports, or the error/toast the
@@ -88,5 +88,73 @@ fn fill_clear_copy_paste_and_masks_are_history_steps() {
 	action(&harness, "clip:paste", serde_json::Value::Null);
 	assert_eq!(last_step(&harness, doc), "Paste");
 
+	harness.engine.shutdown();
+}
+
+fn pointer(kind: PointerKind, x: f64, y: f64, buttons: u8) -> PointerInput {
+	PointerInput {
+		kind,
+		x,
+		y,
+		pressure: 1.0,
+		tilt_x: 0.0,
+		tilt_y: 0.0,
+		buttons,
+		modifiers: Modifiers::default(),
+		time_us: 0,
+	}
+}
+
+#[test]
+fn painting_with_the_brush_eraser_and_on_a_mask_records_strokes() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-paint-flow-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+
+	for (tool, label) in [("brush", "Brush Tool"), ("eraser", "Eraser"), ("pencil", "Pencil")] {
+		action(&harness, &format!("tool:{tool}"), serde_json::Value::Null);
+		harness.ui(UiToEngine::ToolOptions {
+			tool: tool.into(),
+			options: serde_json::json!({ "Size": 30, "Opacity": 80, "Smoothing": 0 }),
+		});
+		harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Down, 100.0, 150.0, 1)));
+		for x in [120.0, 160.0, 220.0, 300.0] {
+			harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Move, x, 170.0, 1)));
+		}
+		harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 300.0, 170.0, 0)));
+		assert_eq!(last_step(&harness, doc), label);
+	}
+
+	// A mask, then paint on it: the stroke goes to the mask.
+	action(&harness, "mask:add", serde_json::json!({ "alt": false }));
+	// The layer list comes before the History message.
+	let layer = harness.wait("the layer list", |s| match s {
+		Seen::Ui(EngineToUi::Layers { layers, .. }) => layers.iter().find(|l| l.has_mask).map(|l| l.id),
+		_ => None,
+	});
+	assert_eq!(last_step(&harness, doc), "Add Layer Mask");
+	action(&harness, "layer:edit-mask", serde_json::json!({ "layer": layer.0, "mask": true }));
+	let marked = harness.wait("the mask marked as the edit target", |s| match s {
+		Seen::Ui(EngineToUi::Layers { layers, .. }) => layers.iter().find(|l| l.id == layer).map(|l| l.edit_mask),
+		_ => None,
+	});
+	assert!(marked);
+	action(&harness, "tool:brush", serde_json::Value::Null);
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Down, 200.0, 200.0, 1)));
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 260.0, 220.0, 0)));
+	assert_eq!(last_step(&harness, doc), "Brush Tool");
+
+	// Undo walks the strokes back.
+	harness.ui(UiToEngine::Undo { doc });
+	harness.wait("a history message", |s| match s {
+		Seen::Ui(EngineToUi::History { doc: d, .. }) if *d == doc => Some(()),
+		_ => None,
+	});
 	harness.engine.shutdown();
 }
