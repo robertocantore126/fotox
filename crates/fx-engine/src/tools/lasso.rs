@@ -12,7 +12,7 @@
 use fx_core::{Command, SelectMode, SelectionShape};
 use fx_render::{Overlay, OverlayItem, OverlayStyle};
 
-use crate::tools::{DocPointer, Tool, ToolContext, ToolResult, mode_at_press, selection_mode, selection_shape_options};
+use crate::tools::{DocPointer, OutlineDrag, Tool, ToolContext, ToolResult, mode_at_press, nudge_outline, selection_mode, selection_shape_options};
 use crate::view::BUTTON_LEFT;
 use crate::{CursorShape, Modifiers, PointerKind};
 
@@ -51,6 +51,11 @@ pub struct Lasso {
 	mode: SelectMode,
 	/// The last press: `(time_us, position)`, for the double-click test.
 	last_press: Option<(u64, (f64, f64))>,
+	/// Freehand with Alt held: a straight segment from the last point to the
+	/// pointer instead of samples (Photoshop's lasso ↔ polygon switch).
+	straight: bool,
+	/// Dragging the selection outline instead of drawing a path.
+	moving: Option<OutlineDrag>,
 }
 
 impl Lasso {
@@ -64,6 +69,8 @@ impl Lasso {
 			dragging: false,
 			mode: SelectMode::Replace,
 			last_press: None,
+			straight: false,
+			moving: None,
 		}
 	}
 
@@ -149,6 +156,17 @@ impl Tool for Lasso {
 					.is_some_and(|(at, p)| event.time_us.saturating_sub(at) <= DOUBLE_CLICK_US && self.near(ctx, p, (event.x, event.y)));
 				self.last_press = Some((event.time_us, (event.x, event.y)));
 				let at = (event.x, event.y);
+				// New mode, a fresh press inside the selection: move the outline.
+				if self.points.is_empty()
+					&& mode_at_press(event.modifiers, selection_mode(ctx, self.id)) == SelectMode::Replace
+					&& let Some(moving) = OutlineDrag::begin(ctx, event)
+				{
+					self.moving = Some(moving);
+					return ToolResult {
+						cursor: Some(CursorShape::Move),
+						..Default::default()
+					};
+				}
 				match self.kind {
 					Kind::Freehand => {
 						if self.points.is_empty() {
@@ -184,11 +202,58 @@ impl Tool for Lasso {
 					}
 				}
 			}
+			PointerKind::Move | PointerKind::Up if self.moving.is_some() => {
+				if let Some(moving) = &mut self.moving {
+					moving.track(event, ctx.view.zoom);
+				}
+				if event.kind == PointerKind::Move {
+					return ToolResult {
+						redraw: true,
+						..Default::default()
+					};
+				}
+				let moving = self.moving.take().expect("checked by the guard");
+				if moving.dragged() {
+					return ToolResult {
+						command: moving.command(),
+						redraw: true,
+						..Default::default()
+					};
+				}
+				// Not dragged: it was a click. The polygonal lasso starts its
+				// path there; the freehand lasso's click deselects.
+				match self.kind {
+					Kind::Polygonal => {
+						self.mode = SelectMode::Replace;
+						self.points.push((moving.press.x, moving.press.y));
+						self.last_press = Some((moving.press.time_us, (moving.press.x, moving.press.y)));
+						ToolResult {
+							redraw: true,
+							..Default::default()
+						}
+					}
+					Kind::Freehand => ToolResult {
+						command: Some(Command::Deselect),
+						redraw: true,
+						..Default::default()
+					},
+				}
+			}
 			PointerKind::Move => {
 				let at = (event.x, event.y);
 				match self.kind {
 					Kind::Freehand if self.dragging => {
-						self.sample(ctx, at);
+						if event.modifiers.alt {
+							// A straight segment to the pointer; its end becomes a
+							// point when Alt is released.
+							self.straight = true;
+						} else {
+							if self.straight {
+								self.points.push(at);
+								self.straight = false;
+							}
+							self.sample(ctx, at);
+						}
 						ToolResult {
 							redraw: true,
 							..Default::default()
@@ -216,7 +281,17 @@ impl Tool for Lasso {
 
 	fn key(&mut self, ctx: &mut ToolContext<'_>, key: &str) -> ToolResult {
 		let idle = ToolResult::default();
+		if self.points.is_empty() && self.moving.is_none() {
+			return ToolResult {
+				command: nudge_outline(ctx, key),
+				..idle
+			};
+		}
 		match key {
+			"Escape" if self.moving.is_some() => {
+				self.moving = None;
+				ToolResult { redraw: true, ..idle }
+			}
 			"Escape" if !self.points.is_empty() => self.cancel(),
 			"Enter" if self.kind == Kind::Polygonal && !self.points.is_empty() => {
 				if self.points.len() >= 3 {
@@ -245,7 +320,7 @@ impl Tool for Lasso {
 		let mut points = self.points.clone();
 		// The live segment from the last click to the pointer: the polygonal
 		// lasso's rubber band.
-		if self.kind == Kind::Polygonal && points.last() != Some(&self.hover) {
+		if (self.kind == Kind::Polygonal || self.straight) && points.last() != Some(&self.hover) {
 			points.push(self.hover);
 		}
 		Some(Overlay {
@@ -262,6 +337,10 @@ impl Tool for Lasso {
 
 	fn cursor(&self, _modifiers: Modifiers) -> CursorShape {
 		CursorShape::Crosshair
+	}
+
+	fn selection_nudge(&self) -> Option<(i32, i32)> {
+		self.moving.map(|m| m.delta())
 	}
 }
 

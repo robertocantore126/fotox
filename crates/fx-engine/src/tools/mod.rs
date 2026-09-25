@@ -23,6 +23,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 pub mod eyedropper;
 pub mod lasso;
 pub mod marquee;
+pub mod wand;
 
 pub use eyedropper::sample_pixel;
 
@@ -142,6 +143,99 @@ fn selection_shape_options(ctx: &ToolContext<'_>, tool: &str) -> (f64, bool) {
 	(feather, anti_alias)
 }
 
+/// Dragging the selection outline with a selection tool (M5-T04): a press
+/// inside the selection with no modifier (New mode) may grab the outline. It
+/// becomes a move once the pointer travels more than [`OUTLINE_SLOP`] screen
+/// pixels; released before that it was a click, and the tool does what a
+/// click does (the wand selects, the polygonal lasso starts a path). While it
+/// moves, the ants follow the pointer; the release is one `OffsetSelection`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutlineDrag {
+	start: (f64, f64),
+	current: (f64, f64),
+	/// The press, for the click the tool falls back to.
+	pub press: DocPointer,
+	dragged: bool,
+}
+
+/// Screen pixels a press inside the selection must travel to move the outline.
+pub(crate) const OUTLINE_SLOP: f64 = 3.0;
+
+impl OutlineDrag {
+	/// Grab the outline if the press is inside the selection.
+	pub(crate) fn begin(ctx: &ToolContext<'_>, event: &DocPointer) -> Option<Self> {
+		inside_selection(ctx, event.x, event.y).then_some(Self {
+			start: (event.x, event.y),
+			current: (event.x, event.y),
+			press: *event,
+			dragged: false,
+		})
+	}
+
+	/// Follow the pointer; `zoom` turns the slop into document pixels.
+	pub(crate) fn track(&mut self, event: &DocPointer, zoom: f64) {
+		self.current = (event.x, event.y);
+		let slop = OUTLINE_SLOP / zoom.max(f64::MIN_POSITIVE);
+		if (self.current.0 - self.start.0).abs() > slop || (self.current.1 - self.start.1).abs() > slop {
+			self.dragged = true;
+		}
+	}
+
+	/// Whether the press became a move.
+	pub(crate) fn dragged(&self) -> bool {
+		self.dragged
+	}
+
+	/// The whole-pixel move so far (0 until the press becomes a move).
+	pub(crate) fn delta(&self) -> (i32, i32) {
+		if !self.dragged {
+			return (0, 0);
+		}
+		((self.current.0 - self.start.0).round() as i32, (self.current.1 - self.start.1).round() as i32)
+	}
+
+	/// The command of the release: `None` for no movement.
+	pub(crate) fn command(&self) -> Option<Command> {
+		let (dx, dy) = self.delta();
+		(dx != 0 || dy != 0).then_some(Command::OffsetSelection { dx, dy })
+	}
+}
+
+/// Whether the document point is inside the pixel selection (coverage at
+/// least 50 %).
+pub(crate) fn inside_selection(ctx: &ToolContext<'_>, x: f64, y: f64) -> bool {
+	let Some(selection) = &ctx.doc.selection else {
+		return false;
+	};
+	if x < 0.0 || y < 0.0 || x >= f64::from(ctx.doc.width) || y >= f64::from(ctx.doc.height) {
+		return false;
+	}
+	let (px, py) = (x as u32, y as u32);
+	let tile = fx_tiles::TILE_SIZE;
+	selection
+		.tile_coverage(ctx.store, px / tile, py / tile)
+		.is_ok_and(|c| c.at(px % tile, py % tile) >= 0.5)
+}
+
+/// The arrow keys move the selection outline by 1 px, Shift+arrow by 10 px
+/// (Photoshop, with a selection tool active). `None` for any other key or
+/// without a selection.
+pub(crate) fn nudge_outline(ctx: &ToolContext<'_>, key: &str) -> Option<Command> {
+	ctx.doc.selection.as_ref()?;
+	let (step, arrow) = match key.strip_prefix("Shift+") {
+		Some(arrow) => (10, arrow),
+		None => (1, key),
+	};
+	let (dx, dy) = match arrow {
+		"ArrowLeft" => (-step, 0),
+		"ArrowRight" => (step, 0),
+		"ArrowUp" => (0, -step),
+		"ArrowDown" => (0, step),
+		_ => return None,
+	};
+	Some(Command::OffsetSelection { dx, dy })
+}
+
 /// What a tool produced for one event.
 #[derive(Clone, Debug, Default)]
 pub struct ToolResult {
@@ -191,6 +285,12 @@ pub trait Tool {
 	fn cursor(&self, _modifiers: Modifiers) -> CursorShape {
 		CursorShape::Default
 	}
+
+	/// While the tool drags the selection outline (M5-T04), how far the
+	/// marching ants are shifted, in whole document pixels.
+	fn selection_nudge(&self) -> Option<(i32, i32)> {
+		None
+	}
 }
 
 /// The tool registry: one boxed tool per id, created on first use, so a tool's
@@ -229,7 +329,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"lasso-poly" => Some(Box::new(lasso::Lasso::new("lasso-poly", lasso::Kind::Polygonal))),
 		// The card puts these out of scope for M5-T04 (the wand is a later
 		// step of it, the rest belongs to a milestone that is not planned).
-		"magic-wand" | "quick-select" | "object-select" | "lasso-magnet" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		"magic-wand" => Some(Box::new(wand::MagicWand::default())),
+		"quick-select" | "object-select" | "lasso-magnet" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		_ => None,
 	}
 }
@@ -237,7 +338,6 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 /// The Photoshop name of a tool that is not implemented, for the toast.
 fn not_yet_name(id: &str) -> &'static str {
 	match id {
-		"magic-wand" => "Magic Wand",
 		"quick-select" => "Quick Selection",
 		"object-select" => "Object Selection",
 		"lasso-magnet" => "Magnetic Lasso",
@@ -366,6 +466,22 @@ pub(crate) mod testing {
 			tool.key(&mut ctx, key)
 		}
 
+		/// Make a selection the way the engine would (a `Select` command).
+		pub(crate) fn select(&mut self, shape: SelectionShape) {
+			let mut ctx = fx_core::CommandContext {
+				tiles: &self.store,
+				ops: Some(&self.ops),
+			};
+			Command::Select {
+				shape,
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: true,
+			}
+			.apply(&mut self.doc, &mut ctx)
+			.expect("the selection applies");
+		}
+
 		/// A press, a drag through `points` and a release, as one gesture.
 		pub(crate) fn drag(&mut self, tool: &mut dyn Tool, points: &[(f64, f64)], modifiers: Modifiers) -> ToolResult {
 			let (start, rest) = points.split_first().expect("a drag has a start");
@@ -410,7 +526,7 @@ mod tests {
 		let mut tools = Tools::default();
 		assert!(tools.get("brush").is_none(), "brush arrives with M5-T06");
 		assert!(tools.get("eyedropper").is_some());
-		for id in ["marquee", "marquee-ellipse", "marquee-row", "marquee-col", "lasso", "lasso-poly"] {
+		for id in ["marquee", "marquee-ellipse", "marquee-row", "marquee-col", "lasso", "lasso-poly", "magic-wand"] {
 			assert!(tools.get(id).is_some(), "{id}");
 		}
 	}
@@ -419,9 +535,9 @@ mod tests {
 	fn a_tool_that_is_not_implemented_says_so_once_per_click() {
 		let mut tools = Tools::default();
 		let mut fixture = Fixture::new("tools", (10, 10), 1.0);
-		let tool = tools.get("magic-wand").expect("the wand has a placeholder");
+		let tool = tools.get("quick-select").expect("quick selection has a placeholder");
 		let result = fixture.pointer(&mut **tool, PointerKind::Down, 0.0, 0.0, Modifiers::default());
-		assert!(result.info.unwrap().contains("Magic Wand"));
+		assert!(result.info.unwrap().contains("Quick Selection"));
 		assert!(result.command.is_none(), "nothing to undo");
 		// A move after the click stays quiet, so a drag does not spam toasts.
 		assert!(fixture.pointer(&mut **tool, PointerKind::Move, 5.0, 5.0, Modifiers::default()).info.is_none());

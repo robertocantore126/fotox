@@ -51,6 +51,31 @@ pub struct Overlay {
 	pub items: Vec<OverlayItem>,
 }
 
+impl OverlayItem {
+	/// The same item moved by `(dx, dy)` document pixels (the ants of a
+	/// selection outline being dragged, M5-T04).
+	pub fn translated(&self, dx: f64, dy: f64) -> Self {
+		let shift = |(x, y): (f64, f64)| (x + dx, y + dy);
+		match self {
+			OverlayItem::Polyline { points, closed, style } => OverlayItem::Polyline {
+				points: points.iter().copied().map(shift).collect(),
+				closed: *closed,
+				style: *style,
+			},
+			OverlayItem::Circle { centre, radius, style } => OverlayItem::Circle {
+				centre: shift(*centre),
+				radius: *radius,
+				style: *style,
+			},
+			OverlayItem::Handle { at, size_px } => OverlayItem::Handle {
+				at: shift(*at),
+				size_px: *size_px,
+			},
+			OverlayItem::Crosshair { at } => OverlayItem::Crosshair { at: shift(*at) },
+		}
+	}
+}
+
 impl Overlay {
 	/// Whether the overlay needs the 8 Hz redraw that animates the ants.
 	pub fn has_ants(&self) -> bool {

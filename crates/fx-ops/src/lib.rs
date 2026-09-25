@@ -18,6 +18,7 @@
 pub mod filter;
 #[cfg(test)]
 mod filter_tests;
+pub mod flood;
 pub mod gaussian;
 pub mod morph;
 pub mod neighbourhood;

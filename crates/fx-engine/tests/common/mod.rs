@@ -35,10 +35,18 @@ pub enum Seen {
 pub struct Harness {
 	pub engine: EngineHandle,
 	pub seen: Arc<Mutex<Vec<Seen>>>,
+	/// One engine at a time per test binary: each allocates the reference
+	/// machine's GPU caches, and several in parallel run the device out of
+	/// memory. Declared last, so the engine stops before the next one starts.
+	_one_at_a_time: std::sync::MutexGuard<'static, ()>,
 }
+
+/// Serialises the engines of one test binary (see `Harness`).
+static ONE_ENGINE: Mutex<()> = Mutex::new(());
 
 impl Harness {
 	pub fn start(device: wgpu::Device, queue: wgpu_sync::Queue, dir: &std::path::Path) -> Self {
+		let one_at_a_time = ONE_ENGINE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		let seen = Arc::new(Mutex::new(Vec::new()));
 		let sink = seen.clone();
 		let engine = EngineHandle::spawn(device, queue, dir.join("scratch"), move |output| {
@@ -56,7 +64,11 @@ impl Harness {
 		})
 		.unwrap();
 		engine.send(EngineInput::ViewportResized { width: 800, height: 600 });
-		Harness { engine, seen }
+		Harness {
+			engine,
+			seen,
+			_one_at_a_time: one_at_a_time,
+		}
 	}
 
 	/// Wait until `pick` finds something in what the engine said (removing

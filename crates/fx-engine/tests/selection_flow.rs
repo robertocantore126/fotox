@@ -160,3 +160,52 @@ fn a_marquee_drag_and_a_polygonal_lasso_reach_the_document() {
 
 	harness.engine.shutdown();
 }
+
+#[test]
+fn the_magic_wand_runs_as_a_job_and_its_outline_can_be_dragged() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-selection-wand-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+
+	// Tolerance 255 matches every pixel: the whole canvas.
+	harness.ui(UiToEngine::Command {
+		doc,
+		command: fx_core::Command::MagicWand {
+			params: fx_core::WandParams {
+				x: 5.0,
+				y: 5.0,
+				tolerance: 255.0,
+				contiguous: true,
+				anti_alias: false,
+				sample_all_layers: true,
+			},
+			mode: fx_core::SelectMode::Replace,
+		},
+	});
+	let (labels, current) = history(&harness, doc);
+	assert_eq!((labels.last().map(String::as_str), current), (Some("Magic Wand"), 1), "{labels:?}");
+	assert!(!settled(&harness).contains("DocumentChanged"), "a selection is not a document change");
+
+	// With the wand active, a drag inside the selection moves the outline.
+	harness.ui(UiToEngine::Action {
+		id: "tool:magic-wand".into(),
+		args: serde_json::Value::Null,
+	});
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Down, 300.0, 300.0, 1)));
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Move, 320.0, 290.0, 1)));
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 320.0, 290.0, 0)));
+	let (labels, current) = history(&harness, doc);
+	assert_eq!((labels.last().map(String::as_str), current), (Some("Move Selection"), 2), "{labels:?}");
+	// And an arrow key nudges it.
+	harness.ui(UiToEngine::Key { key: "Shift+ArrowLeft".into() });
+	let (labels, current) = history(&harness, doc);
+	assert_eq!((labels.last().map(String::as_str), current), (Some("Move Selection"), 3), "{labels:?}");
+
+	harness.engine.shutdown();
+}

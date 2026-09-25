@@ -34,7 +34,7 @@ export const optionBars = {
   "lasso-poly": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Feather:", value: "0", unit: "px", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }],
   "lasso-magnet": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Width:", value: "10", unit: "px", width: 40 }, { type: "select", text: "Contrast:", options: ["1%", "5%", "10%", "25%", "50%", "75%", "100%"], value: "10%" }, { type: "num", text: "Frequency:", value: "57", width: 40 }],
   "quick-select": [SELECTION_MODE, { type: "gap" }, { type: "toggle", text: "Sample All Layers", on: false }, { type: "toggle", text: "Auto-Enhance", on: true }, { type: "gap" }, { type: "num", text: "Size:", value: "30", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "100", unit: "%", width: 40 }],
-  "magic-wand": [{ type: "btngroup", icons: ["i-marquee", "i-plus", "i-minus", "i-object-select"], titles: ["New selection", "Add to selection", "Subtract from selection", "Intersect with selection"], active: 0 }, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
+  "magic-wand": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
   "object-select": [{ type: "btngroup", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "toggle", text: "Sample All Layers", on: false }],
 
   crop: [

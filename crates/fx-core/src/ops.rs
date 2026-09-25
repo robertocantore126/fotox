@@ -14,7 +14,7 @@ use crate::color::{BitDepth, ColorProfile, RenderingIntent};
 use crate::command::CommandError;
 use crate::document::Document;
 use crate::layer::LayerId;
-use crate::selection::{SelectModify, Selection, SelectionShape};
+use crate::selection::{SelectModify, Selection, SelectionShape, WandParams};
 
 /// A destructive filter and its parameters. Serialised in commands, so macros
 /// replay it; variant names are stable.
@@ -105,6 +105,11 @@ pub trait PixelOps: Send + Sync {
 		depth: BitDepth,
 		store: &TileStore,
 	) -> Result<Option<Selection>, CommandError>;
+
+	/// The pixels the Magic Wand selects in `doc` (M5-T04): the active layer's
+	/// own pixels, or the composite with `sample_all_layers`. `None` when
+	/// nothing matches.
+	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError>;
 }
 
 /// A colour conversion between two RGB spaces.

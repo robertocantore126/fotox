@@ -27,7 +27,7 @@ use crate::color::{ColorProfile, RenderingIntent};
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
-use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape};
+use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -160,6 +160,9 @@ pub enum Command {
 	ModifySelection { modify: SelectModify },
 	/// Move the selection outline by whole pixels (never rewrites tiles). M5
 	OffsetSelection { dx: i32, dy: i32 },
+	/// Select what the Magic Wand finds at a point, combined with the
+	/// current selection by `mode`. M5
+	MagicWand { params: WandParams, mode: SelectMode },
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -241,6 +244,7 @@ impl Command {
 			Command::InvertSelection => invert_selection(doc, ctx),
 			Command::ModifySelection { modify } => modify_selection(doc, modify, ctx),
 			Command::OffsetSelection { dx, dy } => offset_selection(doc, *dx, *dy),
+			Command::MagicWand { params, mode } => magic_wand(doc, params, *mode, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -1226,6 +1230,30 @@ fn select(
 	Ok(selection_effect(shape_label(shape)))
 }
 
+fn magic_wand(doc: &mut Document, params: &WandParams, mode: SelectMode, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if !(0.0..=255.0).contains(&params.tolerance) {
+		return Err(CommandError::InvalidValue {
+			field: "tolerance",
+			reason: format!("{} is not in 0..=255", params.tolerance),
+		});
+	}
+	let Some(ops) = ctx.ops else {
+		return Err(CommandError::NotAllowed("the Magic Wand needs the engine".into()));
+	};
+	let size = (doc.width, doc.height);
+	let found = ops.magic_wand(doc, params, ctx.tiles)?;
+	doc.selection = match found {
+		Some(found) => selection::combine(size, doc.selection.as_ref(), &found, mode, ctx.tiles)?,
+		// Nothing found: Replace and Intersect leave no selection, Add and
+		// Subtract keep the current one.
+		None => match mode {
+			SelectMode::Replace | SelectMode::Intersect => None,
+			SelectMode::Add | SelectMode::Subtract => doc.selection.take(),
+		},
+	};
+	Ok(selection_effect("Magic Wand"))
+}
+
 fn select_all(doc: &mut Document) -> Result<CommandEffect, CommandError> {
 	if doc.width == 0 || doc.height == 0 {
 		return Err(CommandError::NotAllowed("the document is empty".into()));
@@ -1373,6 +1401,17 @@ mod tests {
 			// Identity: the commands only need to see their own plumbing here;
 			// the reshaping algorithms are tested in `fx-ops`.
 			Ok(Some(selection.clone()))
+		}
+
+		fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+			// "Finds" a 10 × 10 square at the click; the flood is tested in `fx-ops`.
+			let shape = SelectionShape::Rect {
+				x: params.x.floor(),
+				y: params.y.floor(),
+				w: 10.0,
+				h: 10.0,
+			};
+			self.rasterise(&shape, (doc.width, doc.height), doc.color.depth, true, store).map(Some)
 		}
 	}
 

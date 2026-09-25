@@ -26,4 +26,4 @@ pub use document::NAME_KINDS;
 pub use history::History;
 pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
 pub use ops::{Conversion, FilterParams, PixelOps};
-pub use selection::{SelectMode, SelectModify, Selection, SelectionShape};
+pub use selection::{SelectMode, SelectModify, Selection, SelectionShape, WandParams};

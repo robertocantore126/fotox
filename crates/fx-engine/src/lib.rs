@@ -175,6 +175,8 @@ pub enum CursorShape {
 	Grabbing,
 	ZoomIn,
 	ZoomOut,
+	/// Four arrows: something is being moved (the selection outline, M5).
+	Move,
 	/// Brush outline is drawn by the viewport overlay; hide the OS cursor.
 	None,
 }

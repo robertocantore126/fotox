@@ -3,6 +3,7 @@
 import { setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
 import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
+import { isPopupOpen } from "./popup.js";
 import { toolSlots } from "./data/tools.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
@@ -11,7 +12,7 @@ import { UI } from "./native/protocol.js";
 // being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last
 // point. Everything else stays with the menus and the shortcut map below, and
 // the engine ignores these when no tool has anything in progress.
-const VIEWPORT_KEYS = new Set(["Escape", "Enter", "Backspace", "Delete"]);
+const VIEWPORT_KEYS = new Set(["Escape", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]);
 
 const combos = [
   ["ctrl+n", "New...", "dlg:new-doc"],
@@ -86,8 +87,10 @@ export function initShortcuts() {
     }
 
     // A viewport key (M5-T04): the tools get it before the menus do.
-    if (!typing && !isDialogOpen() && !e.ctrlKey && !e.metaKey && !e.altKey && VIEWPORT_KEYS.has(e.key)) {
-      bridge.send({ type: UI.KEY, key: e.key });
+    // Arrow keys move the selection outline (Shift = 10 px): the engine
+    // gets "Shift+ArrowLeft". Menus keep their own arrow navigation.
+    if (!typing && !isDialogOpen() && !isPopupOpen() && !e.ctrlKey && !e.metaKey && !e.altKey && VIEWPORT_KEYS.has(e.key)) {
+      bridge.send({ type: UI.KEY, key: e.shiftKey && e.key.startsWith("Arrow") ? `Shift+${e.key}` : e.key });
       e.preventDefault();
       return;
     }

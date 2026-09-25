@@ -534,6 +534,7 @@ fn engine_cursor(shape: CursorShape) -> Cursor {
 		CursorShape::Grabbing => Cursor::Icon(CursorIcon::Grabbing),
 		CursorShape::ZoomIn => Cursor::Icon(CursorIcon::ZoomIn),
 		CursorShape::ZoomOut => Cursor::Icon(CursorIcon::ZoomOut),
+		CursorShape::Move => Cursor::Icon(CursorIcon::Move),
 		CursorShape::None => Cursor::None,
 	}
 }

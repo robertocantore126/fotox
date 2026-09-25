@@ -11,7 +11,7 @@
 use fx_core::{Command, SelectMode, SelectionShape};
 use fx_render::{Overlay, OverlayItem, OverlayStyle};
 
-use crate::tools::{DocPointer, Tool, ToolContext, ToolResult, mode_at_press, selection_mode, selection_shape_options};
+use crate::tools::{DocPointer, OutlineDrag, Tool, ToolContext, ToolResult, mode_at_press, nudge_outline, selection_mode, selection_shape_options};
 use crate::view::BUTTON_LEFT;
 use crate::{CursorShape, Modifiers, PointerKind};
 
@@ -88,12 +88,19 @@ pub struct Marquee {
 	id: &'static str,
 	shape: Shape,
 	drag: Option<Drag>,
+	/// Dragging the selection outline instead of drawing a marquee.
+	moving: Option<OutlineDrag>,
 }
 
 impl Marquee {
 	/// The tool for UI id `id`, drawing `shape`.
 	pub fn new(id: &'static str, shape: Shape) -> Self {
-		Self { id, shape, drag: None }
+		Self {
+			id,
+			shape,
+			drag: None,
+			moving: None,
+		}
 	}
 
 	/// The shape a drag defines: Style, then Shift (square/circle), then Alt
@@ -199,6 +206,16 @@ impl Tool for Marquee {
 		match event.kind {
 			PointerKind::Down if event.buttons & BUTTON_LEFT != 0 => {
 				let mode = mode_at_press(event.modifiers, selection_mode(ctx, self.id));
+				// New mode, pressed inside the selection: move the outline.
+				if mode == SelectMode::Replace
+					&& let Some(moving) = OutlineDrag::begin(ctx, event)
+				{
+					self.moving = Some(moving);
+					return ToolResult {
+						cursor: Some(CursorShape::Move),
+						..Default::default()
+					};
+				}
 				match self.shape {
 					// A single row or column: a click, no drag (Photoshop).
 					Shape::Row | Shape::Column => {
@@ -227,6 +244,26 @@ impl Tool for Marquee {
 							..Default::default()
 						}
 					}
+				}
+			}
+			PointerKind::Move | PointerKind::Down if self.moving.is_some() => {
+				if let Some(moving) = &mut self.moving {
+					moving.track(event, ctx.view.zoom);
+				}
+				ToolResult {
+					redraw: true,
+					..Default::default()
+				}
+			}
+			PointerKind::Up if self.moving.is_some() => {
+				let moving = self.moving.take().expect("checked by the guard");
+				// A click inside the selection (no drag) deselects, like any
+				// marquee click in New mode.
+				let command = if moving.dragged() { moving.command() } else { Some(Command::Deselect) };
+				ToolResult {
+					command,
+					redraw: true,
+					..Default::default()
 				}
 			}
 			PointerKind::Move | PointerKind::Down => {
@@ -270,10 +307,18 @@ impl Tool for Marquee {
 
 	/// Escape drops the marquee being drawn (Escape and the pointer release
 	/// are the two ways out of a drag).
-	fn key(&mut self, _ctx: &mut ToolContext<'_>, key: &str) -> ToolResult {
-		if key != "Escape" || self.drag.take().is_none() {
+	fn key(&mut self, ctx: &mut ToolContext<'_>, key: &str) -> ToolResult {
+		if self.drag.is_none() && self.moving.is_none() {
+			return ToolResult {
+				command: nudge_outline(ctx, key),
+				..Default::default()
+			};
+		}
+		if key != "Escape" {
 			return ToolResult::default();
 		}
+		self.drag = None;
+		self.moving = None;
 		ToolResult {
 			redraw: true,
 			..Default::default()
@@ -293,6 +338,10 @@ impl Tool for Marquee {
 
 	fn cursor(&self, _modifiers: Modifiers) -> CursorShape {
 		CursorShape::Crosshair
+	}
+
+	fn selection_nudge(&self) -> Option<(i32, i32)> {
+		self.moving.map(|m| m.delta())
 	}
 }
 

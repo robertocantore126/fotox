@@ -1848,14 +1848,21 @@ impl Engine {
 	/// selection's marching ants (M5-T02/T03). `None` when there is nothing.
 	fn active_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
 		let mut items = Vec::new();
+		let mut nudge = None;
 		if let Some(tool_id) = self.docs.active_mut().map(|doc| doc.view.tool.clone())
 			&& let Some(tool) = self.tools.get(&tool_id)
-			&& let Some(overlay) = tool.overlay()
 		{
-			items.extend(overlay.items);
+			if let Some(overlay) = tool.overlay() {
+				items.extend(overlay.items);
+			}
+			nudge = tool.selection_nudge();
 		}
 		if let Some(selection) = self.selection_overlay() {
-			items.extend(selection.items.iter().cloned());
+			match nudge {
+				// The outline is being dragged (M5-T04): the ants follow.
+				Some((dx, dy)) => items.extend(selection.items.iter().map(|item| item.translated(f64::from(dx), f64::from(dy)))),
+				None => items.extend(selection.items.iter().cloned()),
+			}
 		}
 		(!items.is_empty()).then(|| Arc::new(fx_render::Overlay { items }))
 	}
@@ -2155,6 +2162,7 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::StampVisible
 			| Command::ConvertProfile { .. }
 			| Command::ModifySelection { .. }
+			| Command::MagicWand { .. }
 	)
 }
 
@@ -2167,6 +2175,7 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::StampVisible => "Stamp Visible".to_owned(),
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
 		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
+		Command::MagicWand { .. } => "Magic Wand".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }

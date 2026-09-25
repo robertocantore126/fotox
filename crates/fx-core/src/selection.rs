@@ -123,6 +123,21 @@ pub enum SelectModify {
 	Feather(f64),
 }
 
+/// The Magic Wand's options (M5-T04): what a `Command::MagicWand` replays.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WandParams {
+	/// The clicked document pixel.
+	pub x: f64,
+	pub y: f64,
+	/// `0..=255` in 8-bit levels, also for 16-bit documents (Photoshop).
+	pub tolerance: f64,
+	pub contiguous: bool,
+	pub anti_alias: bool,
+	/// Compare with the composite of all visible layers instead of the
+	/// active layer's own pixels.
+	pub sample_all_layers: bool,
+}
+
 /// The grey format of a selection at `depth`.
 pub fn gray_format(depth: BitDepth) -> PixelFormat {
 	depth.gray_format()
