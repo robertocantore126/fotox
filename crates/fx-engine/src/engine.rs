@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
-use fx_core::{Command, CommandContext, LayerId};
+use fx_core::command::LayerPropsPatch;
+use fx_core::{Command, CommandContext, LayerId, LayerRef};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
 use fx_tiles::{TileError, TileStore};
@@ -28,6 +29,10 @@ const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// How often the `status` message (memory, frame statistics) goes out.
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A repeat of the same edit within this interval replaces the previous
+/// history step instead of adding one (slider drags, live dialogs).
+const MERGE_EDITS_WITHIN: Duration = Duration::from_secs(1);
 
 /// A layer's thumbnail is re-rendered at most this often while it changes (M2-T07).
 const THUMBNAIL_INTERVAL: Duration = Duration::from_millis(500);
@@ -72,6 +77,53 @@ struct Engine {
 	thumbs_wanted: HashMap<(DocId, LayerId), u32>,
 	thumbs_last: HashMap<(DocId, LayerId), Instant>,
 	thumbs_due: HashMap<(DocId, LayerId), Instant>,
+	/// The last mergeable edit: what it was, when, and how many undo steps
+	/// the document had right after it (so an intervening undo or edit
+	/// breaks the merge).
+	last_edit: Option<(DocId, EditKey, Instant, usize)>,
+}
+
+/// What makes two consecutive edits "the same" for history merging.
+#[derive(Clone, Debug, PartialEq)]
+enum EditKey {
+	/// `set_layer_props` of the same layer touching the same fields.
+	Props(LayerRef, [bool; 8]),
+	/// `set_adjustment` of the same layer.
+	Adjustment(LayerRef),
+}
+
+impl EditKey {
+	fn of(command: &Command) -> Option<Self> {
+		match command {
+			Command::SetLayerProps { layer, props } => {
+				let LayerPropsPatch {
+					name,
+					visible,
+					opacity,
+					fill,
+					blend,
+					clipped,
+					locked_pixels,
+					locked_position,
+				} = props;
+				Some(Self::Props(
+					layer.clone(),
+					[
+						name.is_some(),
+						visible.is_some(),
+						opacity.is_some(),
+						fill.is_some(),
+						blend.is_some(),
+						clipped.is_some(),
+						locked_pixels.is_some(),
+						locked_position.is_some(),
+					],
+				))
+			}
+			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
+			_ => None,
+		}
+	}
 }
 
 /// Channels and shared state the engine thread works with.
@@ -114,6 +166,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_wanted: HashMap::new(),
 		thumbs_last: HashMap::new(),
 		thumbs_due: HashMap::new(),
+		last_edit: None,
 	};
 
 	loop {
@@ -423,8 +476,29 @@ impl Engine {
 			tracing::warn!("command for unknown document {id:?}");
 			return;
 		};
+		let now = Instant::now();
+		let key = EditKey::of(&command);
+		// Merge a repeat of the previous edit into its history step: undo it,
+		// then apply the new value on the state before it.
+		let merge = matches!((&self.last_edit, &key), (Some((d, k, at, steps)), Some(new))
+			if *d == id && k == new && now.saturating_duration_since(*at) <= MERGE_EDITS_WITHIN
+				&& *steps == doc.history.labels().count() && !doc.history.can_redo());
+		let before_merge = merge.then(|| doc.doc.clone());
+		if merge {
+			doc.history.undo(&mut doc.doc);
+		}
 		let mut ctx = CommandContext { tiles: &store };
-		match doc.history.execute(&mut doc.doc, command, &mut ctx) {
+		let result = doc.history.execute(&mut doc.doc, command, &mut ctx);
+		if let (Err(_), Some(before)) = (&result, before_merge) {
+			// The new value was refused: put the merged step back as it was.
+			doc.history.redo(&mut doc.doc);
+			doc.doc = before;
+		}
+		self.last_edit = match (&result, key) {
+			(Ok(_), Some(key)) => Some((id, key, now, doc.history.labels().count())),
+			_ => None,
+		};
+		match result {
 			Ok(effect) => {
 				if !effect.selection_only {
 					doc.dirty = true;

@@ -63,7 +63,7 @@ not handle. The engine is the authority for anything that touches a document.
 | `document_opened` / `document_changed` | `info: DocumentInfo` | create/update a document tab |
 | `document_closed` | `doc` | |
 | `active_document` | `doc \| null` | |
-| `layers` | `doc, revision, layers: LayerInfo[]` | full list, top → bottom, tree via `depth` |
+| `layers` | `doc, revision, layers: LayerInfo[]` | full list, top → bottom, tree via `depth`; each row also carries `locked_pixels`, `locked_position`, and `adjustment` (adjustment layers) or `fill_color` (solid fills) |
 | `history` | `doc, labels, current, can_undo, can_redo` | History panel, Edit menu state |
 | `view` | `doc, zoom, center_x, center_y, rotation_deg` | rulers, status bar, navigator; ≤ 60 Hz |
 | `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz |

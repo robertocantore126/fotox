@@ -56,9 +56,19 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 		// (`locked_pixels`, `locked_position`); it reads as "locked in some
 		// way", like Photoshop's row lock icon. See the report.
 		locked: layer.locked_pixels || layer.locked_position,
+		locked_pixels: layer.locked_pixels,
+		locked_position: layer.locked_position,
 		// Only groups can collapse; for anything else the flag means nothing.
 		expanded: matches!(&layer.kind, LayerKind::Group { expanded: true, .. }),
 		selected,
+		adjustment: match &layer.kind {
+			LayerKind::Adjustment(adjustment) => Some(adjustment.clone()),
+			_ => None,
+		},
+		fill_color: match &layer.kind {
+			LayerKind::SolidFill { rgba } => Some(*rgba),
+			_ => None,
+		},
 	}
 }
 

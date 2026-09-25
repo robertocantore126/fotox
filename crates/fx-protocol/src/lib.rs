@@ -19,7 +19,7 @@
 //! The JavaScript side of this file is `ui/js/native/protocol.js`. Keep the
 //! two in sync; docs/PROTOCOL.md is the human-readable contract.
 
-use fx_core::{BitDepth, BlendMode, Command, LayerId};
+use fx_core::{Adjustment, BitDepth, BlendMode, Command, LayerId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -137,9 +137,21 @@ pub struct LayerInfo {
 	pub blend: BlendMode,
 	pub clipped: bool,
 	pub has_mask: bool,
+	/// Either lock below is on (the row's lock icon).
 	pub locked: bool,
+	/// The two locks separately (the panel's lock buttons).
+	#[serde(default)]
+	pub locked_pixels: bool,
+	#[serde(default)]
+	pub locked_position: bool,
 	pub expanded: bool,
 	pub selected: bool,
+	/// Parameters of an adjustment layer (for its dialog / Properties).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub adjustment: Option<Adjustment>,
+	/// Colour of a solid fill layer, 16-bit RGBA.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fill_color: Option<[u16; 4]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
