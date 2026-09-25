@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fx_core::{Document, Layer, LayerKind};
-use fx_tiles::{Backed, PixelFormat, TileHandle, TileSlot, TileStore, TiledImage};
+use fx_tiles::{Backed, PixelFormat, TileError, TileHandle, TileSlot, TileStore, TiledImage};
+use rayon::prelude::*;
 
 use super::container::{ChunkRef, Codec, FOOTER_LEN, FxdFile, FxdWriter, HEADER_LEN};
 use super::manifest;
@@ -25,6 +26,9 @@ use crate::{IoError, Progress};
 pub const SAVE_LEVEL: i32 = 1;
 /// zstd level for Save As / compaction: one-off writes favour size (D-024).
 pub const FRESH_LEVEL: i32 = 3;
+/// Tiles compressed in parallel before they are written in order: bounds the
+/// memory of a save (64 × 512 KiB of 16-bit pixels + their compressed copies).
+const IN_FLIGHT: usize = 64;
 
 /// Where a save writes.
 pub enum SaveTarget {
@@ -85,30 +89,51 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	};
 
 	let total = tiles.len().max(1);
-	for (i, (format, handle)) in tiles.iter().enumerate() {
-		if !progress(i as f32 / total as f32) {
-			return Err(IoError::Cancelled);
-		}
-		if let (Some(reuse_id), Some((src, offset, len))) = (reuse_id, handle.backing())
+	// Tiles already in this file keep their chunk; the others are compressed
+	// on rayon, IN_FLIGHT at a time, and appended in order.
+	let mut pending: Vec<&CollectedTile> = Vec::new();
+	for tile in &tiles {
+		if let (Some(reuse_id), Some((src, offset, len))) = (reuse_id, tile.handle.backing())
 			&& src == reuse_id
 		{
-			refs.insert(handle.id().get(), ChunkRef { offset, len });
+			refs.insert(tile.handle.id().get(), ChunkRef { offset, len });
 			report.tiles_reused += 1;
-			continue;
+		} else {
+			pending.push(tile);
 		}
-		let pixels = request.store.get(handle)?;
-		let compressed = zstd::bulk::compress(pixels.bytes(), level).map_err(|e| IoError::Decode(format!("zstd tile: {e}")))?;
-		let chunk = writer.tile(*format, Codec::Zstd, &compressed)?;
-		refs.insert(handle.id().get(), chunk);
-		written.push((handle.clone(), chunk));
-		report.tiles_written += 1;
-		report.bytes_written += chunk.len;
+	}
+	let mut done = report.tiles_reused as usize;
+	for batch in pending.chunks(IN_FLIGHT) {
+		if !progress(done as f32 / total as f32) {
+			return Err(IoError::Cancelled);
+		}
+		let compressed: Vec<Result<Option<Vec<u8>>, IoError>> = batch
+			.par_iter()
+			.map(|tile| match request.store.get(&tile.handle) {
+				Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
+					.map(Some)
+					.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
+				// A mip dropped under memory pressure is simply not stored:
+				// it is rebuilt after opening, like any missing mip.
+				Err(TileError::Evicted) if tile.derived => Ok(None),
+				Err(error) => Err(error.into()),
+			})
+			.collect();
+		for (tile, result) in batch.iter().zip(compressed) {
+			let Some(bytes) = result? else { continue };
+			let chunk = writer.tile(tile.format, Codec::Zstd, &bytes)?;
+			refs.insert(tile.handle.id().get(), chunk);
+			written.push((tile.handle.clone(), chunk));
+			report.tiles_written += 1;
+			report.bytes_written += chunk.len;
+		}
+		done += batch.len();
 	}
 	progress(1.0);
 
-	let mut manifest = manifest::to_manifest(request.doc, |handle| refs[&handle.id().get()]);
+	let mut manifest = manifest::to_manifest(request.doc, |handle| refs.get(&handle.id().get()).copied());
 	if let Some(preview) = request.preview {
-		manifest.preview = Some(manifest::image_entry(preview, |handle| refs[&handle.id().get()]));
+		manifest.preview = Some(manifest::image_entry(preview, |handle| refs.get(&handle.id().get()).copied()));
 	}
 	let payload = manifest::encode_manifest(&manifest, FRESH_LEVEL)?;
 	let manifest_chunk = writer.manifest(&payload)?;
@@ -170,21 +195,34 @@ fn live_bytes(refs: &HashMap<u64, ChunkRef>, manifest_len: u64) -> u64 {
 	live
 }
 
+/// One tile a save stores.
+struct CollectedTile {
+	format: PixelFormat,
+	handle: TileHandle,
+	/// A mip tile (level ≥ 3): may be skipped if it was evicted.
+	derived: bool,
+}
+
 /// Every real tile of the document and the preview, deduplicated and in a
-/// deterministic (id) order.
-fn collect_tiles(doc: &Document, preview: Option<&TiledImage>) -> Vec<(PixelFormat, TileHandle)> {
+/// deterministic (id) order. Dirty mip tiles are stale and left out (the
+/// manifest skips them too, see [`manifest::image_entry`]).
+fn collect_tiles(doc: &Document, preview: Option<&TiledImage>) -> Vec<CollectedTile> {
 	let mut seen = HashSet::new();
 	let mut out = Vec::new();
-	let mut push = |format: PixelFormat, handle: &TileHandle| {
-		if seen.insert(handle.id().get()) {
-			out.push((format, handle.clone()));
-		}
-	};
 	let mut visit = |image: &TiledImage| {
 		for level in stored_levels(image) {
-			for (_, _, slot) in image.grid(level).non_empty() {
-				if let TileSlot::Data(handle) = slot {
-					push(image.format(), handle);
+			for (tx, ty, slot) in image.grid(level).non_empty() {
+				if level != 0 && image.is_dirty(level, tx, ty) {
+					continue;
+				}
+				if let TileSlot::Data(handle) = slot
+					&& seen.insert(handle.id().get())
+				{
+					out.push(CollectedTile {
+						format: image.format(),
+						handle: handle.clone(),
+						derived: level != 0,
+					});
 				}
 			}
 		}
@@ -195,7 +233,7 @@ fn collect_tiles(doc: &Document, preview: Option<&TiledImage>) -> Vec<(PixelForm
 	if let Some(preview) = preview {
 		visit(preview);
 	}
-	out.sort_by_key(|(_, handle)| handle.id().get());
+	out.sort_by_key(|tile| tile.handle.id().get());
 	out
 }
 
@@ -284,6 +322,59 @@ mod tests {
 			panic!("no data tile")
 		};
 		store.get(handle).unwrap().bytes().to_vec()
+	}
+
+	#[test]
+	fn clean_mips_are_stored_and_dirty_ones_are_not() {
+		let store = store();
+		// 4096² → 16×16 tiles at level 0, a single tile at level 4.
+		let mut image = TiledImage::new(4096, 4096, PixelFormat::Rgba16);
+		image.put_buffer(&store, 0, 0, TileBuffer::filled(PixelFormat::Rgba16, PixelValue::rgba16(5, 6, 7, 65535)));
+		let mut mip = TileBuffer::zeroed(PixelFormat::Rgba16);
+		mip.as_u16_mut()[3] = 777;
+		let mip = store.insert(mip, fx_tiles::TileClass::Derived);
+		image.set_derived_slot(3, 0, 0, TileSlot::Data(mip));
+		image.set_derived_slot(4, 0, 0, TileSlot::Solid(PixelValue::rgba16(1, 1, 1, 1)));
+		// A later level-0 edit at the far corner makes (3: 1,1) and (4: 0,0)
+		// stale; (3: 0,0) stays valid.
+		let mut edit = TileBuffer::zeroed(PixelFormat::Rgba16);
+		edit.as_u16_mut()[0] = 9;
+		image.put_buffer(&store, 15, 15, edit);
+		assert!(image.is_dirty(4, 0, 0) && !image.is_dirty(3, 0, 0));
+
+		let mut doc = document(&store, 1);
+		let id = doc.allocate_layer_id();
+		doc.layers.push(Arc::new(Layer::new(id, "Big", LayerKind::Pixel { image, offset: (0, 0) })));
+		let path = path("mips.fxd");
+		let saved = save(
+			SaveRequest {
+				doc: &doc,
+				store: &store,
+				preview: None,
+			},
+			SaveTarget::Fresh(path.clone()),
+			&mut |_| true,
+		)
+		.unwrap();
+		let footer = saved.file.footer();
+		let (_, payload) = saved
+			.file
+			.read_chunk(ChunkRef {
+				offset: footer.manifest_offset,
+				len: footer.manifest_len,
+			})
+			.unwrap();
+		let manifest = manifest::decode_manifest(&payload).unwrap();
+		let restored = manifest::from_manifest(&manifest, &saved.file, &store).unwrap();
+		let LayerKind::Pixel { image, .. } = &restored.layer(id).unwrap().kind else {
+			panic!("pixel layer")
+		};
+		let TileSlot::Data(handle) = image.slot(3, 0, 0) else {
+			panic!("the clean mip was stored")
+		};
+		assert_eq!(store.get(handle).unwrap().as_u16()[3], 777);
+		assert!(image.slot(4, 0, 0).is_empty(), "the stale mip was not stored");
+		assert!(image.is_dirty(4, 0, 0), "and is rebuilt after opening");
 	}
 
 	#[test]

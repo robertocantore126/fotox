@@ -57,6 +57,15 @@ fn is_fxd(path: &std::path::Path) -> bool {
 	matches!(fx_io::sniff(&header[..n]), Some(fx_io::Sniffed::Fxd))
 }
 
+/// True when `a` and `b` name the same file (case-insensitive on Windows,
+/// resolved through `canonicalize` when both exist).
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+	match (a.canonicalize(), b.canonicalize()) {
+		(Ok(a), Ok(b)) => a == b,
+		_ => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
+	}
+}
+
 /// A `.fxd` file name for a document called `name` (`"Untitled"`, `"sky"` →
 /// `"sky.fxd"`, `"sky.tif"` → `"sky.fxd"`).
 fn suggested_fxd_name(name: &str) -> String {
@@ -82,13 +91,16 @@ pub(crate) enum Internal {
 	OpenedFxd {
 		task: u64,
 		path: PathBuf,
-		result: Result<OpenedFxd, IoError>,
+		result: Result<Box<OpenedFxd>, IoError>,
 	},
 	/// A save finished; `Ok` carries the reopened file (M3-T06).
 	Saved {
 		task: u64,
 		doc: DocId,
 		path: PathBuf,
+		/// The document's generation when the snapshot was taken: edits made
+		/// during the save keep it dirty.
+		generation: u64,
 		result: Result<Arc<FxdFile>, IoError>,
 	},
 	/// The B3 layers are built (M2-T08).
@@ -126,6 +138,9 @@ struct Engine {
 	last_edit: Option<(DocId, EditKey, Instant, usize)>,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
+	/// The window is closing: after each dirty document is answered, ask about
+	/// the next one (M3-T06).
+	window_close_pending: bool,
 }
 
 /// What makes two consecutive edits "the same" for history merging.
@@ -213,6 +228,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_due: HashMap::new(),
 		last_edit: None,
 		pending_close: None,
+		window_close_pending: false,
 	};
 
 	loop {
@@ -282,8 +298,8 @@ impl Engine {
 				}
 				Changed::default()
 			}
-			EngineInput::Export(path) => {
-				self.export(path);
+			EngineInput::Export { path, choice } => {
+				self.export(path, choice);
 				Changed::default()
 			}
 			EngineInput::Save { doc } => {
@@ -292,6 +308,13 @@ impl Engine {
 			}
 			EngineInput::SaveAs { doc, path } => {
 				self.save_as(doc, path);
+				Changed::default()
+			}
+			EngineInput::SaveCancelled { doc } => {
+				if self.pending_close == Some(doc) {
+					self.pending_close = None;
+					self.window_close_pending = false;
+				}
 				Changed::default()
 			}
 			EngineInput::CloseRequested => {
@@ -434,7 +457,7 @@ impl Engine {
 				return Changed::default();
 			}
 			// Likewise export: the save dialog, then `EngineInput::Export`.
-			"export:png" | "export:tiff" => return Changed::default(),
+			"export:png" | "export:tiff" | "export:jpg" | "export:as" => return Changed::default(),
 			_ => {}
 		}
 		if let Some(changed) = self.view_mut().action(id) {
@@ -491,7 +514,7 @@ impl Engine {
 					label: format!("{label}: reading the manifest"),
 					fraction: 0.5,
 				});
-				let result = fxd::open(&path, &store);
+				let result = fxd::open(&path, &store).map(Box::new);
 				let _ = internal.send(Internal::OpenedFxd { task, path, result });
 				return;
 			}
@@ -515,7 +538,7 @@ impl Engine {
 	}
 
 	/// Export the active document as a job on a worker thread, with progress.
-	fn export(&mut self, path: PathBuf) {
+	fn export(&mut self, path: PathBuf, choice: Option<crate::ExportChoice>) {
 		let Some(open) = self.docs.active_mut() else {
 			self.to_ui(&EngineToUi::Toast {
 				text: "Open a document to export it".into(),
@@ -554,8 +577,9 @@ impl Engine {
 			};
 			// An opaque document is written without alpha (a quarter smaller for RGB).
 			let opaque = crate::export::opaque_background(&doc, &store);
-			let result =
-				crate::export::options_for(&doc, &path, opaque).and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
+			let result = crate::export::options_for(&doc, &path, opaque)
+				.map(|options| crate::export::apply_choice(options, choice, opaque))
+				.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
@@ -642,7 +666,7 @@ impl Engine {
 				match result {
 					Ok(opened) => {
 						let id = self.docs.allocate_id();
-						let mut doc = OpenDoc::from_fxd(id, &path, opened);
+						let mut doc = OpenDoc::from_fxd(id, &path, *opened);
 						if let Some(viewport) = self.virtual_view.viewport {
 							doc.view.resize(viewport.width, viewport.height);
 						}
@@ -661,14 +685,23 @@ impl Engine {
 					}
 				}
 			}
-			Internal::Saved { task, doc, path, result } => {
+			Internal::Saved {
+				task,
+				doc,
+				path,
+				generation,
+				result,
+			} => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(file) => {
 						let info = self.docs.get_mut(doc).map(|open| {
 							open.file = Some(file);
 							open.path = Some(path.clone());
-							open.dirty = false;
+							open.dirty = open.generation != generation;
+							open.name = path
+								.file_name()
+								.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
 							open.info()
 						});
 						if let Some(info) = info {
@@ -681,12 +714,17 @@ impl Engine {
 						if self.pending_close == Some(doc) {
 							self.pending_close = None;
 							self.force_close(doc);
+							self.continue_window_close();
 						}
 					}
-					Err(IoError::Cancelled) => {}
+					Err(IoError::Cancelled) => {
+						self.pending_close = None;
+						self.window_close_pending = false;
+					}
 					Err(error) => {
 						tracing::warn!("cannot save {}: {error}", path.display());
 						self.pending_close = None;
+						self.window_close_pending = false;
 						self.to_ui(&EngineToUi::Error {
 							text: format!("Could not save {}: {error}", path.display()),
 						});
@@ -710,12 +748,13 @@ impl Engine {
 	/// The user's answer to the "save changes?" prompt.
 	fn close_answer(&mut self, id: DocId, answer: CloseAnswer) {
 		match answer {
-			CloseAnswer::Cancel => {}
+			CloseAnswer::Cancel => self.window_close_pending = false,
 			CloseAnswer::DontSave => {
 				if let Some(open) = self.docs.get_mut(id) {
 					open.dirty = false;
 				}
 				self.force_close(id);
+				self.continue_window_close();
 			}
 			CloseAnswer::Save => {
 				self.pending_close = Some(id);
@@ -724,15 +763,28 @@ impl Engine {
 		}
 	}
 
+	/// After a dirty document was dealt with while the window is closing: ask
+	/// about the next one, or let the shell close.
+	fn continue_window_close(&mut self) {
+		if self.window_close_pending {
+			self.close_requested();
+		}
+	}
+
 	/// The user asked to close the window: allowed only when nothing is dirty.
+	/// Each dirty document is asked about in turn; Cancel stops the close.
 	fn close_requested(&mut self) {
+		self.window_close_pending = true;
 		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
 		match dirty {
 			Some((id, name)) => {
 				self.to_ui(&EngineToUi::CloseDirtyDocument { doc: id, name });
 				(self.output)(EngineOutput::MayClose(false));
 			}
-			None => (self.output)(EngineOutput::MayClose(true)),
+			None => {
+				self.window_close_pending = false;
+				(self.output)(EngineOutput::MayClose(true));
+			}
 		}
 	}
 
@@ -770,15 +822,25 @@ impl Engine {
 		});
 	}
 
-	/// Save to `path` (the shell chose it).
+	/// Save to `path` (the shell chose it). Choosing the document's own file
+	/// is an incremental save: Windows refuses to replace a file that is open,
+	/// and the document's backed tiles keep it open (D-027).
 	fn save_as(&mut self, id: DocId, path: PathBuf) {
-		self.start_save(id, SaveTarget::Fresh(path));
+		let own = self.docs.get_mut(id).and_then(|open| {
+			let same = open.path.as_ref().is_some_and(|p| same_file(p, &path));
+			if same { open.file.clone() } else { None }
+		});
+		match own {
+			Some(file) => self.start_save(id, SaveTarget::Incremental(file)),
+			None => self.start_save(id, SaveTarget::Fresh(path)),
+		}
 	}
 
 	/// Snapshot the document and save it on a worker thread (recipe R2).
 	fn start_save(&mut self, id: DocId, target: SaveTarget) {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let snapshot = open.doc.clone();
+		let generation = open.generation;
 		let path = match &target {
 			SaveTarget::Incremental(file) => file.path().to_path_buf(),
 			SaveTarget::Fresh(path) => path.clone(),
@@ -788,7 +850,8 @@ impl Engine {
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Saving {}",
-			path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+			path.file_name()
+				.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 		);
 		self.to_ui(&EngineToUi::Progress {
 			task,
@@ -816,7 +879,13 @@ impl Engine {
 				&mut report,
 			)
 			.map(|saved| saved.file);
-			let _ = internal.send(Internal::Saved { task, doc: id, path, result });
+			let _ = internal.send(Internal::Saved {
+				task,
+				doc: id,
+				path,
+				generation,
+				result,
+			});
 		});
 		if let Err(error) = spawned {
 			self.to_ui(&EngineToUi::ProgressDone { task });
@@ -1084,7 +1153,16 @@ impl Engine {
 		});
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let spawned = std::thread::Builder::new().name("b3".into()).spawn(move || {
-			let layers = crate::b3::build(width, height, format, &ids, 3, &store);
+			let mut layers = crate::b3::build(width, height, format, &ids, 3, &store);
+			// The full mip pyramid of every new layer, like an import: the first
+			// frame at fit, and a saved `.fxd` (which stores mips ≥ 3), need them.
+			for layer in &mut layers {
+				if let fx_core::LayerKind::Pixel { image, .. } = &mut Arc::make_mut(layer).kind
+					&& let Err(error) = mips::ensure_all_mips(image, &store)
+				{
+					tracing::warn!("B3 mips of {:?}: {error}", layer.id);
+				}
+			}
 			let _ = internal.send(Internal::B3Built { task, doc: id, layers });
 		});
 		if let Err(error) = spawned {

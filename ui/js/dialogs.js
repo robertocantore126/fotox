@@ -17,6 +17,8 @@ let stack = [];
 //             fields (by label, `curve` for the curve editor) without a change event
 //   onOk:     (values) => …  instead of the mock toast
 //   onCancel: () => …        Cancel, ×, Escape or a click outside
+//   buttons:  [{ text, primary, onClick }] instead of OK/Cancel (e.g. Save /
+//             Don't Save / Cancel); each closes the dialog, then runs onClick
 export function openDialog(id, overrides = {}) {
   const def = { ...dialogDef(id), ...overrides };
   const fields = def.values ? withValues(def.fields || [], def.values) : def.fields || [];
@@ -41,8 +43,16 @@ export function openDialog(id, overrides = {}) {
     h("button", { class: "dlg-x", type: "button", "data-tip": "Close", onclick: () => close() }, icon("i-close", "ic sm")));
 
   const footer = h("div", { class: "dlg-footer" });
-  const cancel = def.cancel === null ? null : h("button", { class: "btn", type: "button", text: def.cancel || "Cancel", onclick: () => close() });
-  const ok = def.ok === null ? null : h("button", {
+  if (def.buttons) {
+    for (const b of def.buttons) {
+      footer.append(h("button", {
+        class: "btn" + (b.primary ? " primary" : ""), type: "button", text: b.text,
+        onclick: () => { close(undefined, true); if (b.onClick) b.onClick(); },
+      }));
+    }
+  }
+  const cancel = def.buttons || def.cancel === null ? null : h("button", { class: "btn", type: "button", text: def.cancel || "Cancel", onclick: () => close() });
+  const ok = def.buttons || def.ok === null ? null : h("button", {
     class: "btn primary", type: "button", text: def.ok || "OK",
     onclick: () => {
       if (def.onOk) def.onOk(readValues(grid));

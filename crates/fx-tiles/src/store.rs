@@ -605,9 +605,26 @@ impl TileStore {
 	}
 
 	/// Point an existing tile at a chunk of an opened native file, e.g. after a
-	/// save wrote it. The tile may then leave scratch at the next trim.
+	/// save wrote it (replacing an older backing). Its warm and cold copies are
+	/// redundant from now on and are released at once (the scratch extent is
+	/// freed); the hot copy stays and follows the normal LRU trimming.
 	pub fn attach_backing(&self, handle: &TileHandle, backed: Backed) {
-		handle.0.copies.lock().backed = Some(backed);
+		let inner = &*self.0;
+		let entry = &handle.0;
+		let (warm_len, cold) = {
+			let mut copies = entry.copies.lock();
+			copies.backed = Some(backed);
+			(copies.warm.take().map(|w| w.len()), copies.cold.take())
+		};
+		if let Some(len) = warm_len {
+			inner.account_warm(len, false);
+		}
+		if let Some(extent) = cold {
+			inner.account_cold(extent, false);
+			if let Some(scratch) = &inner.scratch {
+				scratch.free(extent);
+			}
+		}
 	}
 
 	/// Get the pixels of a tile, bringing it back to RAM if needed.
@@ -692,12 +709,6 @@ impl TileStore {
 	pub fn trim(&self) {
 		let inner = &*self.0;
 		let _guard = inner.trim_lock.lock();
-		// A tile with a backed copy can always be read again, so it holds no
-		// RAM or scratch. Free that first (this is where a tile frees its
-		// scratch extent after `attach_backing`).
-		for entry in inner.live_entries() {
-			self.release_backed_copies(&entry);
-		}
 		let hot_target = inner.config.hot_budget / 10 * 9;
 		let warm_target = inner.config.warm_budget / 10 * 9;
 		let hot_over = inner.stats.hot_bytes.load(Ordering::Relaxed) > inner.config.hot_budget;
@@ -740,33 +751,6 @@ impl TileStore {
 			inner.stats.scratch_full.store(scratch_full, Ordering::Relaxed);
 		} else {
 			inner.stats.scratch_full.store(false, Ordering::Relaxed);
-		}
-	}
-
-	/// Drop every RAM/scratch copy of a backed tile. The backed copy is kept, so
-	/// the pixels are still reachable (by reading the source again).
-	fn release_backed_copies(&self, entry: &Arc<TileEntry>) {
-		let inner = &*self.0;
-		let (had_hot, warm_len, cold) = {
-			let mut copies = entry.copies.lock();
-			if copies.backed.is_none() {
-				return;
-			}
-			let had_hot = copies.hot.take().is_some();
-			let warm_len = copies.warm.take().map(|w| w.len());
-			(had_hot, warm_len, copies.cold.take())
-		};
-		if had_hot {
-			inner.account_hot(entry.format, true, false);
-		}
-		if let Some(len) = warm_len {
-			inner.account_warm(len, false);
-		}
-		if let Some(extent) = cold {
-			inner.account_cold(extent, false);
-			if let Some(scratch) = &inner.scratch {
-				scratch.free(extent);
-			}
 		}
 	}
 
@@ -1147,23 +1131,36 @@ mod tests {
 	}
 
 	#[test]
-	fn trim_keeps_no_ram_or_scratch_for_a_backed_tile() {
-		let store = store();
+	fn a_backed_tile_is_dropped_not_compressed_under_pressure() {
+		let store = store(); // hot and warm budgets are 4 RGBA16 tiles each
 		let expected = noise(PixelFormat::Rgba16, 3);
 		let source = TestSource::new(3, expected.clone());
 		let handle = store.insert_backed(PixelFormat::Rgba16, TileClass::Authoritative, backed(&source, 0, 0));
 		store.get(&handle).unwrap(); // make it hot
-		assert!(store.is_hot(&handle));
 		store.trim();
-		assert!(!store.is_hot(&handle), "a backed tile gives up RAM");
-		assert_eq!(store.stats().warm_bytes, 0);
-		assert_eq!(store.scratch_used(), 0);
+		assert!(store.is_hot(&handle), "under budget, a backed tile in use keeps its hot copy");
+		// Push it out with newer tiles: it is dropped, never compressed or spilled.
+		let others: Vec<_> = (0..40)
+			.map(|i| store.insert(noise(PixelFormat::Rgba16, 50 + i), TileClass::Authoritative))
+			.collect();
+		for other in &others {
+			store.get(other).unwrap();
+		}
+		store.trim();
+		assert!(!store.is_hot(&handle), "the least recently used backed tile gives up RAM");
+		let copies = handle.0.copies.lock();
+		assert!(
+			copies.warm.is_none() && copies.cold.is_none(),
+			"a backed tile is never compressed or written to scratch"
+		);
+		drop(copies);
 		// Still reachable: the source is read again.
 		assert_eq!(store.get(&handle).unwrap().bytes(), expected.bytes());
+		drop(others);
 	}
 
 	#[test]
-	fn attach_backing_frees_the_scratch_extent_at_trim() {
+	fn attach_backing_frees_the_scratch_extent_at_once() {
 		let store = store(); // hot and warm budgets are 4 RGBA16 tiles each
 		let handle = store.insert(noise(PixelFormat::Rgba16, 1), TileClass::Authoritative);
 		let keep: Vec<_> = (0..40)
@@ -1173,11 +1170,14 @@ mod tests {
 		assert!(store.scratch_used() > 0, "some tiles reached scratch");
 		let before = store.scratch_used();
 
+		let spilled = handle.0.copies.lock().cold.is_some();
 		let source = TestSource::new(4, noise(PixelFormat::Rgba16, 1));
 		store.attach_backing(&handle, backed(&source, 0, 0));
 		assert_eq!(source.reads(), 0, "attaching reads nothing");
-		store.trim();
-		assert!(store.scratch_used() < before, "the backed tile's scratch extent was freed");
+		if spilled {
+			assert!(store.scratch_used() < before, "the backed tile's scratch extent was freed at once");
+		}
+		assert!(handle.0.copies.lock().cold.is_none() && handle.0.copies.lock().warm.is_none());
 		drop(keep);
 	}
 

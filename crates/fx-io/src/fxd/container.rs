@@ -384,6 +384,15 @@ impl FxdFile {
 			return Err(IoError::Decode(format!("chunk at {} has unknown flags {}", at.offset, header[1])));
 		}
 		let payload_len = u64::from_le_bytes(header[4..12].try_into().expect("8-byte slice"));
+		// A corrupt length must not turn into a huge allocation: it has to
+		// match the reference (every reader knows the chunk's total length).
+		if payload_len.checked_add(CHUNK_HEADER_LEN) != Some(at.len) {
+			return Err(IoError::Decode(format!(
+				"corrupt chunk at {}: header says {payload_len} payload bytes, expected {}",
+				at.offset,
+				at.len.saturating_sub(CHUNK_HEADER_LEN)
+			)));
+		}
 		let checksum = u32::from_le_bytes(header[12..16].try_into().expect("4-byte slice"));
 		let mut payload = vec![0u8; payload_len as usize];
 		read_exact_at(&self.file, &mut payload, at.offset + CHUNK_HEADER_LEN)?;
@@ -524,6 +533,11 @@ impl FxdWriter {
 		};
 		write_all_at(&self.file, &footer.to_bytes(), self.pos)?;
 		self.file.sync_data()?;
+		// Bytes past the new footer are the torn tail of an interrupted save:
+		// drop them so no stale data outlives this save.
+		if self.file.metadata()?.len() > footer.end_offset {
+			self.file.set_len(footer.end_offset)?;
+		}
 		Ok(FxdFile {
 			file: self.file,
 			id: self.id,

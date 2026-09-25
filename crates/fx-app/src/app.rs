@@ -230,11 +230,17 @@ impl App {
 			Routed::Engine(message) => {
 				// The shell owns native dialogs: the chosen files go to the
 				// engine as `Open` (docs/tasks/M1.md, M1-T08).
-				if let UiToEngine::Action { id, .. } = &message {
+				if let UiToEngine::Action { id, args } = &message {
 					match id.as_str() {
 						"dlg:open" => self.open_file_dialog(),
-						"export:png" => self.export_file_dialog("PNG", "png"),
-						"export:tiff" => self.export_file_dialog("TIFF", "tif"),
+						"export:png" => self.export_file_dialog("PNG", "png", None),
+						"export:tiff" => self.export_file_dialog("TIFF", "tif", None),
+						"export:jpg" => self.export_file_dialog("JPEG", "jpg", None),
+						// The Export As dialog (M3-T07): its options, then the save dialog.
+						"export:as" => {
+							let (name, extension, choice) = export_choice(args);
+							self.export_file_dialog(name, extension, Some(choice));
+						}
 						_ => {}
 					}
 				}
@@ -246,7 +252,7 @@ impl App {
 	/// Show the native save dialog for an export (helper thread, like
 	/// [`open_file_dialog`](Self::open_file_dialog)); the chosen file comes
 	/// back as `AppEvent::ExportTo`.
-	fn export_file_dialog(&self, name: &'static str, extension: &'static str) {
+	fn export_file_dialog(&self, name: &'static str, extension: &'static str, choice: Option<fx_engine::ExportChoice>) {
 		let scheduler = self.app_event_scheduler.clone();
 		let spawned = std::thread::Builder::new().name("export-dialog".into()).spawn(move || {
 			let dialog = rfd::AsyncFileDialog::new()
@@ -259,7 +265,7 @@ impl App {
 				if path.extension().is_none() {
 					path.set_extension(extension);
 				}
-				scheduler.schedule(AppEvent::ExportTo(path));
+				scheduler.schedule(AppEvent::ExportTo(path, choice));
 			}
 		});
 		if let Err(error) = spawned {
@@ -275,7 +281,8 @@ impl App {
 		let spawned = std::thread::Builder::new().name("open-dialog".into()).spawn(move || {
 			let dialog = rfd::AsyncFileDialog::new()
 				.set_title("Open")
-				.add_filter("Images", &["tif", "tiff", "png", "jpg", "jpeg"])
+				.add_filter("Fotox documents and images", &["fxd", "tif", "tiff", "png", "jpg", "jpeg"])
+				.add_filter("Fotox document", &["fxd"])
 				.add_filter("TIFF", &["tif", "tiff"])
 				.add_filter("PNG", &["png"])
 				.add_filter("JPEG", &["jpg", "jpeg"])
@@ -311,6 +318,36 @@ impl App {
 				self.engine_cursor = shape;
 				self.apply_cursor(event_loop);
 			}
+			EngineOutput::NeedSavePath { doc, suggested_name } => self.save_fxd_dialog(doc, suggested_name),
+			// The engine asked about every unsaved document (M3-T06).
+			EngineOutput::MayClose(true) => self.exit(ExitReason::Shutdown),
+			EngineOutput::MayClose(false) => {}
+		}
+	}
+
+	/// Show the native "Save As" dialog for a `.fxd` (helper thread, like
+	/// [`open_file_dialog`](Self::open_file_dialog)); the answer comes back as
+	/// `AppEvent::SaveAs` or `AppEvent::SaveCancelled`.
+	fn save_fxd_dialog(&self, doc: fx_protocol::DocId, suggested_name: String) {
+		let scheduler = self.app_event_scheduler.clone();
+		let spawned = std::thread::Builder::new().name("save-dialog".into()).spawn(move || {
+			let dialog = rfd::AsyncFileDialog::new()
+				.set_title("Save As")
+				.set_file_name(suggested_name)
+				.add_filter("Fotox document", &["fxd"]);
+			match futures::executor::block_on(dialog.save_file()) {
+				Some(file) => {
+					let mut path = file.path().to_path_buf();
+					if path.extension().is_none() {
+						path.set_extension("fxd");
+					}
+					scheduler.schedule(AppEvent::SaveAs { doc, path });
+				}
+				None => scheduler.schedule(AppEvent::SaveCancelled(doc)),
+			}
+		});
+		if let Err(error) = spawned {
+			tracing::error!("cannot show the save dialog: {error}");
 		}
 	}
 
@@ -354,7 +391,9 @@ impl App {
 			}
 			AppEvent::Engine(output) => self.engine_output(event_loop, output),
 			AppEvent::OpenFiles(paths) => self.engine.send(EngineInput::Open(paths)),
-			AppEvent::ExportTo(path) => self.engine.send(EngineInput::Export(path)),
+			AppEvent::ExportTo(path, choice) => self.engine.send(EngineInput::Export { path, choice }),
+			AppEvent::SaveAs { doc, path } => self.engine.send(EngineInput::SaveAs { doc, path }),
+			AppEvent::SaveCancelled(doc) => self.engine.send(EngineInput::SaveCancelled { doc }),
 			AppEvent::UiMessage(frame) => self.ui_message(&frame),
 			AppEvent::UiCrashed => {
 				tracing::error!("the UI crashed, exiting");
@@ -440,7 +479,9 @@ impl ApplicationHandler for App {
 					tracing::error!("cannot read the dropped files: {error}");
 				}
 			},
-			WindowEvent::CloseRequested => self.exit(ExitReason::Shutdown),
+			// The engine asks about unsaved documents first and answers
+			// `MayClose` (M3-T06).
+			WindowEvent::CloseRequested => self.engine.send(EngineInput::CloseRequested),
 			WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
 			WindowEvent::RedrawRequested => self.redraw(),
 			_ => {}
@@ -500,6 +541,29 @@ fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 	}
 	let path = String::from_utf8(decoded).ok()?;
 	Some(std::path::PathBuf::from(path.replace('/', "\\")))
+}
+
+/// The Export As dialog's `export:as` arguments (see `ui/js/actions.js`):
+/// format name, extension and the engine's options. Unknown values fall back
+/// to the defaults (PNG, automatic transparency, quality 90, 4:4:4).
+fn export_choice(args: &serde_json::Value) -> (&'static str, &'static str, fx_engine::ExportChoice) {
+	let text = |key: &str| args.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+	let (name, extension) = match text("format") {
+		"jpg" => ("JPEG", "jpg"),
+		"tif" => ("TIFF", "tif"),
+		_ => ("PNG", "png"),
+	};
+	let choice = fx_engine::ExportChoice {
+		eight_bit: args.get("eight_bit").and_then(serde_json::Value::as_bool).unwrap_or(false),
+		transparency: match text("transparency") {
+			"on" => Some(true),
+			"off" => Some(false),
+			_ => None,
+		},
+		quality: args.get("quality").and_then(serde_json::Value::as_u64).map_or(90, |q| q.min(100) as u8),
+		chroma_half: text("chroma") == "420",
+	};
+	(name, extension, choice)
 }
 
 #[cfg(test)]

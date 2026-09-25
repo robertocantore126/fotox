@@ -21,8 +21,12 @@ pub(crate) enum AppEvent {
 	Engine(fx_engine::EngineOutput),
 	/// Files chosen in the native open dialog.
 	OpenFiles(Vec<std::path::PathBuf>),
-	/// File chosen in the native export dialog.
-	ExportTo(std::path::PathBuf),
+	/// File chosen in the native export dialog, with the Export As options.
+	ExportTo(std::path::PathBuf, Option<fx_engine::ExportChoice>),
+	/// File chosen in the native "save as .fxd" dialog (M3-T06).
+	SaveAs { doc: fx_protocol::DocId, path: std::path::PathBuf },
+	/// That dialog was cancelled.
+	SaveCancelled(fx_protocol::DocId),
 	/// The UI failed or crashed; the app cannot continue.
 	UiCrashed,
 	/// Leave the event loop and shut down.

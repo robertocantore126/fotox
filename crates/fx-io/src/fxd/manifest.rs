@@ -184,8 +184,9 @@ impl<'de> Deserialize<'de> for SlotEntry {
 // ---------------------------------------------------------------------------
 
 /// Build the manifest of `doc`. `tile_ref` maps a stored tile to the chunk the
-/// save path wrote (or is about to write) for it.
-pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> ChunkRef) -> Manifest {
+/// save path wrote for it; `None` for a derived (mip) tile the save skipped
+/// because it was evicted — it is then left out and rebuilt after opening.
+pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> Manifest {
 	let tile_ref = &tile_ref;
 	let (next_layer_id, name_counters) = doc.id_state();
 	Manifest {
@@ -203,7 +204,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> ChunkRef) -
 	}
 }
 
-fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> ChunkRef) -> LayerEntry {
+fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef>) -> LayerEntry {
 	LayerEntry {
 		id: layer.id,
 		name: layer.name.clone(),
@@ -239,7 +240,12 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> ChunkRef) -> La
 
 /// Build the stored-level entry of one image (level 0 and levels ≥ 3, only
 /// non-empty slots). Public so the save path can build the preview entry.
-pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> ChunkRef) -> ImageEntry {
+///
+/// Mip slots that are dirty (older than level 0) or that the save could not
+/// store (`tile_ref` → `None`) are left out: after opening they are empty and
+/// dirty, so the renderer rebuilds them. Storing a stale mip would show old
+/// pixels until the next edit.
+pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> ImageEntry {
 	let tile_ref = &tile_ref;
 	let mut levels = Vec::new();
 	for level in 0..image.level_count() {
@@ -251,14 +257,17 @@ pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> ChunkRe
 		let grid = image.grid(level);
 		let mut slots = Vec::new();
 		for (tx, ty, slot) in grid.non_empty() {
+			if level != 0 && image.is_dirty(level, tx, ty) {
+				continue;
+			}
 			match slot {
 				TileSlot::Empty => {}
 				TileSlot::Solid(value) => slots.push(SlotEntry::Solid { tx, ty, value: value.0 }),
-				TileSlot::Data(handle) => slots.push(SlotEntry::Tile {
-					tx,
-					ty,
-					chunk: tile_ref(handle),
-				}),
+				TileSlot::Data(handle) => match tile_ref(handle) {
+					Some(chunk) => slots.push(SlotEntry::Tile { tx, ty, chunk }),
+					None if level != 0 => {}
+					None => panic!("level-0 tile {tx},{ty} was not written by the save"),
+				},
 			}
 		}
 		if slots.is_empty() {
@@ -593,9 +602,11 @@ mod tests {
 	fn a_document_with_every_layer_kind_round_trips_through_the_manifest() {
 		let store = store();
 		let doc = sample_document(&store);
-		let manifest = to_manifest(&doc, |handle| ChunkRef {
-			offset: handle.id().get() * 100,
-			len: 1234,
+		let manifest = to_manifest(&doc, |handle| {
+			Some(ChunkRef {
+				offset: handle.id().get() * 100,
+				len: 1234,
+			})
 		});
 
 		// Top-level fields come straight from the document.
@@ -656,7 +667,7 @@ mod tests {
 	fn a_version_2_manifest_is_refused() {
 		let store = store();
 		let doc = sample_document(&store);
-		let mut manifest = to_manifest(&doc, |_| ChunkRef { offset: 0, len: 0 });
+		let mut manifest = to_manifest(&doc, |_| Some(ChunkRef { offset: 0, len: 0 }));
 		manifest.version = 2;
 		let json = serde_json::to_vec(&manifest).unwrap();
 		let err = manifest_from_json(&json).unwrap_err();
@@ -757,7 +768,7 @@ mod tests {
 				}
 			}
 		}
-		let manifest = to_manifest(doc, |handle| refs[&handle.id().get()]);
+		let manifest = to_manifest(doc, |handle| refs.get(&handle.id().get()).copied());
 		let payload = encode_manifest(&manifest, 3).unwrap();
 		let chunk = writer.manifest(&payload).unwrap();
 		let live = chunk.end();

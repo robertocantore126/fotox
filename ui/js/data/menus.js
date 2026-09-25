@@ -45,9 +45,12 @@ export const menus = [
       ]),
       sep,
       it("Save", "Ctrl+S", "doc:save"),
+      it("Save As...", "Shift+Ctrl+S", "doc:save-as"),
       it("Save as PSD", "", "doc:save-psd"),
       sub("Save As", [
         it("PSD (Photoshop)", "", "doc:save-psd"),
+        it("Export As...", "Alt+Shift+Ctrl+W", "dlg:export-as"),
+        sep,
         it("PNG", "", "export:png"),
         it("JPG", "", "export:jpg"),
         it("SVG", "", "export:svg"),

@@ -55,6 +55,19 @@ pub struct PointerInput {
 	pub time_us: u64,
 }
 
+/// Options of the Export As dialog (M3-T07).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportChoice {
+	/// Write 8 bits per channel even for a 16-bit document.
+	pub eight_bit: bool,
+	/// `None` = automatic (alpha only when the document is not opaque).
+	pub transparency: Option<bool>,
+	/// JPEG quality, 0..=100.
+	pub quality: u8,
+	/// JPEG 4:2:0 chroma subsampling instead of 4:4:4.
+	pub chroma_half: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerKind {
 	Down,
@@ -95,14 +108,28 @@ pub enum EngineInput {
 	},
 	/// Open these files (native file dialog, drag and drop, command line).
 	Open(Vec<PathBuf>),
-	/// Export the active document, flattened, to this file (the shell's save
-	/// dialog; the format comes from the extension). M3.
-	Export(PathBuf),
+	/// Export the active document, flattened, to `path` (the shell's save
+	/// dialog; the format comes from the extension). `choice`: the Export As
+	/// dialog's options, `None` for the defaults (File ▸ Export ▸ PNG…). M3.
+	Export {
+		path: PathBuf,
+		choice: Option<ExportChoice>,
+	},
 	/// Save `doc` in place (its own file); a document without a file answers
 	/// with [`EngineOutput::NeedSavePath`]. M3-T06.
-	Save { doc: DocId },
+	Save {
+		doc: DocId,
+	},
 	/// Save `doc` to `path` (the shell's save dialog chose it). M3-T06.
-	SaveAs { doc: DocId, path: PathBuf },
+	SaveAs {
+		doc: DocId,
+		path: PathBuf,
+	},
+	/// The shell's save dialog for [`EngineOutput::NeedSavePath`] was
+	/// cancelled: a close waiting for that save is cancelled too. M3-T06.
+	SaveCancelled {
+		doc: DocId,
+	},
 	/// The user asked to close the window; the engine answers
 	/// [`EngineOutput::MayClose`] once no document still needs an answer. M3-T06.
 	CloseRequested,

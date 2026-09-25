@@ -84,6 +84,21 @@ pub fn opaque_background(doc: &Document, store: &TileStore) -> bool {
 	})
 }
 
+/// Apply the Export As dialog's choices to the default options: 8-bit,
+/// transparency on/off (never for JPEG, which has no alpha), JPEG quality and
+/// chroma. `None` keeps the defaults.
+pub fn apply_choice(mut options: ExportOptions, choice: Option<crate::ExportChoice>, opaque: bool) -> ExportOptions {
+	let Some(choice) = choice else { return options };
+	if choice.eight_bit {
+		options.bits = 8;
+	}
+	let jpeg = options.format == ExportFormat::Jpeg;
+	options.alpha = !jpeg && choice.transparency.unwrap_or(!opaque);
+	options.quality = choice.quality.min(100);
+	options.chroma = if choice.chroma_half { JpegChroma::Half } else { JpegChroma::Full };
+	options
+}
+
 /// Composite `doc` and write it to `path`.
 pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: ExportOptions, progress: Progress<'_>) -> Result<(), IoError> {
 	let tiles_x = doc.width.div_ceil(TILE_SIZE);
@@ -223,7 +238,7 @@ mod tests {
 	fn unknown_extension_is_refused() {
 		let store = TileStore::new(TileStoreConfig::for_tests(dir().join("scratch2"))).unwrap();
 		let doc = document(&store);
-		assert!(options_for(&doc, Path::new("x.jpg"), true).is_err());
+		assert!(options_for(&doc, Path::new("x.bmp"), true).is_err());
 	}
 }
 
