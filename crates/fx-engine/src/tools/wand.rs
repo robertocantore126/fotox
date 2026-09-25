@@ -121,6 +121,10 @@ impl Tool for MagicWand {
 	fn selection_nudge(&self) -> Option<(i32, i32)> {
 		self.moving.map(|m| m.delta())
 	}
+
+	fn cancel(&mut self) -> bool {
+		self.moving.take().is_some()
+	}
 }
 
 #[cfg(test)]

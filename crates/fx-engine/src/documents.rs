@@ -60,6 +60,9 @@ pub struct OpenDoc {
 	/// The layer whose mask painting goes to (its mask thumbnail was clicked,
 	/// M5-T09); `None` = the layers' pixels.
 	pub mask_target: Option<LayerId>,
+	/// A save of this document is running: a second one would append to the
+	/// same file from the same offset and corrupt it (review S1-02).
+	pub saving: bool,
 }
 
 /// A soft-proof set-up (M4-T04).
@@ -124,6 +127,7 @@ impl OpenDoc {
 			proof_colors: false,
 			gamut_warning: false,
 			mask_target: None,
+			saving: false,
 		}
 	}
 
@@ -156,6 +160,7 @@ impl OpenDoc {
 			proof_colors: false,
 			gamut_warning: false,
 			mask_target: None,
+			saving: false,
 		}
 	}
 
@@ -180,6 +185,15 @@ impl OpenDoc {
 				s
 			}
 		}
+	}
+
+	/// Why the document cannot be saved or closed right now: a job is changing
+	/// it, or a save is writing it. `None` = it can.
+	pub fn blocked(&self) -> Option<String> {
+		if let Some(job) = &self.busy {
+			return Some(format!("Wait until {job} is finished"));
+		}
+		self.saving.then(|| "Wait until the save is finished".to_owned())
 	}
 
 	/// Whether painting goes to the active layer's mask (M5-T09).

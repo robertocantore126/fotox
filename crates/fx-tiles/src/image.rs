@@ -42,6 +42,22 @@ impl TileSlot {
 	}
 }
 
+/// A tile position and the slot that goes there.
+pub type PlacedSlot = ((u32, u32), TileSlot);
+
+/// The slot a level-0 buffer becomes: `Empty`/`Solid` when uniform, else a
+/// tile inserted into the store. Parallel writers call it inside their worker
+/// so a finished tile goes into the store at once (and under its memory
+/// budget) instead of piling up until every tile is done.
+pub fn slot_for(store: &TileStore, buffer: TileBuffer) -> TileSlot {
+	let format = buffer.format();
+	match buffer.uniform_value() {
+		Some(v) if v.is_transparent(format) || (!format.has_alpha() && v.0[0] == 0) => TileSlot::Empty,
+		Some(v) => TileSlot::Solid(v),
+		None => TileSlot::Data(store.insert(buffer, TileClass::Authoritative)),
+	}
+}
+
 /// The tiles of one mip level, row-major.
 #[derive(Clone, Debug)]
 pub struct TileGrid {
@@ -166,11 +182,7 @@ impl TiledImage {
 	/// `Empty`/`Solid`, otherwise insert into the store as authoritative.
 	pub fn put_buffer(&mut self, store: &TileStore, tx: u32, ty: u32, buffer: TileBuffer) {
 		assert_eq!(buffer.format(), self.format, "tile format does not match image format");
-		let slot = match buffer.uniform_value() {
-			Some(v) if v.is_transparent(self.format) || (!self.format.has_alpha() && v.0[0] == 0) => TileSlot::Empty,
-			Some(v) => TileSlot::Solid(v),
-			None => TileSlot::Data(store.insert(buffer, TileClass::Authoritative)),
-		};
+		let slot = slot_for(store, buffer);
 		self.set_slot(tx, ty, slot);
 	}
 

@@ -11,8 +11,8 @@ use fx_core::{CommandError, Document, LayerId};
 use fx_render::adjust::LutCache;
 use fx_render::blend::{Premul, unpremultiply};
 use fx_render::build_program;
-use fx_render::reference::render_tile;
-use fx_tiles::{TILE_SIZE, TileBuffer, TileHandle, TileStore};
+use fx_render::reference::try_render_tile;
+use fx_tiles::{TILE_SIZE, TileHandle, TileStore};
 
 use crate::export::{keep_layers, to_u16};
 use crate::tools::{ColorTarget, DocPointer, Tool, ToolContext, ToolResult};
@@ -125,7 +125,7 @@ pub fn sample_pixel(doc: &Document, x: f64, y: f64, area: u32, layer: Option<Lay
 	};
 
 	let mut luts = LutCache::default();
-	let fetch = |h: &TileHandle| -> std::sync::Arc<TileBuffer> { store.get(h).expect("tile of a live document") };
+	let fetch = |h: &TileHandle| store.get(h);
 	let (tx0, ty0) = (x0 as u32 / TILE_SIZE, y0 as u32 / TILE_SIZE);
 	let (tx1, ty1) = (x1 as u32 / TILE_SIZE, y1 as u32 / TILE_SIZE);
 	let mut tiles: HashMap<(u32, u32), Vec<Premul>> = HashMap::new();
@@ -133,7 +133,8 @@ pub fn sample_pixel(doc: &Document, x: f64, y: f64, area: u32, layer: Option<Lay
 		for tx in tx0..=tx1 {
 			let program =
 				build_program(&subject, 0, tx, ty, &mut |a| luts.get(a)).map_err(|_| CommandError::NotAllowed("full-resolution tiles are missing".into()))?;
-			tiles.insert((tx, ty), render_tile(&program, &fetch));
+			let pixels = try_render_tile(&program, &fetch).map_err(|e| CommandError::NotAllowed(format!("a tile could not be read: {e}")))?;
+			tiles.insert((tx, ty), pixels);
 		}
 	}
 
@@ -201,7 +202,7 @@ mod tests {
 		let mut top = TiledImage::new(w, h, PixelFormat::Rgba16);
 		for ty in 0..h.div_ceil(TILE_SIZE) {
 			top.set_slot(0, ty, TileSlot::Solid(PixelValue(HALF_BLUE)));
-			let mut tile = TileBuffer::zeroed(PixelFormat::Rgba16);
+			let mut tile = fx_tiles::TileBuffer::zeroed(PixelFormat::Rgba16);
 			let px = tile.as_u16_mut();
 			for y in 0..TILE_SIZE {
 				for x in 0..44 {

@@ -657,6 +657,11 @@ fn delete_mask(doc: &mut Document, layer: &LayerRef, apply: bool, store: &TileSt
 	if !apply {
 		return Ok(delete_mask_effect(id, false));
 	}
+	// Applying bakes the mask into the pixels: a pixel lock forbids it.
+	if target.locked_pixels {
+		target.mask = Some(mask);
+		return Err(CommandError::Locked(id));
+	}
 	let LayerKind::Pixel { image, offset } = &mut target.kind else {
 		target.mask = Some(mask);
 		return Err(CommandError::NotAllowed("only pixel layers can apply their mask".into()));

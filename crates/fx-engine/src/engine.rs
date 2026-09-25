@@ -63,6 +63,21 @@ fn is_fxd(path: &std::path::Path) -> bool {
 
 /// True when `a` and `b` name the same file (case-insensitive on Windows,
 /// resolved through `canonicalize` when both exist).
+/// Run a worker body; a panic becomes an error message instead of a thread
+/// that dies before reporting back, which would leave its document busy
+/// forever (review 2026-09-25, S1-03).
+fn guarded<T>(what: &str, body: impl FnOnce() -> T) -> Result<T, String> {
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).map_err(|panic| {
+		let detail = panic
+			.downcast_ref::<&str>()
+			.map(|s| (*s).to_owned())
+			.or_else(|| panic.downcast_ref::<String>().cloned())
+			.unwrap_or_else(|| "unknown error".to_owned());
+		tracing::error!("{what} failed: {detail}");
+		format!("{what} failed unexpectedly: {detail}")
+	})
+}
+
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 	match (a.canonicalize(), b.canonicalize()) {
 		(Ok(a), Ok(b)) => a == b,
@@ -191,6 +206,8 @@ struct Engine {
 	selection_overlay: Option<(SelectionOverlayKey, Arc<fx_render::Overlay>)>,
 	/// The brush stroke being painted (M5-T07).
 	stroke: Option<crate::stroke::Session>,
+	/// The document an export dialog was opened for (review S2-04).
+	export_doc: Option<DocId>,
 }
 
 /// Cache key of the selection contour (M5-T03).
@@ -293,6 +310,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		settings: ToolSettings::default(),
 		selection_overlay: None,
 		stroke: None,
+		export_doc: None,
 	};
 
 	loop {
@@ -546,6 +564,23 @@ impl Engine {
 		}
 	}
 
+	/// The active tool is about to become `next` (a toolbar click or a
+	/// shortcut, possibly in the middle of a drag): end the live stroke and
+	/// drop the old tool's gesture, so its release never goes astray.
+	fn leave_tool(&mut self, next: &str) {
+		let current = self
+			.docs
+			.active_mut()
+			.map_or_else(|| self.virtual_view.tool.clone(), |open| open.view.tool.clone());
+		if current == next {
+			return;
+		}
+		self.end_stroke();
+		if self.tools.cancel(&current) {
+			self.request_frame();
+		}
+	}
+
 	/// A painting tool's stroke event (M5-T07): start, paint, record.
 	fn stroke_event(&mut self, doc_id: DocId, event: crate::tools::StrokeEvent) {
 		use crate::tools::StrokeEvent;
@@ -747,6 +782,10 @@ impl Engine {
 			},
 			UiToEngine::ActivateDocument { doc } => {
 				if self.docs.activate(doc) {
+					// A gesture, a clone source or an outline drag belongs to
+					// the document it started in (review S2-01/S2-02).
+					self.end_stroke();
+					self.tools.document_changed();
 					self.after_active_change();
 				}
 				Changed::default()
@@ -906,9 +945,22 @@ impl Engine {
 				}
 				return Changed::default();
 			}
-			// Likewise export: the save dialog, then `EngineInput::Export`.
-			"export:png" | "export:tiff" | "export:jpg" | "export:as" => return Changed::default(),
+			// Likewise export: the save dialog, then `EngineInput::Export`. The
+			// document is the one active now, even if the user switches tabs
+			// while the dialog is open (review S2-04).
+			"export:png" | "export:tiff" | "export:jpg" | "export:as" => {
+				self.export_doc = self.docs.active_id();
+				return Changed::default();
+			}
 			_ => {}
+		}
+		if let Some(tool) = id.strip_prefix("tool:") {
+			self.leave_tool(tool);
+		}
+		// Fill Screen and Print Size (review S2-05).
+		if id == "zoom:print" {
+			let ppi = self.docs.active_mut().map_or(72.0, |open| f64::from(open.doc.ppi));
+			return self.view_mut().set_zoom(SCREEN_PPI / ppi.max(1.0));
 		}
 		if let Some(changed) = self.view_mut().action(id) {
 			let mut changed = changed;
@@ -971,7 +1023,7 @@ impl Engine {
 					label: format!("{label}: reading the manifest"),
 					fraction: 0.5,
 				});
-				let result = fxd::open(&path, &store).map(Box::new);
+				let result = guarded("Opening the file", || fxd::open(&path, &store).map(Box::new)).unwrap_or_else(|text| Err(IoError::Decode(text)));
 				let _ = internal.send(Internal::OpenedFxd { task, path, result });
 				return;
 			}
@@ -996,7 +1048,12 @@ impl Engine {
 
 	/// Export the active document as a job on a worker thread, with progress.
 	fn export(&mut self, path: PathBuf, choice: Option<crate::ExportChoice>) {
-		let Some(open) = self.docs.active_mut() else {
+		let target = self
+			.export_doc
+			.take()
+			.filter(|id| self.docs.get(*id).is_some())
+			.or_else(|| self.docs.active_id());
+		let Some(open) = target.and_then(|id| self.docs.get_mut(id)) else {
 			self.to_ui(&EngineToUi::Toast {
 				text: "Open a document to export it".into(),
 			});
@@ -1033,10 +1090,13 @@ impl Engine {
 				true
 			};
 			// An opaque document is written without alpha (a quarter smaller for RGB).
-			let opaque = crate::export::opaque_background(&doc, &store);
-			let result = crate::export::options_for(&doc, &path, opaque)
-				.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
-				.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
+			let result = guarded("The export", || {
+				let opaque = crate::export::opaque_background(&doc, &store);
+				crate::export::options_for(&doc, &path, opaque)
+					.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
+					.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report))
+			})
+			.unwrap_or_else(|text| Err(IoError::Decode(text)));
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
@@ -1194,12 +1254,15 @@ impl Engine {
 				})),
 				clipboard,
 			};
-			let mut after = before;
-			let mut ctx = CommandContext {
-				tiles: &store,
-				ops: Some(&ops),
-			};
-			let result = command.apply(&mut after, &mut ctx).map(|effect| (Box::new(after), effect));
+			let result = guarded("The operation", || {
+				let mut after = before;
+				let mut ctx = CommandContext {
+					tiles: &store,
+					ops: Some(&ops),
+				};
+				command.apply(&mut after, &mut ctx).map(|effect| (Box::new(after), effect))
+			})
+			.unwrap_or_else(|text| Err(CommandError::NotAllowed(text)));
 			let _ = internal.send(Internal::PixelJobDone {
 				task,
 				doc: id,
@@ -1401,6 +1464,9 @@ impl Engine {
 				result,
 			} => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let Some(open) = self.docs.get_mut(doc) {
+					open.saving = false;
+				}
 				match result {
 					Ok(file) => {
 						let info = self.docs.get_mut(doc).map(|open| {
@@ -1444,6 +1510,12 @@ impl Engine {
 
 	/// Close `id`, asking the UI first when it is dirty (M3-T06).
 	fn close(&mut self, id: DocId) {
+		// Closing now would drop a running job's result or a save's handle.
+		if let Some(text) = self.docs.get(id).and_then(|open| open.blocked()) {
+			self.window_close_pending = false;
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
 		let dirty = self.docs.get_mut(id).is_some_and(|open| open.dirty);
 		if dirty {
 			let name = self.docs.get_mut(id).map_or_else(String::new, |open| open.name.clone());
@@ -1482,6 +1554,14 @@ impl Engine {
 	/// The user asked to close the window: allowed only when nothing is dirty.
 	/// Each dirty document is asked about in turn; Cancel stops the close.
 	fn close_requested(&mut self) {
+		self.end_stroke();
+		let blocked = self.docs.iter_mut().find_map(|open| open.blocked());
+		if let Some(text) = blocked {
+			self.window_close_pending = false;
+			self.to_ui(&EngineToUi::Toast { text });
+			(self.output)(EngineOutput::MayClose(false));
+			return;
+		}
 		self.window_close_pending = true;
 		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
 		match dirty {
@@ -1546,7 +1626,20 @@ impl Engine {
 
 	/// Snapshot the document and save it on a worker thread (recipe R2).
 	fn start_save(&mut self, id: DocId, target: SaveTarget) {
+		// A live stroke belongs in the saved file.
+		self.end_stroke();
 		let Some(open) = self.docs.get_mut(id) else { return };
+		if let Some(text) = open.blocked() {
+			// One writer per file (S1-02), and never the state before a
+			// running job (S3-01).
+			if self.pending_close == Some(id) {
+				self.pending_close = None;
+				self.window_close_pending = false;
+			}
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
+		open.saving = true;
 		let snapshot = open.doc.clone();
 		let generation = open.generation;
 		let path = match &target {
@@ -1577,16 +1670,19 @@ impl Engine {
 			};
 			// The composite preview (D-026) needs the engine's compositor; a
 			// later card can render it and pass it here.
-			let result = fxd::save(
-				SaveRequest {
-					doc: &snapshot,
-					store: &store,
-					preview: None,
-				},
-				target,
-				&mut report,
-			)
-			.map(|saved| saved.file);
+			let result = guarded("The save", || {
+				fxd::save(
+					SaveRequest {
+						doc: &snapshot,
+						store: &store,
+						preview: None,
+					},
+					target,
+					&mut report,
+				)
+				.map(|saved| saved.file)
+			})
+			.unwrap_or_else(|text| Err(IoError::Decode(text)));
 			let _ = internal.send(Internal::Saved {
 				task,
 				doc: id,
@@ -1895,7 +1991,12 @@ impl Engine {
 			"layer:merge-visible" if visible_roots.len() > 1 => vec![Command::MergeLayers { layers: visible_roots }],
 			"layer:flatten" => vec![Command::Flatten],
 			"layer:stamp-visible" => vec![Command::StampVisible],
-			"layer:merge-visible" => return true,
+			"layer:merge-visible" => {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Merge Visible needs two visible layers".into(),
+				});
+				return true;
+			}
 			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
 				// Nothing selected / nothing hidden: nothing to do, and no toast.
 				return true;
@@ -1955,7 +2056,9 @@ impl Engine {
 					cut: false,
 				},
 			),
-			"clip:clear" => {}
+			"clip:clear" => self.to_ui(&EngineToUi::Toast {
+				text: "Nothing is selected".into(),
+			}),
 			// Edit ▸ Fill (Shift+F5) with the dialog's values, and the shortcuts:
 			// Alt+Backspace foreground, Ctrl+Backspace background, Shift keeps
 			// transparency.
@@ -2093,11 +2196,14 @@ impl Engine {
 		});
 		let spawned = std::thread::Builder::new().name("copy-merged".into()).spawn(move || {
 			let ids: Vec<LayerId> = doc.layers.iter().map(|l| l.id).collect();
-			let result = crate::export::composite_layers(&doc, &ids, None, &store, None)
-				.map_err(|e| e.to_string())
-				.and_then(|merged| {
-					crate::clipboard::copy_layer(&merged, (0, 0), doc.selection.as_ref(), (doc.width, doc.height), &store).map_err(|e| e.to_string())
-				});
+			let result = guarded("Copy Merged", || {
+				crate::export::composite_layers(&doc, &ids, None, &store, None)
+					.map_err(|e| e.to_string())
+					.and_then(|merged| {
+						crate::clipboard::copy_layer(&merged, (0, 0), doc.selection.as_ref(), (doc.width, doc.height), &store).map_err(|e| e.to_string())
+					})
+			})
+			.and_then(|r| r);
 			let _ = internal.send(Internal::Copied { task, result });
 		});
 		if let Err(error) = spawned {
@@ -2654,6 +2760,11 @@ fn cmyk_profile_files() -> Vec<fx_color::CmykProfileFile> {
 	let dirs: Vec<PathBuf> = [windows, user].into_iter().flatten().collect();
 	fx_color::cmyk_profiles(&dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>())
 }
+
+/// The screen resolution View ▸ Print Size assumes (Photoshop's default
+/// "Screen Resolution" preference, 72 ppi): a document of `ppi` shows at
+/// `72 / ppi`.
+const SCREEN_PPI: f64 = 72.0;
 
 /// Commands whose pixel work is too heavy for the engine thread (M4).
 fn is_pixel_job(command: &Command) -> bool {

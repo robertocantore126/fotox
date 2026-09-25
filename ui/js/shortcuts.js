@@ -174,6 +174,8 @@ export function initShortcuts() {
     const combo = comboOf(e);
     const hit = combos.find(([c]) => c === combo);
     if (hit) {
+      // A held key repeats: an action (Save!) runs once per press.
+      if (e.repeat) { e.preventDefault(); return; }
       runAction({ label: hit[1], a: hit[2] });
       e.preventDefault();
       return;

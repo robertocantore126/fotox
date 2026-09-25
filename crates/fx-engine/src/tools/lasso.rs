@@ -342,6 +342,16 @@ impl Tool for Lasso {
 	fn selection_nudge(&self) -> Option<(i32, i32)> {
 		self.moving.map(|m| m.delta())
 	}
+
+	fn cancel(&mut self) -> bool {
+		let busy = !self.points.is_empty() || self.moving.is_some();
+		self.points.clear();
+		self.dragging = false;
+		self.straight = false;
+		self.moving = None;
+		self.last_press = None;
+		busy
+	}
 }
 
 #[cfg(test)]

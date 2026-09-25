@@ -317,6 +317,17 @@ pub trait Tool {
 	fn selection_nudge(&self) -> Option<(i32, i32)> {
 		None
 	}
+
+	/// Drop the gesture in progress (the user switched tools mid-drag).
+	/// Returns whether there was one (the overlay needs a redraw).
+	fn cancel(&mut self) -> bool {
+		false
+	}
+
+	/// The active document changed: forget everything tied to the old one.
+	fn document_changed(&mut self) {
+		self.cancel();
+	}
 }
 
 /// The tool registry: one boxed tool per id, created on first use, so a tool's
@@ -328,6 +339,18 @@ pub struct Tools {
 }
 
 impl Tools {
+	/// Cancel the gesture of tool `id`, if it exists (it is not created).
+	pub fn cancel(&mut self, id: &str) -> bool {
+		self.active.get_mut(id).is_some_and(|tool| tool.cancel())
+	}
+
+	/// Tell every tool the active document changed.
+	pub fn document_changed(&mut self) {
+		for tool in self.active.values_mut() {
+			tool.document_changed();
+		}
+	}
+
 	/// The tool for `id`, created on first use. `None` for a tool id M5 does
 	/// not implement yet: the view still pans and zooms, the pointer is just
 	/// ignored.

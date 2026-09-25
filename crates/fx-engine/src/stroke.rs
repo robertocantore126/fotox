@@ -12,7 +12,7 @@ use fx_core::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
 use fx_core::{CommandError, Document, LayerId, LayerKind, Selection};
 use fx_ops::brush::{LayerSource, SourceTiles, Stroke, StrokeSetup};
 use fx_render::adjust::LutCache;
-use fx_tiles::{TILE_PIXELS, TileBuffer, TileError, TileStore, TiledImage};
+use fx_tiles::{TILE_PIXELS, TileError, TileStore, TiledImage};
 
 /// What a stroke on a layer needs from the document at its start.
 pub struct Prepared {
@@ -109,8 +109,8 @@ impl SourceTiles for CompositeTiles {
 		let pixels: Vec<[f32; 4]> = if program.is_empty() {
 			vec![[0.0; 4]; TILE_PIXELS]
 		} else {
-			let fetch = |h: &fx_tiles::TileHandle| -> Arc<TileBuffer> { self.store.get(h).expect("tile of a live document") };
-			fx_render::reference::render_tile(&program, &fetch)
+			let fetch = |h: &fx_tiles::TileHandle| self.store.get(h);
+			fx_render::reference::try_render_tile(&program, &fetch)?
 				.iter()
 				.map(|p| p.map(|v| v as f32))
 				.collect()

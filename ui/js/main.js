@@ -164,7 +164,7 @@ function buildStatusbar(el) {
           onPick: (v) => {
             // Actions, not direct calls: in the app the engine owns the view.
             if (v === "Fit on Screen") return runAction({ a: "zoom:fit", label: v });
-            if (v === "Fill Screen") return zoomTo(200);
+            if (v === "Fill Screen") return runAction({ a: "zoom:fill", label: v });
             if (v === "Actual Pixels") return runAction({ a: "zoom:100", label: v });
             zoomTo(parseFloat(v));
           },

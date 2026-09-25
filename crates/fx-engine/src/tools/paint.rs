@@ -248,6 +248,18 @@ impl Tool for Paint {
 					..Default::default()
 				}
 			}
+			// The release went elsewhere (another window took the pointer):
+			// a move without the button ends the stroke.
+			PointerKind::Move if self.stroking && event.buttons & BUTTON_LEFT == 0 => {
+				self.stroking = false;
+				self.pen = None;
+				self.stroke_offset = None;
+				ToolResult {
+					strokes: vec![StrokeEvent::End],
+					redraw: true,
+					..Default::default()
+				}
+			}
 			PointerKind::Move if self.stroking => {
 				let samples: Vec<StrokeSample> = self.follow(ctx, event).into_iter().collect();
 				ToolResult {
@@ -315,5 +327,23 @@ impl Tool for Paint {
 	fn cursor(&self, _modifiers: Modifiers) -> CursorShape {
 		// The outline (or crosshair) is drawn by the overlay.
 		CursorShape::None
+	}
+
+	fn cancel(&mut self) -> bool {
+		// The engine ends the live stroke itself (`leave_tool`).
+		let busy = self.stroking;
+		self.stroking = false;
+		self.pen = None;
+		self.stroke_offset = None;
+		busy
+	}
+
+	fn document_changed(&mut self) {
+		self.cancel();
+		// The clone source and the outline position were in the other
+		// document's coordinates.
+		self.source = None;
+		self.aligned = None;
+		self.hover = None;
 	}
 }

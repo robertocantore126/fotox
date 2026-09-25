@@ -31,6 +31,6 @@ mod scratch;
 mod store;
 
 pub use format::{PixelFormat, PixelValue, TILE_PIXELS, TILE_SIZE};
-pub use image::{TileGrid, TileSlot, TiledImage};
+pub use image::{PlacedSlot, TileGrid, TileSlot, TiledImage, slot_for};
 pub use mip::{ChildPixels, downsample_2x2};
 pub use store::{Backed, TileBuffer, TileClass, TileError, TileHandle, TileId, TileSource, TileStore, TileStoreConfig, TileStoreStats};

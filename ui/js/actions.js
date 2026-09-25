@@ -118,8 +118,9 @@ export function runAction(item) {
   if (a === "zoom:out") { zoomOut(); return; }
   if (a === "zoom:fit") { fit(); status("Fit on screen"); return; }
   if (a === "zoom:100") { actual(); status("Actual pixels"); return; }
-  if (a === "zoom:fill") { zoomTo(200); status("Fill screen"); return; }
-  if (a === "zoom:print") { zoomTo(72); status("Print size"); return; }
+  // In the app the engine knows the viewport and the document's ppi.
+  if (a === "zoom:fill") { if (!bridge.isNative) zoomTo(200); status("Fill screen"); return; }
+  if (a === "zoom:print") { if (!bridge.isNative) zoomTo(72); status("Print size"); return; }
 
   if (a.startsWith("toggle:")) {
     const key = a.slice(7);

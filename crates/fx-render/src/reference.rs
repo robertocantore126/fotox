@@ -17,13 +17,25 @@ pub type Fetch<'a> = &'a dyn Fn(&TileHandle) -> Arc<TileBuffer>;
 
 /// Render a program into 256×256 premultiplied RGBA (row-major).
 pub fn render_tile(program: &TileProgram, fetch: Fetch<'_>) -> Vec<Premul> {
+	match try_render_tile::<std::convert::Infallible>(program, &|h| Ok(fetch(h))) {
+		Ok(pixels) => pixels,
+		Err(never) => match never {},
+	}
+}
+
+/// [`render_tile`] with a fetch that can fail (a tile of a corrupt file, a
+/// lost scratch file): the error is returned instead of a panic, so a job can
+/// report it (review 2026-09-25, S1-03).
+pub fn try_render_tile<E>(program: &TileProgram, fetch: &dyn Fn(&TileHandle) -> Result<Arc<TileBuffer>, E>) -> Result<Vec<Premul>, E> {
 	// Resolve all tiles up front so the per-pixel loop is simple.
 	let mut buffers: HashMap<TileId, Arc<TileBuffer>> = HashMap::new();
 	for op in &program.ops {
 		for quad in op.quads() {
 			for slot in &quad.slots {
-				if let QuadSlot::Slot(TileSlot::Data(h)) = slot {
-					buffers.entry(h.id()).or_insert_with(|| fetch(h));
+				if let QuadSlot::Slot(TileSlot::Data(h)) = slot
+					&& !buffers.contains_key(&h.id())
+				{
+					buffers.insert(h.id(), fetch(h)?);
 				}
 			}
 		}
@@ -42,7 +54,7 @@ pub fn render_tile(program: &TileProgram, fetch: Fetch<'_>) -> Vec<Premul> {
 			out.push(stack[0]);
 		}
 	}
-	out
+	Ok(out)
 }
 
 fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<TileId, Arc<TileBuffer>>, stack: &mut Vec<Premul>) {

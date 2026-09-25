@@ -13,9 +13,6 @@ use rayon::prelude::*;
 
 use crate::mips;
 
-/// One output tile of a filter.
-type FilteredTile = ((u32, u32), fx_tiles::TileBuffer);
-
 /// Reports a job's progress, 0..=1.
 pub type ProgressFn = dyn Fn(f32) + Send + Sync;
 
@@ -41,10 +38,12 @@ impl PixelOps for EngineOps {
 		let done = AtomicUsize::new(0);
 		let total = tiles.len().max(1);
 		let source = ImageSource { image: &source_image, store };
-		let results: Vec<Result<FilteredTile, TileError>> = tiles
+		// Each filtered tile goes into the store at once; only slots are
+		// collected (review S1-01).
+		let results: Vec<Result<fx_tiles::PlacedSlot, TileError>> = tiles
 			.par_iter()
 			.map(|&(tx, ty)| {
-				let tile = filter::filter_tile(&source, &geometry, filter, 0, tx, ty)?;
+				let tile = fx_tiles::slot_for(store, filter::filter_tile(&source, &geometry, filter, 0, tx, ty)?);
 				let n = done.fetch_add(1, Ordering::Relaxed) + 1;
 				if let Some(progress) = &self.progress
 					&& (n * 100 / total) != ((n - 1) * 100 / total)
@@ -56,8 +55,8 @@ impl PixelOps for EngineOps {
 			.collect();
 		let mut out = image.clone();
 		for result in results {
-			let ((tx, ty), tile) = result?;
-			out.put_buffer(store, tx, ty, tile);
+			let ((tx, ty), slot) = result?;
+			out.set_slot(tx, ty, slot);
 		}
 		Ok(out)
 	}
@@ -206,8 +205,8 @@ impl fx_ops::flood::WandSource for CompositeSource<'_> {
 		if program.is_empty() {
 			return Ok(fx_ops::flood::WandTile::Uniform([0.0; 4]));
 		}
-		let fetch = |h: &fx_tiles::TileHandle| self.store.get(h).expect("tile of a live document");
-		let pixels = fx_render::reference::render_tile(&program, &fetch);
+		let fetch = |h: &fx_tiles::TileHandle| self.store.get(h);
+		let pixels = fx_render::reference::try_render_tile(&program, &fetch).map_err(|e| CommandError::NotAllowed(format!("a tile could not be read: {e}")))?;
 		Ok(fx_ops::flood::WandTile::Data(pixels.iter().map(|p| p.map(|v| v as f32)).collect()))
 	}
 }

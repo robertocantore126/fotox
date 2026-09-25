@@ -13,7 +13,6 @@ use fx_io::{IoError, Progress};
 use fx_render::adjust::LutCache;
 use fx_render::blend::unpremultiply;
 use fx_render::build_program;
-use fx_render::reference::render_tile;
 use fx_tiles::{PixelFormat, TILE_SIZE, TileSlot, TileStore};
 use rayon::prelude::*;
 
@@ -127,7 +126,7 @@ pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: 
 	let tiles_x = doc.width.div_ceil(TILE_SIZE);
 	let width = doc.width as usize;
 	let mut luts = LutCache::default();
-	let fetch = |h: &fx_tiles::TileHandle| store.get(h).expect("tile of a live document");
+	let fetch = |h: &fx_tiles::TileHandle| store.get(h);
 	let mut render = |y: u32, rows: u32, out: &mut [[u16; 4]]| -> Result<(), IoError> {
 		let ty = y / TILE_SIZE;
 		// Programs are cheap and need the LUT cache: build them first, render in parallel.
@@ -135,7 +134,11 @@ pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: 
 			.map(|tx| build_program(doc, 0, tx, ty, &mut |a| luts.get(a)))
 			.collect::<Result<Vec<_>, _>>()
 			.map_err(|_| IoError::Decode("full-resolution tiles are missing".into()))?;
-		let tiles: Vec<_> = programs.par_iter().map(|p| render_tile(p, &fetch)).collect();
+		let tiles: Vec<_> = programs
+			.par_iter()
+			.map(|p| fx_render::reference::try_render_tile(p, &fetch))
+			.collect::<Result<_, _>>()
+			.map_err(|e| IoError::Decode(format!("a tile could not be read: {e}")))?;
 		for (tx, tile) in tiles.iter().enumerate() {
 			let x0 = tx * TILE_SIZE as usize;
 			let cols = (TILE_SIZE as usize).min(width - x0);
@@ -188,14 +191,16 @@ pub fn composite_layers(
 			}
 		}
 	}
-	let fetch = |h: &fx_tiles::TileHandle| store.get(h).expect("tile of a live document");
+	let fetch = |h: &fx_tiles::TileHandle| store.get(h);
 	let bg = background.map(|c| c.map(|v| f64::from(v) / 65535.0));
 	let done = AtomicUsize::new(0);
 	let total = programs.len().max(1);
-	let tiles: Vec<((u32, u32), fx_tiles::TileBuffer)> = programs
+	// Each finished tile goes into the store at once: only the slots are
+	// collected, never the whole document's pixels (review S1-01).
+	let tiles: Result<Vec<fx_tiles::PlacedSlot>, fx_tiles::TileError> = programs
 		.par_iter()
 		.map(|(pos, program)| {
-			let pixels = render_tile(program, &fetch);
+			let pixels = fx_render::reference::try_render_tile(program, &fetch)?;
 			let mut tile = fx_tiles::TileBuffer::zeroed(format);
 			for (i, &p) in pixels.iter().enumerate() {
 				let p = match bg {
@@ -220,12 +225,13 @@ pub fn composite_layers(
 			{
 				progress(n as f32 / total as f32);
 			}
-			(*pos, tile)
+			Ok((*pos, fx_tiles::slot_for(store, tile)))
 		})
 		.collect();
+	let tiles = tiles.map_err(|e| fx_core::CommandError::NotAllowed(format!("a tile could not be read: {e}")))?;
 	let mut image = fx_tiles::TiledImage::new(doc.width, doc.height, format);
-	for ((tx, ty), tile) in tiles {
-		image.put_buffer(store, tx, ty, tile);
+	for ((tx, ty), slot) in tiles {
+		image.set_slot(tx, ty, slot);
 	}
 	Ok(image)
 }

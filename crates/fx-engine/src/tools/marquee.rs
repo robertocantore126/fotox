@@ -345,6 +345,13 @@ impl Tool for Marquee {
 	fn selection_nudge(&self) -> Option<(i32, i32)> {
 		self.moving.map(|m| m.delta())
 	}
+
+	fn cancel(&mut self) -> bool {
+		let busy = self.drag.is_some() || self.moving.is_some();
+		self.drag = None;
+		self.moving = None;
+		busy
+	}
 }
 
 /// `-1.0` for a negative number, `1.0` otherwise (a zero-sized drag keeps the

@@ -101,6 +101,16 @@ impl ViewState {
 				self.view = ViewTransform::fit(viewport, self.doc.0, self.doc.1);
 				return Some(Changed { view: true, cursor: None });
 			}
+			// Fill Screen: the document covers the whole viewport, centred.
+			"zoom:fill" => {
+				let viewport = self.viewport?;
+				let zx = f64::from(viewport.width) / f64::from(self.doc.0.max(1));
+				let zy = f64::from(viewport.height) / f64::from(self.doc.1.max(1));
+				self.view.center_x = f64::from(self.doc.0) / 2.0;
+				self.view.center_y = f64::from(self.doc.1) / 2.0;
+				self.view.zoom = zx.max(zy).clamp(fx_render::viewport::MIN_ZOOM, fx_render::viewport::MAX_ZOOM);
+				return Some(Changed { view: true, cursor: None });
+			}
 			_ => return None,
 		};
 		Some(self.set_zoom(zoom))
