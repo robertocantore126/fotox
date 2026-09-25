@@ -85,6 +85,23 @@ pub enum AdjustKind {
 		lightness: f32,
 		colorize: bool,
 	},
+	/// RGB out = LUT(luminance): Threshold, Gradient Map (M4-T07).
+	LumaLut(Arc<Lut>),
+	/// `rows · rgb + constant`, optionally keeping the luminance: Channel
+	/// Mixer, Photo Filter (M4-T07).
+	Matrix { rows: [[f32; 4]; 3], preserve_luma: bool },
+	/// Color Balance shifts, −1..=1 per channel and tone range (M4-T07).
+	ColorBalance {
+		shadows: [f32; 3],
+		midtones: [f32; 3],
+		highlights: [f32; 3],
+		preserve_luma: bool,
+	},
+	/// Vibrance and saturation, −1..=1 (M4-T07).
+	Vibrance { vibrance: f32, saturation: f32 },
+	/// Black & White weights (fractions: reds, yellows, greens, cyans, blues,
+	/// magentas) and the optional tint `[hue°, saturation %]` (M4-T07).
+	BlackWhite { weights: [f32; 6], tint: Option<[f32; 2]> },
 }
 
 #[derive(Clone, Debug)]
@@ -357,6 +374,53 @@ impl Builder<'_> {
 						lightness: *lightness,
 						colorize: *colorize,
 					},
+					Adjustment::Threshold { .. } | Adjustment::GradientMap { .. } => AdjustKind::LumaLut((self.luts)(adjustment)),
+					Adjustment::ChannelMixer { red, green, blue, monochrome } => {
+						let pct = |r: &[f32; 4]| r.map(|v| v / 100.0);
+						let rows = if *monochrome { [pct(red); 3] } else { [pct(red), pct(green), pct(blue)] };
+						AdjustKind::Matrix { rows, preserve_luma: false }
+					}
+					Adjustment::PhotoFilter {
+						color,
+						density,
+						preserve_luminosity,
+					} => {
+						let d = density.clamp(0.0, 1.0);
+						let k = color.map(|c| 1.0 - d + d * c.clamp(0.0, 1.0));
+						AdjustKind::Matrix {
+							rows: [[k[0], 0.0, 0.0, 0.0], [0.0, k[1], 0.0, 0.0], [0.0, 0.0, k[2], 0.0]],
+							preserve_luma: *preserve_luminosity,
+						}
+					}
+					Adjustment::ColorBalance {
+						shadows,
+						midtones,
+						highlights,
+						preserve_luminosity,
+					} => AdjustKind::ColorBalance {
+						shadows: shadows.map(|v| v / 100.0),
+						midtones: midtones.map(|v| v / 100.0),
+						highlights: highlights.map(|v| v / 100.0),
+						preserve_luma: *preserve_luminosity,
+					},
+					Adjustment::Vibrance { vibrance, saturation } => AdjustKind::Vibrance {
+						vibrance: vibrance / 100.0,
+						saturation: saturation / 100.0,
+					},
+					Adjustment::BlackWhite {
+						reds,
+						yellows,
+						greens,
+						cyans,
+						blues,
+						magentas,
+						tint,
+						tint_hue,
+						tint_saturation,
+					} => AdjustKind::BlackWhite {
+						weights: [*reds, *yellows, *greens, *cyans, *blues, *magentas].map(|v| v / 100.0),
+						tint: tint.then_some([*tint_hue, *tint_saturation]),
+					},
 					other => AdjustKind::Lut((self.luts)(other)),
 				};
 				Op::Adjust {
@@ -510,7 +574,29 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 		} => {
 			layer.hash(h);
 			match adjust {
-				AdjustKind::Lut(lut) => lut.key.hash(h),
+				AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) => lut.key.hash(h),
+				AdjustKind::Matrix { rows, preserve_luma } => {
+					rows.iter().flatten().map(|v| v.to_bits()).for_each(|b| b.hash(h));
+					preserve_luma.hash(h);
+				}
+				AdjustKind::ColorBalance {
+					shadows,
+					midtones,
+					highlights,
+					preserve_luma,
+				} => {
+					[shadows, midtones, highlights]
+						.iter()
+						.flat_map(|v| v.iter())
+						.map(|v| v.to_bits())
+						.for_each(|b| b.hash(h));
+					preserve_luma.hash(h);
+				}
+				AdjustKind::Vibrance { vibrance, saturation } => [vibrance, saturation].map(|v| v.to_bits()).hash(h),
+				AdjustKind::BlackWhite { weights, tint } => {
+					weights.map(|v| v.to_bits()).hash(h);
+					tint.map(|t| t.map(|v| v.to_bits())).hash(h);
+				}
 				AdjustKind::HueSaturation {
 					hue,
 					saturation,

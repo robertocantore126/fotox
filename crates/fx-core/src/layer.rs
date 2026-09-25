@@ -55,6 +55,72 @@ pub enum Adjustment {
 		colorize: bool,
 	},
 	Invert,
+	/// `levels` tone levels per channel, 2..=255 (M4-T07).
+	Posterize {
+		levels: u8,
+	},
+	/// White where the luminance reaches `level`/255, black below; 1..=255 (M4-T07).
+	Threshold {
+		level: u8,
+	},
+	/// The luminance mapped through a gradient (stops sorted by position,
+	/// 0..=1; colours straight 0..=1); `reverse` flips it (M4-T07).
+	GradientMap {
+		stops: Vec<GradientStop>,
+		reverse: bool,
+	},
+	/// Each output channel as a mix of the input channels, in percent:
+	/// `[red, green, blue, constant]` (−200..=200). `monochrome`: `red` for
+	/// all three (M4-T07). Identity: red `[100, 0, 0, 0]`, green `[0, 100, 0, 0]`,
+	/// blue `[0, 0, 100, 0]`.
+	ChannelMixer {
+		red: [f32; 4],
+		green: [f32; 4],
+		blue: [f32; 4],
+		monochrome: bool,
+	},
+	/// A coloured filter: `color` straight 0..=1, `density` 0..=1 (M4-T07).
+	PhotoFilter {
+		color: [f32; 3],
+		density: f32,
+		preserve_luminosity: bool,
+	},
+	/// Cyan–red, magenta–green and yellow–blue shifts per tone range, each
+	/// −100..=100 (M4-T07).
+	ColorBalance {
+		shadows: [f32; 3],
+		midtones: [f32; 3],
+		highlights: [f32; 3],
+		preserve_luminosity: bool,
+	},
+	/// Vibrance and saturation, −100..=100 each (M4-T07).
+	Vibrance {
+		vibrance: f32,
+		saturation: f32,
+	},
+	/// Grey from per-hue weights in percent (−200..=300; Photoshop's defaults
+	/// 40, 60, 40, 60, 20, 80), optionally tinted with `tint_hue` (degrees)
+	/// and `tint_saturation` (percent) (M4-T07).
+	BlackWhite {
+		reds: f32,
+		yellows: f32,
+		greens: f32,
+		cyans: f32,
+		blues: f32,
+		magentas: f32,
+		tint: bool,
+		tint_hue: f32,
+		tint_saturation: f32,
+	},
+}
+
+/// One colour stop of a Gradient Map.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+	/// 0..=1 along the gradient.
+	pub position: f32,
+	/// Straight RGB, 0..=1.
+	pub color: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

@@ -84,6 +84,19 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 					lightness,
 					colorize,
 				} => crate::adjust::hue_saturation(cb, *hue as f64, *saturation as f64, *lightness as f64, *colorize),
+				AdjustKind::LumaLut(lut) => {
+					let y = crate::adjust::luma(cb);
+					lut.apply([y; 3])
+				}
+				AdjustKind::Matrix { rows, preserve_luma } => crate::adjust::apply_matrix(cb, rows, *preserve_luma),
+				AdjustKind::ColorBalance {
+					shadows,
+					midtones,
+					highlights,
+					preserve_luma,
+				} => crate::adjust::color_balance(cb, *shadows, *midtones, *highlights, *preserve_luma),
+				AdjustKind::Vibrance { vibrance, saturation } => crate::adjust::vibrance(cb, *vibrance, *saturation),
+				AdjustKind::BlackWhite { weights, tint } => crate::adjust::black_white(cb, *weights, *tint),
 			};
 			*top = composite(*blend, *top, f, *alpha as f64 * m, true);
 		}

@@ -214,6 +214,111 @@ fn hue_saturation_and_brightness_contrast_match_the_reference() {
 	assert!(over < 0.002, "{:.3} % of channels differ", over * 100.0);
 }
 
+#[test]
+fn m4_adjustments_match_the_reference() {
+	let (device, queue) = gpu_or_skip!();
+	let store = store();
+	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
+	let mut luts = LutCache::default();
+	let adjustments = [
+		Adjustment::Posterize { levels: 5 },
+		Adjustment::Threshold { level: 110 },
+		Adjustment::GradientMap {
+			stops: vec![
+				fx_core::GradientStop {
+					position: 0.0,
+					color: [0.1, 0.0, 0.3],
+				},
+				fx_core::GradientStop {
+					position: 0.6,
+					color: [0.9, 0.4, 0.1],
+				},
+				fx_core::GradientStop {
+					position: 1.0,
+					color: [1.0, 1.0, 0.8],
+				},
+			],
+			reverse: false,
+		},
+		Adjustment::ChannelMixer {
+			red: [80.0, 30.0, -10.0, 5.0],
+			green: [10.0, 90.0, 0.0, 0.0],
+			blue: [0.0, 20.0, 70.0, -5.0],
+			monochrome: false,
+		},
+		Adjustment::ChannelMixer {
+			red: [40.0, 40.0, 20.0, 0.0],
+			green: [0.0, 100.0, 0.0, 0.0],
+			blue: [0.0, 0.0, 100.0, 0.0],
+			monochrome: true,
+		},
+		Adjustment::PhotoFilter {
+			color: [0.92, 0.54, 0.0],
+			density: 0.25,
+			preserve_luminosity: true,
+		},
+		Adjustment::ColorBalance {
+			shadows: [20.0, -10.0, 5.0],
+			midtones: [-15.0, 25.0, 0.0],
+			highlights: [0.0, 10.0, -30.0],
+			preserve_luminosity: true,
+		},
+		Adjustment::ColorBalance {
+			shadows: [0.0, 0.0, 0.0],
+			midtones: [40.0, 0.0, -20.0],
+			highlights: [0.0, 0.0, 0.0],
+			preserve_luminosity: false,
+		},
+		Adjustment::Vibrance {
+			vibrance: 45.0,
+			saturation: 10.0,
+		},
+		Adjustment::Vibrance {
+			vibrance: -30.0,
+			saturation: 0.0,
+		},
+		Adjustment::BlackWhite {
+			reds: 40.0,
+			yellows: 60.0,
+			greens: 40.0,
+			cyans: 60.0,
+			blues: 20.0,
+			magentas: 80.0,
+			tint: false,
+			tint_hue: 0.0,
+			tint_saturation: 0.0,
+		},
+		Adjustment::BlackWhite {
+			reds: 120.0,
+			yellows: -20.0,
+			greens: 70.0,
+			cyans: 10.0,
+			blues: 200.0,
+			magentas: 30.0,
+			tint: true,
+			tint_hue: 35.0,
+			tint_saturation: 25.0,
+		},
+	];
+	for adjustment in adjustments {
+		let mut doc = doc(512, 256);
+		let bg = busy_layer(&mut doc, &store, 41);
+		let id = doc.allocate_layer_id();
+		let mut layer = Layer::new(id, "adjustment", LayerKind::Adjustment(adjustment.clone()));
+		layer.opacity = 0.9;
+		doc.layers.push(Arc::new(bg));
+		doc.layers.push(Arc::new(layer));
+		let programs = programs(&doc, &mut luts);
+		gpu.begin_frame();
+		let outcomes = gpu.composite(&programs, &|h| store.try_get_hot(h)).unwrap();
+		let (max_err, over) = compare(&gpu, &programs, &outcomes, &store);
+		eprintln!("{adjustment:?}: max error {max_err:.5}, {:.4} % > 2/1024", over * 100.0);
+		// Posterize and Threshold are step functions: f16 inputs flip the odd
+		// pixel sitting exactly on a step.
+		assert!(over < 0.002, "{adjustment:?}: {:.3} % of channels differ", over * 100.0);
+	}
+}
+
 /// Background, isolated + pass-through groups, clipping, masks, offsets,
 /// solid fills, LUT adjustments, nested groups.
 fn complex_doc(store: &TileStore) -> Document {

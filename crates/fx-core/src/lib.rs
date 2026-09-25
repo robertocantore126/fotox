@@ -21,6 +21,7 @@ pub use blend::BlendMode;
 pub use color::{BitDepth, ColorProfile, DocumentColor};
 pub use command::{Command, CommandContext, CommandEffect, CommandError, LayerRef};
 pub use document::Document;
+pub use document::NAME_KINDS;
 pub use history::History;
-pub use layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
+pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
 pub use ops::{FilterParams, PixelOps};

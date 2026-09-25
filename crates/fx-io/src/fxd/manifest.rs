@@ -24,10 +24,6 @@ use crate::IoError;
 /// Manifest format version stored in [`Manifest::version`].
 pub const MANIFEST_VERSION: u32 = 1;
 
-/// Number of per-kind default-name counters (matches `fx_core`'s
-/// `NameKind::COUNT`; the `id_state` round trip in the tests pins them equal).
-pub const NAME_COUNTERS: usize = 9;
-
 /// The whole document structure. Level-0 pixels are referenced by chunk, not
 /// stored here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,7 +34,10 @@ pub struct Manifest {
 	pub color: DocumentColor,
 	pub ppi: f32,
 	pub next_layer_id: u64,
-	pub name_counters: [u32; NAME_COUNTERS],
+	/// Per-kind default-name counters, in `fx_core`'s `NameKind` order. A
+	/// list, not an array: kinds are appended over time, and a file written
+	/// with fewer counters reads the missing ones as 0.
+	pub name_counters: Vec<u32>,
 	/// Selected layers in the panel (the last is active). *Not* the pixel
 	/// selection, which is not saved (D-028).
 	pub selected: Vec<LayerId>,
@@ -196,7 +195,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		color: doc.color.clone(),
 		ppi: doc.ppi,
 		next_layer_id,
-		name_counters,
+		name_counters: name_counters.to_vec(),
 		selected: doc.selected.clone(),
 		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
 		// The flattened composite preview is rendered by the save path (M3-T04).
@@ -308,7 +307,11 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 		.map(|entry| layer_from_entry(entry, file, store))
 		.collect::<Result<Vec<_>, _>>()?;
 	doc.selected = manifest.selected.clone();
-	Ok(doc.with_id_state(manifest.next_layer_id, manifest.name_counters))
+	let mut counters = [0u32; fx_core::NAME_KINDS];
+	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
+		*slot = *value;
+	}
+	Ok(doc.with_id_state(manifest.next_layer_id, counters))
 }
 
 fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<Arc<Layer>, IoError> {
@@ -426,8 +429,8 @@ mod tests {
 
 	use super::super::container::{ChunkKind, ChunkRef, Codec, FxdFile, FxdWriter};
 	use super::{
-		LayerKindEntry, MANIFEST_VERSION, Manifest, NAME_COUNTERS, SlotEntry, decode_manifest, encode_manifest, from_manifest, manifest_from_json,
-		manifest_to_json, to_manifest,
+		LayerKindEntry, MANIFEST_VERSION, Manifest, SlotEntry, decode_manifest, encode_manifest, from_manifest, manifest_from_json, manifest_to_json,
+		to_manifest,
 	};
 	use crate::IoError;
 
@@ -706,7 +709,8 @@ mod tests {
 	}
 
 	#[test]
-	fn name_counter_width_matches_fx_core() {
+	fn a_manifest_with_fewer_name_counters_still_opens() {
+		// Files written before the M4 adjustment kinds have 9 counters.
 		let doc = Document::new(
 			8,
 			8,
@@ -716,9 +720,19 @@ mod tests {
 			},
 			72.0,
 		);
-		let (_, counters) = doc.id_state();
-		let typed: [u32; NAME_COUNTERS] = counters;
-		assert_eq!(typed.len(), NAME_COUNTERS);
+		let mut manifest = to_manifest(&doc, |_| None);
+		manifest.name_counters = vec![7; 9];
+		let json = serde_json::to_string(&manifest).unwrap();
+		let back: Manifest = serde_json::from_str(&json).unwrap();
+		assert_eq!(back.name_counters.len(), 9);
+		let store = fx_tiles::TileStore::new(fx_tiles::TileStoreConfig::for_tests(std::env::temp_dir().join("fx-io-counters"))).unwrap();
+		let path = std::env::temp_dir().join("fx-io-counters.fxd");
+		let writer = crate::fxd::FxdWriter::create(&path).unwrap();
+		let file = std::sync::Arc::new(writer.commit(crate::fxd::ChunkRef { offset: 0, len: 0 }, 0).unwrap());
+		let restored = from_manifest(&back, &file, &store).unwrap();
+		let (_, counters) = restored.id_state();
+		assert_eq!(&counters[..9], &[7; 9]);
+		assert!(counters[9..].iter().all(|&c| c == 0));
 	}
 
 	// -----------------------------------------------------------------------

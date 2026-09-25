@@ -42,10 +42,24 @@ pub(crate) enum NameKind {
 	Exposure,
 	HueSaturation,
 	Invert,
+	// M4-T07. New kinds are only ever appended: the index is saved in `.fxd`
+	// manifests (`Document::id_state`).
+	Posterize,
+	Threshold,
+	GradientMap,
+	ChannelMixer,
+	PhotoFilter,
+	ColorBalance,
+	Vibrance,
+	BlackWhite,
 }
 
+/// Number of per-kind default-name counters of a document
+/// ([`Document::id_state`]).
+pub const NAME_KINDS: usize = NameKind::COUNT;
+
 impl NameKind {
-	const COUNT: usize = 9;
+	const COUNT: usize = 17;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -60,6 +74,14 @@ impl NameKind {
 			NameKind::Exposure => "Exposure",
 			NameKind::HueSaturation => "Hue/Saturation",
 			NameKind::Invert => "Invert",
+			NameKind::Posterize => "Posterize",
+			NameKind::Threshold => "Threshold",
+			NameKind::GradientMap => "Gradient Map",
+			NameKind::ChannelMixer => "Channel Mixer",
+			NameKind::PhotoFilter => "Photo Filter",
+			NameKind::ColorBalance => "Color Balance",
+			NameKind::Vibrance => "Vibrance",
+			NameKind::BlackWhite => "Black & White",
 		}
 	}
 
@@ -71,6 +93,14 @@ impl NameKind {
 			Adjustment::Exposure { .. } => NameKind::Exposure,
 			Adjustment::HueSaturation { .. } => NameKind::HueSaturation,
 			Adjustment::Invert => NameKind::Invert,
+			Adjustment::Posterize { .. } => NameKind::Posterize,
+			Adjustment::Threshold { .. } => NameKind::Threshold,
+			Adjustment::GradientMap { .. } => NameKind::GradientMap,
+			Adjustment::ChannelMixer { .. } => NameKind::ChannelMixer,
+			Adjustment::PhotoFilter { .. } => NameKind::PhotoFilter,
+			Adjustment::ColorBalance { .. } => NameKind::ColorBalance,
+			Adjustment::Vibrance { .. } => NameKind::Vibrance,
+			Adjustment::BlackWhite { .. } => NameKind::BlackWhite,
 		}
 	}
 
@@ -308,10 +338,13 @@ mod tests {
 
 	#[test]
 	fn every_name_kind_has_a_counter() {
+		// Counters are saved by index in `.fxd` manifests: kinds are only ever
+		// appended, and COUNT follows the last one.
+		assert_eq!(NameKind::Invert as usize, 8, "the M2 kinds keep their indices");
 		assert_eq!(
-			NameKind::Invert as usize,
+			NameKind::BlackWhite as usize,
 			NameKind::COUNT - 1,
-			"a new NameKind must be added before Invert, or COUNT must grow"
+			"a new NameKind goes at the end, and COUNT must grow"
 		);
 	}
 
