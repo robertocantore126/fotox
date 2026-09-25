@@ -94,6 +94,7 @@ half = { version = "2.7", features = ["bytemuck"] }
 lz4_flex = "0.14"
 zstd = "0.14"
 memmap2 = "0.9"
+crc32fast = "1.5"
 
 # image formats
 tiff = "0.11"
