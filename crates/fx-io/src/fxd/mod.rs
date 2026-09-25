@@ -5,6 +5,7 @@
 
 mod container;
 pub mod manifest;
+pub mod save;
 #[cfg(test)]
 mod tests;
 

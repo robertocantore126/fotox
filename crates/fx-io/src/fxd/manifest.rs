@@ -237,7 +237,10 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> ChunkRef) -> La
 	}
 }
 
-fn image_entry(image: &TiledImage, tile_ref: &impl Fn(&TileHandle) -> ChunkRef) -> ImageEntry {
+/// Build the stored-level entry of one image (level 0 and levels ≥ 3, only
+/// non-empty slots). Public so the save path can build the preview entry.
+pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> ChunkRef) -> ImageEntry {
+	let tile_ref = &tile_ref;
 	let mut levels = Vec::new();
 	for level in 0..image.level_count() {
 		// Level 0 is authoritative; levels ≥ 3 are stored derived (D-026);
