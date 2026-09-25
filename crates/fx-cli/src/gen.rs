@@ -102,7 +102,11 @@ impl Content {
 		let (u, v) = (fx / self.width, fy / self.height);
 		// Large smooth gradients, a different direction per channel: a sky-like
 		// vertical ramp, a warm diagonal, a cool horizontal.
-		let base = [0.30 + 0.35 * u + 0.10 * v, 0.25 + 0.30 * (1.0 - v) + 0.10 * u, 0.20 + 0.25 * (u * 0.5 + v * 0.5)];
+		let base = [
+			0.30 + 0.35 * u + 0.10 * v,
+			0.25 + 0.30 * (1.0 - v) + 0.10 * u,
+			0.20 + 0.25 * (u * 0.5 + v * 0.5),
+		];
 		let mut out = [0.0; 3];
 		for (c, value) in out.iter_mut().enumerate() {
 			let channel_seed = self.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(c as u64 * 0x1000_0000_01B3);
@@ -159,7 +163,9 @@ fn smooth(t: f64) -> f64 {
 }
 
 fn lattice(x: i64, y: i64, seed: u64) -> f64 {
-	unit(mix(seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)))
+	unit(mix(seed
+		^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+		^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)))
 }
 
 fn hash_unit(x: u32, y: u32, seed: u64) -> f64 {

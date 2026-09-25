@@ -20,6 +20,8 @@ export function runAction(item) {
   if (a) bridge.send({ type: UI.ACTION, id: a });
 
   // dialoghi -------------------------------------------------------------
+  // In the app, Open is the native file dialog (the shell shows it).
+  if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }
 
   // pannelli -------------------------------------------------------------

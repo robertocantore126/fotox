@@ -1,5 +1,7 @@
 //! Command line of the Fotox desktop app.
 
+use std::path::PathBuf;
+
 use clap::Parser;
 
 /// The Fotox desktop app.
@@ -11,4 +13,7 @@ pub(crate) struct Cli {
 	/// accelerated path fails to present a frame.
 	#[arg(long)]
 	pub(crate) disable_ui_acceleration: bool,
+
+	/// Images to open at startup.
+	pub(crate) files: Vec<PathBuf>,
 }

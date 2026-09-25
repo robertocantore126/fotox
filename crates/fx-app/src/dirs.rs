@@ -18,6 +18,14 @@ pub(crate) fn app_data_dir() -> PathBuf {
 	dir
 }
 
+/// Where the tile store's scratch file goes: the local (non-roaming) cache
+/// directory, `%LOCALAPPDATA%/Fotox/scratch` on Windows — it must be on a
+/// fast local disk and is never worth syncing.
+pub(crate) fn scratch_dir() -> PathBuf {
+	let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+	base.join(APP_DIRECTORY_NAME).join("scratch")
+}
+
 /// Path of the single-instance lock file.
 pub(crate) fn lock_file_path() -> PathBuf {
 	app_data_dir().join(APP_LOCK_FILE_NAME)

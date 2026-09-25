@@ -14,18 +14,21 @@
 //! The engine is headless: `fx-cli` drives it without any GUI, which is how
 //! most engine features are tested and benchmarked.
 
+pub mod documents;
 pub mod layers;
 pub mod mips;
+pub mod view;
 
+mod engine;
+mod render;
+
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crossbeam_channel::Sender;
 use fx_protocol::UiToEngine;
-
-mod engine;
-mod render;
-pub mod view;
+use fx_tiles::{TileStore, TileStoreConfig};
 
 /// Pointer/keyboard input that happened *over the viewport*. The shell routes
 /// it here directly (not through the UI) to keep brush latency low.
@@ -86,6 +89,8 @@ pub enum EngineInput {
 		width: u32,
 		height: u32,
 	},
+	/// Open these files (native file dialog, drag and drop, command line).
+	Open(Vec<PathBuf>),
 	Shutdown,
 }
 
@@ -130,19 +135,34 @@ pub struct EngineHandle {
 impl EngineHandle {
 	/// Start the engine and render threads. `queue` must be the shell's
 	/// [`wgpu_sync::Queue`]: every submission from the render thread goes
-	/// through it (see the crate docs).
-	pub fn spawn(device: wgpu::Device, queue: wgpu_sync::Queue, output: impl Fn(EngineOutput) + Send + Sync + 'static) -> std::io::Result<Self> {
+	/// through it (see the crate docs). Tiles spill to a scratch file in
+	/// `scratch_dir` (reference-machine budgets, docs/PERFORMANCE.md §2).
+	pub fn spawn(
+		device: wgpu::Device,
+		queue: wgpu_sync::Queue,
+		scratch_dir: PathBuf,
+		output: impl Fn(EngineOutput) + Send + Sync + 'static,
+	) -> std::io::Result<Self> {
 		let output: OutputSink = Arc::new(output);
+		let store = Arc::new(TileStore::new(TileStoreConfig::reference_machine(scratch_dir)).map_err(std::io::Error::other)?);
 		let (input, inputs) = crossbeam_channel::unbounded();
 		let (render_requests, render_inbox) = crossbeam_channel::unbounded();
+		let (internal, internal_rx) = crossbeam_channel::unbounded();
+		let (mips, mips_rx) = crossbeam_channel::unbounded();
 
-		let render_output = output.clone();
-		let render_thread = std::thread::Builder::new()
-			.name("fx-render".into())
-			.spawn(move || render::run(device, queue, render_inbox, render_output))?;
+		let context = render::RenderContext {
+			device,
+			queue,
+			store: store.clone(),
+			requests: render_inbox,
+			wake: render_requests.clone(),
+			mips,
+			output: output.clone(),
+		};
+		let render_thread = std::thread::Builder::new().name("fx-render".into()).spawn(move || render::run(context))?;
 		let engine_thread = std::thread::Builder::new()
 			.name("fx-engine".into())
-			.spawn(move || engine::run(inputs, render_requests, output))?;
+			.spawn(move || engine::run(inputs, internal_rx, internal, mips_rx, render_requests, store, output))?;
 
 		Ok(Self {
 			input,

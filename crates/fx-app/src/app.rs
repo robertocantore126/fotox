@@ -13,13 +13,15 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
+use winit::data_transfer::TypeHint;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, ControlFlow, DndAction, EventLoop};
 use winit::window::WindowId;
 
 use fx_engine::{CursorShape, EngineHandle, EngineInput, EngineOutput};
+use fx_protocol::UiToEngine;
 
 use crate::bridge::{self, Routed};
 use crate::event::{AppEvent, AppEventScheduler};
@@ -65,6 +67,8 @@ pub(crate) struct App {
 	/// whichever owns the pointer shows.
 	ui_cursor: Option<Cursor>,
 	engine_cursor: CursorShape,
+	/// A drop whose file list is being fetched.
+	pending_drop: Option<AsyncRequestSerial>,
 	startup_time: Option<Instant>,
 	exiting: Arc<AtomicBool>,
 	exit_reason: ExitReason,
@@ -101,6 +105,7 @@ impl App {
 			web_communication_initialized: false,
 			ui_cursor: None,
 			engine_cursor: CursorShape::Default,
+			pending_drop: None,
 			startup_time: None,
 			exiting: Arc::new(AtomicBool::new(false)),
 			exit_reason: ExitReason::Shutdown,
@@ -222,7 +227,37 @@ impl App {
 				tracing::debug!("direct input {enabled}");
 				self.input_state.set_direct_input(enabled);
 			}
-			Routed::Engine(message) => self.engine.send(EngineInput::Ui(message)),
+			Routed::Engine(message) => {
+				// The shell owns native dialogs: the chosen files go to the
+				// engine as `Open` (docs/tasks/M1.md, M1-T08).
+				if matches!(&message, UiToEngine::Action { id, .. } if id == "dlg:open") {
+					self.open_file_dialog();
+				}
+				self.engine.send(EngineInput::Ui(message));
+			}
+		}
+	}
+
+	/// Show the native open dialog on a helper thread (it is modal and would
+	/// otherwise block the event loop); the result comes back as
+	/// `AppEvent::OpenFiles`.
+	fn open_file_dialog(&self) {
+		let scheduler = self.app_event_scheduler.clone();
+		let spawned = std::thread::Builder::new().name("open-dialog".into()).spawn(move || {
+			let dialog = rfd::AsyncFileDialog::new()
+				.set_title("Open")
+				.add_filter("Images", &["tif", "tiff", "png", "jpg", "jpeg"])
+				.add_filter("TIFF", &["tif", "tiff"])
+				.add_filter("PNG", &["png"])
+				.add_filter("JPEG", &["jpg", "jpeg"])
+				.add_filter("All files", &["*"]);
+			let files = futures::executor::block_on(dialog.pick_files()).unwrap_or_default();
+			if !files.is_empty() {
+				scheduler.schedule(AppEvent::OpenFiles(files.iter().map(|f| f.path().to_path_buf()).collect()));
+			}
+		});
+		if let Err(error) = spawned {
+			tracing::error!("cannot show the open dialog: {error}");
 		}
 	}
 
@@ -289,6 +324,7 @@ impl App {
 				self.apply_cursor(event_loop);
 			}
 			AppEvent::Engine(output) => self.engine_output(event_loop, output),
+			AppEvent::OpenFiles(paths) => self.engine.send(EngineInput::Open(paths)),
 			AppEvent::UiMessage(frame) => self.ui_message(&frame),
 			AppEvent::UiCrashed => {
 				tracing::error!("the UI crashed, exiting");
@@ -348,6 +384,32 @@ impl ApplicationHandler for App {
 		}
 
 		match event {
+			// Drag and drop of files onto the window opens them.
+			WindowEvent::DragEntered { id, .. } => {
+				let accepts = event_loop.data_transfer(id).is_ok_and(|data| data.has_type(&TypeHint::UriList));
+				let actions: &[DndAction] = if accepts { &[DndAction::Copy] } else { &[] };
+				if let Err(error) = event_loop.set_valid_dnd_actions(id, actions) {
+					tracing::error!("cannot accept the drag: {error}");
+				}
+			}
+			WindowEvent::DragDropped { id, .. } => match event_loop.fetch_data_transfer(id, &TypeHint::UriList) {
+				Ok(serial) => self.pending_drop = Some(serial),
+				Err(error) => tracing::error!("cannot read the dropped files: {error}"),
+			},
+			WindowEvent::DataTransferReceived { serial, ref value, .. } if self.pending_drop == Some(serial) => match value.try_as_uris() {
+				Ok(uris) => {
+					self.pending_drop = None;
+					let paths: Vec<_> = uris.iter().filter_map(|uri| file_uri_to_path(uri)).collect();
+					if !paths.is_empty() {
+						self.engine.send(EngineInput::Open(paths));
+					}
+				}
+				Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+				Err(error) => {
+					self.pending_drop = None;
+					tracing::error!("cannot read the dropped files: {error}");
+				}
+			},
 			WindowEvent::CloseRequested => self.exit(ExitReason::Shutdown),
 			WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
 			WindowEvent::RedrawRequested => self.redraw(),
@@ -379,5 +441,51 @@ fn engine_cursor(shape: CursorShape) -> Cursor {
 		CursorShape::ZoomIn => Cursor::Icon(CursorIcon::ZoomIn),
 		CursorShape::ZoomOut => Cursor::Icon(CursorIcon::ZoomOut),
 		CursorShape::None => Cursor::None,
+	}
+}
+
+/// `file:///C:/My%20Pictures/a.tif` → `C:\\My Pictures\\a.tif`. Other schemes → `None`.
+fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+	let rest = uri.trim().strip_prefix("file://")?;
+	// `file:///C:/…` (local) or `file://server/share/…` (UNC).
+	let rest = match rest.strip_prefix('/') {
+		Some(local) if local.as_bytes().get(1) == Some(&b':') => local.to_owned(),
+		Some(local) => format!("/{local}"),
+		None => format!("//{rest}"),
+	};
+	let bytes = rest.as_bytes();
+	let mut decoded = Vec::with_capacity(bytes.len());
+	let mut i = 0;
+	while i < bytes.len() {
+		if bytes[i] == b'%'
+			&& let Some(hex) = rest.get(i + 1..i + 3)
+			&& let Ok(byte) = u8::from_str_radix(hex, 16)
+		{
+			decoded.push(byte);
+			i += 3;
+			continue;
+		}
+		decoded.push(bytes[i]);
+		i += 1;
+	}
+	let path = String::from_utf8(decoded).ok()?;
+	Some(std::path::PathBuf::from(path.replace('/', "\\")))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::file_uri_to_path;
+
+	#[test]
+	fn file_uris_become_windows_paths() {
+		assert_eq!(
+			file_uri_to_path("file:///C:/My%20Pictures/a.tif").unwrap().to_str(),
+			Some("C:\\My Pictures\\a.tif")
+		);
+		assert_eq!(
+			file_uri_to_path("file://server/share/b.png").unwrap().to_str(),
+			Some("\\\\server\\share\\b.png")
+		);
+		assert_eq!(file_uri_to_path("https://example.com/c.jpg"), None);
 	}
 }

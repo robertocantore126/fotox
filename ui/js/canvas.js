@@ -5,6 +5,7 @@ import { h, icon, clear } from "./el.js";
 import { state, setZoom, emit, on } from "./state.js";
 import * as bridge from "./native/bridge.js";
 import { UI, ENGINE } from "./native/protocol.js";
+import { initDocumentTabs } from "./native/documents.js";
 
 let canvasEl = null;
 let scrollEl = null;
@@ -51,6 +52,8 @@ export function initWorkspace(host) {
       h("div", { class: "workspace-main" }, viewport, gridLayer));
     host.append(tabs, rulerRow, body);
     viewportEl = viewport;
+    // Tabs come from the engine's documents, not the demo document.
+    initDocumentTabs(tabs, newTab);
     on("flag", (key) => {
       if (key === "rulers") applyRulers();
       if (key === "grid" || key === "pixelgrid") applyGrid();
@@ -60,7 +63,7 @@ export function initWorkspace(host) {
     bridge.on(ENGINE.VIEW, (view) => {
       nativeView = view;
       state.zoom = view.zoom * 100;
-      updateZoomLabels(state.zoom);
+      updateStatusZoom(state.zoom); // tab labels: native/documents.js
       drawRulers();
     });
     requestAnimationFrame(() => { applyRulers(); applyGrid(); });

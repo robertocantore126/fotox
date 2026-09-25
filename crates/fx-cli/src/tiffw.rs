@@ -101,7 +101,12 @@ impl TiffWriter {
 	pub fn write_strip(&mut self, data: &[u8]) -> Result<()> {
 		let strip = self.offsets.len() as u32;
 		ensure!(strip < self.strip_count(), "more strips than the image has");
-		ensure!(data.len() == self.strip_bytes(strip), "strip {strip} has {} bytes, expected {}", data.len(), self.strip_bytes(strip));
+		ensure!(
+			data.len() == self.strip_bytes(strip),
+			"strip {strip} has {} bytes, expected {}",
+			data.len(),
+			self.strip_bytes(strip)
+		);
 		self.out.write_all(data)?;
 		self.offsets.push(self.position);
 		self.counts.push(data.len() as u64);
@@ -111,7 +116,12 @@ impl TiffWriter {
 
 	/// Write the IFD, patch the header and flush. Every strip must be written.
 	pub fn finish(mut self) -> Result<u64> {
-		ensure!(self.offsets.len() as u32 == self.strip_count(), "only {} of {} strips written", self.offsets.len(), self.strip_count());
+		ensure!(
+			self.offsets.len() as u32 == self.strip_count(),
+			"only {} of {} strips written",
+			self.offsets.len(),
+			self.strip_count()
+		);
 		// Word-align the IFD.
 		if self.position % 2 == 1 {
 			self.out.write_all(&[0])?;
