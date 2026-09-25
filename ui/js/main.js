@@ -203,6 +203,10 @@ async function boot() {
 
   // eventi -------------------------------------------------------------
   on("tool", (id) => {
+    // Every tool change passes here (toolbar, flyouts, single-key shortcuts,
+    // menu actions): tell the engine, which pans with the Hand tool and will
+    // route viewport input to the active tool (docs/tasks/M5.md, M5-T01).
+    if (bridge.isNative) bridge.send({ type: UI.ACTION, id: "tool:" + id });
     renderOptionsBar(shell.optionsbar, id);
     document.querySelectorAll(".toolbtn[data-slot]").forEach((b) => {
       const slot = toolSlots.find((s) => s.id === b.dataset.slot);
