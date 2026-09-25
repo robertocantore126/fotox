@@ -9,3 +9,5 @@ pub use viewport::ViewportRenderer;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod viewport_tests;

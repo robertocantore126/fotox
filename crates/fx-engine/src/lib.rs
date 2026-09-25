@@ -133,6 +133,11 @@ pub enum EngineInput {
 	/// The user asked to close the window; the engine answers
 	/// [`EngineOutput::MayClose`] once no document still needs an answer. M3-T06.
 	CloseRequested,
+	/// The ICC profile of the monitor the window is on, as raw ICC bytes
+	/// (M4-T02). `None` = the shell could not read one, and sRGB is assumed.
+	/// Sent at start-up and whenever the window moves to another monitor, so
+	/// the viewport can transform the document into the display's space.
+	DisplayProfile(Option<Vec<u8>>),
 	Shutdown,
 }
 

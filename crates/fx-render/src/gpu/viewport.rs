@@ -2,8 +2,16 @@
 //!
 //! Clear to the background colour, draw the transparency checkerboard over
 //! the document rectangle, then every tile quad (premultiplied, source-over).
+//!
+//! The last step of the pipeline is the display transform (M4-T02): the tile
+//! colour goes through a 33³ [`fx_color::Lut3d`] in straight alpha, so what
+//! the user sees is the document in the monitor's colour space. The LUT is
+//! built on the engine thread; this renderer only uploads it (a 280 KB
+//! texture write) when its key changes, and skips it entirely when the
+//! document and the monitor profiles are the same.
 
 use bytemuck::{Pod, Zeroable};
+use fx_color::{LUT_GRID, Lut3d};
 
 use crate::frame::FramePlan;
 
@@ -12,7 +20,8 @@ use crate::frame::FramePlan;
 struct Globals {
 	size: [f32; 2],
 	nearest: u32,
-	_pad: u32,
+	/// 1 = run the composite through the display LUT.
+	apply_lut: u32,
 	_unused: [f32; 4],
 	doc_rect: [f32; 4],
 }
@@ -43,6 +52,14 @@ pub struct ViewportRenderer {
 	draws: wgpu::Buffer,
 	linear: wgpu::Sampler,
 	nearest: wgpu::Sampler,
+	/// The display LUT, `Rgba16Float` 33³. Always bound; only sampled when
+	/// `apply_lut` is 1, so a frame without a LUT binds the 1×1×1 placeholder.
+	lut: wgpu::Texture,
+	lut_view: wgpu::TextureView,
+	placeholder: wgpu::TextureView,
+	/// Key of the LUT currently in `lut` (so an unchanged profile is not
+	/// re-uploaded every frame).
+	lut_key: Option<u64>,
 }
 
 impl ViewportRenderer {
@@ -95,6 +112,16 @@ impl ViewportRenderer {
 					},
 					count: None,
 				},
+				wgpu::BindGroupLayoutEntry {
+					binding: 5,
+					visibility: wgpu::ShaderStages::FRAGMENT,
+					ty: wgpu::BindingType::Texture {
+						sample_type: wgpu::TextureSampleType::Float { filterable: true },
+						view_dimension: wgpu::TextureViewDimension::D3,
+						multisampled: false,
+					},
+					count: None,
+				},
 			],
 		});
 		let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -135,6 +162,45 @@ impl ViewportRenderer {
 				..Default::default()
 			})
 		};
+		let lut = device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("fx-display-lut"),
+			size: wgpu::Extent3d {
+				width: LUT_GRID as u32,
+				height: LUT_GRID as u32,
+				depth_or_array_layers: LUT_GRID as u32,
+			},
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D3,
+			format: wgpu::TextureFormat::Rgba16Float,
+			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		let lut_view = lut.create_view(&wgpu::TextureViewDescriptor {
+			dimension: Some(wgpu::TextureViewDimension::D3),
+			..Default::default()
+		});
+		// Bound in place of the LUT while `apply_lut` is 0 (a 3D binding must
+		// always be present).
+		let placeholder = device
+			.create_texture(&wgpu::TextureDescriptor {
+				label: Some("fx-display-lut-placeholder"),
+				size: wgpu::Extent3d {
+					width: 1,
+					height: 1,
+					depth_or_array_layers: 1,
+				},
+				mip_level_count: 1,
+				sample_count: 1,
+				dimension: wgpu::TextureDimension::D3,
+				format: wgpu::TextureFormat::Rgba16Float,
+				usage: wgpu::TextureUsages::TEXTURE_BINDING,
+				view_formats: &[],
+			})
+			.create_view(&wgpu::TextureViewDescriptor {
+				dimension: Some(wgpu::TextureViewDimension::D3),
+				..Default::default()
+			});
 		Self {
 			device: device.clone(),
 			queue: queue.clone(),
@@ -149,11 +215,50 @@ impl ViewportRenderer {
 			draws: draws_buffer(device, 256),
 			linear: sampler(wgpu::FilterMode::Linear),
 			nearest: sampler(wgpu::FilterMode::Nearest),
+			lut,
+			lut_view,
+			placeholder,
+			lut_key: None,
 		}
 	}
 
+	/// Upload the display LUT if it is a new one. `None` = document and monitor
+	/// profiles are the same: the composite reaches the screen untouched (C1).
+	pub fn set_display_lut(&mut self, lut: Option<&Lut3d>) {
+		let Some(lut) = lut else {
+			self.lut_key = None;
+			return;
+		};
+		if self.lut_key == Some(lut.key()) {
+			return;
+		}
+		self.queue.write_texture(
+			wgpu::TexelCopyTextureInfo {
+				texture: &self.lut,
+				mip_level: 0,
+				origin: wgpu::Origin3d::ZERO,
+				aspect: wgpu::TextureAspect::All,
+			},
+			lut.bytes(),
+			wgpu::TexelCopyBufferLayout {
+				offset: 0,
+				bytes_per_row: Some(LUT_GRID as u32 * 8),
+				rows_per_image: Some(LUT_GRID as u32),
+			},
+			wgpu::Extent3d {
+				width: LUT_GRID as u32,
+				height: LUT_GRID as u32,
+				depth_or_array_layers: LUT_GRID as u32,
+			},
+		);
+		self.lut_key = Some(lut.key());
+	}
+
 	/// Record the viewport pass. `tiles` = `GpuCompositor::composite_view()`.
-	/// `zoom >= 1` draws hard pixels like Photoshop.
+	/// `zoom >= 1` draws hard pixels like Photoshop. `lut` is the display
+	/// transform for this frame's document (see [`set_display_lut`]).
+	///
+	/// [`set_display_lut`]: Self::set_display_lut
 	pub fn render(
 		&mut self,
 		encoder: &mut wgpu::CommandEncoder,
@@ -162,7 +267,9 @@ impl ViewportRenderer {
 		plan: &FramePlan,
 		zoom: f64,
 		tiles: &wgpu::TextureView,
+		lut: Option<&Lut3d>,
 	) {
+		self.set_display_lut(lut);
 		let draws: Vec<GpuDraw> = plan
 			.draws
 			.iter()
@@ -186,6 +293,7 @@ impl ViewportRenderer {
 			bytemuck::bytes_of(&Globals {
 				size: [size.0 as f32, size.1 as f32],
 				nearest: (zoom >= 1.0) as u32,
+				apply_lut: self.lut_key.is_some() as u32,
 				doc_rect: plan.doc_rect,
 				..Default::default()
 			}),
@@ -213,6 +321,14 @@ impl ViewportRenderer {
 				wgpu::BindGroupEntry {
 					binding: 4,
 					resource: self.draws.as_entire_binding(),
+				},
+				wgpu::BindGroupEntry {
+					binding: 5,
+					resource: wgpu::BindingResource::TextureView(if self.lut_key.is_some() {
+						&self.lut_view
+					} else {
+						&self.placeholder
+					}),
 				},
 			],
 		});

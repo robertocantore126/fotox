@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
+use fx_color::Lut3d;
 use fx_core::{Document, LayerId};
 use fx_protocol::DocId;
 use fx_render::adjust::LutCache;
@@ -59,6 +60,10 @@ pub(crate) struct Frame {
 	pub hot_layer: Option<LayerId>,
 	/// Size of the virtual document when `doc` is `None`.
 	pub virtual_doc: (u32, u32),
+	/// Display transform of this document (M4-T02), or `None` when the
+	/// document profile is already the monitor profile (identity shortcut).
+	/// Built on the engine thread: the render thread only uploads it.
+	pub display_lut: Option<Arc<Lut3d>>,
 }
 
 /// Work for the render thread.
@@ -137,8 +142,7 @@ pub(crate) fn run(ctx: RenderContext) {
 			None => pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc),
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
-				pipeline.compositor.set_hot_layer(f.hot_layer);
-				match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, (*id, f.generation), doc) {
+				pipeline.compositor.set_hot_layer(f.hot_layer);					match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, (*id, f.generation), doc, f.display_lut.as_deref()) {
 					Ok(more) => {
 						again = more;
 						uploads = pipeline.frame_uploads;
@@ -234,6 +238,7 @@ impl TilePipeline {
 		viewport: ViewportSize,
 		(id, generation): (DocId, u64),
 		doc: &Arc<Document>,
+		display_lut: Option<&Lut3d>,
 	) -> Result<bool, fx_render::gpu::CompositeError> {
 		// A new document or content generation invalidates everything cached
 		// for it; a new snapshot of the same generation (mips committed) only
@@ -331,6 +336,7 @@ impl TilePipeline {
 			&plan,
 			view.zoom,
 			self.compositor.composite_view(),
+			display_lut,
 		);
 		Ok(!plan.complete && (progressed || budget_spent))
 	}
