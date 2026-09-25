@@ -26,6 +26,11 @@ export function runAction(item) {
     else toast("The frame-time overlay measures the app's render thread (not available in a browser)");
     return;
   }
+  // Other debug actions are the engine's (sent above); nothing to do here.
+  if (a.startsWith("debug:")) {
+    if (!bridge.isNative) toast(label + " needs the app (not available in a browser)");
+    return;
+  }
 
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }

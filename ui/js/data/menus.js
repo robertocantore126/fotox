@@ -653,6 +653,11 @@ export const menus = [
       it("Preferences...", "Ctrl+K", "dlg:prefs"),
       it("Environment Settings...", "", "dlg:env"),
       sep,
+      sub("Benchmarks", [
+        it("Frame-Time Overlay", "Alt+Ctrl+F", "debug:fps"),
+        it("Load B3 onto This Document", "", "debug:load-b3"),
+      ]),
+      sep,
       it("Start Page", "", "app:startpage"),
       sub("Templates", [
         it("Social Media", "", "tpl:social"),

@@ -50,6 +50,8 @@ pub(crate) enum Internal {
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
 	},
+	/// The B3 layers are built (M2-T08).
+	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
 	/// A layer thumbnail finished rendering.
 	Thumbnail {
 		doc: DocId,
@@ -323,6 +325,11 @@ impl Engine {
 				}
 				return Changed::default();
 			}
+			// Build the B3 benchmark on top of the active document (M2-T08).
+			"debug:load-b3" => {
+				self.load_b3();
+				return Changed::default();
+			}
 			"tab:close-all" => {
 				for doc in self.docs.ids() {
 					self.close(doc);
@@ -415,6 +422,19 @@ impl Engine {
 
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::B3Built { task, doc, layers } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				let Some(open) = self.docs.get_mut(doc) else { return };
+				// Built outside the history on purpose (a benchmark setup, not
+				// an edit): the history restarts from here.
+				open.doc.layers.extend(layers);
+				open.doc.revision += 1;
+				open.history = fx_core::History::default();
+				open.dirty = true;
+				open.changed();
+				tracing::info!("B3 loaded into {doc:?}: {} layers", open.doc.layers.len());
+				self.after_edit(doc, true);
+			}
 			Internal::Thumbnail { doc, layer, revision, result } => match result {
 				Ok(thumb) => {
 					let header = EngineToUi::Thumbnail {
@@ -624,6 +644,37 @@ impl Engine {
 				result,
 			});
 		});
+	}
+
+	fn load_b3(&mut self) {
+		let Some(doc) = self.docs.active_mut() else {
+			self.to_ui(&EngineToUi::Error {
+				text: "Open B1 (or any document) first: B3 is built on top of it".into(),
+			});
+			return;
+		};
+		let ids: Vec<LayerId> = (0..crate::b3::PIXEL_LAYERS + crate::b3::ADJUSTMENT_LAYERS)
+			.map(|_| doc.doc.allocate_layer_id())
+			.collect();
+		let (id, width, height, format) = (doc.id, doc.doc.width, doc.doc.height, doc.doc.color.depth.rgba_format());
+		self.next_task += 1;
+		let task = self.next_task;
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: "Building B3 (219 layers)".into(),
+			fraction: 0.0,
+		});
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		let spawned = std::thread::Builder::new().name("b3".into()).spawn(move || {
+			let layers = crate::b3::build(width, height, format, &ids, 3, &store);
+			let _ = internal.send(Internal::B3Built { task, doc: id, layers });
+		});
+		if let Err(error) = spawned {
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot build B3: {error}"),
+			});
+		}
 	}
 
 	fn after_active_change(&mut self) {

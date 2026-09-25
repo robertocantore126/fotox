@@ -8,7 +8,7 @@
 // The list is virtualised (only the visible rows exist), so 1 000 layers
 // scroll and update as fast as 10.
 
-import { h, icon, clear } from "../el.js";
+import { h, icon, clear, add } from "../el.js";
 import { openDropdown } from "../popup.js";
 import { openDialog } from "../dialogs.js";
 import { state } from "../state.js";
@@ -301,11 +301,12 @@ function row(i, v) {
   const meta = [];
   if (l.blend !== "normal" && l.blend !== "pass_through") meta.push(blendName(l.blend));
   if (l.opacity < 1) meta.push(Math.round(l.opacity * 100) + "%");
-  el.append(eye, expander, thumb,
+  // The DOM's own append() would print a null child as "null": use add().
+  add(el, [eye, expander, thumb,
     l.has_mask ? h("span", { class: "pthumb nmask", "data-tip": "Layer mask" }, icon("i-mask", "ic xs")) : null,
     name,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
-    l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null);
+    l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
 
   el.addEventListener("click", (e) => select(l, e));
   el.addEventListener("dragstart", (e) => { dragId = l.id; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(l.id)); });
