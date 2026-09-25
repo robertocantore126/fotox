@@ -73,6 +73,12 @@ impl History {
 		self.undo.iter().map(|e| e.label.as_str())
 	}
 
+	/// Labels of the undone steps, in the order they would be redone (the
+	/// History panel shows them greyed out after the current state).
+	pub fn redo_labels(&self) -> impl Iterator<Item = &str> {
+		self.redo.iter().rev().map(|e| e.label.as_str())
+	}
+
 	pub fn can_undo(&self) -> bool {
 		!self.undo.is_empty()
 	}

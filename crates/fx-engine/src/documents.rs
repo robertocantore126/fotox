@@ -6,8 +6,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use fx_core::{ColorProfile, Document, DocumentColor, History, Layer, LayerKind};
+use fx_core::{ColorProfile, Document, DocumentColor, History, Layer, LayerId, LayerKind};
 use fx_io::ImportedImage;
 use fx_protocol::{DocId, DocumentInfo};
 
@@ -21,6 +22,13 @@ pub struct OpenDoc {
 	pub history: History,
 	pub view: ViewState,
 	pub dirty: bool,
+	/// Bumped by every content change (command, undo, redo). The render
+	/// thread keys its caches on it: `Document::revision` is not unique
+	/// because undo winds it back.
+	pub generation: u64,
+	/// The last edited layer and when, and the layer that is "hot" (M2-T05).
+	last_edit: Option<(LayerId, Instant)>,
+	hot: Option<(LayerId, Instant)>,
 	/// The snapshot last handed to the render thread; rebuilt when `doc`
 	/// changes (see [`OpenDoc::snapshot`]).
 	snapshot: Option<Arc<Document>>,
@@ -64,6 +72,9 @@ impl OpenDoc {
 			history: History::default(),
 			view,
 			dirty: false,
+			generation: 0,
+			last_edit: None,
+			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
 		}
@@ -88,6 +99,49 @@ impl OpenDoc {
 		self.snapshot_stale = true;
 	}
 
+	/// The document content changed (command, undo, redo).
+	pub fn changed(&mut self) {
+		self.generation += 1;
+		// Undo can bring back an earlier revision number: never trust it alone.
+		self.snapshot_stale = true;
+	}
+
+	/// Record edits of `layers` at `now`. A layer edited twice within
+	/// [`HOT_AFTER`] becomes the hot layer (slider drags, painting), which
+	/// lets the compositor cache everything below it (M2-T05).
+	pub fn note_edits(&mut self, layers: &[LayerId], now: Instant) {
+		for &layer in layers {
+			if let Some((last, at)) = self.last_edit
+				&& last == layer
+				&& now.saturating_duration_since(at) <= HOT_AFTER
+			{
+				self.hot = Some((layer, now));
+			} else if self.hot.is_some_and(|(hot, _)| hot == layer) {
+				self.hot = Some((layer, now));
+			}
+			self.last_edit = Some((layer, now));
+		}
+	}
+
+	/// The hot layer, if any.
+	pub fn hot_layer(&self) -> Option<LayerId> {
+		self.hot.map(|(layer, _)| layer)
+	}
+
+	/// When the hot layer cools down if nothing edits it.
+	pub fn hot_expiry(&self) -> Option<Instant> {
+		self.hot.map(|(_, at)| at + HOT_IDLE)
+	}
+
+	/// Drop the hot layer after [`HOT_IDLE`] without edits. Returns true if it changed.
+	pub fn expire_hot(&mut self, now: Instant) -> bool {
+		if self.hot_expiry().is_some_and(|expiry| now >= expiry) {
+			self.hot = None;
+			return true;
+		}
+		false
+	}
+
 	/// What the UI's document tabs show.
 	pub fn info(&self) -> DocumentInfo {
 		DocumentInfo {
@@ -102,6 +156,11 @@ impl OpenDoc {
 		}
 	}
 }
+
+/// Two edits of one layer within this interval make it hot (M2-T05).
+pub const HOT_AFTER: Duration = Duration::from_secs(1);
+/// The hot layer cools down after this long without edits.
+pub const HOT_IDLE: Duration = Duration::from_secs(2);
 
 fn profile_name(profile: &ColorProfile) -> &'static str {
 	match profile {
@@ -221,6 +280,36 @@ mod tests {
 		assert_eq!(docs.active_id(), None);
 		assert!(docs.is_empty());
 		assert!(!docs.activate(ids[0]), "a closed document cannot be activated");
+	}
+
+	#[test]
+	fn a_layer_edited_twice_within_a_second_becomes_hot_then_cools() {
+		let mut doc = OpenDoc::from_import(DocId(1), Path::new("a.png"), imported());
+		let (a, b) = (LayerId(1), LayerId(2));
+		let t0 = Instant::now();
+		doc.note_edits(&[a], t0);
+		assert_eq!(doc.hot_layer(), None, "one edit is not a drag");
+		doc.note_edits(&[a], t0 + Duration::from_millis(300));
+		assert_eq!(doc.hot_layer(), Some(a));
+		// Another layer's single edit does not steal it.
+		doc.note_edits(&[b], t0 + Duration::from_millis(400));
+		assert_eq!(doc.hot_layer(), Some(a));
+		assert!(!doc.expire_hot(t0 + Duration::from_millis(2000)));
+		assert!(doc.expire_hot(t0 + Duration::from_millis(2400)));
+		assert_eq!(doc.hot_layer(), None);
+		// Edits further apart than a second never heat up.
+		doc.note_edits(&[a], t0 + Duration::from_secs(10));
+		doc.note_edits(&[a], t0 + Duration::from_secs(12));
+		assert_eq!(doc.hot_layer(), None);
+	}
+
+	#[test]
+	fn a_change_always_gives_a_new_snapshot() {
+		let mut doc = OpenDoc::from_import(DocId(1), Path::new("a.png"), imported());
+		let a = doc.snapshot();
+		doc.changed();
+		assert!(!Arc::ptr_eq(&a, &doc.snapshot()), "same revision after undo, still a new snapshot");
+		assert_eq!(doc.generation, 1);
 	}
 
 	#[test]

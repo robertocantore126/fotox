@@ -51,6 +51,12 @@ pub(crate) struct Frame {
 	pub viewport: ViewportSize,
 	/// The active document, or `None` for the M0 test pattern.
 	pub doc: Option<(DocId, Arc<Document>)>,
+	/// Changes whenever the document's content changes (commands, undo, redo)
+	/// — unlike `Document::revision`, which undo winds back, so two different
+	/// states can share one revision.
+	pub generation: u64,
+	/// The layer being edited, for the compositor's prefix cache (M2-T05).
+	pub hot_layer: Option<LayerId>,
 	/// Size of the virtual document when `doc` is `None`.
 	pub virtual_doc: (u32, u32),
 }
@@ -131,7 +137,8 @@ pub(crate) fn run(ctx: RenderContext) {
 			None => pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc),
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
-				match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, *id, doc) {
+				pipeline.compositor.set_hot_layer(f.hot_layer);
+				match pipeline.frame(&ctx, &mut encoder, &target, &f.view, viewport, (*id, f.generation), doc) {
 					Ok(more) => {
 						again = more;
 						uploads = pipeline.frame_uploads;
@@ -179,7 +186,7 @@ struct TilePipeline {
 	ready: HashMap<TileKey, Ready>,
 	/// Programs built for the current document revision (reused every frame).
 	programs: HashMap<TileKey, TileProgram>,
-	/// Which document / revision / snapshot `ready` and `programs` belong to.
+	/// Which document / generation / snapshot `ready` and `programs` belong to.
 	current: Option<(DocId, u64)>,
 	snapshot: Option<Arc<Document>>,
 	/// Mip tiles already sent to the engine for this snapshot.
@@ -225,14 +232,14 @@ impl TilePipeline {
 		target: &wgpu::TextureView,
 		view: &ViewTransform,
 		viewport: ViewportSize,
-		id: DocId,
+		(id, generation): (DocId, u64),
 		doc: &Arc<Document>,
 	) -> Result<bool, fx_render::gpu::CompositeError> {
-		// A new document or revision invalidates everything cached for it; a
-		// new snapshot of the same revision (mips committed) only allows the
-		// failed tiles to be retried.
-		if self.current != Some((id, doc.revision)) {
-			self.current = Some((id, doc.revision));
+		// A new document or content generation invalidates everything cached
+		// for it; a new snapshot of the same generation (mips committed) only
+		// allows the failed tiles to be retried.
+		if self.current != Some((id, generation)) {
+			self.current = Some((id, generation));
 			self.ready.clear();
 			self.programs.clear();
 		}
