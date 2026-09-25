@@ -11,7 +11,7 @@ Agent: Claude  ·  Branch: `task/M3-export-writers`  ·  Status: code done, not 
 
 ## Decisions for Rob (candidates for the M3 cards)
 
-* **Transparency always kept** (PNG/TIFF with alpha, even for an opaque document: +33 % size for 8-bit RGB). An Export dialog with a Transparency checkbox, or detecting an opaque composite, is the proper fix.
+* **Transparency**: kept only when the document can have any — an opaque bottom layer (every canvas pixel at alpha 1, full opacity, no mask) means an opaque composite, so the file is written without alpha (`opaque_background`, reads that layer once). An Export dialog with a Transparency checkbox is still the proper control.
 * **Bit depth = the document's.** No 16 → 8 choice yet.
 * **The reference compositor is slow** (f64 per pixel): fine for photos, minutes for B1 (30 000²). A GPU readback path (the compositor already renders tiles) is the fast route; the file side does not change.
 * **JPEG export** needs an encoder crate (`jpeg-encoder` is the usual pure-Rust choice) — not added without asking.

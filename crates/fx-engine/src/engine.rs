@@ -439,15 +439,12 @@ impl Engine {
 		};
 		// A snapshot: editing may go on while the export runs.
 		let doc = open.doc.clone();
-		let options = match crate::export::options_for(&doc, &path) {
-			Ok(options) => options,
-			Err(error) => {
-				self.to_ui(&EngineToUi::Error {
-					text: format!("Cannot export {}: {error}", path.display()),
-				});
-				return;
-			}
-		};
+		if let Err(error) = crate::export::options_for(&doc, &path, false) {
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot export {}: {error}", path.display()),
+			});
+			return;
+		}
 		self.next_task += 1;
 		let task = self.next_task;
 		let (store, internal) = (self.store.clone(), self.internal.clone());
@@ -470,7 +467,10 @@ impl Engine {
 				});
 				true
 			};
-			let result = crate::export::export_document(&doc, &store, &path, options, &mut report);
+			// An opaque document is written without alpha (a quarter smaller for RGB).
+			let opaque = crate::export::opaque_background(&doc, &store);
+			let result =
+				crate::export::options_for(&doc, &path, opaque).and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
