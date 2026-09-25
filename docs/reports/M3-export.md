@@ -15,7 +15,7 @@ Agent: Claude  ·  Branch: `task/M3-export-writers`  ·  Status: code done, not 
 * **Bit depth = the document's.** No 16 → 8 choice yet.
 * **The reference compositor is slow** (f64 per pixel): fine for photos, minutes for B1 (30 000²). A GPU readback path (the compositor already renders tiles) is the fast route; the file side does not change.
 * **JPEG export** needs an encoder crate (`jpeg-encoder` is the usual pure-Rust choice) — not added without asking.
-* No ICC profile, no resolution tag from the document (72 ppi written) yet.
+* No ICC profile yet (M4). The document ppi is written (TIFF resolution, PNG `pHYs`).
 
 ## Verification
 
