@@ -7,12 +7,14 @@
 //! cursor change, a status line, or an engine-side effect (the eyedropper's
 //! colour).
 //!
-//! Overlays (marching ants, the brush outline) arrive with M5-T02: the `Tool`
-//! trait gains an `overlay()` method then, when the [`Overlay`] type exists.
+//! Overlays (marching ants, the brush outline, selection handles) are drawn by
+//! [`Tool::overlay`] in document coordinates and handed to the render thread
+//! (M5-T02), which tessellates them (`fx_render::overlay`).
 
 use std::collections::HashMap;
 
 use fx_core::{Command, Document};
+use fx_render::Overlay;
 use fx_tiles::TileStore;
 
 use crate::ops::EngineOps;
@@ -121,6 +123,12 @@ pub struct ToolContext<'a> {
 pub trait Tool {
 	/// Handle one pointer event in document coordinates.
 	fn pointer(&mut self, ctx: &mut ToolContext<'_>, event: &DocPointer) -> ToolResult;
+
+	/// The overlay to draw over the viewport, in document coordinates
+	/// (M5-T02): marching ants, the brush outline, handles. `None` = nothing.
+	fn overlay(&self) -> Option<Overlay> {
+		None
+	}
 
 	/// The cursor to show while this tool is active and the pointer is idle.
 	fn cursor(&self, _modifiers: Modifiers) -> CursorShape {

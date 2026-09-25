@@ -1705,6 +1705,7 @@ impl Engine {
 
 	fn request_frame(&mut self) {
 		let virtual_view = self.virtual_view.clone();
+		let overlay = self.active_tool_overlay();
 		// The display transform needs the cache on `self`, so build it before
 		// borrowing the active document mutably (and only for a real document:
 		// the virtual test pattern has no profile).
@@ -1732,6 +1733,7 @@ impl Engine {
 					virtual_doc: VIRTUAL_DOC,
 					display_lut,
 					gamut_warning,
+					overlay,
 				}
 			}
 			None => {
@@ -1745,10 +1747,18 @@ impl Engine {
 					virtual_doc: VIRTUAL_DOC,
 					display_lut: None,
 					gamut_warning: false,
+					overlay,
 				}
 			}
 		};
 		let _ = self.render.send(RenderRequest::Frame(frame));
+	}
+
+	/// The active tool's overlay, in document coordinates (M5-T02). `None` when
+	/// no document is open or the tool draws nothing.
+	fn active_tool_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
+		let tool_id = self.docs.active_mut()?.view.tool.clone();
+		self.tools.get(&tool_id)?.overlay().map(Arc::new)
 	}
 
 	/// The monitor profile the shell reported (M4-T02), or `None` while it has

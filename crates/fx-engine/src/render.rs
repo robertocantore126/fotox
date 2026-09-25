@@ -29,7 +29,10 @@ use fx_core::{Document, LayerId};
 use fx_protocol::DocId;
 use fx_render::adjust::LutCache;
 use fx_render::gpu::{CompositorConfig, GpuCompositor, TileOutcome, ViewportRenderer};
-use fx_render::{FramePlan, MipRequest, TestPatternRenderer, TileKey, TileProgram, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame};
+use fx_render::overlay::tessellate;
+use fx_render::{
+	FramePlan, MipRequest, Overlay, TestPatternRenderer, TileKey, TileProgram, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame,
+};
 use fx_tiles::{TILE_SIZE, TileId, TileStore};
 
 use crate::stats::RenderStats;
@@ -37,6 +40,10 @@ use crate::{EngineOutput, OutputSink};
 
 /// Programs built per frame, at most (the rest wait for the next frame).
 const MAX_REQUESTS_PER_FRAME: usize = 256;
+
+/// While a marching-ants overlay is visible the viewport is redrawn at this
+/// interval (8 Hz), which is what animates the dashes (M5-T02).
+const ANTS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(125);
 
 /// `plan_frame` has no notion of "ready but fully transparent": such tiles
 /// are reported with this slot and their draws are dropped before rendering.
@@ -66,6 +73,9 @@ pub(crate) struct Frame {
 	pub display_lut: Option<Arc<Lut3d>>,
 	/// Paint out-of-gamut colours grey (with a proof LUT, M4-T04).
 	pub gamut_warning: bool,
+	/// Tool overlay in document coordinates, tessellated by the render thread
+	/// (M5-T02). `None` = nothing to draw over the image.
+	pub overlay: Option<Arc<Overlay>>,
 }
 
 /// Work for the render thread.
@@ -105,11 +115,28 @@ pub(crate) fn run(ctx: RenderContext) {
 	let mut textures: [Option<wgpu::Texture>; 2] = [None, None];
 	let mut next = 0;
 	let mut frame: Option<Frame> = None;
+	let started_at = Instant::now();
+	// The last frame had marching ants: loop on a timer so the dashes move
+	// (M5-T02). A redraw needs no new Frame; the time uniform does the work.
+	let mut animated = false;
 
-	while let Ok(first) = ctx.requests.recv() {
+	loop {
+		let first = if animated {
+			match ctx.requests.recv_timeout(ANTS_INTERVAL) {
+				Ok(request) => Some(request),
+				// Timer fired: draw the same frame again, one dash step on.
+				Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
+				Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+			}
+		} else {
+			match ctx.requests.recv() {
+				Ok(request) => Some(request),
+				Err(_) => break,
+			}
+		};
 		// Only the newest frame matters; wakes just mean "draw again".
 		let mut stop = false;
-		for request in std::iter::once(first).chain(ctx.requests.try_iter()) {
+		for request in first.into_iter().chain(ctx.requests.try_iter()) {
 			match request {
 				RenderRequest::Frame(f) => frame = Some(f),
 				RenderRequest::Wake => {}
@@ -119,11 +146,17 @@ pub(crate) fn run(ctx: RenderContext) {
 		if stop {
 			break;
 		}
-		let Some(f) = &frame else { continue };
+		let Some(f) = &frame else {
+			animated = false;
+			continue;
+		};
 		let viewport = f.viewport;
 		if viewport.width == 0 || viewport.height == 0 {
+			animated = false;
 			continue;
 		}
+		let time = started_at.elapsed().as_secs_f32();
+		animated = f.overlay.as_ref().is_some_and(|overlay| overlay.has_ants());
 		let started = Instant::now();
 
 		let reuse = textures[next]
@@ -155,6 +188,8 @@ pub(crate) fn run(ctx: RenderContext) {
 					doc,
 					f.display_lut.as_deref(),
 					f.gamut_warning,
+					f.overlay.as_deref(),
+					time,
 				) {
 					Ok(more) => {
 						again = more;
@@ -253,6 +288,8 @@ impl TilePipeline {
 		doc: &Arc<Document>,
 		display_lut: Option<&Lut3d>,
 		gamut_warning: bool,
+		overlay: Option<&Overlay>,
+		time: f32,
 	) -> Result<bool, fx_render::gpu::CompositeError> {
 		// A new document or content generation invalidates everything cached
 		// for it; a new snapshot of the same generation (mips committed) only
@@ -343,6 +380,9 @@ impl TilePipeline {
 		// Plan again with this frame's results, and draw.
 		let mut plan: FramePlan = plan_frame(view, viewport, doc.width, doc.height, levels, &|key| self.ready.get(&key).copied().map(slot_of));
 		plan.draws.retain(|d| d.slot != EMPTY_SLOT);
+		// The overlay is tessellated here, on the render thread, so a hover (which
+		// only changes the overlay) never touches the compositor (M5-T02).
+		let vertices = overlay.map(|overlay| tessellate(overlay, view, viewport)).unwrap_or_default();
 		self.renderer.set_display_lut(display_lut);
 		self.renderer.set_gamut_warning(gamut_warning);
 		self.renderer.render(
@@ -352,6 +392,8 @@ impl TilePipeline {
 			&plan,
 			view.zoom,
 			self.compositor.composite_view(),
+			&vertices,
+			time,
 		);
 		Ok(!plan.complete && (progressed || budget_spent))
 	}

@@ -28,12 +28,14 @@ pub mod adjust;
 pub mod blend;
 pub mod frame;
 pub mod gpu;
+pub mod overlay;
 pub mod program;
 pub mod reference;
 pub mod test_pattern;
 pub mod viewport;
 
 pub use frame::{FramePlan, TileDraw, TileKey, plan_frame};
+pub use overlay::{Overlay, OverlayItem, OverlayStyle, OverlayVertex};
 pub use program::{MipRequest, TileProgram, build_program};
 pub use test_pattern::{TestPatternRenderer, VIEWPORT_FORMAT};
 pub use viewport::{TileRange, ViewTransform, ViewportSize};
