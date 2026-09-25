@@ -18,6 +18,7 @@ pub mod layer;
 pub mod ops;
 pub mod pixels;
 pub mod selection;
+pub mod stroke;
 
 pub use blend::BlendMode;
 pub use color::{BitDepth, ColorProfile, DocumentColor, RenderingIntent};
