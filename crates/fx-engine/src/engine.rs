@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
-use fx_core::command::LayerPropsPatch;
+use fx_core::command::{LayerPropsPatch, NewLayer};
 use fx_core::{Command, CommandContext, LayerId, LayerRef};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
@@ -325,6 +325,7 @@ impl Engine {
 				}
 				return Changed::default();
 			}
+			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
 			// Build the B3 benchmark on top of the active document (M2-T08).
 			"debug:load-b3" => {
 				self.load_b3();
@@ -644,6 +645,84 @@ impl Engine {
 				result,
 			});
 		});
+	}
+
+	/// Layer menu actions on the active document's selection, as commands.
+	/// Returns false for the ones not implemented yet (merge, flatten, …).
+	fn layer_action(&mut self, id: &str) -> bool {
+		let Some(doc) = self.docs.active_mut() else { return false };
+		let doc_id = doc.id;
+		let selected: Vec<LayerRef> = doc.doc.selected.iter().map(|&l| LayerRef::Id(l)).collect();
+		let active = doc.doc.active_layer();
+		let hidden: Vec<LayerRef> = {
+			let mut out = Vec::new();
+			doc.doc.walk(|layer, _| {
+				if !layer.visible {
+					out.push(LayerRef::Id(layer.id));
+				}
+			});
+			out
+		};
+		let clipped = active.and_then(|l| doc.doc.layer(l)).is_some_and(|l| l.clipped);
+		let props = |patch: LayerPropsPatch| {
+			selected
+				.iter()
+				.map(|l| Command::SetLayerProps {
+					layer: l.clone(),
+					props: patch.clone(),
+				})
+				.collect::<Vec<_>>()
+		};
+		let commands: Vec<Command> = match id {
+			"layer:new" => vec![Command::AddLayer {
+				layer: NewLayer::Pixel,
+				name: None,
+			}],
+			"layer:new-group" => vec![Command::AddLayer {
+				layer: NewLayer::Group,
+				name: None,
+			}],
+			"layer:group" | "layer:group-from" if !selected.is_empty() => vec![Command::GroupLayers {
+				layers: selected.clone(),
+				name: None,
+			}],
+			// Without a pixel selection (M5), Ctrl+J duplicates the layer, like Photoshop.
+			"layer:duplicate" | "layer:via-copy" if !selected.is_empty() => vec![Command::DuplicateLayers { layers: selected.clone() }],
+			"layer:delete" if !selected.is_empty() => vec![Command::DeleteLayers { layers: selected.clone() }],
+			"layer:delete-hidden" if !hidden.is_empty() => vec![Command::DeleteLayers { layers: hidden }],
+			// Alt+Ctrl+G toggles the clipping mask of the active layer.
+			"layer:clip" => active.map_or_else(Vec::new, |l| {
+				vec![Command::SetLayerProps {
+					layer: LayerRef::Id(l),
+					props: LayerPropsPatch {
+						clipped: Some(!clipped),
+						..Default::default()
+					},
+				}]
+			}),
+			"layer:release-clip" => props(LayerPropsPatch {
+				clipped: Some(false),
+				..Default::default()
+			}),
+			"layer:hide" => props(LayerPropsPatch {
+				visible: Some(false),
+				..Default::default()
+			}),
+			"layer:lock" => props(LayerPropsPatch {
+				locked_pixels: Some(true),
+				locked_position: Some(true),
+				..Default::default()
+			}),
+			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
+				// Nothing selected / nothing hidden: nothing to do, and no toast.
+				return true;
+			}
+			_ => return false,
+		};
+		for command in commands {
+			self.command(doc_id, command);
+		}
+		true
 	}
 
 	fn load_b3(&mut self) {
