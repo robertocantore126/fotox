@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use fx_tiles::TiledImage;
-
 use crate::color::DocumentColor;
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind};
+use crate::selection::Selection;
 
 /// An open image. Cheap to clone: see crate docs.
 #[derive(Clone, Debug)]
@@ -17,8 +16,12 @@ pub struct Document {
 	pub layers: Vec<Arc<Layer>>,
 	/// Selected layers in the Layers panel; the last one is the "active" layer.
 	pub selected: Vec<LayerId>,
-	/// Pixel selection (Gray, document size). `None` = nothing selected. (M5)
-	pub selection: Option<TiledImage>,
+	/// Pixel selection (grey coverage, document size). `None` = nothing
+	/// selected, so the whole canvas is editable. (M5-T03, D-040)
+	pub selection: Option<Selection>,
+	/// The selection the last `Deselect` removed, for `Reselect` (M5-T03).
+	/// Transient: not part of the `.fxd` (D-028).
+	pub reselect: Option<Selection>,
 	/// Incremented by every applied command. Used for cache keys and UI sync.
 	pub revision: u64,
 	next_id: u64,
@@ -120,6 +123,7 @@ impl Document {
 			layers: Vec::new(),
 			selected: Vec::new(),
 			selection: None,
+			reselect: None,
 			revision: 0,
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],

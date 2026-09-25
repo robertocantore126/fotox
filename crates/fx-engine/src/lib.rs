@@ -21,6 +21,7 @@ pub mod filters;
 pub mod layers;
 pub mod mips;
 pub mod ops;
+pub mod selection;
 pub mod thumbs;
 pub mod tools;
 pub mod view;

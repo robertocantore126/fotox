@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fx_core::{CommandError, Conversion, Document, FilterParams, LayerId, PixelOps};
+use fx_core::{BitDepth, CommandError, Conversion, Document, FilterParams, LayerId, PixelOps, SelectModify, Selection, SelectionShape};
 use fx_ops::filter::{self, Geometry};
 use fx_ops::neighbourhood::{LevelSource, TileRef};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
@@ -108,6 +108,21 @@ impl PixelOps for EngineOps {
 		let mut px = [rgba];
 		rgb_transform(conversion)?.apply(&mut px);
 		Ok(px[0])
+	}
+
+	fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, anti_alias: bool, store: &TileStore) -> Result<Selection, CommandError> {
+		fx_ops::raster::rasterise(shape, size, depth, anti_alias, store)
+	}
+
+	fn modify_selection(
+		&self,
+		selection: &Selection,
+		op: &SelectModify,
+		size: (u32, u32),
+		depth: BitDepth,
+		store: &TileStore,
+	) -> Result<Option<Selection>, CommandError> {
+		fx_ops::morph::modify(selection, op, size, depth, store)
 	}
 }
 

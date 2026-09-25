@@ -19,4 +19,6 @@ pub mod filter;
 #[cfg(test)]
 mod filter_tests;
 pub mod gaussian;
+pub mod morph;
 pub mod neighbourhood;
+pub mod raster;

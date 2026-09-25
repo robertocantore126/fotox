@@ -181,7 +181,13 @@ struct Engine {
 	tools: Tools,
 	/// Colours and option-bar values the tools read (M5-T01).
 	settings: ToolSettings,
+	/// The marching-ants overlay of the selection, cached per document,
+	/// generation, view level and visible rectangle (M5-T03).
+	selection_overlay: Option<(SelectionOverlayKey, Arc<fx_render::Overlay>)>,
 }
+
+/// Cache key of the selection contour (M5-T03).
+type SelectionOverlayKey = (DocId, u64, usize, (i64, i64, i64, i64));
 
 /// What makes two consecutive edits "the same" for history merging.
 #[derive(Clone, Debug, PartialEq)]
@@ -276,6 +282,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		display_luts: Vec::new(),
 		tools: Tools::default(),
 		settings: ToolSettings::default(),
+		selection_overlay: None,
 	};
 
 	loop {
@@ -1369,14 +1376,28 @@ impl Engine {
 		};
 		match result {
 			Ok(effect) => {
-				if !effect.selection_only {
+				// A pixel-selection command is a history step but not a document
+				// change (M5-T03): it must not mark the document dirty (D-028),
+				// but the ants have to be redrawn.
+				let content = !effect.selection_only && !effect.history_only;
+				if content {
 					doc.dirty = true;
 					doc.changed();
 					let edited: Vec<LayerId> = effect.props_changed.iter().chain(&effect.pixels_changed).copied().collect();
 					doc.note_edits(&edited, Instant::now());
 				}
 				let pixels = effect.pixels_changed.clone();
-				self.after_edit(id, !effect.selection_only);
+				self.after_edit(id, content);
+				if effect.history_only {
+					// The selection is not part of the content generation (it is
+					// not saved, D-028), so the cached ants are stale now. Drop
+					// them rather than bump the generation: a bump would make the
+					// render thread recomposite the frame.
+					self.selection_overlay = None;
+					if self.docs.active_id() == Some(id) {
+						self.request_frame();
+					}
+				}
 				for layer in pixels {
 					self.refresh_thumbnail(id, layer);
 				}
@@ -1705,7 +1726,7 @@ impl Engine {
 
 	fn request_frame(&mut self) {
 		let virtual_view = self.virtual_view.clone();
-		let overlay = self.active_tool_overlay();
+		let overlay = self.active_overlay();
 		// The display transform needs the cache on `self`, so build it before
 		// borrowing the active document mutably (and only for a real document:
 		// the virtual test pattern has no profile).
@@ -1754,11 +1775,57 @@ impl Engine {
 		let _ = self.render.send(RenderRequest::Frame(frame));
 	}
 
-	/// The active tool's overlay, in document coordinates (M5-T02). `None` when
-	/// no document is open or the tool draws nothing.
-	fn active_tool_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
-		let tool_id = self.docs.active_mut()?.view.tool.clone();
-		self.tools.get(&tool_id)?.overlay().map(Arc::new)
+	/// Everything to draw over the image: the active tool's overlay plus the
+	/// selection's marching ants (M5-T02/T03). `None` when there is nothing.
+	fn active_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
+		let mut items = Vec::new();
+		if let Some(tool_id) = self.docs.active_mut().map(|doc| doc.view.tool.clone())
+			&& let Some(tool) = self.tools.get(&tool_id)
+			&& let Some(overlay) = tool.overlay()
+		{
+			items.extend(overlay.items);
+		}
+		if let Some(selection) = self.selection_overlay() {
+			items.extend(selection.items.iter().cloned());
+		}
+		(!items.is_empty()).then(|| Arc::new(fx_render::Overlay { items }))
+	}
+
+	/// The selection's marching-ants contour, cached (M5-T03): recomputed only
+	/// when the document, its content generation, the view level or the visible
+	/// rectangle changes — panning is the only common invalidator, and a
+	/// selection command clears the cache explicitly (`command`), because it
+	/// does not move the generation.
+	fn selection_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
+		let store = self.store.clone();
+		let (key, selection) = {
+			let doc = self.docs.active_mut()?;
+			let viewport = doc.view.viewport?;
+			let selection = doc.doc.selection.clone()?;
+			let level = doc.view.view.mip_level(selection.image.level_count());
+			let visible = doc.view.view.visible_doc_rect(viewport, doc.doc.width, doc.doc.height)?;
+			let rect = (
+				visible.0.floor() as i64,
+				visible.1.floor() as i64,
+				visible.2.ceil() as i64,
+				visible.3.ceil() as i64,
+			);
+			((doc.id, doc.render_generation(), level, rect), selection)
+		};
+		if let Some((cached, overlay)) = &self.selection_overlay
+			&& *cached == key
+		{
+			return Some(overlay.clone());
+		}
+		let overlay = match crate::selection::contour(&selection, &store, key.2, key.3) {
+			Ok(overlay) => Arc::new(overlay),
+			Err(error) => {
+				tracing::warn!("the selection contour failed: {error}");
+				return None;
+			}
+		};
+		self.selection_overlay = Some((key, overlay.clone()));
+		Some(overlay)
 	}
 
 	/// The monitor profile the shell reported (M4-T02), or `None` while it has

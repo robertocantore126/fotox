@@ -27,6 +27,7 @@ use crate::color::{ColorProfile, RenderingIntent};
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
+use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -139,6 +140,26 @@ pub enum Command {
 	/// Run a destructive filter on a pixel layer (level 0; the engine shows a
 	/// live preview first). M4
 	ApplyFilter { layer: LayerRef, filter: FilterParams },
+	/// Combine a shape into the pixel selection (M5-T03). `feather` blurs the
+	/// new shape's edge before combining.
+	Select {
+		shape: SelectionShape,
+		mode: SelectMode,
+		feather: f64,
+		anti_alias: bool,
+	},
+	/// Select the whole canvas. M5
+	SelectAll,
+	/// Remove the pixel selection; `Reselect` brings it back. M5
+	Deselect,
+	/// Restore the selection the last `Deselect` removed. M5
+	Reselect,
+	/// Invert the pixel selection across the canvas. M5
+	InvertSelection,
+	/// Expand / contract / border / smooth / feather the selection. M5
+	ModifySelection { modify: SelectModify },
+	/// Move the selection outline by whole pixels (never rewrites tiles). M5
+	OffsetSelection { dx: i32, dy: i32 },
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -155,6 +176,11 @@ pub struct CommandEffect {
 	pub structure_changed: bool,
 	/// Only the layer selection changed: do not create an undo step.
 	pub selection_only: bool,
+	/// The command is a real history step but does not change the document
+	/// (M5-T03: the pixel selection is recorded like Photoshop records it, yet
+	/// it is not saved — D-028 — so making a selection must not dirty the
+	/// document).
+	pub history_only: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +229,18 @@ impl Command {
 			Command::StampVisible => stamp_visible(doc, ctx),
 			Command::AssignProfile { profile } => assign_profile(doc, profile),
 			Command::ConvertProfile { profile, intent, bpc } => convert_profile(doc, profile, *intent, *bpc, ctx),
+			Command::Select {
+				shape,
+				mode,
+				feather,
+				anti_alias,
+			} => select(doc, shape, *mode, *feather, *anti_alias, ctx),
+			Command::SelectAll => select_all(doc),
+			Command::Deselect => deselect(doc),
+			Command::Reselect => reselect(doc),
+			Command::InvertSelection => invert_selection(doc, ctx),
+			Command::ModifySelection { modify } => modify_selection(doc, modify, ctx),
+			Command::OffsetSelection { dx, dy } => offset_selection(doc, *dx, *dy),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -1134,6 +1172,129 @@ fn checked_offset(value: i32, delta: i32) -> Result<i32, CommandError> {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// The pixel selection (M5-T03)
+// ---------------------------------------------------------------------------
+
+/// A selection command's effect: a real history step, but not a document
+/// change (the selection is not saved — D-028).
+fn selection_effect(label: &str) -> CommandEffect {
+	CommandEffect {
+		label: label.into(),
+		history_only: true,
+		..Default::default()
+	}
+}
+
+/// The Photoshop History label of a rasterised shape.
+fn shape_label(shape: &SelectionShape) -> &'static str {
+	match shape {
+		SelectionShape::Rect { .. } => "Rectangular Marquee",
+		SelectionShape::Ellipse { .. } => "Elliptical Marquee",
+		SelectionShape::Polygon { .. } => "Lasso",
+		SelectionShape::RowPixel { .. } => "Single Row Marquee",
+		SelectionShape::ColumnPixel { .. } => "Single Column Marquee",
+	}
+}
+
+fn select(
+	doc: &mut Document,
+	shape: &SelectionShape,
+	mode: SelectMode,
+	feather: f64,
+	anti_alias: bool,
+	ctx: &mut CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if !feather.is_finite() || feather < 0.0 {
+		return Err(CommandError::InvalidValue {
+			field: "feather",
+			reason: format!("{feather} is not a distance"),
+		});
+	}
+	let size = (doc.width, doc.height);
+	let depth = doc.color.depth;
+	let Some(ops) = ctx.ops else {
+		return Err(CommandError::NotAllowed("a selection needs the engine's rasteriser".into()));
+	};
+	let mut shape_selection = ops.rasterise(shape, size, depth, anti_alias, ctx.tiles)?;
+	if feather > 0.0 {
+		shape_selection = ops
+			.modify_selection(&shape_selection, &SelectModify::Feather(feather), size, depth, ctx.tiles)?
+			.unwrap_or_else(|| Selection::empty(size, depth));
+	}
+	doc.selection = selection::combine(size, doc.selection.as_ref(), &shape_selection, mode, ctx.tiles)?;
+	Ok(selection_effect(shape_label(shape)))
+}
+
+fn select_all(doc: &mut Document) -> Result<CommandEffect, CommandError> {
+	if doc.width == 0 || doc.height == 0 {
+		return Err(CommandError::NotAllowed("the document is empty".into()));
+	}
+	doc.selection = Some(Selection::full((doc.width, doc.height), doc.color.depth));
+	Ok(selection_effect("Select All"))
+}
+
+fn deselect(doc: &mut Document) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.selection.take() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	doc.reselect = Some(selection);
+	Ok(selection_effect("Deselect"))
+}
+
+fn reselect(doc: &mut Document) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.reselect.take() else {
+		return Err(CommandError::NotAllowed("no deselected selection to restore".into()));
+	};
+	doc.selection = Some(selection);
+	Ok(selection_effect("Reselect"))
+}
+
+fn invert_selection(doc: &mut Document, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if doc.width == 0 || doc.height == 0 {
+		return Err(CommandError::NotAllowed("the document is empty".into()));
+	}
+	let size = (doc.width, doc.height);
+	let Some(source) = doc.selection.take() else {
+		// Inverting nothing selects everything, like Photoshop.
+		doc.selection = Some(Selection::full(size, doc.color.depth));
+		return Ok(selection_effect("Inverse"));
+	};
+	doc.selection = Some(selection::invert(size, &source, ctx.tiles)?);
+	Ok(selection_effect("Inverse"))
+}
+
+fn modify_selection(doc: &mut Document, op: &SelectModify, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let size = (doc.width, doc.height);
+	let depth = doc.color.depth;
+	let Some(ops) = ctx.ops else {
+		return Err(CommandError::NotAllowed("a selection change needs the engine's distance transform".into()));
+	};
+	let Some(current) = doc.selection.as_ref() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	let modified = ops.modify_selection(current, op, size, depth, ctx.tiles)?;
+	let label = match op {
+		SelectModify::Expand(_) => "Expand Selection",
+		SelectModify::Contract(_) => "Contract Selection",
+		SelectModify::Border(_) => "Border Selection",
+		SelectModify::Smooth(_) => "Smooth Selection",
+		SelectModify::Feather(_) => "Feather Selection",
+	};
+	doc.selection = modified;
+	Ok(selection_effect(label))
+}
+
+fn offset_selection(doc: &mut Document, dx: i32, dy: i32) -> Result<CommandEffect, CommandError> {
+	let Some(selection) = doc.selection.as_mut() else {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	};
+	let x = checked_offset(selection.offset.0, dx)?;
+	let y = checked_offset(selection.offset.1, dy)?;
+	selection.offset = (x, y);
+	Ok(selection_effect("Move Selection"))
+}
+
 #[cfg(test)]
 mod tests {
 	use fx_tiles::{TILE_SIZE, TileStoreConfig};
@@ -1141,6 +1302,7 @@ mod tests {
 	use super::*;
 	use crate::color::{BitDepth, ColorProfile, DocumentColor};
 	use crate::history::History;
+	use crate::selection::{SelectMode, SelectModify, SelectionShape, gray_at, set_gray as set_coverage};
 
 	/// Stands in for the engine's pixel operations: a composite is a solid
 	/// image whose value counts the layers composited; a filter returns the
@@ -1167,6 +1329,50 @@ mod tests {
 		fn convert_color(&self, rgba: [u16; 4], _: &crate::ops::Conversion<'_>) -> Result<[u16; 4], CommandError> {
 			// "Converted": the red and blue channels swap, so the test can see it.
 			Ok([rgba[2], rgba[1], rgba[0], rgba[3]])
+		}
+
+		fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, _: bool, store: &TileStore) -> Result<Selection, CommandError> {
+			// Rectangles only: enough to drive the selection commands the tests
+			// below exercise. The real rasteriser is tested in `fx-ops`.
+			let (x0, y0, x1, y1) = match shape {
+				SelectionShape::Rect { x, y, w, h } => (x.floor() as i64, y.floor() as i64, (x + w).ceil() as i64, (y + h).ceil() as i64),
+				_ => return Ok(Selection::empty(size, depth)),
+			};
+			let format = depth.gray_format();
+			let mut selection = Selection::empty(size, depth);
+			let (tw, th) = (size.0.div_ceil(TILE_SIZE), size.1.div_ceil(TILE_SIZE));
+			for ty in 0..th {
+				for tx in 0..tw {
+					let mut buffer = TileBuffer::zeroed(format);
+					let mut used = false;
+					for py in 0..TILE_SIZE {
+						for px in 0..TILE_SIZE {
+							let (x, y) = (i64::from(tx * TILE_SIZE + px), i64::from(ty * TILE_SIZE + py));
+							if x >= x0 && x < x1 && y >= y0 && y < y1 {
+								set_coverage(&mut buffer, format, px, py, 1.0);
+								used = true;
+							}
+						}
+					}
+					if used {
+						selection.image.put_buffer(store, tx, ty, buffer);
+					}
+				}
+			}
+			Ok(selection)
+		}
+
+		fn modify_selection(
+			&self,
+			selection: &Selection,
+			_: &SelectModify,
+			_: (u32, u32),
+			_: BitDepth,
+			_: &TileStore,
+		) -> Result<Option<Selection>, CommandError> {
+			// Identity: the commands only need to see their own plumbing here;
+			// the reshaping algorithms are tested in `fx-ops`.
+			Ok(Some(selection.clone()))
 		}
 	}
 
@@ -1223,6 +1429,17 @@ mod tests {
 				ops: Some(&ops),
 			};
 			self.history.execute(&mut self.doc, command, &mut ctx)
+		}
+
+		fn ok_with_ops(&mut self, command: Command) -> CommandEffect {
+			self.run_with_ops(command.clone()).unwrap_or_else(|error| panic!("{command:?} failed: {error}"))
+		}
+
+		fn fail_with_ops(&mut self, command: Command) -> CommandError {
+			match self.run_with_ops(command.clone()) {
+				Err(error) => error,
+				Ok(effect) => panic!("{command:?} unexpectedly succeeded: {effect:?}"),
+			}
 		}
 
 		/// Add a layer and return its id (`AddLayer` selects it).
@@ -2772,5 +2989,232 @@ mod tests {
 		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [300, 200, 100, 65535] }));
 		f.history.undo(&mut f.doc);
 		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998, "undo restores the profile");
+	}
+
+	// -----------------------------------------------------------------------
+	// The pixel selection (M5-T03)
+	// -----------------------------------------------------------------------
+
+	/// Coverage of the fixture's current selection at one document pixel.
+	fn coverage(f: &Fixture, x: u32, y: u32) -> f32 {
+		let Some(selection) = &f.doc.selection else {
+			return 0.0;
+		};
+		let format = selection.image.format();
+		let (ix, iy) = (i64::from(x) - i64::from(selection.offset.0), i64::from(y) - i64::from(selection.offset.1));
+		if ix < 0 || iy < 0 || ix >= i64::from(selection.image.width()) || iy >= i64::from(selection.image.height()) {
+			return 0.0;
+		}
+		match selection.image.slot(0, ix as u32 / TILE_SIZE, iy as u32 / TILE_SIZE) {
+			TileSlot::Empty => 0.0,
+			TileSlot::Solid(value) => f32::from(value.0[0]) / 65535.0,
+			TileSlot::Data(handle) => gray_at(&f.store.get(handle).unwrap(), format, ix as u32 % TILE_SIZE, iy as u32 % TILE_SIZE),
+		}
+	}
+
+	/// `Select` with a rectangle, the one shape [`FakeOps`] rasterises.
+	fn rect_select(x: f64, y: f64, w: f64, h: f64, mode: SelectMode) -> Command {
+		Command::Select {
+			shape: SelectionShape::Rect { x, y, w, h },
+			mode,
+			feather: 0.0,
+			anti_alias: true,
+		}
+	}
+
+	#[test]
+	fn a_rectangular_selection_is_one_history_step_that_undoes() {
+		let mut f = Fixture::new();
+		let effect = f.ok_with_ops(rect_select(10.0, 20.0, 30.0, 40.0, SelectMode::Replace));
+		assert_eq!(effect.label, "Rectangular Marquee");
+		// A real history step, but not a document change: the engine saves the
+		// document only for the latter (D-028, `CommandEffect::history_only`).
+		assert!(effect.history_only && !effect.selection_only);
+		assert!(effect.pixels_changed.is_empty() && effect.props_changed.is_empty());
+		assert_eq!(f.history.labels().collect::<Vec<_>>(), ["Rectangular Marquee"]);
+		assert_eq!(coverage(&f, 15, 25), 1.0, "inside");
+		assert_eq!(coverage(&f, 5, 25), 0.0, "left of the rectangle");
+		assert_eq!(coverage(&f, 39, 59), 1.0, "the last row and column");
+		assert_eq!(coverage(&f, 40, 20), 0.0, "just past the right edge");
+		assert!(f.history.undo(&mut f.doc));
+		assert!(f.doc.selection.is_none(), "undo takes the selection away");
+		assert!(f.history.redo(&mut f.doc));
+		assert_eq!(coverage(&f, 15, 25), 1.0, "redo brings it back");
+	}
+
+	#[test]
+	fn selection_commands_need_the_engine_and_reject_bad_values() {
+		let mut f = Fixture::new();
+		let error = f.fail(rect_select(0.0, 0.0, 10.0, 10.0, SelectMode::Replace));
+		assert!(matches!(error, CommandError::NotAllowed(_)), "without PixelOps: {error}");
+		assert!(f.doc.selection.is_none(), "nothing was selected");
+		let error = f.fail_with_ops(Command::Select {
+			shape: SelectionShape::Rect {
+				x: 0.0,
+				y: 0.0,
+				w: 1.0,
+				h: 1.0,
+			},
+			mode: SelectMode::Replace,
+			feather: -1.0,
+			anti_alias: true,
+		});
+		assert!(matches!(error, CommandError::InvalidValue { field: "feather", .. }), "{error}");
+		assert!(f.fail(Command::Deselect).to_string().contains("nothing is selected"));
+		assert!(f.fail(Command::Reselect).to_string().contains("no deselected selection"));
+		// These are pure model code: they need no PixelOps.
+		f.ok(Command::SelectAll);
+		let error = f.fail(Command::ModifySelection {
+			modify: SelectModify::Expand(2.0),
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error}");
+	}
+
+	#[test]
+	fn select_all_deselect_and_reselect_each_undo() {
+		let mut f = Fixture::new();
+		f.ok(Command::SelectAll);
+		assert_eq!((coverage(&f, 0, 0), coverage(&f, 399, 299)), (1.0, 1.0), "the whole canvas");
+		f.ok(Command::Deselect);
+		assert!(f.doc.selection.is_none());
+		assert!(f.doc.reselect.is_some(), "kept for Reselect");
+		f.ok(Command::Reselect);
+		assert_eq!(coverage(&f, 100, 100), 1.0);
+		assert!(f.doc.reselect.is_none(), "restored, so there is nothing left to restore");
+		// Walk the three steps back.
+		assert!(f.history.undo(&mut f.doc), "Reselect");
+		assert!(f.doc.selection.is_none());
+		assert!(f.history.undo(&mut f.doc), "Deselect");
+		assert_eq!(coverage(&f, 100, 100), 1.0);
+		assert!(f.history.undo(&mut f.doc), "Select All");
+		assert!(f.doc.selection.is_none());
+		assert!(!f.history.can_undo(), "three commands, three steps");
+	}
+
+	#[test]
+	fn inverting_selects_everything_but_the_old_selection() {
+		let mut f = Fixture::new();
+		// Inverting nothing selects everything, like Photoshop.
+		assert_eq!(f.ok(Command::InvertSelection).label, "Inverse");
+		assert_eq!(coverage(&f, 399, 299), 1.0);
+		f.ok_with_ops(rect_select(0.0, 0.0, 100.0, 100.0, SelectMode::Replace));
+		f.ok(Command::InvertSelection);
+		assert_eq!(coverage(&f, 50, 50), 0.0, "the rectangle is gone");
+		assert_eq!(coverage(&f, 150, 50), 1.0, "everything else is selected");
+		assert_eq!(coverage(&f, 300, 250), 1.0, "to the far corner");
+		f.history.undo(&mut f.doc);
+		assert_eq!(coverage(&f, 50, 50), 1.0, "undo restores the rectangle");
+		assert_eq!(coverage(&f, 150, 50), 0.0);
+		// Inverting everything selected leaves an empty selection (the ants
+		// disappear), like Photoshop's "no pixels are selected".
+		f.ok(Command::SelectAll);
+		f.ok(Command::InvertSelection);
+		assert!(f.doc.selection.as_ref().unwrap().is_empty());
+	}
+
+	#[test]
+	fn a_moved_selection_keeps_its_coverage_and_inverts_in_document_space() {
+		let mut f = Fixture::new();
+		f.ok_with_ops(rect_select(0.0, 0.0, 100.0, 100.0, SelectMode::Replace));
+		assert_eq!(f.ok(Command::OffsetSelection { dx: 5, dy: 7 }).label, "Move Selection");
+		assert_eq!(f.doc.selection.as_ref().unwrap().offset, (5, 7), "the tiles never moved");
+		assert_eq!(coverage(&f, 50, 50), 1.0, "the rectangle reads at its new place");
+		assert_eq!(coverage(&f, 3, 3), 0.0, "and no longer at the old one");
+		f.ok(Command::InvertSelection);
+		assert_eq!(coverage(&f, 50, 50), 0.0);
+		assert_eq!(coverage(&f, 3, 3), 1.0, "inverted in document space");
+		assert_eq!(coverage(&f, 104, 106), 0.0, "the moved rectangle's last pixel");
+		assert_eq!(coverage(&f, 105, 106), 1.0, "just past it");
+	}
+
+	#[test]
+	fn a_new_shape_combines_with_the_current_selection_by_mode() {
+		let mut f = Fixture::new();
+		f.ok_with_ops(rect_select(0.0, 0.0, 100.0, 100.0, SelectMode::Replace));
+		f.ok_with_ops(rect_select(50.0, 0.0, 100.0, 100.0, SelectMode::Add));
+		assert_eq!((coverage(&f, 25, 25), coverage(&f, 75, 25), coverage(&f, 120, 25)), (1.0, 1.0, 1.0));
+		f.ok_with_ops(rect_select(50.0, 0.0, 100.0, 100.0, SelectMode::Subtract));
+		assert_eq!((coverage(&f, 25, 25), coverage(&f, 75, 25), coverage(&f, 120, 25)), (1.0, 0.0, 0.0));
+		f.ok_with_ops(rect_select(0.0, 0.0, 60.0, 60.0, SelectMode::Intersect));
+		assert_eq!((coverage(&f, 25, 25), coverage(&f, 75, 25)), (1.0, 0.0));
+		f.ok_with_ops(rect_select(200.0, 200.0, 50.0, 50.0, SelectMode::Replace));
+		assert_eq!((coverage(&f, 225, 225), coverage(&f, 25, 25)), (1.0, 0.0), "Replace drops the old one");
+		assert_eq!(f.history.labels().collect::<Vec<_>>(), ["Rectangular Marquee"; 5], "one step each");
+	}
+
+	#[test]
+	fn every_selection_command_round_trips_through_json() {
+		let commands = vec![
+			rect_select(1.5, 2.5, 3.0, 4.0, SelectMode::Add),
+			Command::Select {
+				shape: SelectionShape::Ellipse {
+					x: 0.0,
+					y: 1.0,
+					w: 10.0,
+					h: 20.0,
+				},
+				mode: SelectMode::Subtract,
+				feather: 2.5,
+				anti_alias: false,
+			},
+			Command::Select {
+				shape: SelectionShape::Polygon {
+					points: vec![(0.0, 0.0), (10.0, 0.0), (5.0, 8.0)],
+				},
+				mode: SelectMode::Intersect,
+				feather: 0.0,
+				anti_alias: true,
+			},
+			Command::Select {
+				shape: SelectionShape::RowPixel { y: 3.0 },
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: true,
+			},
+			Command::Select {
+				shape: SelectionShape::ColumnPixel { x: 3.0 },
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: true,
+			},
+			Command::SelectAll,
+			Command::Deselect,
+			Command::Reselect,
+			Command::InvertSelection,
+			Command::ModifySelection {
+				modify: SelectModify::Expand(2.0),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Contract(2.0),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Border(4.0),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Smooth(1.5),
+			},
+			Command::ModifySelection {
+				modify: SelectModify::Feather(3.0),
+			},
+			Command::OffsetSelection { dx: -2, dy: 5 },
+		];
+		for command in commands {
+			let json = serde_json::to_string(&command).unwrap();
+			assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), command, "{json}");
+		}
+		// Pin the wire shapes: they are part of saved macros and of the
+		// `command` message the UI sends (docs/PROTOCOL.md §4).
+		assert_eq!(serde_json::to_string(&Command::SelectAll).unwrap(), r#"{"op":"select_all"}"#);
+		assert_eq!(
+			serde_json::to_string(&rect_select(1.5, 2.5, 3.0, 4.0, SelectMode::Add)).unwrap(),
+			r#"{"op":"select","shape":{"shape":"rect","x":1.5,"y":2.5,"w":3.0,"h":4.0},"mode":"add","feather":0.0,"anti_alias":true}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::ModifySelection {
+				modify: SelectModify::Feather(3.0)
+			})
+			.unwrap(),
+			r#"{"op":"modify_selection","modify":{"kind":"feather","px":3.0}}"#
+		);
 	}
 }
