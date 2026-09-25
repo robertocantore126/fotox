@@ -22,7 +22,9 @@ struct Globals {
 	nearest: u32,
 	/// 1 = run the composite through the display LUT.
 	apply_lut: u32,
-	_unused: [f32; 4],
+	/// 1.0 = paint out-of-gamut colours grey (the LUT's alpha flag, M4-T04).
+	gamut_warning: f32,
+	_unused: [f32; 3],
 	doc_rect: [f32; 4],
 }
 
@@ -60,6 +62,8 @@ pub struct ViewportRenderer {
 	/// Key of the LUT currently in `lut` (so an unchanged profile is not
 	/// re-uploaded every frame).
 	lut_key: Option<u64>,
+	/// Gamut warning on (needs a proof LUT, M4-T04).
+	gamut_warning: bool,
 }
 
 impl ViewportRenderer {
@@ -219,7 +223,13 @@ impl ViewportRenderer {
 			lut_view,
 			placeholder,
 			lut_key: None,
+			gamut_warning: false,
 		}
+	}
+
+	/// Paint the colours the proof LUT flags as out of gamut grey (M4-T04).
+	pub fn set_gamut_warning(&mut self, on: bool) {
+		self.gamut_warning = on;
 	}
 
 	/// Upload the display LUT if it is a new one. `None` = document and monitor
@@ -292,6 +302,7 @@ impl ViewportRenderer {
 				size: [size.0 as f32, size.1 as f32],
 				nearest: (zoom >= 1.0) as u32,
 				apply_lut: self.lut_key.is_some() as u32,
+				gamut_warning: if self.gamut_warning && self.lut_key.is_some() { 1.0 } else { 0.0 },
 				doc_rect: plan.doc_rect,
 				..Default::default()
 			}),

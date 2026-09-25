@@ -385,6 +385,14 @@ impl Engine {
 		match message {
 			UiToEngine::Hello { ui_version } => {
 				tracing::info!("UI connected (ui_version {ui_version})");
+				let profiles = cmyk_profile_files()
+					.into_iter()
+					.map(|p| fx_protocol::CmykProfileInfo {
+						name: p.name,
+						path: p.path.display().to_string(),
+					})
+					.collect();
+				self.to_ui(&EngineToUi::CmykProfiles { profiles });
 				self.to_ui(&EngineToUi::Toast {
 					text: "Engine connected".into(),
 				});
@@ -448,6 +456,16 @@ impl Engine {
 				self.cancel_preview(doc);
 				Changed::default()
 			}
+			UiToEngine::ProofSetup {
+				doc,
+				path,
+				intent,
+				bpc,
+				simulate_paper,
+			} => {
+				self.proof_setup(doc, PathBuf::from(path), intent, bpc, simulate_paper);
+				Changed { view: true, cursor: None }
+			}
 			// Shell messages never reach the engine; documents commands, undo
 			// and thumbnails arrive with M2.
 			other => {
@@ -467,6 +485,11 @@ impl Engine {
 			}
 			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
 			// Build the B3 benchmark on top of the active document (M2-T08).
+			// View ▸ Proof Colors (Ctrl+Y) / Gamut Warning (Shift+Ctrl+Y), M4-T04.
+			"view:proof-colors" | "view:gamut-warning" => {
+				self.toggle_proof(id == "view:gamut-warning");
+				return Changed { view: true, cursor: None };
+			}
 			// Filter ▸ Last Filter (Ctrl+F): the last filter, same parameters.
 			"filter:last" => {
 				match (self.docs.active_id(), self.last_filter.clone()) {
@@ -647,7 +670,7 @@ impl Engine {
 			// An opaque document is written without alpha (a quarter smaller for RGB).
 			let opaque = crate::export::opaque_background(&doc, &store);
 			let result = crate::export::options_for(&doc, &path, opaque)
-				.map(|options| crate::export::apply_choice(options, choice, opaque))
+				.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
 				.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
@@ -1581,12 +1604,17 @@ impl Engine {
 		// The display transform needs the cache on `self`, so build it before
 		// borrowing the active document mutably (and only for a real document:
 		// the virtual test pattern has no profile).
-		let display_lut = match self.docs.active_mut() {
+		let (display_lut, gamut_warning) = match self.docs.active_mut() {
 			Some(doc) => {
 				let profile = doc.doc.color.profile.clone();
-				self.display_lut_for(&profile)
+				let proof = doc.proof_colors.then(|| doc.proof.clone()).flatten();
+				let gamut = doc.gamut_warning && proof.is_some();
+				match proof {
+					Some(proof) => (self.proof_lut_for(&profile, &proof), gamut),
+					None => (self.display_lut_for(&profile), false),
+				}
 			}
-			None => None,
+			None => (None, false),
 		};
 		let frame = match self.docs.active_mut() {
 			Some(doc) => {
@@ -1599,6 +1627,7 @@ impl Engine {
 					hot_layer: doc.hot_layer(),
 					virtual_doc: VIRTUAL_DOC,
 					display_lut,
+					gamut_warning,
 				}
 			}
 			None => {
@@ -1611,6 +1640,7 @@ impl Engine {
 					hot_layer: None,
 					virtual_doc: VIRTUAL_DOC,
 					display_lut: None,
+					gamut_warning: false,
 				}
 			}
 		};
@@ -1648,6 +1678,99 @@ impl Engine {
 	/// Built here, on the engine thread: the render thread only uploads it
 	/// (M4-T02). The result is cached because a moving window, a tab switch or
 	/// a slider drag must not rebuild a 35 937-sample transform per frame.
+	fn proof_lut_for(&mut self, profile: &ColorProfile, proof: &crate::documents::ProofSettings) -> Option<Arc<fx_color::Lut3d>> {
+		let monitor = self.monitor_profile().unwrap_or(ColorProfile::Srgb);
+		let intent = fx_color::lcms_intent(proof.intent);
+		let key = {
+			use std::hash::{Hash, Hasher};
+			let mut h = std::collections::hash_map::DefaultHasher::new();
+			fx_color::display_lut_key(profile, &monitor, intent, proof.bpc).hash(&mut h);
+			proof.icc.hash(&mut h);
+			proof.simulate_paper.hash(&mut h);
+			h.finish()
+		};
+		if let Some((_, lut)) = self.display_luts.iter().find(|(k, _)| *k == key) {
+			return lut.clone();
+		}
+		let built = match fx_color::proof_lut(profile, &proof.icc, &monitor, intent, proof.bpc, proof.simulate_paper) {
+			Ok(lut) => Some(Arc::new(lut)),
+			Err(error) => {
+				tracing::error!("cannot build the proof transform: {error}");
+				None
+			}
+		};
+		self.display_luts.push((key, built.clone()));
+		if self.display_luts.len() > DISPLAY_LUT_CACHE {
+			self.display_luts.remove(0);
+		}
+		built
+	}
+
+	/// View ▸ Proof Setup (M4-T04): the press to simulate; turns Proof Colors on.
+	fn proof_setup(&mut self, id: DocId, path: PathBuf, intent: fx_core::RenderingIntent, bpc: bool, simulate_paper: bool) {
+		let icc = match std::fs::read(&path) {
+			Ok(bytes) if fx_color::cmyk_profile(&bytes).is_ok() => bytes,
+			_ => {
+				self.to_ui(&EngineToUi::Error {
+					text: format!("{} is not a readable CMYK profile", path.display()),
+				});
+				return;
+			}
+		};
+		let Some(open) = self.docs.get_mut(id) else { return };
+		open.proof = Some(crate::documents::ProofSettings {
+			path,
+			icc: Arc::from(icc),
+			intent,
+			bpc,
+			simulate_paper,
+		});
+		open.proof_colors = true;
+		self.send_proof_state(id);
+	}
+
+	/// Ctrl+Y / Shift+Ctrl+Y on the active document. Without a Proof Setup yet,
+	/// the first CMYK profile found is used (Windows ships RSWOP.icm).
+	fn toggle_proof(&mut self, gamut: bool) {
+		let Some(id) = self.docs.active_id() else { return };
+		let needs_setup = self.docs.get_mut(id).is_some_and(|open| open.proof.is_none());
+		if needs_setup {
+			match cmyk_profile_files().into_iter().next() {
+				Some(first) => self.proof_setup(id, first.path, fx_core::RenderingIntent::RelativeColorimetric, true, false),
+				None => {
+					self.to_ui(&EngineToUi::Toast {
+						text: "No CMYK profile found: add one to %APPDATA%\\Fotox\\profiles".into(),
+					});
+					return;
+				}
+			}
+			if !gamut {
+				return; // proof_setup already turned Proof Colors on
+			}
+		}
+		let Some(open) = self.docs.get_mut(id) else { return };
+		if gamut {
+			open.gamut_warning = !open.gamut_warning;
+		} else {
+			open.proof_colors = !open.proof_colors;
+		}
+		self.send_proof_state(id);
+	}
+
+	fn send_proof_state(&mut self, id: DocId) {
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let message = EngineToUi::ProofState {
+			doc: id,
+			proof_colors: open.proof_colors,
+			gamut_warning: open.gamut_warning,
+			profile: open
+				.proof
+				.as_ref()
+				.map(|p| fx_color::icc_description(&p.icc).unwrap_or_else(|| p.path.display().to_string())),
+		};
+		self.to_ui(&message);
+	}
+
 	fn display_lut_for(&mut self, profile: &ColorProfile) -> Option<Arc<fx_color::Lut3d>> {
 		let monitor = self.monitor_profile().unwrap_or(ColorProfile::Srgb);
 		if fx_color::same_profile(profile, &monitor) {
@@ -1763,11 +1886,20 @@ fn display_transform(profile: &ColorProfile, monitor: Option<&[u8]>) -> Result<O
 	Ok((!lut.is_identity(1.0 / 255.0)).then_some(lut))
 }
 
+/// The CMYK profiles for proofing and export (D-032): Windows' colour folder
+/// and `%APPDATA%/Fotox/profiles`.
+fn cmyk_profile_files() -> Vec<fx_color::CmykProfileFile> {
+	let windows = std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join(r"System32\spool\drivers\color"));
+	let user = std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join(r"Fotox\profiles"));
+	let dirs: Vec<PathBuf> = [windows, user].into_iter().flatten().collect();
+	fx_color::cmyk_profiles(&dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+}
+
 /// Commands whose pixel work is too heavy for the engine thread (M4).
 fn is_pixel_job(command: &Command) -> bool {
 	matches!(
 		command,
-		Command::ApplyFilter { .. } | Command::MergeLayers { .. } | Command::Flatten | Command::StampVisible
+		Command::ApplyFilter { .. } | Command::MergeLayers { .. } | Command::Flatten | Command::StampVisible | Command::ConvertProfile { .. }
 	)
 }
 
@@ -1778,6 +1910,7 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::MergeLayers { .. } => "Merge Layers".to_owned(),
 		Command::Flatten => "Flatten Image".to_owned(),
 		Command::StampVisible => "Stamp Visible".to_owned(),
+		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }

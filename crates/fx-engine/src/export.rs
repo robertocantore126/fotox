@@ -20,8 +20,8 @@ use rayon::prelude::*;
 const _: () = assert!(EXPORT_BAND_ROWS == TILE_SIZE, "one band = one row of tiles");
 
 /// Options for exporting `doc` to `path`: the format from the extension, the
-/// document's bit depth, its ppi; transparency kept unless `opaque` (see
-/// [`opaque_background`]).
+/// document's bit depth, its ppi and its ICC profile (embedded, M4-T03);
+/// transparency kept unless `opaque` (see [`opaque_background`]).
 pub fn options_for(doc: &Document, path: &Path, opaque: bool) -> Result<ExportOptions, IoError> {
 	let format = ExportFormat::from_path(path).ok_or_else(|| IoError::Unsupported("export to this file type (use .tif, .png or .jpg)".into()))?;
 	// JPEG is 8-bit and has no alpha: the band is flattened onto white.
@@ -34,6 +34,7 @@ pub fn options_for(doc: &Document, path: &Path, opaque: bool) -> Result<ExportOp
 			BitDepth::U16 => 16,
 		}
 	};
+	let icc = fx_color::icc_bytes(&doc.color.profile).ok().map(std::sync::Arc::from);
 	Ok(ExportOptions {
 		format,
 		bits,
@@ -41,6 +42,8 @@ pub fn options_for(doc: &Document, path: &Path, opaque: bool) -> Result<ExportOp
 		ppi: doc.ppi,
 		quality: 90,
 		chroma: JpegChroma::Full,
+		icc,
+		cmyk: None,
 	})
 }
 
@@ -86,9 +89,26 @@ pub fn opaque_background(doc: &Document, store: &TileStore) -> bool {
 
 /// Apply the Export As dialog's choices to the default options: 8-bit,
 /// transparency on/off (never for JPEG, which has no alpha), JPEG quality and
-/// chroma. `None` keeps the defaults.
-pub fn apply_choice(mut options: ExportOptions, choice: Option<crate::ExportChoice>, opaque: bool) -> ExportOptions {
-	let Some(choice) = choice else { return options };
+/// chroma, and CMYK conversion (TIFF, M4-T04) from `profile` — the document's.
+/// `None` keeps the defaults.
+pub fn apply_choice(
+	mut options: ExportOptions,
+	choice: Option<crate::ExportChoice>,
+	opaque: bool,
+	profile: &fx_core::ColorProfile,
+) -> Result<ExportOptions, IoError> {
+	let Some(choice) = choice else { return Ok(options) };
+	if let Some(path) = &choice.cmyk {
+		let icc = std::fs::read(path)?;
+		// Relative colorimetric with black point compensation (D-033).
+		let transform = fx_color::CmykTransform::new(profile, &icc, fx_core::RenderingIntent::RelativeColorimetric, true)
+			.map_err(|error| IoError::Unsupported(format!("CMYK profile {}: {error}", path.display())))?;
+		options.cmyk = Some(fx_io::export::CmykExport {
+			convert: std::sync::Arc::new(move |rgb: &[[u16; 3]], out: &mut [[u16; 4]]| transform.apply(rgb, out)),
+			icc: std::sync::Arc::from(icc),
+		});
+		options.alpha = false;
+	}
 	if choice.eight_bit {
 		options.bits = 8;
 	}
@@ -96,7 +116,10 @@ pub fn apply_choice(mut options: ExportOptions, choice: Option<crate::ExportChoi
 	options.alpha = !jpeg && choice.transparency.unwrap_or(!opaque);
 	options.quality = choice.quality.min(100);
 	options.chroma = if choice.chroma_half { JpegChroma::Half } else { JpegChroma::Full };
-	options
+	if options.cmyk.is_some() {
+		options.alpha = false;
+	}
+	Ok(options)
 }
 
 /// Composite `doc` and write it to `path`.
@@ -326,17 +349,8 @@ mod tests {
 		let path = dir().join("composite.png");
 		assert!(opaque_background(&doc, &store), "the red background is opaque");
 		let options = options_for(&doc, &path, false).unwrap();
-		assert_eq!(
-			options,
-			ExportOptions {
-				format: ExportFormat::Png,
-				bits: 16,
-				alpha: true,
-				ppi: 72.0,
-				quality: 90,
-				chroma: JpegChroma::Full
-			}
-		);
+		assert_eq!((options.format, options.bits, options.alpha, options.ppi), (ExportFormat::Png, 16, true, 72.0));
+		assert!(options.icc.is_some(), "the document's profile is embedded");
 		export_document(&doc, &store, &path, options, &mut |_| true).unwrap();
 
 		let back = fx_io::import_file(&path, &store, &mut |_| true).unwrap();

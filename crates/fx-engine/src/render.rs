@@ -64,6 +64,8 @@ pub(crate) struct Frame {
 	/// document profile is already the monitor profile (identity shortcut).
 	/// Built on the engine thread: the render thread only uploads it.
 	pub display_lut: Option<Arc<Lut3d>>,
+	/// Paint out-of-gamut colours grey (with a proof LUT, M4-T04).
+	pub gamut_warning: bool,
 }
 
 /// Work for the render thread.
@@ -152,6 +154,7 @@ pub(crate) fn run(ctx: RenderContext) {
 					(*id, f.generation),
 					doc,
 					f.display_lut.as_deref(),
+					f.gamut_warning,
 				) {
 					Ok(more) => {
 						again = more;
@@ -249,6 +252,7 @@ impl TilePipeline {
 		(id, generation): (DocId, u64),
 		doc: &Arc<Document>,
 		display_lut: Option<&Lut3d>,
+		gamut_warning: bool,
 	) -> Result<bool, fx_render::gpu::CompositeError> {
 		// A new document or content generation invalidates everything cached
 		// for it; a new snapshot of the same generation (mips committed) only
@@ -340,6 +344,7 @@ impl TilePipeline {
 		let mut plan: FramePlan = plan_frame(view, viewport, doc.width, doc.height, levels, &|key| self.ready.get(&key).copied().map(slot_of));
 		plan.draws.retain(|d| d.slot != EMPTY_SLOT);
 		self.renderer.set_display_lut(display_lut);
+		self.renderer.set_gamut_warning(gamut_warning);
 		self.renderer.render(
 			encoder,
 			target,

@@ -18,9 +18,11 @@
 
 mod lut;
 mod profile;
+mod transform;
 
-pub use lut::{LUT_BYTES, LUT_GRID, Lut3d, display_lut, display_lut_key};
+pub use lut::{LUT_BYTES, LUT_GRID, Lut3d, display_lut, display_lut_key, proof_lut};
 pub use profile::{ColorError, profile, profile_key, same_profile};
+pub use transform::{CmykProfileFile, CmykTransform, RgbTransform, cmyk_profile, cmyk_profiles, icc_bytes, icc_description, lcms_intent};
 
 /// The rendering intents, exactly lcms2's (D-033).
 pub use lcms2::Intent;

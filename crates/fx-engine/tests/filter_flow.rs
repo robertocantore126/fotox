@@ -130,3 +130,80 @@ fn merge_stamp_and_flatten_run_as_jobs() {
 	harness.engine.shutdown();
 	let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn convert_profile_proof_and_cmyk_export() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let rswop = std::path::PathBuf::from(r"C:\Windows\System32\spool\drivers\color\RSWOP.icm");
+	if !rswop.exists() {
+		eprintln!("no RSWOP.icm: test skipped");
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("fx-engine-color-flow-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.ui(UiToEngine::Hello { ui_version: "test".into() });
+	let profiles = harness.wait("cmyk_profiles", |s| match s {
+		Seen::Ui(EngineToUi::CmykProfiles { profiles }) => Some(profiles.clone()),
+		_ => None,
+	});
+	assert!(profiles.iter().any(|p| p.path.ends_with("RSWOP.icm")), "{profiles:?}");
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 300, 200)]));
+	let doc = opened(&harness);
+
+	// Convert to Adobe RGB: a job, one history step, the document's profile changes.
+	harness.ui(UiToEngine::Command {
+		doc,
+		command: Command::ConvertProfile {
+			profile: fx_core::ColorProfile::AdobeRgb1998,
+			intent: fx_core::RenderingIntent::RelativeColorimetric,
+			bpc: true,
+		},
+	});
+	let name = harness.wait("the converted document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentChanged { info }) if info.doc == doc && info.profile_name == "Adobe RGB (1998)" => Some(info.profile_name.clone()),
+		_ => None,
+	});
+	assert_eq!(name, "Adobe RGB (1998)");
+
+	// Ctrl+Y without a proof set-up picks a CMYK profile and turns proofing on.
+	harness.ui(UiToEngine::Action {
+		id: "view:proof-colors".into(),
+		args: serde_json::Value::Null,
+	});
+	let proof = harness.wait("the proof state", |s| match s {
+		Seen::Ui(EngineToUi::ProofState { proof_colors, .. }) => Some(*proof_colors),
+		_ => None,
+	});
+	assert!(proof);
+
+	// CMYK TIFF export with RSWOP.
+	let out = dir.join("press.tif");
+	harness.engine.send(EngineInput::Export {
+		path: out.clone(),
+		choice: Some(fx_engine::ExportChoice {
+			eight_bit: true,
+			transparency: None,
+			quality: 90,
+			chroma_half: false,
+			cmyk: Some(rswop),
+		}),
+	});
+	harness.wait("the export", |s| match s {
+		Seen::Ui(EngineToUi::Toast { text }) if text.starts_with("Exported") => Some(()),
+		Seen::Ui(EngineToUi::Error { text }) => panic!("export failed: {text}"),
+		_ => None,
+	});
+	let mut decoder = tiff::decoder::Decoder::new(std::io::BufReader::new(std::fs::File::open(&out).unwrap())).unwrap();
+	assert_eq!(decoder.colortype().unwrap(), tiff::ColorType::CMYK(8));
+	assert!(
+		decoder.get_tag_u8_vec(tiff::tags::Tag::IccProfile).unwrap().len() > 1000,
+		"the CMYK profile is embedded"
+	);
+
+	harness.engine.shutdown();
+	let _ = std::fs::remove_dir_all(&dir);
+}

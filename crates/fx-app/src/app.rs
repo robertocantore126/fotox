@@ -585,6 +585,11 @@ fn export_choice(args: &serde_json::Value) -> (&'static str, &'static str, fx_en
 		},
 		quality: args.get("quality").and_then(serde_json::Value::as_u64).map_or(90, |q| q.min(100) as u8),
 		chroma_half: text("chroma") == "420",
+		cmyk: args
+			.get("cmyk")
+			.and_then(serde_json::Value::as_str)
+			.filter(|p| !p.is_empty())
+			.map(std::path::PathBuf::from),
 	};
 	(name, extension, choice)
 }

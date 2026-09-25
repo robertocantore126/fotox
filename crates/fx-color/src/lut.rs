@@ -22,6 +22,7 @@ use half::f16;
 use lcms2::{Flags, Intent, PixelFormat, Transform};
 
 use crate::profile::{ColorError, profile, profile_key};
+use crate::transform::cmyk_profile;
 
 /// Nodes per LUT axis. 33³ = 35 937 samples: the usual display-transform size
 /// (Photoshop's display 3D LUT is the same order), and small enough that
@@ -159,6 +160,109 @@ pub fn display_lut(src: &ColorProfile, dst: &ColorProfile, intent: Intent, bpc: 
 		})
 		.collect();
 	Ok(Lut3d { entries, key })
+}
+
+/// lcms2's out-of-gamut alarm, set to pure RGB magenta: no soft proof of a
+/// CMYK press can produce it, so an output equal to it means "out of gamut".
+const GAMUT_ALARM: [u16; 3] = [u16::MAX, 0, u16::MAX];
+
+/// The soft-proof display transform (M4-T04): document → CMYK press (`cmyk`
+/// ICC bytes) → monitor, with lcms2's proofing transform. The proof intent
+/// is `intent`; the press → monitor step is absolute colorimetric when
+/// `simulate_paper` (the paper's white shows), relative otherwise.
+///
+/// The alpha channel of each node holds the gamut flag: 1 in gamut, 0 when
+/// lcms2's gamut check says the press cannot print the colour (the same check
+/// Little CMS-based proofing tools use); the viewport's gamut warning paints
+/// those grey.
+pub fn proof_lut(src: &ColorProfile, cmyk: &[u8], monitor: &ColorProfile, intent: Intent, bpc: bool, simulate_paper: bool) -> Result<Lut3d, ColorError> {
+	let key = {
+		let mut hasher = DefaultHasher::new();
+		"proof".hash(&mut hasher);
+		display_lut_key(src, monitor, intent, bpc).hash(&mut hasher);
+		cmyk.hash(&mut hasher);
+		simulate_paper.hash(&mut hasher);
+		hasher.finish()
+	};
+	let (src_profile, press, screen) = (profile(src)?, cmyk_profile(cmyk)?, profile(monitor)?);
+	let proofing_intent = if simulate_paper {
+		Intent::AbsoluteColorimetric
+	} else {
+		Intent::RelativeColorimetric
+	};
+	let flags = if bpc {
+		Flags::SOFT_PROOFING | Flags::BLACKPOINT_COMPENSATION
+	} else {
+		Flags::SOFT_PROOFING
+	};
+	let proof: Transform<[u16; 4], [u16; 4]> = Transform::new_proofing(
+		&src_profile,
+		PixelFormat::RGBA_16,
+		&screen,
+		PixelFormat::RGBA_16,
+		&press,
+		intent,
+		proofing_intent,
+		flags,
+	)?;
+	// The gamut check marks out-of-gamut colours with the (process-wide) alarm
+	// codes. Only this function uses gamut checks, so setting them globally is
+	// safe; the per-context API would need every profile rebuilt in that context.
+	#[allow(deprecated)]
+	Transform::<[u16; 4], [u16; 4]>::set_global_alarm_codes({
+		let mut codes = [0u16; 16];
+		codes[..3].copy_from_slice(&GAMUT_ALARM);
+		codes
+	});
+	let check: Transform<[u16; 4], [u16; 4]> = Transform::new_proofing(
+		&src_profile,
+		PixelFormat::RGBA_16,
+		&screen,
+		PixelFormat::RGBA_16,
+		&press,
+		intent,
+		proofing_intent,
+		flags | Flags::GAMUT_CHECK,
+	)?;
+	let nodes = LUT_GRID * LUT_GRID * LUT_GRID;
+	let step = u16::MAX as f64 / (LUT_GRID - 1) as f64;
+	let mut rgba = vec![[0u16; 4]; nodes];
+	for b in 0..LUT_GRID {
+		for g in 0..LUT_GRID {
+			for r in 0..LUT_GRID {
+				rgba[(b * LUT_GRID + g) * LUT_GRID + r] = [
+					(r as f64 * step).round() as u16,
+					(g as f64 * step).round() as u16,
+					(b as f64 * step).round() as u16,
+					u16::MAX,
+				];
+			}
+		}
+	}
+	let mut shown = vec![[0u16; 4]; nodes];
+	proof.transform_pixels(&rgba, &mut shown);
+	let mut checked = vec![[0u16; 4]; nodes];
+	check.transform_pixels(&rgba, &mut checked);
+	let entries: Box<[[f16; 4]]> = (0..nodes)
+		.map(|i| {
+			let px = shown[i];
+			let out_of_gamut = checked[i][..3] == GAMUT_ALARM;
+			[
+				f16::from_f64(px[0] as f64 / 65535.0),
+				f16::from_f64(px[1] as f64 / 65535.0),
+				f16::from_f64(px[2] as f64 / 65535.0),
+				if out_of_gamut { f16::ZERO } else { f16::ONE },
+			]
+		})
+		.collect();
+	Ok(Lut3d { entries, key })
+}
+
+/// Whether node `(r, g, b)` of the table is inside the gamut (M4-T04).
+impl Lut3d {
+	pub fn in_gamut(&self, r: usize, g: usize, b: usize) -> bool {
+		self.entries[(b * LUT_GRID + g) * LUT_GRID + r][3].to_f64() > 0.5
+	}
 }
 
 /// The key [`display_lut`] gives the table it would build for these inputs: a
@@ -313,5 +417,21 @@ mod tests {
 		assert_ne!(a.key(), d.key());
 		let again = display_lut(&ColorProfile::Srgb, &ColorProfile::Srgb, Intent::RelativeColorimetric, true).unwrap();
 		assert_eq!(a.key(), again.key());
+	}
+
+	#[test]
+	fn rswop_proof_flags_saturated_blue_and_keeps_grey() {
+		let Ok(bytes) = std::fs::read(r"C:\Windows\System32\spool\drivers\color\RSWOP.icm") else {
+			eprintln!("no RSWOP.icm on this machine: test skipped");
+			return;
+		};
+		let lut = proof_lut(&ColorProfile::Srgb, &bytes, &ColorProfile::Srgb, Intent::RelativeColorimetric, true, false).unwrap();
+		let last = LUT_GRID - 1;
+		assert!(!lut.in_gamut(0, 0, last), "pure sRGB blue is out of a press gamut");
+		assert!(lut.in_gamut(last / 2, last / 2, last / 2), "mid grey is in gamut");
+		assert!(lut.in_gamut(last, last, last), "white is in gamut");
+		// The proof changes how a saturated colour looks (it gets duller).
+		let blue = lut.sample([0.0, 0.0, 1.0]);
+		assert!(blue[2] < 0.98 || blue[0] > 0.02, "{blue:?}");
 	}
 }

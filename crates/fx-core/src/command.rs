@@ -23,6 +23,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::blend::BlendMode;
+use crate::color::{ColorProfile, RenderingIntent};
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
@@ -124,6 +125,17 @@ pub enum Command {
 	/// A new pixel layer above the active one with the composite of every
 	/// visible layer; nothing else changes. M4
 	StampVisible,
+	/// Give the document another profile without touching the numbers (the
+	/// look changes). M4
+	AssignProfile { profile: ColorProfile },
+	/// Convert every pixel layer (level 0) and solid fill colour to `profile`,
+	/// keeping the look. Masks and adjustment parameters stay as they are
+	/// (Photoshop does the same). M4
+	ConvertProfile {
+		profile: ColorProfile,
+		intent: RenderingIntent,
+		bpc: bool,
+	},
 	/// Run a destructive filter on a pixel layer (level 0; the engine shows a
 	/// live preview first). M4
 	ApplyFilter { layer: LayerRef, filter: FilterParams },
@@ -189,6 +201,8 @@ impl Command {
 			Command::MergeLayers { layers } => merge_layers(doc, layers, ctx),
 			Command::Flatten => flatten(doc, ctx),
 			Command::StampVisible => stamp_visible(doc, ctx),
+			Command::AssignProfile { profile } => assign_profile(doc, profile),
+			Command::ConvertProfile { profile, intent, bpc } => convert_profile(doc, profile, *intent, *bpc, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -998,6 +1012,69 @@ fn stamp_visible(doc: &mut Document, ctx: &CommandContext<'_>) -> Result<Command
 	})
 }
 
+/// `AssignProfile` (M4-T03): metadata only.
+fn assign_profile(doc: &mut Document, profile: &ColorProfile) -> Result<CommandEffect, CommandError> {
+	doc.color.profile = profile.clone();
+	Ok(CommandEffect {
+		label: "Assign Profile".into(),
+		// Every layer looks different on screen.
+		props_changed: doc.panel_order(),
+		..Default::default()
+	})
+}
+
+/// `ConvertProfile` (M4-T03): the pixels of every pixel layer and the colour
+/// of every solid fill, converted; then the document's profile.
+fn convert_profile(
+	doc: &mut Document,
+	profile: &ColorProfile,
+	intent: RenderingIntent,
+	bpc: bool,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	let ops = pixel_ops(ctx, "converting")?;
+	let from = doc.color.profile.clone();
+	let conversion = crate::ops::Conversion {
+		from: &from,
+		to: profile,
+		intent,
+		bpc,
+	};
+	// Compute everything first (all or nothing), then install.
+	let mut converted: Vec<(LayerId, LayerKind)> = Vec::new();
+	let mut failure = None;
+	doc.walk(|layer, _| {
+		if failure.is_some() {
+			return;
+		}
+		let kind = match &layer.kind {
+			LayerKind::Pixel { image, offset } => ops
+				.convert(image, &conversion, ctx.tiles)
+				.map(|image| LayerKind::Pixel { image, offset: *offset }),
+			LayerKind::SolidFill { rgba } => ops.convert_color(*rgba, &conversion).map(|rgba| LayerKind::SolidFill { rgba }),
+			_ => return,
+		};
+		match kind {
+			Ok(kind) => converted.push((layer.id, kind)),
+			Err(error) => failure = Some(error),
+		}
+	});
+	if let Some(error) = failure {
+		return Err(error);
+	}
+	let changed: Vec<LayerId> = converted.iter().map(|(id, _)| *id).collect();
+	for (id, kind) in converted {
+		doc.layer_mut(id).expect("walked layer exists").kind = kind;
+	}
+	doc.color.profile = profile.clone();
+	Ok(CommandEffect {
+		label: "Convert to Profile".into(),
+		pixels_changed: changed,
+		props_changed: doc.panel_order(),
+		..Default::default()
+	})
+}
+
 fn delete_mask_effect(id: LayerId, pixels_changed: bool) -> CommandEffect {
 	CommandEffect {
 		label: "Delete Layer Mask".into(),
@@ -1081,6 +1158,15 @@ mod tests {
 			let value = background.map_or([n, n, n, n], |_| [n, n, n, u16::MAX]);
 			image.set_slot(0, 0, TileSlot::Solid(PixelValue(value)));
 			Ok(image)
+		}
+
+		fn convert(&self, image: &TiledImage, _: &crate::ops::Conversion<'_>, _: &TileStore) -> Result<TiledImage, CommandError> {
+			Ok(image.clone())
+		}
+
+		fn convert_color(&self, rgba: [u16; 4], _: &crate::ops::Conversion<'_>) -> Result<[u16; 4], CommandError> {
+			// "Converted": the red and blue channels swap, so the test can see it.
+			Ok([rgba[2], rgba[1], rgba[0], rgba[3]])
 		}
 	}
 
@@ -2663,5 +2749,28 @@ mod tests {
 			matches!(image.slot(0, 0, 0), TileSlot::Solid(v) if v.0 == [3, 3, 3, u16::MAX]),
 			"every layer, on an opaque background"
 		);
+	}
+
+	#[test]
+	fn assign_changes_only_the_profile_and_convert_converts_fills() {
+		let mut f = Fixture::new();
+		let fill = f.add(NewLayer::SolidFill { rgba: [100, 200, 300, 65535] }, "Fill");
+		f.ok(Command::AssignProfile {
+			profile: ColorProfile::AdobeRgb1998,
+		});
+		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998);
+		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [100, 200, 300, 65535] }));
+		let effect = f
+			.run_with_ops(Command::ConvertProfile {
+				profile: ColorProfile::Srgb,
+				intent: RenderingIntent::RelativeColorimetric,
+				bpc: true,
+			})
+			.unwrap();
+		assert_eq!(effect.label, "Convert to Profile");
+		assert_eq!(f.doc.color.profile, ColorProfile::Srgb);
+		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [300, 200, 100, 65535] }));
+		f.history.undo(&mut f.doc);
+		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998, "undo restores the profile");
 	}
 }

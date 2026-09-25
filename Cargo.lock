@@ -999,6 +999,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "thiserror 2.0.21",
+ "tiff",
  "tracing",
  "wgpu",
  "wgpu-sync",

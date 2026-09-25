@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fx_core::{CommandError, Document, FilterParams, LayerId, PixelOps};
+use fx_core::{CommandError, Conversion, Document, FilterParams, LayerId, PixelOps};
 use fx_ops::filter::{self, Geometry};
 use fx_ops::neighbourhood::{LevelSource, TileRef};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
@@ -63,6 +63,89 @@ impl PixelOps for EngineOps {
 	fn composite(&self, doc: &Document, layers: &[LayerId], background: Option<[u16; 4]>, store: &TileStore) -> Result<TiledImage, CommandError> {
 		crate::export::composite_layers(doc, layers, background, store, self.progress.as_deref())
 	}
+
+	fn convert(&self, image: &TiledImage, conversion: &Conversion<'_>, store: &TileStore) -> Result<TiledImage, CommandError> {
+		let transform = rgb_transform(conversion)?;
+		let format = image.format();
+		let tiles: Vec<(u32, u32, TileSlot)> = image.grid(0).non_empty().map(|(tx, ty, slot)| (tx, ty, slot.clone())).collect();
+		let done = AtomicUsize::new(0);
+		let total = tiles.len().max(1);
+		let converted: Vec<Result<(u32, u32, TileSlot), TileError>> = tiles
+			.par_iter()
+			.map(|(tx, ty, slot)| {
+				let out = match slot {
+					TileSlot::Empty => TileSlot::Empty,
+					TileSlot::Solid(value) => {
+						let mut px = [value.0];
+						transform.apply(&mut px);
+						TileSlot::Solid(fx_tiles::PixelValue(px[0]))
+					}
+					TileSlot::Data(handle) => {
+						let buffer = store.get(handle)?;
+						let mut pixels = to_rgba16(&buffer, format);
+						transform.apply(&mut pixels);
+						TileSlot::Data(store.insert(from_rgba16(&pixels, format), fx_tiles::TileClass::Authoritative))
+					}
+				};
+				let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+				if let Some(progress) = &self.progress
+					&& n * 100 / total != (n - 1) * 100 / total
+				{
+					progress(n as f32 / total as f32);
+				}
+				Ok((*tx, *ty, out))
+			})
+			.collect();
+		let mut out = image.clone();
+		for result in converted {
+			let (tx, ty, slot) = result?;
+			out.set_slot(tx, ty, slot);
+		}
+		Ok(out)
+	}
+
+	fn convert_color(&self, rgba: [u16; 4], conversion: &Conversion<'_>) -> Result<[u16; 4], CommandError> {
+		let mut px = [rgba];
+		rgb_transform(conversion)?.apply(&mut px);
+		Ok(px[0])
+	}
+}
+
+fn rgb_transform(conversion: &Conversion<'_>) -> Result<fx_color::RgbTransform, CommandError> {
+	fx_color::RgbTransform::new(conversion.from, conversion.to, conversion.intent, conversion.bpc)
+		.map_err(|error| CommandError::NotAllowed(format!("cannot convert: {error}")))
+}
+
+/// The pixels of an RGBA tile as straight RGBA16.
+fn to_rgba16(buffer: &fx_tiles::TileBuffer, format: PixelFormat) -> Vec<[u16; 4]> {
+	match format {
+		PixelFormat::Rgba16 => buffer.as_u16().chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect(),
+		_ => buffer
+			.bytes()
+			.chunks_exact(4)
+			.map(|p| [p[0], p[1], p[2], p[3]].map(|v| u16::from(v) * 257))
+			.collect(),
+	}
+}
+
+/// Straight RGBA16 pixels back into a tile of `format` (8-bit rounded).
+fn from_rgba16(pixels: &[[u16; 4]], format: PixelFormat) -> fx_tiles::TileBuffer {
+	let mut tile = fx_tiles::TileBuffer::zeroed(format);
+	match format {
+		PixelFormat::Rgba16 => {
+			for (dst, p) in tile.as_u16_mut().chunks_exact_mut(4).zip(pixels) {
+				dst.copy_from_slice(p);
+			}
+		}
+		_ => {
+			for (dst, p) in tile.bytes_mut().chunks_exact_mut(4).zip(pixels) {
+				for c in 0..4 {
+					dst[c] = ((u32::from(p[c]) * 255 + 32767) / 65535) as u8;
+				}
+			}
+		}
+	}
+	tile
 }
 
 /// Make the mip levels a filter at `level` reads valid in `image` (a working

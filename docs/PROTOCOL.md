@@ -48,6 +48,9 @@ Some UI messages are for the **shell** (`fx-app`), not the engine:
 | `command` | `doc`, `command` (an `fx_core::Command` JSON) | panels acting directly on the document (Layers panel opacity, visibility eye, rename…) |
 | `undo` / `redo` | `doc` | |
 | `activate_document` / `close_document` | `doc` | document tabs; closing an unsaved document is answered with `close_dirty_document` instead |
+| `filter_preview` | `doc, layer, filter` (`FilterParams`: `{"kind": "gaussian_blur", "radius": 4}` / `unsharp_mask {amount, radius, threshold}`) | a filter dialog changed: the engine shows the layer filtered on the visible area, live (M4-T05). OK sends the `apply_filter` command |
+| `filter_preview_cancel` | `doc` | Cancel, or the Preview box off |
+| `proof_setup` | `doc, path, intent, bpc, simulate_paper` | View ▸ Proof Setup (M4-T04): the CMYK profile (a `cmyk_profiles` path) to simulate; turns Proof Colors on |
 | `close_document_answer` | `doc`, `answer`: `"save"` \| `"dont_save"` \| `"cancel"` | the user's answer to `close_dirty_document` (M3-T06) |
 | `set_zoom` | `doc`, `zoom` (1.0 = 100 %) | status-bar zoom field, View menu |
 | `request_thumbnails` | `doc`, `layers`, `size` | Layers panel needs thumbnails |
@@ -70,6 +73,8 @@ not handle. The engine is the authority for anything that touches a document.
 | `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz |
 | `progress` / `progress_done` | `task, label, fraction` / `task` | long jobs (import, export, filters) |
 | `toast` / `error` | `text` | |
+| `cmyk_profiles` | `profiles: [{name, path}]` | after `hello`: the CMYK profiles for Proof Setup and CMYK export (M4-T04) |
+| `proof_state` | `doc, proof_colors, gamut_warning, profile` | Proof Colors / Gamut Warning check marks (actions `view:proof-colors` Ctrl+Y, `view:gamut-warning` Shift+Ctrl+Y) |
 | `close_dirty_document` | `doc, name` | the document has unsaved changes: show *Save / Don't Save / Cancel*, answer with `close_document_answer` (M3-T06). Also sent while the window is closing, once per unsaved document |
 | `thumbnail` (binary frame) | header: `doc, layer, revision, width, height`; payload: RGBA8 straight | Layers panel |
 

@@ -40,6 +40,19 @@ pub enum ColorProfile {
 	Icc(Arc<[u8]>),
 }
 
+/// Rendering intents of colour conversions and proofing, exactly lcms2's
+/// (D-033). Relative colorimetric (with black point compensation) is the
+/// default, like Photoshop's Convert to Profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderingIntent {
+	Perceptual,
+	#[default]
+	RelativeColorimetric,
+	Saturation,
+	AbsoluteColorimetric,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentColor {
 	pub depth: BitDepth,

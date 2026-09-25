@@ -10,6 +10,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::tiff_write::TiffWriter;
 use crate::{IoError, Progress};
@@ -47,7 +48,25 @@ pub enum JpegChroma {
 	Half,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Converts straight RGB16 to CMYK16 (0 = no ink), pixel for pixel.
+pub type RgbToCmyk = dyn Fn(&[[u16; 3]], &mut [[u16; 4]]) + Send + Sync;
+
+/// CMYK output (M4-T04): the caller's RGB16 → CMYK16 conversion (an lcms2
+/// transform in the engine; `fx-io` does no colour management) and the CMYK
+/// profile to embed. CMYK is written as TIFF only, flattened onto white.
+#[derive(Clone)]
+pub struct CmykExport {
+	pub convert: Arc<RgbToCmyk>,
+	pub icc: Arc<[u8]>,
+}
+
+impl std::fmt::Debug for CmykExport {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("CmykExport").field("icc_bytes", &self.icc.len()).finish()
+	}
+}
+
+#[derive(Clone, Debug)]
 pub struct ExportOptions {
 	pub format: ExportFormat,
 	/// 8 or 16 bits per channel (JPEG is 8 only).
@@ -61,6 +80,10 @@ pub struct ExportOptions {
 	pub quality: u8,
 	/// JPEG chroma subsampling (ignored by TIFF and PNG).
 	pub chroma: JpegChroma,
+	/// The document's ICC profile, embedded in the file (M4-T03).
+	pub icc: Option<Arc<[u8]>>,
+	/// Convert to CMYK (TIFF only) instead of writing RGB (M4-T04).
+	pub cmyk: Option<CmykExport>,
 }
 
 /// Renders one band: `render(y, rows, out)` fills `out` (`width × rows`
@@ -75,8 +98,11 @@ pub fn export_image(path: &Path, width: u32, height: u32, options: ExportOptions
 	if width == 0 || height == 0 {
 		return Err(IoError::Unsupported("empty image".into()));
 	}
+	if options.cmyk.is_some() && options.format != ExportFormat::Tiff {
+		return Err(IoError::Unsupported("CMYK export writes TIFF files".into()));
+	}
 	let part = part_path(path);
-	let result = write(&part, width, height, options, render, progress);
+	let result = write(&part, width, height, &options, render, progress);
 	match result {
 		Ok(()) => {
 			std::fs::rename(&part, path)?;
@@ -95,17 +121,25 @@ fn part_path(path: &Path) -> PathBuf {
 	path.with_file_name(name)
 }
 
-fn write(part: &Path, width: u32, height: u32, options: ExportOptions, render: BandRenderer<'_>, progress: Progress<'_>) -> Result<(), IoError> {
+fn write(part: &Path, width: u32, height: u32, options: &ExportOptions, render: BandRenderer<'_>, progress: Progress<'_>) -> Result<(), IoError> {
 	if options.format == ExportFormat::Jpeg {
 		return write_jpeg(part, width, height, options, render, progress);
 	}
-	let samples: usize = if options.alpha { 4 } else { 3 };
+	let samples: usize = if options.alpha || options.cmyk.is_some() { 4 } else { 3 };
 	let mut band = vec![[0u16; 4]; width as usize * EXPORT_BAND_ROWS as usize];
 	let mut bytes = Vec::new();
 	let mut sink: Box<dyn Sink> = match options.format {
 		ExportFormat::Tiff => {
 			let mut writer = TiffWriter::create_with(part, width, height, options.bits, samples as u16, EXPORT_BAND_ROWS, None)?;
 			writer.set_ppi(options.ppi);
+			match (&options.cmyk, &options.icc) {
+				(Some(cmyk), _) => {
+					writer.set_cmyk()?;
+					writer.set_icc(cmyk.icc.to_vec());
+				}
+				(None, Some(icc)) => writer.set_icc(icc.to_vec()),
+				(None, None) => {}
+			}
 			Box::new(writer)
 		}
 		ExportFormat::Png => Box::new(PngSink::create(part, width, height, options)?),
@@ -131,7 +165,7 @@ fn write(part: &Path, width: u32, height: u32, options: ExportOptions, render: B
 /// JPEG has no streaming encoder: buffer the whole image (8-bit RGB, flattened
 /// onto white) and encode it. Refuses sides above 16 384 px, where the buffer
 /// would grow past ~800 MB (JPEG's own limit is 65 535).
-fn write_jpeg(part: &Path, width: u32, height: u32, options: ExportOptions, render: BandRenderer<'_>, progress: Progress<'_>) -> Result<(), IoError> {
+fn write_jpeg(part: &Path, width: u32, height: u32, options: &ExportOptions, render: BandRenderer<'_>, progress: Progress<'_>) -> Result<(), IoError> {
 	const MAX_SIDE: u32 = 16_384;
 	if options.bits != 8 {
 		return Err(IoError::Unsupported("JPEG is 8 bits per channel".into()));
@@ -167,6 +201,9 @@ fn write_jpeg(part: &Path, width: u32, height: u32, options: ExportOptions, rend
 		JpegChroma::Full => jpeg_encoder::SamplingFactor::F_1_1,
 		JpegChroma::Half => jpeg_encoder::SamplingFactor::F_2_2,
 	});
+	if let Some(icc) = &options.icc {
+		encoder.add_icc_profile(icc).map_err(jpeg_error)?;
+	}
 	encoder
 		.encode(&rgb, width as u16, height as u16, jpeg_encoder::ColorType::Rgb)
 		.map_err(jpeg_error)
@@ -176,8 +213,30 @@ fn jpeg_error(e: jpeg_encoder::EncodingError) -> IoError {
 	IoError::Decode(format!("jpeg: {e}"))
 }
 
-/// Straight RGBA16 → the file's samples (RGB or RGBA, 8 or 16 bits).
-fn encode(pixels: &[[u16; 4]], options: ExportOptions, big_endian: bool, out: &mut Vec<u8>) {
+/// Straight RGBA16 → the file's samples (RGB, RGBA or CMYK, 8 or 16 bits).
+fn encode(pixels: &[[u16; 4]], options: &ExportOptions, big_endian: bool, out: &mut Vec<u8>) {
+	if let Some(cmyk) = &options.cmyk {
+		// Flattened onto white, then the caller's RGB → CMYK conversion.
+		let rgb: Vec<[u16; 3]> = pixels
+			.iter()
+			.map(|&[r, g, b, a]| [over_white(r, a), over_white(g, a), over_white(b, a)])
+			.collect();
+		let mut inks = vec![[0u16; 4]; rgb.len()];
+		(cmyk.convert)(&rgb, &mut inks);
+		out.reserve(inks.len() * 4 * usize::from(options.bits / 8));
+		for px in inks {
+			for v in px {
+				if options.bits == 8 {
+					out.push(to_8(v));
+				} else if big_endian {
+					out.extend_from_slice(&v.to_be_bytes());
+				} else {
+					out.extend_from_slice(&v.to_le_bytes());
+				}
+			}
+		}
+		return;
+	}
 	let samples = if options.alpha { 4 } else { 3 };
 	out.reserve(pixels.len() * samples * usize::from(options.bits / 8));
 	for &[r, g, b, a] in pixels {
@@ -235,9 +294,11 @@ struct PngSink {
 }
 
 impl PngSink {
-	fn create(path: &Path, width: u32, height: u32, options: ExportOptions) -> Result<Self, IoError> {
+	fn create(path: &Path, width: u32, height: u32, options: &ExportOptions) -> Result<Self, IoError> {
 		let file = BufWriter::with_capacity(8 << 20, File::create(path)?);
-		let mut encoder = ::png::Encoder::new(file, width, height);
+		let mut info = ::png::Info::with_size(width, height);
+		info.icc_profile = options.icc.as_ref().map(|icc| std::borrow::Cow::Owned(icc.to_vec()));
+		let mut encoder = ::png::Encoder::with_info(file, info).map_err(png_error)?;
 		encoder.set_color(if options.alpha { ::png::ColorType::Rgba } else { ::png::ColorType::Rgb });
 		encoder.set_depth(if options.bits == 16 {
 			::png::BitDepth::Sixteen
@@ -343,7 +404,7 @@ mod tests {
 	}
 
 	/// What the file should hold for `source(x, y)`, as the importer returns it.
-	fn expected(options: ExportOptions, x: u32, y: u32) -> [u16; 4] {
+	fn expected(options: &ExportOptions, x: u32, y: u32) -> [u16; 4] {
 		let [r, g, b, a] = source(x, y);
 		let px = if options.alpha {
 			[r, g, b, a]
@@ -361,11 +422,13 @@ mod tests {
 			ppi: 300.0,
 			quality: 90,
 			chroma: JpegChroma::Full,
+			icc: None,
+			cmyk: None,
 		};
 		let ext = if format == ExportFormat::Tiff { "tif" } else { "png" };
 		let path = dir().join(format!("out-{bits}-{alpha}.{ext}"));
 		let mut calls = 0;
-		export_image(&path, W, H, options, &mut renderer(), &mut |_| {
+		export_image(&path, W, H, options.clone(), &mut renderer(), &mut |_| {
 			calls += 1;
 			true
 		})
@@ -378,7 +441,7 @@ mod tests {
 		assert_eq!((imported.width, imported.height), (W, H));
 		assert!((imported.ppi - 300.0).abs() < 0.01, "ppi {}", imported.ppi);
 		for &(x, y) in &[(0, 0), (19, 3), (20, 3), (299, 0), (255, 255), (256, 256), (123, 511), (299, 529), (7, 512)] {
-			let (want, got) = (expected(options, x, y), pixel(&imported.image, &store, x, y));
+			let (want, got) = (expected(&options, x, y), pixel(&imported.image, &store, x, y));
 			assert_eq!(got, want, "{format:?} {bits}-bit alpha={alpha}: pixel ({x}, {y})");
 		}
 	}
@@ -412,6 +475,8 @@ mod tests {
 			ppi: 72.0,
 			quality: 90,
 			chroma: JpegChroma::Full,
+			icc: None,
+			cmyk: None,
 		};
 		let result = export_image(&path, W, H, options, &mut renderer(), &mut |_| false);
 		assert!(matches!(result, Err(IoError::Cancelled)));
@@ -429,6 +494,8 @@ mod tests {
 			ppi: 300.0,
 			quality: 90,
 			chroma: JpegChroma::Full,
+			icc: None,
+			cmyk: None,
 		};
 		let path = dir().join("out.jpg");
 		let mut smooth = |y0: u32, rows: u32, out: &mut [[u16; 4]]| -> Result<(), IoError> {
@@ -464,5 +531,84 @@ mod tests {
 		assert_eq!(ExportFormat::from_path(Path::new("b.jpeg")), Some(ExportFormat::Jpeg));
 		assert_eq!(ExportFormat::from_path(Path::new("b.gif")), None);
 		assert_eq!(ExportFormat::from_path(Path::new("b")), None);
+	}
+
+	#[test]
+	fn the_icc_profile_travels_with_tiff_png_and_jpeg() {
+		let icc: Arc<[u8]> = Arc::from(vec![7u8; 600]);
+		for (format, ext) in [(ExportFormat::Tiff, "tif"), (ExportFormat::Png, "png"), (ExportFormat::Jpeg, "jpg")] {
+			let path = dir().join(format!("icc.{ext}"));
+			let options = ExportOptions {
+				format,
+				bits: 8,
+				alpha: false,
+				ppi: 72.0,
+				quality: 90,
+				chroma: JpegChroma::Full,
+				icc: Some(icc.clone()),
+				cmyk: None,
+			};
+			export_image(&path, W, H, options, &mut renderer(), &mut |_| true).unwrap();
+			let imported = import_file(&path, &store(), &mut |_| true).unwrap();
+			assert_eq!(imported.profile, fx_core::ColorProfile::Icc(icc.clone()), "{format:?}");
+		}
+	}
+
+	#[test]
+	fn cmyk_tiff_is_separated_with_the_callers_inks_and_profile() {
+		let path = dir().join("cmyk.tif");
+		let icc: Arc<[u8]> = Arc::from(vec![9u8; 300]);
+		let options = ExportOptions {
+			format: ExportFormat::Tiff,
+			bits: 16,
+			alpha: false,
+			ppi: 72.0,
+			quality: 90,
+			chroma: JpegChroma::Full,
+			icc: None,
+			cmyk: Some(CmykExport {
+				// A stand-in conversion: C, M, Y = 1 − R, G, B; K = 0.
+				convert: Arc::new(|rgb: &[[u16; 3]], out: &mut [[u16; 4]]| {
+					for (o, p) in out.iter_mut().zip(rgb) {
+						*o = [65535 - p[0], 65535 - p[1], 65535 - p[2], 0];
+					}
+				}),
+				icc: icc.clone(),
+			}),
+		};
+		export_image(&path, W, H, options, &mut renderer(), &mut |_| true).unwrap();
+		let mut decoder = ::tiff::decoder::Decoder::new(std::io::BufReader::new(File::open(&path).unwrap())).unwrap();
+		assert_eq!(decoder.colortype().unwrap(), ::tiff::ColorType::CMYK(16));
+		assert_eq!(decoder.get_tag_u32(::tiff::tags::Tag::PhotometricInterpretation).unwrap(), 5);
+		assert_eq!(decoder.get_tag_u8_vec(::tiff::tags::Tag::IccProfile).unwrap(), icc.to_vec());
+		let ::tiff::decoder::DecodingResult::U16(data) = decoder.read_image().unwrap() else {
+			panic!("16-bit")
+		};
+		// Pixel (25, 3): opaque, so no white mixed in.
+		let [r, g, b, a] = source(25, 3);
+		assert_eq!(a, 65535 - 300, "the test pixel is almost opaque");
+		let i = (3 * W as usize + 25) * 4;
+		let expected = [r, g, b].map(|c| 65535 - over_white(c, a));
+		assert_eq!(&data[i..i + 3], &expected, "inks of pixel (25, 3)");
+		assert_eq!(data[i + 3], 0);
+	}
+
+	#[test]
+	fn cmyk_is_refused_for_png() {
+		let options = ExportOptions {
+			format: ExportFormat::Png,
+			bits: 8,
+			alpha: false,
+			ppi: 72.0,
+			quality: 90,
+			chroma: JpegChroma::Full,
+			icc: None,
+			cmyk: Some(CmykExport {
+				convert: Arc::new(|_: &[[u16; 3]], _: &mut [[u16; 4]]| {}),
+				icc: Arc::from(vec![0u8; 4]),
+			}),
+		};
+		let result = export_image(&dir().join("no.png"), W, H, options, &mut renderer(), &mut |_| true);
+		assert!(matches!(result, Err(IoError::Unsupported(_))));
 	}
 }

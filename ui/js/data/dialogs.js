@@ -89,6 +89,7 @@ dialogs["export-as"] = {
       sel("Bit Depth:", ["Document", "8 bits/channel"], "Document"),
       sel("Transparency:", ["Automatic", "On", "Off"], "Automatic"),
       grp("JPG options", [rng("Quality:", 90, { min: 0, max: 100 }), sel("Chroma:", ["4:4:4 (best)", "4:2:0 (smaller)"], "4:4:4 (best)")]),
+      grp("Print", [sel("CMYK:", ["None"], "None")]),
     ] },
   ],
   ok: "Export", cancel: "Cancel",
@@ -216,6 +217,11 @@ dialogs["guide-layout"] = { title: "New Guide Layout", width: 400, fields: [txt(
 dialogs["brightness-contrast"] = { title: "Brightness/Contrast", width: 400, icon: "i-sun", fields: [rng("Brightness:", 0, { min: -150, max: 150 }), rng("Contrast:", 0, { min: -100, max: 100 }), chk("Use Legacy", false), PREVIEW], ok: "OK", cancel: "Cancel" };
 // Asked by the engine before closing an unsaved document (M3-T06); the
 // buttons are supplied by ui/js/native/documents.js.
+// Colour management (M4-T03/T04). The option lists of proof-setup and of the
+// Export As CMYK menu are filled by ui/js/native/color.js from the engine.
+dialogs["assign-profile"] = { title: "Assign Profile", width: 420, fields: [lbl("The numbers stay; the colours will look different."), sel("Profile:", ["sRGB IEC61966-2.1", "Adobe RGB (1998)", "Display P3", "ProPhoto RGB"], "sRGB IEC61966-2.1")], ok: "OK", cancel: "Cancel" };
+dialogs["convert-profile"] = { title: "Convert to Profile", width: 440, fields: [sel("Destination:", ["sRGB IEC61966-2.1", "Adobe RGB (1998)", "Display P3", "ProPhoto RGB"], "sRGB IEC61966-2.1"), sel("Intent:", ["Perceptual", "Relative Colorimetric", "Saturation", "Absolute Colorimetric"], "Relative Colorimetric"), chk("Use Black Point Compensation", true)], ok: "OK", cancel: "Cancel" };
+dialogs["proof-setup"] = { title: "Customize Proof Condition", width: 460, fields: [sel("Device to Simulate:", ["(no CMYK profile found)"]), sel("Rendering Intent:", ["Perceptual", "Relative Colorimetric", "Saturation", "Absolute Colorimetric"], "Relative Colorimetric"), chk("Black Point Compensation", true), chk("Simulate Paper Color", false)], ok: "OK", cancel: "Cancel" };
 dialogs["save-changes"] = { title: "Fotox", width: 420, icon: "i-info", plain: true, fields: [lbl("Save changes to the document before closing?")] };
 dialogs.levels = { title: "Levels", width: 520, icon: "i-adjust", fields: [sel("Preset:", ["Default", "Increase Contrast", "Lighter", "Darker", "Midtones Brighter"], "Default"), sel("Channel:", ["RGB", "Red", "Green", "Blue"], "RGB"), { type: "histo" }, rng("Input Black:", 0, { min: 0, max: 253 }), rng("Gamma (x100):", 100, { min: 1, max: 999 }), rng("Input White:", 255, { min: 2, max: 255 }), rng("Output Black:", 0, { min: 0, max: 255 }), rng("Output White:", 255, { min: 0, max: 255 }), chk("Preview", true)], ok: "OK", cancel: "Cancel" };
 dialogs.curves = { title: "Curves", width: 520, icon: "i-paths", fields: [sel("Preset:", ["Default", "Strong Contrast", "Custom"], "Default"), sel("Channel:", ["RGB", "Red", "Green", "Blue"], "RGB"), { type: "curve" }, row(num("Input:", 0, { w: 55 }), num("Output:", 255, { w: 55 })), row({ type: "btn", text: "Smooth" }, { type: "btn", text: "Linear" }, { type: "btn", text: "Reset", curve: "reset" }), chk("Preview", true)], ok: "OK", cancel: "Cancel" };

@@ -10,6 +10,7 @@
 use fx_tiles::{TileStore, TiledImage};
 use serde::{Deserialize, Serialize};
 
+use crate::color::{ColorProfile, RenderingIntent};
 use crate::command::CommandError;
 use crate::document::Document;
 use crate::layer::LayerId;
@@ -79,4 +80,19 @@ pub trait PixelOps: Send + Sync {
 	/// `background`, the result is composited onto that opaque colour
 	/// (Flatten's white). Used by merge, flatten and stamp (M4-T08).
 	fn composite(&self, doc: &Document, layers: &[LayerId], background: Option<[u16; 4]>, store: &TileStore) -> Result<TiledImage, CommandError>;
+
+	/// `image`'s pixels converted from `from` to `to` (Convert to Profile,
+	/// M4-T03): level 0, alpha untouched.
+	fn convert(&self, image: &TiledImage, conversion: &Conversion<'_>, store: &TileStore) -> Result<TiledImage, CommandError>;
+
+	/// One straight RGBA16 colour converted (solid fill layers).
+	fn convert_color(&self, rgba: [u16; 4], conversion: &Conversion<'_>) -> Result<[u16; 4], CommandError>;
+}
+
+/// A colour conversion between two RGB spaces.
+pub struct Conversion<'a> {
+	pub from: &'a ColorProfile,
+	pub to: &'a ColorProfile,
+	pub intent: RenderingIntent,
+	pub bpc: bool,
 }

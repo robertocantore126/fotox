@@ -29,6 +29,7 @@ macro_rules! ensure {
 /// Tag types.
 const SHORT: u16 = 3;
 const LONG: u16 = 4;
+const UNDEFINED: u16 = 7;
 const RATIONAL: u16 = 5;
 const LONG8: u16 = 16;
 
@@ -43,6 +44,10 @@ pub struct TiffWriter {
 	samples: u16,
 	/// XResolution / YResolution as a rational, pixels per inch.
 	resolution: (u32, u32),
+	/// 4 samples are C, M, Y, K ("separated"), not RGBA (M4-T04).
+	cmyk: bool,
+	/// The ICC profile to embed (tag 34675), M4-T03.
+	icc: Option<Vec<u8>>,
 	rows_per_strip: u32,
 	offsets: Vec<u64>,
 	counts: Vec<u64>,
@@ -98,6 +103,8 @@ impl TiffWriter {
 			bits,
 			samples,
 			resolution: (72, 1),
+			cmyk: false,
+			icc: None,
 			rows_per_strip,
 			offsets: Vec::new(),
 			counts: Vec::new(),
@@ -110,6 +117,19 @@ impl TiffWriter {
 		if ppi.is_finite() && ppi > 0.0 {
 			self.resolution = (((f64::from(ppi) * 100.0).round() as u32).max(1), 100);
 		}
+	}
+
+	/// Embed this ICC profile (TIFF tag 34675).
+	pub fn set_icc(&mut self, icc: Vec<u8>) {
+		self.icc = Some(icc);
+	}
+
+	/// The 4 samples are C, M, Y, K (Photometric "separated", InkSet CMYK;
+	/// 0 = no ink) instead of RGBA. Needs `samples == 4`.
+	pub fn set_cmyk(&mut self) -> Result<()> {
+		ensure!(self.samples == 4, "CMYK needs 4 samples per pixel");
+		self.cmyk = true;
+		Ok(())
 	}
 
 	/// Whether the file is a BigTIFF.
@@ -161,11 +181,8 @@ impl TiffWriter {
 		let ifd_offset = self.position;
 		let bits = vec![self.bits; usize::from(self.samples)];
 
-		// Out-of-line data goes after the IFD; compute where.
-		let alpha = self.samples == 4;
-		let entries: u64 = if alpha { 14 } else { 13 };
-		let (entry_size, count_size, next_size) = if self.big { (20u64, 8u64, 8u64) } else { (12, 2, 4) };
-		let mut extra = ifd_offset + count_size + entries * entry_size + next_size;
+		let alpha = self.samples == 4 && !self.cmyk;
+		let photometric: u16 = if self.cmyk { 5 } else { 2 };
 		let inline_limit = if self.big { 8 } else { 4 };
 
 		let off_type = if self.big { LONG8 } else { LONG };
@@ -177,8 +194,8 @@ impl TiffWriter {
 			(256, LONG, 1, self.width.to_le_bytes().to_vec()),
 			(257, LONG, 1, self.height.to_le_bytes().to_vec()),
 			(258, SHORT, u64::from(self.samples), bits.iter().flat_map(|b| b.to_le_bytes()).collect()),
-			(259, SHORT, 1, 1u16.to_le_bytes().to_vec()), // no compression
-			(262, SHORT, 1, 2u16.to_le_bytes().to_vec()), // RGB
+			(259, SHORT, 1, 1u16.to_le_bytes().to_vec()),        // no compression
+			(262, SHORT, 1, photometric.to_le_bytes().to_vec()), // RGB or separated
 			(273, off_type, n_strips, pack(&self.offsets, off_width)),
 			(277, SHORT, 1, self.samples.to_le_bytes().to_vec()),
 			(278, LONG, 1, self.rows_per_strip.to_le_bytes().to_vec()),
@@ -191,7 +208,16 @@ impl TiffWriter {
 		if alpha {
 			tags.push((338, SHORT, 1, 2u16.to_le_bytes().to_vec())); // unassociated alpha
 		}
-		debug_assert_eq!(tags.len() as u64, entries);
+		if self.cmyk {
+			tags.push((332, SHORT, 1, 1u16.to_le_bytes().to_vec())); // InkSet: CMYK
+		}
+		if let Some(icc) = &self.icc {
+			tags.push((34675, UNDEFINED, icc.len() as u64, icc.clone())); // ICC profile
+		}
+		// Out-of-line data goes after the IFD; compute where.
+		let entries = tags.len() as u64;
+		let (entry_size, count_size, next_size) = if self.big { (20u64, 8u64, 8u64) } else { (12, 2, 4) };
+		let mut extra = ifd_offset + count_size + entries * entry_size + next_size;
 		tags.sort_by_key(|t| t.0);
 
 		let mut ifd = Vec::new();

@@ -19,7 +19,7 @@
 //! The JavaScript side of this file is `ui/js/native/protocol.js`. Keep the
 //! two in sync; docs/PROTOCOL.md is the human-readable contract.
 
-use fx_core::{Adjustment, BitDepth, BlendMode, Command, FilterParams, LayerId};
+use fx_core::{Adjustment, BitDepth, BlendMode, Command, FilterParams, LayerId, RenderingIntent};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -101,6 +101,15 @@ pub enum UiToEngine {
 	FilterPreviewCancel {
 		doc: DocId,
 	},
+	/// View ▸ Proof Setup (M4-T04): simulate the press of the CMYK profile at
+	/// `path` (one of `cmyk_profiles`), and turn Proof Colors on.
+	ProofSetup {
+		doc: DocId,
+		path: String,
+		intent: RenderingIntent,
+		bpc: bool,
+		simulate_paper: bool,
+	},
 	/// The user answered the "save changes?" prompt of [`EngineToUi::CloseDirtyDocument`].
 	CloseDocumentAnswer {
 		doc: DocId,
@@ -180,6 +189,13 @@ pub struct LayerInfo {
 	pub fill_color: Option<[u16; 4]>,
 }
 
+/// A CMYK profile the UI can offer (M4-T04).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CmykProfileInfo {
+	pub name: String,
+	pub path: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryStats {
 	pub hot_bytes: u64,
@@ -254,6 +270,17 @@ pub enum EngineToUi {
 	},
 	Error {
 		text: String,
+	},
+	/// The CMYK profiles for proofing and export (M4-T04), sent after `hello`.
+	CmykProfiles {
+		profiles: Vec<CmykProfileInfo>,
+	},
+	/// Proof state of a document changed (menus show the check marks).
+	ProofState {
+		doc: DocId,
+		proof_colors: bool,
+		gamut_warning: bool,
+		profile: Option<String>,
 	},
 	/// A dirty document was asked to close: the UI shows the save/don't save/
 	/// cancel prompt and answers with [`UiToEngine::CloseDocumentAnswer`].

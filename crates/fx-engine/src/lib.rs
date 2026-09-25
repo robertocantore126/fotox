@@ -58,7 +58,7 @@ pub struct PointerInput {
 }
 
 /// Options of the Export As dialog (M3-T07).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportChoice {
 	/// Write 8 bits per channel even for a 16-bit document.
 	pub eight_bit: bool,
@@ -68,6 +68,8 @@ pub struct ExportChoice {
 	pub quality: u8,
 	/// JPEG 4:2:0 chroma subsampling instead of 4:4:4.
 	pub chroma_half: bool,
+	/// Convert to CMYK with the profile at this path (TIFF only, M4-T04).
+	pub cmyk: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
