@@ -37,14 +37,28 @@ export const optionBars = {
   "magic-wand": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
   "object-select": [{ type: "btngroup", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "toggle", text: "Sample All Layers", on: false }],
 
+  // The crop tool reads Ratio / W / H and the Delete Cropped Pixels toggle
+  // (M6-T03): the engine's crop command takes exactly those.
   crop: [
     { type: "select", text: "Ratio:", options: ["Unconstrained", "1:1 (Square)", "5:4", "4:3", "3:2", "16:9", "Original Ratio"], value: "Unconstrained" },
     { type: "num", text: "W:", value: "", width: 44 }, { type: "num", text: "H:", value: "", width: 44 },
-    { type: "toggle", text: "Straighten", on: false },
     { type: "gap" },
-    { type: "btngroup", icons: ["i-grid", "i-presets", "i-eye-off"], titles: ["Grid overlay", "Presets", "Delete cropped pixels"], active: 0 },
+    { type: "toggle", text: "Delete Cropped Pixels", on: false },
     { type: "gap" },
-    { type: "label", text: "Delete Cropped Pixels: off · Content-Aware: off" },
+    // The ✓ and ✗ are actions, not values: the engine commits the box with
+    // the same `Enter` / `Escape` the keyboard sends.
+    { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Crop (Enter)", "Cancel (Esc)"], actions: ["tool:commit", "tool:cancel"] },
+  ],
+  // Free Transform's bar (M6-T04), shown while the box is up whatever the
+  // tool: the interpolation, Warp, and the commit / cancel buttons.
+  _transform: [
+    { type: "label", text: "Free Transform" },
+    { type: "gap" },
+    { type: "select", text: "Interpolation:", options: ["Nearest Neighbor", "Bilinear", "Bicubic", "Bicubic Smoother", "Bicubic Sharper", "Bicubic Automatic", "Lanczos 3"], value: "Bicubic" },
+    { type: "gap" },
+    { type: "btngroup", icons: ["i-grid"], titles: ["Switch between free transform and warp modes"], actions: ["xf:warp"] },
+    { type: "gap" },
+    { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Commit Transform (Enter)", "Cancel Transform (Esc)"], actions: ["tool:commit", "tool:cancel"] },
   ],
   "crop-persp": [{ type: "label", text: "Drag the corner handles to define the perspective plane" }],
   slice: [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],

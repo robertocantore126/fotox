@@ -8,7 +8,7 @@ import { menus } from "./data/menus.js";
 import { toolSlots, findTool } from "./data/tools.js";
 import { initPopupEngine, openDropdown, openPopup, closeAll, isPopupOpen } from "./popup.js";
 import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
-import { renderOptionsBar, onOptionsChange, readOptions } from "./optionsbar.js";
+import { renderOptionsBar, onOptionsChange, readOptions, currentBar } from "./optionsbar.js";
 import { renderDock, focusPanel, togglePanel } from "./panels.js";
 import { openDialog, isDialogOpen } from "./dialogs.js";
 import { initWorkspace, zoomTo } from "./canvas.js";
@@ -117,7 +117,8 @@ function buildToolbar(container) {
 // The engine keeps the active tool's option-bar values (M5-T01).
 function sendToolOptions(options) {
   if (!bridge.isNative) return;
-  bridge.send({ type: UI.TOOL_OPTIONS, tool: state.tool, options });
+  // The bar on show: the active tool's, or Free Transform's (M6-T04).
+  bridge.send({ type: UI.TOOL_OPTIONS, tool: currentBar() || state.tool, options });
 }
 
 function pickTool(toolId, slotId) {
@@ -227,8 +228,17 @@ async function boot() {
     status(`${tool.name} (${tool.key})`);
   });
 
+  // A Free Transform box (M6-T04) swaps in its own option bar while it is up.
+  bridge.on(ENGINE.TRANSFORM_BOX, ({ up }) => {
+    renderOptionsBar(shell.optionsbar, up ? "_transform" : state.tool);
+    sendToolOptions(readOptions());
+  });
+
   on("colors", () => { refreshSwatches(); sendColors(); });
   on("mock", (msg) => toast(msg));
+  // A control that is an action rather than a value (M6-T03: the crop tool's
+  // ✓ and ✗) takes the same path as a menu item or a shortcut.
+  on("action", (id) => runAction({ label: id, a: id }));
   on("ask-dialog", (id) => openDialog(id));
   on("panel:open", (id) => focusPanel(id));
   on("zoom:set", (z) => zoomTo(z));

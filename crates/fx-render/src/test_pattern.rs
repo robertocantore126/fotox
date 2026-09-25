@@ -153,6 +153,7 @@ mod tests {
 
 	/// Render a 64 × 64 viewport and read it back as RGBA8 rows.
 	fn render(view: ViewTransform, doc: (u32, u32)) -> Option<Vec<u8>> {
+		let _one_at_a_time = crate::testing::one_gpu_test();
 		let (device, queue) = gpu()?;
 		let size = wgpu::Extent3d {
 			width: 64,

@@ -46,6 +46,8 @@ pub struct OpenDoc {
 	/// Bumped whenever the preview's pixels change (the render thread's
 	/// caches must not reuse tiles composited from the old preview).
 	pub preview_rev: u64,
+	/// A Free Transform's live preview (M6-T04); shares `preview_rev`.
+	pub transform_preview: Option<crate::transform_preview::TransformPreview>,
 	/// A pixel job (filter, merge, flatten) is running on this document: its
 	/// label. Commands and undo wait until it is done (M4-T05).
 	pub busy: Option<String>,
@@ -118,6 +120,7 @@ impl OpenDoc {
 			path: None,
 			preview: None,
 			preview_rev: 0,
+			transform_preview: None,
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -150,6 +153,7 @@ impl OpenDoc {
 			path: Some(path.to_path_buf()),
 			preview: None,
 			preview_rev: 0,
+			transform_preview: None,
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -172,6 +176,10 @@ impl OpenDoc {
 					&& let LayerKind::Pixel { image, .. } = &mut layer.kind
 				{
 					*image = preview.image.clone();
+				}
+				// So does a Free Transform's (M6-T04).
+				if let Some(preview) = &self.transform_preview {
+					preview.apply(&mut doc);
 				}
 				let s = Arc::new(doc);
 				self.snapshot = Some(s.clone());

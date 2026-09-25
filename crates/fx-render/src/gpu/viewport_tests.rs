@@ -32,16 +32,19 @@ fn gpu() -> Option<(wgpu::Device, wgpu_sync::Queue)> {
 	.ok()
 }
 
+/// The GPU lock (see `testing::one_gpu_test`), a device and its queue, or
+/// skip the test when there is no adapter.
 macro_rules! gpu_or_skip {
-	() => {
+	() => {{
+		let one_at_a_time = crate::testing::one_gpu_test();
 		match gpu() {
-			Some(g) => g,
+			Some((device, queue)) => (one_at_a_time, device, queue),
 			None => {
 				eprintln!("no GPU adapter: test skipped");
 				return;
 			}
 		}
-	};
+	}};
 }
 
 /// A `SIZE × SIZE` `Rgba16Float` array texture with one layer holding one
@@ -172,7 +175,7 @@ fn to_u8(v: f64) -> u8 {
 fn without_a_lut_the_document_reaches_the_screen_untouched() {
 	// Criterion C1 on the GPU side: an sRGB document on an sRGB monitor
 	// (no LUT) is displayed bit-exactly.
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let tiles = tiles_texture(&device, &queue, [0.5, 0.5, 0.5, 1.0]);
 	let pixels = render(&device, &queue, &tiles, None, &[]);
 	assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
@@ -193,7 +196,7 @@ fn without_a_lut_the_document_reaches_the_screen_untouched() {
 
 #[test]
 fn the_display_lut_maps_the_tile_colour() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	// A saturated Adobe RGB colour: sRGB cannot show it unchanged, so the
 	// result must differ from the un-transformed bytes.
 	let colour = [0.9, 0.25, 0.4];
@@ -220,7 +223,7 @@ fn the_display_lut_maps_the_tile_colour() {
 
 #[test]
 fn the_lut_runs_on_straight_colour_before_the_checkerboard() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	// Half-transparent saturated colour over the light checkerboard: the
 	// shader must un-premultiply, transform, premultiply, then blend.
 	let colour = [0.9, 0.25, 0.4];
@@ -247,7 +250,7 @@ fn an_overlay_line_lands_on_the_expected_pixels() {
 	// M5-T02: the overlay pass draws after the tiles, in screen space. At zoom
 	// 1 with the view centred on the viewport the document and screen
 	// coordinates coincide, so a line at y = 128.5 must light up row 128.
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let tiles = tiles_texture(&device, &queue, [0.25, 0.25, 0.25, 1.0]);
 	let overlay = Overlay {
 		items: vec![OverlayItem::Polyline {

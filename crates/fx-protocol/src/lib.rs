@@ -317,6 +317,11 @@ pub enum EngineToUi {
 	ToolInfo {
 		text: String,
 	},
+	/// A Free Transform box went up or down (M6-T04): the UI shows the
+	/// transform option bar (interpolation, ✓, ✗) while it is up.
+	TransformBox {
+		up: bool,
+	},
 	/// The CMYK profiles for proofing and export (M4-T04), sent after `hello`.
 	CmykProfiles {
 		profiles: Vec<CmykProfileInfo>,

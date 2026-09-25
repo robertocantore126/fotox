@@ -137,6 +137,11 @@ fn resample_tile(
 		(bounds[3] / scale).ceil() as i64 + grow + 1,
 	];
 	let grid = Grid::load(src, *source, src_level, format, rect)?;
+	if grid.tiles.iter().all(Option::is_none) {
+		// Nothing under this tile (a small object on a big layer, the corners
+		// of a turned image): no pixel to sample.
+		return Ok(TileBuffer::zeroed(format));
+	}
 	let candidates = transform.candidates(dst_rect);
 
 	let mut out = vec![[0.0f32; 4]; TILE_PIXELS];

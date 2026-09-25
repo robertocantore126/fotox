@@ -20,10 +20,12 @@ use fx_tiles::TileStore;
 use crate::ops::EngineOps;
 use crate::{CursorShape, Modifiers, PointerKind};
 
+pub mod crop;
 pub mod eyedropper;
 pub mod lasso;
 pub mod marquee;
 pub mod paint;
+pub mod transform;
 pub mod wand;
 
 pub use eyedropper::sample_pixel;
@@ -292,6 +294,11 @@ pub struct ToolContext<'a> {
 
 /// A viewport tool (M5-T01).
 pub trait Tool {
+	/// The tool became the active one on `doc` (M6-T03): the crop box starts as
+	/// the whole canvas, Free Transform (M6-T04) takes the layer's bounds. The
+	/// only hook a tool gets before its first event.
+	fn activate(&mut self, _doc: &Document) {}
+
 	/// Handle one pointer event in document coordinates.
 	fn pointer(&mut self, ctx: &mut ToolContext<'_>, event: &DocPointer) -> ToolResult;
 
@@ -346,6 +353,7 @@ impl Tools {
 fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 	match id {
 		"eyedropper" => Some(Box::new(eyedropper::Eyedropper)),
+		"crop" => Some(Box::new(crop::Crop::new("crop"))),
 		// The tool keeps its own id: it reads that tool's option-bar values.
 		"marquee" => Some(Box::new(marquee::Marquee::new("marquee", marquee::Shape::Rect))),
 		"marquee-ellipse" => Some(Box::new(marquee::Marquee::new("marquee-ellipse", marquee::Shape::Ellipse))),
@@ -487,6 +495,12 @@ pub(crate) mod testing {
 			tool.pointer(&mut ctx, &event)
 		}
 
+		/// Make `tool` the active one, the way the engine does when the UI picks a
+		/// tool from the toolbar (M6-T03).
+		pub(crate) fn activate(&mut self, tool: &mut dyn Tool) {
+			tool.activate(&self.doc);
+		}
+
 		/// Send one key to `tool`.
 		pub(crate) fn key(&mut self, tool: &mut dyn Tool, key: &str) -> ToolResult {
 			let mut ctx = ToolContext {
@@ -561,7 +575,16 @@ mod tests {
 		assert!(tools.get("mixer-brush").is_none(), "not implemented");
 		assert!(tools.get("brush").is_some());
 		assert!(tools.get("eyedropper").is_some());
-		for id in ["marquee", "marquee-ellipse", "marquee-row", "marquee-col", "lasso", "lasso-poly", "magic-wand"] {
+		for id in [
+			"marquee",
+			"marquee-ellipse",
+			"marquee-row",
+			"marquee-col",
+			"lasso",
+			"lasso-poly",
+			"magic-wand",
+			"crop",
+		] {
 			assert!(tools.get(id).is_some(), "{id}");
 		}
 	}

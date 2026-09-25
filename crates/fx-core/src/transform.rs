@@ -196,6 +196,49 @@ impl Mapping {
 		}
 	}
 
+	/// The mapping that sends the source rectangle `rect` (`[x0, y0, x1, y1]`)
+	/// onto the quadrilateral `quad` — its top-left, top-right, bottom-right and
+	/// bottom-left corners, in that order (M6-T04: Free Transform's box). A
+	/// parallelogram gives an affine mapping (scale, rotate, skew), anything
+	/// else a homography (distort, perspective; Heckbert's square-to-quad).
+	/// `None` for an empty rectangle or a quad that is not strictly convex (a
+	/// folded or collapsed box has no homography that keeps it on screen).
+	pub fn from_quad(rect: [f64; 4], quad: [(f64, f64); 4]) -> Option<Mapping> {
+		let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+		if !(w > 0.0 && h > 0.0) || !quad_is_convex(quad) {
+			return None;
+		}
+		let [(x0, y0), (x1, y1), (x2, y2), (x3, y3)] = quad;
+		let size = (x2 - x0).abs().max((y2 - y0).abs()).max((x3 - x1).abs()).max((y3 - y1).abs()).max(1.0);
+		let (dx3, dy3) = (x0 - x1 + x2 - x3, y0 - y1 + y2 - y3);
+		let mapping = if dx3.abs() <= 1e-9 * size && dy3.abs() <= 1e-9 * size {
+			// A parallelogram: TL + (TR − TL)·u + (BL − TL)·v.
+			let (a, b) = ((x1 - x0) / w, (y1 - y0) / w);
+			let (c, d) = ((x3 - x0) / h, (y3 - y0) / h);
+			Mapping::Affine([a, b, c, d, x0 - a * rect[0] - c * rect[1], y0 - b * rect[0] - d * rect[1]])
+		} else {
+			// The unit square onto the quad (u along x, v along y) …
+			let (dx1, dx2, dy1, dy2) = (x1 - x2, x3 - x2, y1 - y2, y3 - y2);
+			let den = dx1 * dy2 - dx2 * dy1;
+			if den.abs() < 1e-12 {
+				return None;
+			}
+			let g = (dx3 * dy2 - dx2 * dy3) / den;
+			let h2 = (dx1 * dy3 - dx3 * dy1) / den;
+			let square = [x1 - x0 + g * x1, x3 - x0 + h2 * x3, x0, y1 - y0 + g * y1, y3 - y0 + h2 * y3, y0, g, h2, 1.0];
+			// … after the rectangle onto the unit square.
+			let s = [1.0 / w, 0.0, -rect[0] / w, 0.0, 1.0 / h, -rect[1] / h, 0.0, 0.0, 1.0];
+			let mut m = [0.0; 9];
+			for r in 0..3 {
+				for c in 0..3 {
+					m[r * 3 + c] = (0..3).map(|k| square[r * 3 + k] * s[k * 3 + c]).sum();
+				}
+			}
+			Mapping::Projective(m)
+		};
+		mapping.is_finite().then_some(mapping)
+	}
+
 	/// If this mapping is a whole-pixel translation, its offset: such a
 	/// transform needs no resampling at all (recipe R1.7, exact case).
 	pub fn integer_translation(&self) -> Option<(i32, i32)> {
@@ -220,12 +263,25 @@ impl Mapping {
 pub fn dest_rect(mapping: &Mapping, rect: [f64; 4]) -> Option<((i32, i32), (u32, u32))> {
 	let corners = [(rect[0], rect[1]), (rect[2], rect[1]), (rect[2], rect[3]), (rect[0], rect[3])];
 	let mut box_ = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
-	for (x, y) in corners {
-		let point = mapping.forward_point(x, y)?;
-		box_[0] = box_[0].min(point.0);
-		box_[1] = box_[1].min(point.1);
-		box_[2] = box_[2].max(point.0);
-		box_[3] = box_[3].max(point.1);
+	let mut add = |(x, y): (f64, f64)| {
+		box_[0] = box_[0].min(x);
+		box_[1] = box_[1].min(y);
+		box_[2] = box_[2].max(x);
+		box_[3] = box_[3].max(y);
+	};
+	match mapping {
+		// A Bézier surface lies inside the convex hull of its control points
+		// (M6-T04's Warp): their box holds every mapped pixel. The source
+		// outside the patch's rectangle maps nowhere.
+		Mapping::Warp(patch) => patch.points.iter().for_each(|p| add((p[0], p[1]))),
+		_ => {
+			for (x, y) in corners {
+				add(mapping.forward_point(x, y)?);
+			}
+		}
+	}
+	if !box_.iter().all(|v| v.is_finite()) {
+		return None;
 	}
 	let left = snap(box_[0]).floor();
 	let top = snap(box_[1]).floor();
@@ -235,6 +291,26 @@ pub fn dest_rect(mapping: &Mapping, rect: [f64; 4]) -> Option<((i32, i32), (u32,
 		(i32::try_from(left as i64).ok()?, i32::try_from(top as i64).ok()?),
 		(u32::try_from(width.max(1.0) as i64).ok()?, u32::try_from(height.max(1.0) as i64).ok()?),
 	))
+}
+
+/// Whether the quadrilateral (corners in order round it) is strictly convex:
+/// every turn goes the same way and no side is collapsed (M6-T04: a Free
+/// Transform box that folds over itself is refused, as in Photoshop).
+pub fn quad_is_convex(quad: [(f64, f64); 4]) -> bool {
+	let mut sign = 0.0;
+	for i in 0..4 {
+		let (a, b, c) = (quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]);
+		let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+		if !cross.is_finite() || cross.abs() < 1e-9 {
+			return false;
+		}
+		if sign == 0.0 {
+			sign = cross.signum();
+		} else if cross.signum() != sign {
+			return false;
+		}
+	}
+	true
 }
 
 /// A coordinate that is a rounding error away from a whole pixel is that
@@ -472,6 +548,43 @@ mod tests {
 	}
 
 	#[test]
+	fn a_quad_maps_the_rectangle_onto_its_corners() {
+		let rect = [10.0, 20.0, 110.0, 70.0];
+		let corners = [(10.0, 20.0), (110.0, 20.0), (110.0, 70.0), (10.0, 70.0)];
+		// A parallelogram (rotated, sheared) is affine …
+		let turned = [(50.0, 0.0), (150.0, 30.0), (170.0, 90.0), (70.0, 60.0)];
+		let affine = Mapping::from_quad(rect, turned).expect("convex");
+		assert!(matches!(affine, Mapping::Affine(_)));
+		// … a trapezoid is not.
+		let trapezoid = [(0.0, 0.0), (200.0, 0.0), (150.0, 100.0), (50.0, 100.0)];
+		let projective = Mapping::from_quad(rect, trapezoid).expect("convex");
+		assert!(matches!(projective, Mapping::Projective(_)));
+		for (mapping, quad) in [(affine, turned), (projective, trapezoid)] {
+			for (corner, expected) in corners.iter().zip(quad) {
+				let p = mapping.forward_point(corner.0, corner.1).expect("finite");
+				assert!(
+					(p.0 - expected.0).abs() < 1e-9 && (p.1 - expected.1).abs() < 1e-9,
+					"{corner:?} → {p:?}, want {expected:?}"
+				);
+			}
+		}
+		// The rectangle's own corners are the identity.
+		assert_eq!(Mapping::from_quad(rect, corners), Some(Mapping::identity()));
+		// A folded box (two corners swapped) and a collapsed one are refused.
+		assert_eq!(Mapping::from_quad(rect, [(0.0, 0.0), (100.0, 100.0), (100.0, 0.0), (0.0, 100.0)]), None);
+		assert_eq!(Mapping::from_quad(rect, [(0.0, 0.0), (0.0, 0.0), (100.0, 100.0), (0.0, 100.0)]), None);
+		assert_eq!(Mapping::from_quad([0.0, 0.0, 0.0, 10.0], corners), None);
+	}
+
+	#[test]
+	fn a_warps_box_is_its_control_points_box() {
+		let mut patch = BezierPatch::rect([0.0, 0.0, 300.0, 200.0], [0.0, 0.0, 300.0, 200.0]);
+		patch.set_point(1, 1, -40.5, 70.0);
+		patch.set_point(3, 3, 330.0, 260.2);
+		assert_eq!(dest_rect(&Mapping::Warp(patch), [0.0, 0.0, 300.0, 200.0]), Some(((-41, 0), (371, 261))));
+	}
+
+	#[test]
 	fn integer_translations_are_detected() {
 		assert_eq!(Mapping::translation(3.0, -4.0).integer_translation(), Some((3, -4)));
 		assert_eq!(Mapping::translation(3.5, 0.0).integer_translation(), None);
@@ -625,8 +738,8 @@ mod tests {
 		let ((x, y), (w, h)) = dest_rect(&diagonal, [0.0, 0.0, 30.0, 10.0]).unwrap();
 		assert_eq!((w, h), (30, 29), "ceil of the mapped box each way");
 		assert_eq!((x, y), (-8, 0));
-		// A warp has no forward evaluation here.
-		assert!(dest_rect(&Mapping::Warp(BezierPatch::identity(10, 10)), [0.0, 0.0, 10.0, 10.0]).is_none());
+		// A warp is boxed by its control points (M6-T04).
+		assert_eq!(dest_rect(&Mapping::Warp(BezierPatch::identity(10, 10)), [0.0, 0.0, 10.0, 10.0]), Some(((0, 0), (10, 10))));
 	}
 
 	#[test]

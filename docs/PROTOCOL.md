@@ -70,6 +70,24 @@ there is one), `mask:reveal-sel` / `mask:hide-sel`; `layer:edit-mask`
 painting edits). The shell answers `clip:paste` itself when another program put
 an image on the Windows clipboard since Fotox's last copy.
 
+M6 actions the engine owns: `img:rot90cw` / `img:rot90ccw` / `img:rot180` /
+`img:flip-h` / `img:flip-v` (M6-T02; the three dialogs send the
+`rotate_canvas_arbitrary`, `canvas_size` and `image_size` commands);
+`img:crop` (crop to the selection's bounds, M6-T03); `edit:trim`
+(`args: {based_on, away}` from the Trim dialog: `based_on` is the dialog's
+"Based On" label, `away` the ticked edges `"Top"`, `"Left"`, `"Bottom"`,
+`"Right"`); `tool:commit` / `tool:cancel` (the option bar's ✓ and ✗, the
+same as Enter and Escape for the active tool). The crop tool's ✓ sends
+`{"op":"crop","rect":[x,y,w,h],"angle_deg":a,"delete_cropped":b}`.
+Free Transform (M6-T04): `xf:free` (Ctrl+T) puts a box over the active layer
+(or the selection); `xf:scale` / `xf:rotate` / `xf:skew` / `xf:distort` /
+`xf:perspective` / `xf:warp` do the same with that gesture as the default, or
+switch it while the box is up; `xf:rot180` / `xf:rot90cw` / `xf:rot90ccw` /
+`xf:flip-h` / `xf:flip-v` turn the box when one is up, else transform the
+layer at once. While the box is up it takes the pointer and the `key`s
+(Enter, Escape, the arrows); Enter or ✓ sends
+`{"op":"transform","layer":{"id":n},"mapping":{"kind":"affine"|"projective"|"warp","value":…},"filter":"bicubic"}`.
+
 Action routing rule for the UI (`ui/js/actions.js`): actions that only change
 UI state (panels, screen modes, tool selection display) stay in JS as today;
 **every** action is also sent to the engine, which ignores the ones it does
@@ -87,6 +105,7 @@ not handle. The engine is the authority for anything that touches a document.
 | `view` | `doc, zoom, center_x, center_y, rotation_deg` | rulers, status bar, navigator; ≤ 60 Hz |
 | `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads, input_latency_ms_p50, input_latency_ms_p99` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz. The input latency covers brush input → pixels on screen over the last 2 s (0 when nothing was painted, M5-T11) |
 | `tool_info` | `text` | a tool's status line (M5-T10: the marquee's size while it is dragged) |
+| `transform_box` | `up` | a Free Transform box went up or down (M6-T04): the UI shows the `_transform` option bar while it is up and sends its values as `tool_options` with `tool: "_transform"` |
 | `progress` / `progress_done` | `task, label, fraction` / `task` | long jobs (import, export, filters) |
 | `toast` / `error` | `text` | |
 | `cmyk_profiles` | `profiles: [{name, path}]` | after `hello`: the CMYK profiles for Proof Setup and CMYK export (M4-T04) |

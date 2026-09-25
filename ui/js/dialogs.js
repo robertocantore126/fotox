@@ -138,12 +138,21 @@ function readValues(grid) {
     const label = line.querySelector("span:last-child");
     if (box && label) set(label.textContent, box.classList.contains("on"));
   });
-  // A radio group (`rad()`): the label of the selected option.
+  // A radio group (`rad()`): the label of the selected option — or, for a
+  // multi group (`{multi: true}`, Trim's "Trim Away"), the labels of all of
+  // them, as an array.
   grid.querySelectorAll(".dlg-radiowrap").forEach((wrap) => {
     const label = wrap.querySelector(".dlg-field-label");
+    if (!label) return;
+    const boxes = [...wrap.querySelectorAll("input")];
+    const text = (box) => (box.parentElement.querySelector("span") || {}).textContent;
+    if (boxes.some((box) => box.type === "checkbox")) {
+      set(label.textContent, boxes.filter((box) => box.checked).map(text));
+      return;
+    }
     const checked = wrap.querySelector("input:checked");
-    const option = checked && checked.parentElement.querySelector("span");
-    if (label && option) set(label.textContent, option.textContent);
+    const option = checked && text(checked);
+    if (option) set(label.textContent, option);
   });
   // The Canvas Size anchor grid: the selected cell's index, 0..8 (top-left →
   // bottom-right, 4 = centre).
@@ -326,7 +335,9 @@ function radioField(f) {
   const group = h("div", { class: "dlg-radio" + (f.inline ? " inline" : "") });
   const name = "r" + Math.random().toString(36).slice(2, 8);
   (f.options || []).forEach((o, i) => {
-    const dot = h("input", { type: f.multi ? "checkbox" : "radio", name, checked: i === f.value });
+    // A multi group (Trim's "Trim Away") starts with every box ticked, as in
+    // Photoshop.
+    const dot = h("input", { type: f.multi ? "checkbox" : "radio", name, checked: f.multi ? true : i === f.value });
     group.append(h("label", { class: "dlg-checkline" }, dot, h("span", { text: o })));
   });
   return h("div", { class: "dlg-radiowrap" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, group);

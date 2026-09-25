@@ -1,5 +1,5 @@
-//! The image-geometry commands through the real engine operations (M6-T02):
-//! rotate, flip, canvas size and image size on real tiles.
+//! The image-geometry commands through the real engine operations (M6-T02 and
+//! M6-T03): rotate, flip, canvas size, image size and crop on real tiles.
 //!
 //! `fx-core`'s own tests run these commands against a stub permutation and
 //! `fx-ops` tests the permutation and the sampler on their own. What is only
@@ -323,6 +323,143 @@ fn image_size_half_then_double_keeps_a_smooth_image() {
 }
 
 #[test]
+fn crop_without_deleting_keeps_the_tiles_and_moves_the_offsets() {
+	let store = store();
+	let (mut doc, id) = document_with(&store, 600, 500, ramp);
+	apply(
+		&mut doc,
+		&store,
+		Command::OffsetLayer {
+			layer: LayerRef::Id(id),
+			dx: 40,
+			dy: -30,
+		},
+	);
+	let before = image_of(&doc, id).clone();
+
+	apply(
+		&mut doc,
+		&store,
+		Command::Crop {
+			rect: (100, 80, 400, 300),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		},
+	);
+	assert_eq!((doc.width, doc.height), (400, 300));
+	assert_eq!(offset_of(&doc, id), (-60, -110), "the layer moved with the canvas");
+	assert!(same_tiles(&before, image_of(&doc, id)), "no pixel was rewritten (D-056)");
+}
+
+#[test]
+fn crop_with_delete_clears_everything_outside_the_rectangle() {
+	let store = store();
+	// Content over the first two tile columns and the first tile row.
+	let (mut doc, id) = document_with(&store, 600, 500, |x, y| if x < 400 && y < 200 { [1000, 2000, 3000, 65_535] } else { [0; 4] });
+	apply(
+		&mut doc,
+		&store,
+		Command::AddMask {
+			layer: LayerRef::Id(id),
+			fill: MaskFill::RevealAll,
+		},
+	);
+	apply(&mut doc, &store, Command::SelectAll);
+
+	// The rectangle starts in the middle of tile (0, 0): that tile is crossed,
+	// tile (1, 0) holds its right part and everything below goes.
+	apply(
+		&mut doc,
+		&store,
+		Command::Crop {
+			rect: (256, 0, 100, 150),
+			angle_deg: 0.0,
+			delete_cropped: true,
+		},
+	);
+	assert_eq!((doc.width, doc.height), (100, 150));
+	assert_eq!(offset_of(&doc, id), (-256, 0));
+	let image = image_of(&doc, id);
+	assert_eq!(pixel_of(&store, image, 256, 10), [1000, 2000, 3000, 65_535], "inside the rectangle");
+	assert_eq!(pixel_of(&store, image, 255, 10), [0; 4], "just left of it");
+	assert_eq!(pixel_of(&store, image, 300, 200), [0; 4], "below it");
+	assert!(matches!(image.slot(0, 0, 0), TileSlot::Empty), "a tile wholly outside went");
+	assert!(matches!(image.slot(0, 1, 1), TileSlot::Empty), "and a whole row of them");
+	// The mask is canvas coverage: it is clipped and then follows the canvas.
+	let mask = &doc.layer(id).expect("layer exists").mask.as_ref().expect("mask exists").image;
+	assert!(matches!(mask.slot(0, 0, 0), TileSlot::Empty));
+	assert!(matches!(mask.slot(0, 1, 0), TileSlot::Data(_)), "the crossed tile was rewritten");
+	// The selection too, and it moved with the canvas.
+	let selection = doc.selection.as_ref().expect("SelectAll set one");
+	assert_eq!(selection.offset, (-256, 0));
+	assert!(matches!(selection.image.slot(0, 1, 1), TileSlot::Empty));
+}
+
+#[test]
+fn a_ten_degree_straighten_levels_a_horizon() {
+	let store = store();
+	// A horizon tilted 10° down to the right: bright sky above, black ground
+	// below.
+	let slope = 10f64.to_radians().tan();
+	let horizon = |x: u32, y: u32| -> [u16; 4] {
+		if f64::from(y) < 150.0 + slope * (f64::from(x) - 200.0) {
+			[60_000, 60_000, 60_000, 65_535]
+		} else {
+			[2_000, 2_000, 2_000, 65_535]
+		}
+	};
+	let (mut doc, id) = document_with(&store, 400, 300, horizon);
+	// −10° levels a horizon that leans +10°.
+	apply(
+		&mut doc,
+		&store,
+		Command::Crop {
+			rect: (0, 0, 400, 300),
+			angle_deg: -10.0,
+			delete_cropped: false,
+		},
+	);
+	assert_eq!((doc.width, doc.height), (400, 300), "the crop box is the new canvas");
+
+	// The straighten *is* T01's rotation in the crop box's frame: the very same
+	// pixels as an arbitrary rotation of the same angle, which is what the card
+	// asks us to compare against.
+	let (mut turned, turned_id) = document_with(&store, 400, 300, horizon);
+	apply(
+		&mut turned,
+		&store,
+		Command::RotateCanvasArbitrary {
+			angle_deg: -10.0,
+			filter: Filter::BicubicAutomatic,
+		},
+	);
+	let (straight, rotated) = (image_of(&doc, id), image_of(&turned, turned_id));
+	for y in (20..280).step_by(7) {
+		for x in (20..380).step_by(7) {
+			assert_eq!(pixel_of(&store, straight, x, y), pixel_of(&store, rotated, x, y), "({x}, {y})");
+		}
+	}
+
+	// The horizon the user gets is level: every column crosses from the sky to
+	// the ground at the same row, give or take the kernel's one-row reach. A
+	// transparent pixel (the corner the turn left empty) is not the ground.
+	let ground = |x: u32, y: u32| {
+		let p = pixel_of(&store, straight, x, y);
+		p[3] > 60_000 && p[0] < 30_000
+	};
+	let rows: Vec<u32> = (60..340)
+		.map(|x| (40..260).find(|y| ground(x, *y)).unwrap_or_else(|| panic!("a horizon in column {x}")))
+		.collect();
+	let min = *rows.iter().min().expect("columns");
+	let max = *rows.iter().max().expect("columns");
+	assert!(max - min <= 2, "the horizon is level: rows {min}..={max}");
+	// The image starts at the rotated box's corner, which the turn left outside
+	// the canvas: the horizon is level in the canvas, right at its middle.
+	let middle = rows[140] as i32 + offset_of(&doc, id).1;
+	assert!((145..156).contains(&middle), "the horizon sits at the box's middle: {middle}");
+}
+
+#[test]
 fn a_turn_carries_the_masks_and_the_selection() {
 	let store = store();
 	let (mut doc, id) = document_with(&store, 600, 500, |_, _| [1000, 2000, 3000, 65_535]);
@@ -369,4 +506,248 @@ fn a_turn_carries_the_masks_and_the_selection() {
 	let selection = doc.selection.as_ref().expect("SelectAll set one");
 	assert_eq!((selection.image.width(), selection.image.height()), (500, 600));
 	assert_eq!(selection.offset, (0, 0));
+}
+
+/// A mask's gray value at mask pixel `(x, y)`, or its outside value off it.
+fn mask_at(store: &TileStore, doc: &Document, id: LayerId, canvas: (i32, i32)) -> u16 {
+	let layer = doc.layer(id).expect("layer exists");
+	let mask = layer.mask.as_ref().expect("mask exists");
+	let origin = match (&layer.kind, mask.linked) {
+		(LayerKind::Pixel { offset, .. }, true) => *offset,
+		_ => (0, 0),
+	};
+	let (x, y) = (canvas.0 - origin.0, canvas.1 - origin.1);
+	if x < 0 || y < 0 || x >= mask.image.width() as i32 || y >= mask.image.height() as i32 {
+		return mask.outside_value;
+	}
+	let (x, y) = (x as u32, y as u32);
+	match mask.image.slot(0, x / TILE_SIZE, y / TILE_SIZE) {
+		TileSlot::Empty => 0,
+		TileSlot::Solid(value) => value.0[0],
+		TileSlot::Data(handle) => store.get(handle).unwrap().as_u16()[((y % TILE_SIZE) * TILE_SIZE + x % TILE_SIZE) as usize],
+	}
+}
+
+/// A document whose layer sits at (40, 30) with a hide-all mask holding a
+/// white 128² square in its top-left corner.
+fn moved_layer_with_a_mask(store: &TileStore, linked: bool) -> (Document, LayerId) {
+	let (mut doc, id) = document_with(store, 600, 500, |_, _| [1000, 2000, 3000, 65_535]);
+	apply(
+		&mut doc,
+		store,
+		Command::OffsetLayer {
+			layer: LayerRef::Id(id),
+			dx: 40,
+			dy: 30,
+		},
+	);
+	apply(
+		&mut doc,
+		store,
+		Command::AddMask {
+			layer: LayerRef::Id(id),
+			fill: MaskFill::HideAll,
+		},
+	);
+	let mut buffer = TileBuffer::zeroed(PixelFormat::Gray16);
+	for y in 0..128 {
+		for x in 0..128 {
+			buffer.as_u16_mut()[(y * TILE_SIZE + x) as usize] = u16::MAX;
+		}
+	}
+	let mask = doc.layer_mut(id).expect("layer exists").mask.as_mut().expect("mask exists");
+	mask.image.put_buffer(store, 0, 0, buffer);
+	mask.linked = linked;
+	(doc, id)
+}
+
+#[test]
+fn a_linked_mask_of_a_moved_layer_turns_with_its_layer() {
+	let store = store();
+	let (mut doc, id) = moved_layer_with_a_mask(&store, true);
+	// The square covers canvas (40..168, 30..158): a quarter turn clockwise of
+	// a 600 × 500 canvas sends (x, y) to (499 − y, x), so it lands on
+	// (342..470, 40..168) — wherever the turn puts the layer.
+	apply(&mut doc, &store, Command::RotateCanvas { quarter_turns: 1 });
+	assert_eq!(mask_at(&store, &doc, id, (400, 100)), u16::MAX, "inside the turned square");
+	assert_eq!(mask_at(&store, &doc, id, (343, 41)), u16::MAX, "its corner");
+	assert_eq!(mask_at(&store, &doc, id, (300, 100)), 0, "left of it");
+	assert_eq!(mask_at(&store, &doc, id, (400, 200)), 0, "below it");
+
+	// Image Size moves the layer too: the mask follows.
+	let (mut doc, id) = moved_layer_with_a_mask(&store, true);
+	apply(
+		&mut doc,
+		&store,
+		Command::ImageSize {
+			width: 300,
+			height: 250,
+			ppi: 72.0,
+			resample: Some(Filter::Bilinear),
+		},
+	);
+	// The square is now canvas (20..84, 15..79).
+	assert_eq!(mask_at(&store, &doc, id, (50, 45)), u16::MAX);
+	assert_eq!(mask_at(&store, &doc, id, (100, 45)), 0);
+	assert_eq!(mask_at(&store, &doc, id, (50, 100)), 0);
+}
+
+#[test]
+fn an_unlinked_mask_moves_with_the_canvas() {
+	let store = store();
+	let (mut doc, id) = moved_layer_with_a_mask(&store, false);
+	// Unlinked, the square is canvas (0..128, 0..128). A crop at (60, 70)
+	// moves it to (−60..68, −70..58).
+	apply(
+		&mut doc,
+		&store,
+		Command::Crop {
+			rect: (60, 70, 400, 300),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		},
+	);
+	assert_eq!(mask_at(&store, &doc, id, (10, 10)), u16::MAX);
+	assert_eq!(mask_at(&store, &doc, id, (67, 57)), u16::MAX, "its last pixel");
+	assert_eq!(mask_at(&store, &doc, id, (70, 10)), 0, "right of it");
+	assert_eq!(mask_at(&store, &doc, id, (10, 60)), 0, "below it");
+	// Canvas Size shifts it the same way.
+	apply(
+		&mut doc,
+		&store,
+		Command::CanvasSize {
+			width: 500,
+			height: 400,
+			anchor: Anchor9::BottomRight,
+		},
+	);
+	assert_eq!(mask_at(&store, &doc, id, (110, 110)), u16::MAX, "anchored bottom-right: 100 px further");
+	assert_eq!(mask_at(&store, &doc, id, (90, 90)), 0, "what the crop dropped stays dropped");
+}
+
+/// The pixel a placed layer shows at canvas `(x, y)` (transparent off it).
+fn canvas_pixel(store: &TileStore, doc: &Document, id: LayerId, x: i32, y: i32) -> [u16; 4] {
+	let (image, (ox, oy)) = (image_of(doc, id), offset_of(doc, id));
+	let (lx, ly) = (x - ox, y - oy);
+	if lx < 0 || ly < 0 || lx >= image.width() as i32 || ly >= image.height() as i32 {
+		return [0; 4];
+	}
+	pixel_of(store, image, lx as u32, ly as u32)
+}
+
+#[test]
+fn an_instant_quarter_turn_of_a_layer_copies_its_pixels_exactly() {
+	let store = store();
+	let (mut doc, id) = document_with(&store, 300, 200, ramp);
+	let linear = crate::tools::transform::instant_turn("xf:rot90cw").expect("known");
+	let mapping = crate::tools::transform::turn_mapping(linear, [0.0, 0.0, 300.0, 200.0]);
+	apply(
+		&mut doc,
+		&store,
+		Command::Transform {
+			layer: LayerRef::Id(id),
+			mapping: Box::new(mapping),
+			filter: Filter::Bicubic,
+		},
+	);
+	// About (150, 100): source pixel (i, j) lands on canvas (249 − j, i − 50).
+	for (i, j) in [(50, 0), (120, 37), (299, 199), (200, 150)] {
+		assert_eq!(
+			canvas_pixel(&store, &doc, id, 249 - j, i - 50),
+			ramp(i as u32, j as u32),
+			"({i}, {j}) moved exactly"
+		);
+	}
+	let image = image_of(&doc, id);
+	assert_eq!((image.width(), image.height()), (200, 300), "the layer turned");
+}
+
+#[test]
+fn transforming_a_selection_leaves_a_hole_and_one_undo_restores_both() {
+	let store = store();
+	let colour = |x: u32, _: u32| {
+		if x < 200 {
+			[60_000, 1_000, 1_000, 65_535]
+		} else {
+			[1_000, 1_000, 60_000, 65_535]
+		}
+	};
+	let (mut doc, id) = document_with(&store, 400, 300, colour);
+	let ops = EngineOps::default();
+	let mut ctx = CommandContext {
+		tiles: &store,
+		ops: Some(&ops as &dyn PixelOps),
+	};
+	let mut history = fx_core::History::default();
+	history
+		.execute(
+			&mut doc,
+			Command::Select {
+				shape: fx_core::SelectionShape::Rect {
+					x: 50.0,
+					y: 50.0,
+					w: 100.0,
+					h: 100.0,
+				},
+				mode: fx_core::SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: false,
+			},
+			&mut ctx,
+		)
+		.expect("select");
+	let effect = history
+		.execute(
+			&mut doc,
+			Command::Transform {
+				layer: LayerRef::Id(id),
+				mapping: Box::new(fx_core::Mapping::translation(200.0, 0.0)),
+				filter: Filter::Bicubic,
+			},
+			&mut ctx,
+		)
+		.expect("transform");
+	assert_eq!(effect.label, "Free Transform");
+	assert_eq!(canvas_pixel(&store, &doc, id, 100, 100), [0; 4], "a hole where the pixels were");
+	assert_eq!(
+		canvas_pixel(&store, &doc, id, 300, 100),
+		[60_000, 1_000, 1_000, 65_535],
+		"the red pixels, moved"
+	);
+	assert_eq!(
+		canvas_pixel(&store, &doc, id, 300, 200),
+		[1_000, 1_000, 60_000, 65_535],
+		"outside the moved square: the layer"
+	);
+	assert_eq!(
+		canvas_pixel(&store, &doc, id, 20, 100),
+		[60_000, 1_000, 1_000, 65_535],
+		"outside the hole: the layer"
+	);
+	let selection = doc.selection.as_ref().expect("still selected");
+	assert!(selection.offset.0 >= 200, "the selection moved with the pixels: {:?}", selection.offset);
+
+	assert!(history.undo(&mut doc), "one step");
+	assert_eq!(canvas_pixel(&store, &doc, id, 100, 100), [60_000, 1_000, 1_000, 65_535]);
+	assert_eq!(canvas_pixel(&store, &doc, id, 300, 100), [1_000, 1_000, 60_000, 65_535]);
+}
+
+#[test]
+fn a_transformed_layer_carries_its_linked_mask() {
+	let store = store();
+	let (mut doc, id) = moved_layer_with_a_mask(&store, true);
+	apply(
+		&mut doc,
+		&store,
+		Command::Transform {
+			layer: LayerRef::Id(id),
+			mapping: Box::new(fx_core::Mapping::translation(30.0, 20.0)),
+			filter: Filter::Bicubic,
+		},
+	);
+	// The square was canvas (40..168, 30..158): now (70..198, 50..178).
+	assert_eq!(mask_at(&store, &doc, id, (100, 60)), u16::MAX);
+	assert_eq!(mask_at(&store, &doc, id, (197, 177)), u16::MAX, "its last pixel");
+	assert_eq!(mask_at(&store, &doc, id, (60, 40)), 0, "where it was");
+	assert_eq!(canvas_pixel(&store, &doc, id, 45, 35), [0; 4], "the layer moved too");
 }
