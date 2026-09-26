@@ -244,6 +244,8 @@ enum EditKey {
 	Shape(LayerRef, [bool; 4]),
 	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
 	Style(LayerRef),
+	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running total.
+	Move,
 }
 
 impl EditKey {
@@ -278,6 +280,7 @@ impl EditKey {
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
 			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
+			Command::OffsetLayers { layers, .. } if layers.is_empty() => Some(Self::Move),
 			Command::SetShape {
 				layer,
 				shape,
@@ -722,6 +725,9 @@ impl Engine {
 		if let Some(command) = result.command {
 			// A command that changes the canvas hands the tool the new document
 			// when it lands (`after_edit`), which for a job is later than now.
+			self.command(doc_id, command);
+		}
+		for command in result.then {
 			self.command(doc_id, command);
 		}
 	}

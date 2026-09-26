@@ -14,11 +14,13 @@ export const optionBars = {
 
   move: [
     { type: "toggle", text: "Auto-Select", on: false },
-    { type: "select", options: ["Layer", "Group"], value: "Layer", disabled: true },
-    { type: "toggle", text: "Show Transform Controls", on: true },
+    { type: "select", key: "Select", options: ["Layer", "Group"], value: "Layer" },
+    { type: "toggle", text: "Show Transform Controls", on: false },
     { type: "gap" },
-    { type: "btngroup", icons: ["i-shape-rect", "i-props", "i-shape-rect"], titles: ["Align left edges", "Align horizontal centers", "Align right edges"], active: -1 },
-    { type: "btngroup", icons: ["i-layers", "i-props", "i-layers"], titles: ["Distribute horizontal centers", "Distribute vertical centers"], active: -1 },
+    // Align / Distribute (M7-T04): the same actions as Layer ▸ Align.
+    { type: "btngroup", icons: ["i-shape-rect", "i-props", "i-shape-rect"], titles: ["Align left edges", "Align horizontal centers", "Align right edges"], actions: ["align:left", "align:hcenter", "align:right"] },
+    { type: "btngroup", icons: ["i-shape-rect", "i-props", "i-shape-rect"], titles: ["Align top edges", "Align vertical centers", "Align bottom edges"], actions: ["align:top", "align:vcenter", "align:bottom"] },
+    { type: "btngroup", icons: ["i-layers", "i-props", "i-layers"], titles: ["Distribute horizontal centers", "Distribute vertical centers"], actions: ["dist:hcenter", "dist:vcenter"] },
   ],
 
   marquee: [
