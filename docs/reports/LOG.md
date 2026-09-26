@@ -434,3 +434,16 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Try it: C's flyout ▸ Slice Tool, drag two rectangles; save the document; File ▸ Export ▸ Slices to Files.
 
 ## M12-T09 — Acceptance: deferred to HARDEN (S35–S37, Rob's mock-up and the styles comparison).
+
+## M13-T00 — Decisions  (Claude, 2026-09-26)
+- Done: D-088 (ort, load-dynamic, DirectML), D-089 (Rob's model picks: BiRefNet, EfficientSAM; no Sky Select, no Neural Filters in M13; licences checked on the repos' LICENSE files), D-090 (models folder), D-091 (ComfyUI bridge), D-092 (honest UI).
+- Skipped: M13-T03 (Sky Select) and M13-T05 (Neural Filters), by Rob's choice.
+- FAST: none. VERIFY: the ONNX weights' licence terms when the download links are fixed.
+- Try it: `docs/DECISIONS.md`.
+
+## M13-T01 — Inference host  (Claude, 2026-09-26)
+- Done: the `fx-ai` crate — `runtime` (ONNX Runtime loaded dynamically: `FOTOX_ORT_DYLIB`, next to the exe, or the models folder; D-088), `session::Model` (load once, DirectML first on Windows then CPU, f32 / i64 inputs, f32 outputs), `models` (registry with real URLs, sizes and SHA-256: BiRefNet lite 224 MB, EfficientSAM ViT-T encoder + decoder 41 MB; `models_dir()` is the one folder, D-090; checksummed download to `.part` then rename; delete), `image` (planar normalised model input over white, bilinear mask sampling, sigmoid), `sam` (box / point prompts in EfficientSAM's format, best mask by IoU). Engine: `ai::working_composite` (the composite at the mip level whose long side ≤ N — tiles read bounded by N², missing tiles served inline) and the `ai:status` / `ai:download` / `ai:delete` actions. A 218-byte test model (`crates/fx-ai/tests/data/threshold.onnx`) runs through the host in `tests/host.rs` (skipped without `FOTOX_ORT_DYLIB`); checked here with ONNX Runtime 1.30. The real models' IO was checked with Python onnxruntime: EfficientSAM box prompt on a 200² square → 39 575 px; BiRefNet separates a square (9 s on this CPU).
+- Skipped: the Preferences page for models (download size prompt, progress, delete button), the M9-T05 edge refinement of the upsampled mask, shipping `onnxruntime.dll` with the app (xtask / installer), Tests (bounded read on a 30k² document, crisp-edge upsample).
+- FAST: downloads run on a bare thread with the result only logged; programs' missing tiles are served on the calling thread.
+- VERIFY: the rembg mirror of BiRefNet's ONNX weights (licence of the export).
+- Try it: put `onnxruntime.dll` next to Fotox (or set `FOTOX_ORT_DYLIB`), send the actions `ai:status` / `ai:download {"id":"birefnet-lite"}`.

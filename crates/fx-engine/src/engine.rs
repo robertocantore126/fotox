@@ -1038,6 +1038,7 @@ impl Engine {
 					|| self.m10_action(&id, &args)
 					|| self.m11_action(&id, &args)
 					|| self.m12_action(&id, &args)
+					|| self.m13_action(&id, &args)
 				{
 					return Changed::default();
 				}
@@ -4088,6 +4089,7 @@ fn pixel_job_label(command: &Command) -> String {
 mod m10;
 mod m11;
 mod m12;
+mod m13;
 mod m8;
 mod m9;
 
