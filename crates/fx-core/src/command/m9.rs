@@ -221,7 +221,7 @@ fn inverse(mapping: &Mapping) -> Option<Mapping> {
 	let m = match mapping {
 		Mapping::Affine([a, b, c, d, e, f]) => [*a, *c, *e, *b, *d, *f, 0.0, 0.0, 1.0],
 		Mapping::Projective(m) => *m,
-		Mapping::Warp(_) => return None,
+		Mapping::Warp(_) | Mapping::Custom { .. } => return None,
 	};
 	let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
 	if det.abs() < 1e-15 {

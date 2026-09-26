@@ -337,3 +337,17 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: seams are `scale` px wide at full resolution (blocky steps on big images); nearest neighbour for the plain-scale part; the layer mask is not scaled; skin tones by a crude RGB rule; energy recomputed per seam.
 - VERIFY: Photoshop's skin detector and how Amount mixes the two.
 - Try it: Edit ▸ Content-Aware Scale…, Width 60 %.
+
+## M11-T06 — Liquify  (Claude, 2026-09-26)
+- Done: `Mapping::Custom { id, src, dst }` (still `Copy`) naming a geometry in `fx_core::warp_map` (a registry of `TriMesh` / sparse `DispField`, the last 48 kept), supported by `dest_rect`, the sampler's `Transform` (`fx-ops/resample/mapping.rs`: mesh → warp triangles with source points as `uv`; field → `p + d(p)`) and so by `Command::Transform` and the Free Transform live preview. The transform `Session` takes a `CustomWarp` (pointer, keys, options, overlay, status) in place of the box (`start_transform_with`), with its own option bar (`TransformBox.bar`). `fx_ops::liquify::dab`: Forward Warp, Reconstruct, Smooth, Twirl (Alt: counter-clockwise), Pucker / Bloat (Alt swaps), Push Left on a backward field with 4-px nodes in 64² chunks (only touched chunks exist). Filter ▸ Liquify… (Shift+Ctrl+X) starts the session (`tools/liquify.rs`): bar with Tool, Size, Pressure, Rate, ✓ / ✗; `[` `]` size, Delete = Restore All, Enter applies as one resample job.
+- Skipped: the modal workspace, Freeze / Thaw Mask, Hand / Zoom inside, Show Mesh / Backdrop, Reconstruct All (partial), stylus pressure, mesh load / save, Face-Aware (D-078), Tests.
+- FAST: the history step is "Free Transform"; the output layer grows by the largest displacement all round; source bounds use the field's global maximum; the registry forgets old ids (a stale id maps nothing).
+- VERIFY: brush falloff and twirl / pucker speeds against Photoshop.
+- Try it: Filter ▸ Liquify…, drag over a face, Enter.
+
+## M11-T07 — Puppet Warp  (Claude, 2026-09-26)
+- Done: `fx_ops::puppet` (grid mesh over the content box keeping cells the alpha — dilated by Expansion — covers; Density sets 20 / 36 / 60 cells; MLS deformation, D-079: Rigid, Normal = similarity, Distort = affine); `tools/puppet.rs` session: click adds a pin, drag moves it, Alt+click removes it; Mode and Show Mesh live from the bar; the deformed mesh is registered as `Mapping::Custom` and previewed / committed like Free Transform. Edit ▸ Puppet Warp.
+- Skipped: ARAP (D-079 fast default), pin rotation, Pin Depth, Tests.
+- FAST: a new pin's source is found from the nearest mesh vertex; Density / Expansion only apply when the session starts; the mesh overlay draws every triangle.
+- VERIFY: none.
+- Try it: a layer with an object on transparency, Edit ▸ Puppet Warp, click three pins, drag one.

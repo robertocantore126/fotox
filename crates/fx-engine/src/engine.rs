@@ -1110,6 +1110,12 @@ impl Engine {
 				self.request_frame();
 				Changed::default()
 			}
+			UiToEngine::ToolOptions { tool, options } if tool.starts_with("_warp") => {
+				// A warp session's bar (M11).
+				self.settings.options.insert(tool, options.clone());
+				self.warp_options(&options);
+				Changed::default()
+			}
 			UiToEngine::ToolOptions { tool, options } => {
 				let transform = tool == "_transform";
 				let active = self.docs.active_mut().is_some_and(|open| open.view.tool == tool);
@@ -1518,6 +1524,12 @@ impl Engine {
 
 	/// Put a Free Transform box over the active layer (or the selection).
 	fn start_transform(&mut self, doc_id: DocId, mode: TransformMode) {
+		self.start_transform_with(doc_id, mode, None);
+	}
+
+	/// The same session driven by a warp tool instead of the box (M11).
+	fn start_transform_with(&mut self, doc_id: DocId, mode: TransformMode, custom: Option<Box<dyn crate::tools::transform::CustomWarp>>) {
+		let bar = custom.as_ref().map(|c| c.bar().to_owned());
 		let filter = self.transform_filter();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		if let Some(job) = &open.busy {
@@ -1550,7 +1562,8 @@ impl Engine {
 			}
 		};
 		self.end_stroke();
-		let session = free_transform::Session::new(layer_id, rect, mode, filter);
+		let mut session = free_transform::Session::new(layer_id, rect, mode, filter);
+		session.custom = custom;
 		let status = session.status();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		open.transform_preview = Some(TransformPreview {
@@ -1571,7 +1584,7 @@ impl Engine {
 			});
 		});
 		self.transform = Some((doc_id, session));
-		self.to_ui(&EngineToUi::TransformBox { up: true });
+		self.to_ui(&EngineToUi::TransformBox { up: true, bar });
 		self.to_ui(&EngineToUi::ToolInfo { text: status });
 		self.request_frame();
 	}
@@ -1633,7 +1646,7 @@ impl Engine {
 		{
 			open.preview_rev += 1;
 		}
-		self.to_ui(&EngineToUi::TransformBox { up: false });
+		self.to_ui(&EngineToUi::TransformBox { up: false, bar: None });
 		self.to_ui(&EngineToUi::ToolInfo { text: String::new() });
 		self.request_frame();
 	}

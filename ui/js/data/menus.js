@@ -133,8 +133,8 @@ export const menus = [
       sep,
       it("Content-Aware Fill...", "", "dlg:content-aware-fill"),
       it("Content-Aware Scale...", "Alt+Shift+Ctrl+C", "misc:content-aware-scale"),
-      it("Puppet Warp", "", "misc:puppet-warp", { dis: true }),
-      it("Perspective Warp", "Alt+Shift+Ctrl+W", "misc:perspective-warp", { dis: true }),
+      it("Puppet Warp", "", "misc:puppet-warp"),
+      it("Perspective Warp", "Alt+Shift+Ctrl+W", "misc:perspective-warp"),
       it("Free Transform", "Ctrl+T", "xf:free"),
       sub("Transform", [
         it("Scale", "", "xf:scale"),

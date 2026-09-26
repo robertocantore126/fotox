@@ -135,6 +135,12 @@ export function runAction(item) {
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
   // Type ▸ Warp Text (M10-T08).
+  // M11 warp sessions: the engine puts its bar up.
+  const warps = { "dlg:liquify": "warp:liquify", "misc:puppet-warp": "warp:puppet", "misc:perspective-warp": "warp:perspective" };
+  if (warps[a] && bridge.isNative) {
+    bridge.send({ type: UI.ACTION, id: warps[a] });
+    return;
+  }
   // Edit ▸ Content-Aware Scale (M11-T05). FAST: a dialog instead of the
   // transform box.
   if (a === "misc:content-aware-scale" && bridge.isNative) {

@@ -72,6 +72,38 @@ impl Mode {
 	}
 }
 
+/// A warp that drives a transform session instead of the box (M11-T06..T08:
+/// Liquify, Puppet Warp, Perspective Warp). The session hands it the
+/// pointer, keys and overlay, and previews / commits its mapping exactly as
+/// a Free Transform's.
+pub trait CustomWarp: Send + std::fmt::Debug {
+	fn clone_box(&self) -> Box<dyn CustomWarp>;
+	/// The option bar shown while it runs (`ui/js/data/options.js`).
+	fn bar(&self) -> &'static str;
+	/// Source → destination (canvas pixels); `None` = identity so far.
+	fn mapping(&self) -> Option<Mapping>;
+	fn pointer(&mut self, event: &DocPointer, zoom: f64) -> Update;
+	/// A key the warp handles itself (`None` → Enter commits, Escape cancels).
+	fn key(&mut self, _key: &str) -> Option<Update> {
+		None
+	}
+	/// An option-bar / dialog value changed.
+	fn set_option(&mut self, _key: &str, _value: &serde_json::Value) -> Update {
+		Update::None
+	}
+	fn overlay(&self) -> Vec<OverlayItem>;
+	fn status(&self) -> String;
+	fn cursor(&self) -> CursorShape {
+		CursorShape::Crosshair
+	}
+}
+
+impl Clone for Box<dyn CustomWarp> {
+	fn clone(&self) -> Self {
+		self.clone_box()
+	}
+}
+
 /// What an event did to the session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
@@ -136,6 +168,8 @@ pub struct Session {
 	/// Select ▸ Transform Selection (M9-T02): the box transforms the
 	/// selection's coverage, not the layer.
 	pub selection: bool,
+	/// M11: a warp tool in place of the box.
+	pub custom: Option<Box<dyn CustomWarp>>,
 }
 
 impl Session {
@@ -154,6 +188,7 @@ impl Session {
 			hover: None,
 			zoom: 1.0,
 			selection: false,
+			custom: None,
 		};
 		session.set_mode(mode);
 		session
@@ -183,6 +218,9 @@ impl Session {
 	/// Source pixels → canvas pixels, or `None` while the box cannot be
 	/// resampled (it never is: folding gestures are refused).
 	pub fn mapping(&self) -> Option<Mapping> {
+		if let Some(custom) = &self.custom {
+			return custom.mapping();
+		}
 		match self.patch {
 			Some(patch) => Some(Mapping::Warp(patch)),
 			None => Mapping::from_quad(self.rect, self.quad),
@@ -191,6 +229,9 @@ impl Session {
 
 	/// Whether the box is still the source rectangle (Enter then cancels).
 	pub fn is_identity(&self) -> bool {
+		if let Some(custom) = &self.custom {
+			return custom.mapping().is_none();
+		}
 		match self.patch {
 			Some(patch) => {
 				let mut identity = BezierPatch::rect(self.rect, self.rect);
@@ -217,6 +258,9 @@ impl Session {
 	/// The status line: size in percent of the source and the angle of the
 	/// top side (Photoshop's option bar numbers).
 	pub fn status(&self) -> String {
+		if let Some(custom) = &self.custom {
+			return custom.status();
+		}
 		let [tl, tr, _, bl] = self.quad;
 		let (w, h) = (self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]);
 		let width = 100.0 * distance(tl, tr) / w;
@@ -229,6 +273,9 @@ impl Session {
 	/// Rotate 90°, Flip… while the box is up). `linear` is a 2 × 2 matrix
 	/// `[a, b, c, d]`: `x' = a·x + b·y`, `y' = c·x + d·y`.
 	pub fn turn(&mut self, linear: [f64; 4]) {
+		if self.custom.is_some() {
+			return;
+		}
 		let r = self.reference;
 		let apply = |p: Point| -> Point {
 			let (dx, dy) = sub(p, r);
@@ -262,7 +309,7 @@ impl Session {
 	/// value. The box becomes a rotated rectangle around the reference point
 	/// (FAST: skew and perspective are lost; Warp ignores this).
 	pub fn set_numeric(&mut self, x: Option<f64>, y: Option<f64>, w: Option<f64>, h: Option<f64>, angle: Option<f64>) {
-		if self.patch.is_some() {
+		if self.patch.is_some() || self.custom.is_some() {
 			return;
 		}
 		let (cx, cy, cw, ch, ca) = self.numbers();
@@ -283,6 +330,9 @@ impl Session {
 
 	/// Move the whole box by whole pixels (the arrow keys).
 	pub fn nudge(&mut self, dx: f64, dy: f64) {
+		if self.custom.is_some() {
+			return;
+		}
 		let shift = |p: Point| (p.0 + dx, p.1 + dy);
 		self.quad = self.quad.map(shift);
 		self.reference = shift(self.reference);
@@ -296,6 +346,9 @@ impl Session {
 
 	/// A pointer event in document coordinates.
 	pub fn pointer(&mut self, event: &DocPointer, zoom: f64) -> Update {
+		if let Some(custom) = &mut self.custom {
+			return custom.pointer(event, zoom.max(MIN_ZOOM));
+		}
 		self.zoom = zoom.max(MIN_ZOOM);
 		let pointer = (event.x, event.y);
 		self.hover = Some(pointer);
@@ -337,6 +390,16 @@ impl Session {
 
 	/// Enter commits, Escape cancels, the arrows nudge (Shift: 10 px).
 	pub fn key(&mut self, key: &str) -> Update {
+		if let Some(custom) = &mut self.custom {
+			if let Some(update) = custom.key(key) {
+				return update;
+			}
+			return match key {
+				"Enter" => self.commit(),
+				"Escape" => Update::Cancel,
+				_ => Update::None,
+			};
+		}
 		let step = |n: f64| if key.starts_with("Shift+") { n * 10.0 } else { n };
 		match key.trim_start_matches("Shift+") {
 			"Enter" => self.commit(),
@@ -379,6 +442,9 @@ impl Session {
 
 	/// The cursor for the pointer's position.
 	pub fn cursor(&self) -> CursorShape {
+		if let Some(custom) = &self.custom {
+			return custom.cursor();
+		}
 		match self.hover.map(|p| self.grab_at(p)) {
 			Some(Grab::Inside | Grab::WarpInside(..)) => CursorShape::Move,
 			_ => CursorShape::Crosshair,
@@ -388,6 +454,9 @@ impl Session {
 	/// The box, its handles and the reference point (or the warp's control
 	/// points and surface).
 	pub fn overlay(&self) -> Overlay {
+		if let Some(custom) = &self.custom {
+			return Overlay { items: custom.overlay() };
+		}
 		let mut items = Vec::new();
 		match &self.patch {
 			Some(patch) => {

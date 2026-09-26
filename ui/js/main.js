@@ -266,8 +266,9 @@ async function boot() {
   });
 
   // A Free Transform box (M6-T04) swaps in its own option bar while it is up.
-  bridge.on(ENGINE.TRANSFORM_BOX, ({ up }) => {
-    renderOptionsBar(shell.optionsbar, up ? "_transform" : state.tool);
+  // M11: a warp session (Liquify, Puppet Warp, Perspective Warp) names its bar.
+  bridge.on(ENGINE.TRANSFORM_BOX, ({ up, bar }) => {
+    renderOptionsBar(shell.optionsbar, up ? bar || "_transform" : state.tool);
     sendToolOptions(readOptions());
   });
 

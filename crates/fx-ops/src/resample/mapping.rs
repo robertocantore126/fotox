@@ -14,16 +14,49 @@ use crate::resample::warp::{self, WarpGrid};
 pub struct Transform {
 	mapping: Mapping,
 	grid: Option<WarpGrid>,
+	/// `Mapping::Custom`'s displacement field (M11-T06).
+	field: Option<std::sync::Arc<fx_core::warp_map::WarpData>>,
 }
+
+/// A registered mesh as warp triangles whose `uv` are source points.
+fn mesh_grid(mesh: &fx_core::warp_map::TriMesh) -> WarpGrid {
+	let triangles = mesh
+		.tris
+		.iter()
+		.map(|t| {
+			let [a, b, c] = t.map(|i| i as usize);
+			warp::Triangle {
+				dst: [mesh.dst[a], mesh.dst[b], mesh.dst[c]],
+				uv: [mesh.src[a], mesh.src[b], mesh.src[c]],
+			}
+		})
+		.collect();
+	WarpGrid { triangles }
+}
+
+/// `source_uv` with this rectangle is the identity: mesh `uv` are points.
+const UNIT: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
 
 impl Transform {
 	/// Prepare `mapping`; builds the warp mesh for [`Mapping::Warp`].
 	pub fn new(mapping: Mapping) -> Self {
+		let mut field = None;
 		let grid = match &mapping {
 			Mapping::Warp(patch) => Some(WarpGrid::build(patch, warp::DEFAULT_SEGMENTS)),
+			// FAST: an id that left the registry maps like an empty mesh.
+			Mapping::Custom { id, .. } => match fx_core::warp_map::get(*id) {
+				Some(data) => match data.as_ref() {
+					fx_core::warp_map::WarpData::Mesh(mesh) => Some(mesh_grid(mesh)),
+					fx_core::warp_map::WarpData::Field(_) => {
+						field = Some(data.clone());
+						None
+					}
+				},
+				None => Some(WarpGrid { triangles: Vec::new() }),
+			},
 			_ => None,
 		};
-		Self { mapping, grid }
+		Self { mapping, grid, field }
 	}
 
 	/// Whether this is a warp (the sampler then uses per-tile triangle lists).
@@ -40,6 +73,10 @@ impl Transform {
 	/// The triangles of a warp whose destination box touches `rect`, or `None`
 	/// for an affine/projective mapping.
 	pub fn candidates(&self, rect: [f64; 4]) -> Option<Vec<usize>> {
+		if let Mapping::Custom { dst, .. } = self.mapping {
+			let r = [rect[0] - dst[0], rect[1] - dst[1], rect[2] - dst[0], rect[3] - dst[1]];
+			return self.grid.as_ref().map(|grid| grid.intersecting(r));
+		}
 		self.grid.as_ref().map(|grid| grid.intersecting(rect))
 	}
 
@@ -62,7 +99,31 @@ impl Transform {
 				};
 				Some(warp::source_uv(&patch.src_rect, uv))
 			}
+			Mapping::Custom { src, dst: shift, .. } => {
+				let d = (dst.0 - shift[0], dst.1 - shift[1]);
+				let p = self.custom_inverse(candidates, d)?;
+				Some((p.0 - src[0], p.1 - src[1]))
+			}
 		}
+	}
+
+	/// `G⁻¹` of the registered geometry at `d` (destination minus `dst`).
+	fn custom_inverse(&self, candidates: Option<&[usize]>, d: (f64, f64)) -> Option<(f64, f64)> {
+		if let Some(data) = &self.field
+			&& let fx_core::warp_map::WarpData::Field(field) = data.as_ref()
+		{
+			let v = field.at(d.0, d.1);
+			return Some((d.0 + v[0], d.1 + v[1]));
+		}
+		let grid = self.grid.as_ref()?;
+		let uv = match candidates {
+			Some(list) => grid.parameter_at(list, d)?,
+			None => {
+				let all: Vec<usize> = (0..grid.triangles.len()).collect();
+				grid.parameter_at(&all, d)?
+			}
+		};
+		Some(warp::source_uv(&UNIT, uv))
 	}
 
 	/// The bounding box in level-0 source pixels of a destination rectangle, or
@@ -88,6 +149,27 @@ impl Transform {
 					bbox[3] = bbox[3].max(p.1);
 				}
 				Some(bbox)
+			}
+			Mapping::Custom { src, dst, .. } => {
+				let r = [dst_rect[0] - dst[0], dst_rect[1] - dst[1], dst_rect[2] - dst[0], dst_rect[3] - dst[1]];
+				if let Some(data) = &self.field
+					&& let fx_core::warp_map::WarpData::Field(field) = data.as_ref()
+				{
+					// FAST: the field's global maximum bounds every rectangle.
+					let m = field.max().ceil() + 1.0;
+					return Some([r[0] - m - src[0], r[1] - m - src[1], r[2] + m - src[0], r[3] + m - src[1]]);
+				}
+				let grid = self.grid.as_ref()?;
+				let candidates = grid.intersecting(r);
+				if candidates.is_empty() {
+					return None;
+				}
+				let mut bbox = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+				for &i in &candidates {
+					let b = grid.triangles[i].source_bbox(&UNIT);
+					bbox = [bbox[0].min(b[0]), bbox[1].min(b[1]), bbox[2].max(b[2]), bbox[3].max(b[3])];
+				}
+				Some([bbox[0] - src[0], bbox[1] - src[1], bbox[2] - src[0], bbox[3] - src[1]])
 			}
 			Mapping::Warp(patch) => {
 				let grid = self.grid.as_ref()?;
