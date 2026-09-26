@@ -403,3 +403,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: gradient overlay placed over the canvas (not "Align with Layer"); overlay dialogs apply on OK only; bevel's shading curve is my own.
 - VERIFY: all five effects against Photoshop at identical parameters (M12-T09), the composite order.
 - Try it: a shape layer, Layer ▸ Layer Style ▸ Bevel & Emboss…, Size 10.
+
+## M12-T05 — Color Lookup and Selective Color  (Claude, 2026-09-26)
+- Done: `Adjustment::ColorLookup { name, size, table }` (the table stored in the document, D-086) and `Adjustment::SelectiveColor { ranges: [[C, M, Y, K]; 9], relative }`, with their NameKinds; `fx_io::lut` parses `.cube` (3D, and 1D expanded to 17³) and `.3dl` (blue-fastest reordered, 10/12/16-bit scaled); render: `AdjustKind::Lut3d` (resampled to 16³ = one 4096-texel LUT row, trilinear in `composite.wgsl` and `adjust::lut3d`) and `AdjustKind::Selective` (9-range table in a LUT row; range weights, CMY → RGB, K on all, Relative × ink), GPU shader validated with naga. UI: the Layers panel's new-adjustment menu and Image ▸ Adjustments ▸ Color Lookup… (file picker → `adj:color-lookup`) / Selective Color… (per-range dialog, Relative / Absolute); double-click a Color Lookup layer to load another file.
+- Skipped: Color Lookup as a destructive image adjustment, Abstract / Device Link profiles, `.look` / `.csp`, dithering for 8-bit, Export Color Lookup, Tests (identity LUT exact, 1D cube = Curves, Reds −100 % cyan on pure red).
+- FAST: a 33³ LUT is resampled to 16³ (trilinear); `.cube` domains other than 0..1 ignored.
+- VERIFY: Selective Color's range weights and Relative / Absolute formulas (published approximations, not Photoshop's).
+- Try it: Layers panel ◐ ▸ Color Lookup…, pick a `.cube`; ◐ ▸ Selective Color…, Reds, Cyan −100.

@@ -7,6 +7,7 @@ import { openDialog } from "./dialogs.js";
 import { toast, status } from "./tooltip.js";
 import { zoomIn, zoomOut, fit, actual, zoomTo, toggleFpsOverlay } from "./canvas.js";
 import * as panels from "./panels.js";
+import { newAdjustmentLayer } from "./native/layers-panel.js";
 import { dockGroups } from "./data/panels.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
@@ -139,6 +140,12 @@ export function runAction(item) {
   const warps = { "dlg:liquify": "warp:liquify", "misc:puppet-warp": "warp:puppet", "misc:perspective-warp": "warp:perspective", "warp:straighten": "warp:straighten" };
   if (warps[a] && bridge.isNative) {
     bridge.send({ type: UI.ACTION, id: warps[a] });
+    return;
+  }
+  // Image ▸ Adjustments ▸ Color Lookup / Selective Color (M12-T05): as
+  // adjustment layers.
+  if ((a === "dlg:color-lookup" || a === "dlg:selective-color") && bridge.isNative) {
+    newAdjustmentLayer(a === "dlg:color-lookup" ? "Color Lookup..." : "Selective Color...");
     return;
   }
   // Edit ▸ Content-Aware Scale (M11-T05). FAST: a dialog instead of the

@@ -103,6 +103,39 @@ impl Engine {
 				);
 				true
 			}
+			// Color Lookup (M12-T05): a `.cube` / `.3dl` the UI read; a new
+			// adjustment layer, or the active Color Lookup layer's table replaced.
+			"adj:color-lookup" => {
+				let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("LUT.cube").to_owned();
+				let text = args.get("data").and_then(|v| v.as_str()).unwrap_or("");
+				let text = text.split_once("base64,").map_or(text, |(_, b)| b);
+				let bytes = crate::b64::decode(text);
+				match fx_io::lut::parse(&name, &String::from_utf8_lossy(&bytes)) {
+					Ok(lut) => {
+						let adjustment = fx_core::Adjustment::ColorLookup {
+							name,
+							size: lut.size,
+							table: lut.table,
+						};
+						let replace = args.get("layer").and_then(|v| v.as_u64()).map(LayerId);
+						let command = match replace {
+							Some(layer) => Command::SetAdjustment {
+								layer: LayerRef::Id(layer),
+								adjustment,
+							},
+							None => Command::AddLayer {
+								layer: fx_core::command::NewLayer::Adjustment(adjustment),
+								name: None,
+							},
+						};
+						self.command(doc_id, command);
+					}
+					Err(error) => self.to_ui(&EngineToUi::Error {
+						text: format!("Color Lookup: {error}"),
+					}),
+				}
+				true
+			}
 			"smart:edit" => {
 				self.edit_contents(doc_id);
 				true

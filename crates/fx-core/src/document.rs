@@ -98,6 +98,9 @@ pub(crate) enum NameKind {
 	PatternFill,
 	// M10-T07.
 	Triangle,
+	// M12-T05.
+	ColorLookup,
+	SelectiveColor,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -105,7 +108,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 28;
+	const COUNT: usize = 30;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -139,6 +142,8 @@ impl NameKind {
 			NameKind::GradientFill => "Gradient Fill",
 			NameKind::PatternFill => "Pattern Fill",
 			NameKind::Triangle => "Triangle",
+			NameKind::ColorLookup => "Color Lookup",
+			NameKind::SelectiveColor => "Selective Color",
 		}
 	}
 
@@ -172,6 +177,8 @@ impl NameKind {
 			Adjustment::ColorBalance { .. } => NameKind::ColorBalance,
 			Adjustment::Vibrance { .. } => NameKind::Vibrance,
 			Adjustment::BlackWhite { .. } => NameKind::BlackWhite,
+			Adjustment::ColorLookup { .. } => NameKind::ColorLookup,
+			Adjustment::SelectiveColor { .. } => NameKind::SelectiveColor,
 		}
 	}
 
@@ -432,7 +439,7 @@ mod tests {
 		assert_eq!(NameKind::BlackWhite as usize, 16, "the M4 kinds follow them");
 		assert_eq!(NameKind::Type as usize, 24, "the M6 kinds follow them");
 		assert_eq!(
-			NameKind::Triangle as usize,
+			NameKind::SelectiveColor as usize,
 			NameKind::COUNT - 1,
 			"a new NameKind goes at the end, and COUNT must grow"
 		);

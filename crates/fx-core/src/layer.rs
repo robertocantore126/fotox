@@ -114,6 +114,20 @@ pub enum Adjustment {
 		tint_hue: f32,
 		tint_saturation: f32,
 	},
+	/// Color Lookup (M12-T05, D-086): a 3D table of `size³` straight RGB
+	/// entries, red fastest, applied in the document's encoding; `name` is
+	/// the file it came from.
+	ColorLookup {
+		name: String,
+		size: u32,
+		table: Vec<[f32; 3]>,
+	},
+	/// Selective Color (M12-T05): CMYK adjustments (−1..=1) for Reds,
+	/// Yellows, Greens, Cyans, Blues, Magentas, Whites, Neutrals, Blacks.
+	SelectiveColor {
+		ranges: [[f32; 4]; 9],
+		relative: bool,
+	},
 }
 
 /// One colour stop of a Gradient Map.

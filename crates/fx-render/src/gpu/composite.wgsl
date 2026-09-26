@@ -24,6 +24,8 @@ const K_ADJUST_MATRIX: u32 = 9u;
 const K_ADJUST_BALANCE: u32 = 10u;
 const K_ADJUST_VIBRANCE: u32 = 11u;
 const K_ADJUST_BW: u32 = 12u;
+const K_ADJUST_LUT3D: u32 = 13u;
+const K_ADJUST_SELECTIVE: u32 = 14u;
 
 // op flags
 const F_CLIP: u32 = 1u;
@@ -404,6 +406,51 @@ fn lut_channel(row: u32, c: u32, v: f32) -> f32 {
 	return a + (b - a) * t;
 }
 
+// `adjust::lut3d` (M12-T05): trilinear in a 16³ table, red fastest.
+fn lut3d_at(row: u32, r: u32, g: u32, b: u32) -> vec3<f32> {
+	return textureLoad(luts, vec2<i32>(i32(r + 16u * (g + 16u * b)), i32(row)), 0).rgb;
+}
+
+fn adjust_lut3d(row: u32, cb: vec3<f32>) -> vec3<f32> {
+	let p = clamp(cb, vec3<f32>(0.0), vec3<f32>(1.0)) * 15.0;
+	let i = min(vec3<u32>(floor(p)), vec3<u32>(14u));
+	let f = p - vec3<f32>(i);
+	var out = vec3<f32>(0.0);
+	for (var k = 0u; k < 8u; k++) {
+		let d = vec3<u32>(k & 1u, (k >> 1u) & 1u, (k >> 2u) & 1u);
+		let w = select(1.0 - f.x, f.x, d.x == 1u) * select(1.0 - f.y, f.y, d.y == 1u) * select(1.0 - f.z, f.z, d.z == 1u);
+		out += lut3d_at(row, i.x + d.x, i.y + d.y, i.z + d.z) * w;
+	}
+	return out;
+}
+
+// `adjust::selective_color` (M12-T05): texels 0..9 = CMY per range, 9..18 = K.
+fn adjust_selective(row: u32, cb: vec3<f32>, relative: bool) -> vec3<f32> {
+	let r = cb.r;
+	let g = cb.g;
+	let b = cb.b;
+	let mx = max(r, max(g, b));
+	let mn = min(r, min(g, b));
+	let md = r + g + b - mx - mn;
+	var w: array<f32, 9>;
+	for (var k = 0u; k < 9u; k++) { w[k] = 0.0; }
+	if r == mx { w[0] = mx - md; } else if g == mx { w[2] = mx - md; } else { w[4] = mx - md; }
+	if b == mn { w[1] = md - mn; } else if r == mn { w[3] = md - mn; } else { w[5] = md - mn; }
+	w[6] = max((mn - 0.5) * 2.0, 0.0);
+	w[8] = max((0.5 - mx) * 2.0, 0.0);
+	w[7] = clamp(1.0 - (mx - mn) - w[6] - w[8], 0.0, 1.0);
+	var out = cb;
+	for (var k = 0u; k < 9u; k++) {
+		if w[k] <= 0.0 { continue; }
+		let cmy = textureLoad(luts, vec2<i32>(i32(k), i32(row)), 0).rgb;
+		let kk = textureLoad(luts, vec2<i32>(i32(9u + k), i32(row)), 0).r;
+		let ink = vec3<f32>(1.0) - cb;
+		let delta = select(cmy + vec3<f32>(kk), (cmy + vec3<f32>(kk)) * ink, relative);
+		out -= w[k] * delta;
+	}
+	return clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 	let job = jobs[gid.z];
@@ -455,6 +502,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 			}
 			case K_ADJUST_VIBRANCE: {
 				let f = adjust_vibrance(unpremultiply(stack[sp]), ops[i].params);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_LUT3D: {
+				let f = adjust_lut3d(ops[i].lut_row, unpremultiply(stack[sp]));
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+			}
+			case K_ADJUST_SELECTIVE: {
+				let f = adjust_selective(ops[i].lut_row, unpremultiply(stack[sp]), ops[i].params.x > 0.5);
 				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
 			}
 			case K_ADJUST_BW: {

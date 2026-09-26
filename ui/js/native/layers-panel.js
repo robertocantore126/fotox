@@ -15,6 +15,7 @@ import { state, setTool, emit } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
+import { pickFile } from "./brush-settings.js";
 
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
@@ -48,7 +49,29 @@ const NEW_ADJUSTMENTS = [
   ["Posterize...", () => ({ adjustment: { kind: "posterize", levels: 4 } })],
   ["Threshold...", () => ({ adjustment: { kind: "threshold", level: 128 } })],
   ["Gradient Map...", () => ({ adjustment: { kind: "gradient_map", stops: GRADIENTS["Black, White"], reverse: false } })],
+  // M12-T05. Color Lookup asks for a file first (`null` = handled here).
+  ["Selective Color...", () => ({ adjustment: { kind: "selective_color", ranges: Array.from({ length: 9 }, () => [0, 0, 0, 0]), relative: true } })],
+  ["Color Lookup...", () => { pickLut(null); return null; }],
 ];
+
+/** Read a `.cube` / `.3dl` and send it to the engine (M12-T05). */
+function pickLut(layer) {
+  pickFile(".cube,.3dl").then((file) => {
+    if (!file) return;
+    bridge.send({ type: UI.ACTION, id: "adj:color-lookup", args: { name: file.name, data: file.data, layer } });
+  });
+}
+
+/** Image ▸ Adjustments ▸ … for the M12 adjustments: a new adjustment layer. */
+export function newAdjustmentLayer(label) {
+  const make = NEW_ADJUSTMENTS.find(([n]) => n === label);
+  if (!make) return false;
+  const layer = make[1]();
+  if (!layer) return true;
+  if (layer.adjustment) editNew = new Set(layers.map((l) => l.id));
+  send({ op: "add_layer", layer, name: null });
+  return true;
+}
 
 // Photo Filter colours (straight 0..1). VERIFY (M7): Photoshop's exact values.
 const rgb8 = (r, g, b) => [r / 255, g / 255, b / 255];
@@ -309,6 +332,7 @@ function renderLayers() {
         const make = NEW_ADJUSTMENTS.find(([n]) => n === name);
         if (!make) return;
         const layer = make[1]();
+        if (!layer) return;
         if (layer.adjustment) editNew = new Set(layers.map((l) => l.id));
         send({ op: "add_layer", layer, name: null });
       },
@@ -695,6 +719,16 @@ const PER_CHANNEL_DIALOGS = {
     toValues: (row) => ({ "Red:": row[0], "Green:": row[1], "Blue:": row[2], "Constant:": row[3] }),
     fromValues: (v) => [v["Red:"], v["Green:"], v["Blue:"], v["Constant:"]],
   },
+  // M12-T05: CMYK per colour range, −100..100 in the dialog.
+  selective_color: {
+    dialog: "selective-color",
+    selector: "Colors:", names: ["Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Whites", "Neutrals", "Blacks"],
+    parts: (a) => a.ranges.map((r) => r.map((v) => Math.round(v * 100))),
+    make: (a, parts, v) => ({ kind: "selective_color", ranges: parts.map((r) => r.map((x) => (Number(x) || 0) / 100)), relative: v["Method:"] !== "Absolute" && v["Method:"] !== 1 }),
+    extra: (a) => ({ "Method:": a.relative ? "Relative" : "Absolute" }),
+    toValues: (t) => ({ "Cyan:": t[0], "Magenta:": t[1], "Yellow:": t[2], "Black:": t[3] }),
+    fromValues: (v) => [v["Cyan:"], v["Magenta:"], v["Yellow:"], v["Black:"]],
+  },
   color_balance: {
     dialog: "color-balance",
     selector: "Tone:", names: ["Shadows", "Midtones", "Highlights"], first: 1,
@@ -710,6 +744,7 @@ function editAdjustment(l) {
   const adj = l.adjustment;
   if (!adj) return;
   if (PER_CHANNEL_DIALOGS[adj.kind]) { editPerChannel(l, PER_CHANNEL_DIALOGS[adj.kind]); return; }
+  if (adj.kind === "color_lookup") { pickLut(l.id); return; }
   const spec = ADJUSTMENT_DIALOGS[adj.kind];
   if (!spec) {
     toast(adj.kind === "invert" ? "Invert has no settings" : "This adjustment has no dialog yet");

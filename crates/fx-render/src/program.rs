@@ -102,6 +102,10 @@ pub enum AdjustKind {
 	/// Black & White weights (fractions: reds, yellows, greens, cyans, blues,
 	/// magentas) and the optional tint `[hue°, saturation %]` (M4-T07).
 	BlackWhite { weights: [f32; 6], tint: Option<[f32; 2]> },
+	/// Color Lookup (M12-T05): a 16³ table in one LUT row.
+	Lut3d(Arc<Lut>),
+	/// Selective Color (M12-T05): its 9-range table in a LUT row.
+	Selective { lut: Arc<Lut>, relative: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -606,6 +610,11 @@ impl Builder<'_> {
 						weights: [*reds, *yellows, *greens, *cyans, *blues, *magentas].map(|v| v / 100.0),
 						tint: tint.then_some([*tint_hue, *tint_saturation]),
 					},
+					Adjustment::ColorLookup { .. } => AdjustKind::Lut3d((self.luts)(adjustment)),
+					Adjustment::SelectiveColor { relative, .. } => AdjustKind::Selective {
+						lut: (self.luts)(adjustment),
+						relative: *relative,
+					},
 					other => AdjustKind::Lut((self.luts)(other)),
 				};
 				Op::Adjust {
@@ -815,7 +824,11 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 		} => {
 			layer.hash(h);
 			match adjust {
-				AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) => lut.key.hash(h),
+				AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) | AdjustKind::Lut3d(lut) => lut.key.hash(h),
+				AdjustKind::Selective { lut, relative } => {
+					lut.key.hash(h);
+					relative.hash(h);
+				}
 				AdjustKind::Matrix { rows, preserve_luma } => {
 					rows.iter().flatten().map(|v| v.to_bits()).for_each(|b| b.hash(h));
 					preserve_luma.hash(h);

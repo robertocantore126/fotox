@@ -80,6 +80,8 @@ export const IMPLEMENTED = new Set([
   "dlg:style-satin",
   "dlg:style-gradient-overlay",
   "dlg:style-pattern-overlay",
+  "dlg:color-lookup",
+  "dlg:selective-color",
   "smart:convert",
   "filter:smart",
   "smart:copy",

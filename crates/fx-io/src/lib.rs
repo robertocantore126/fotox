@@ -104,6 +104,7 @@ mod band;
 pub mod export;
 pub mod fxd;
 mod jpeg;
+pub mod lut;
 mod png;
 #[cfg(test)]
 mod png_jpeg_tests;
