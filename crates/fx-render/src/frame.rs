@@ -48,6 +48,45 @@ pub struct FramePlan {
 /// fallback (1/16 of the tiles for +2).
 pub const COVERAGE_LEVELS: usize = 2;
 
+/// Clip one draw to the document rectangle on screen.
+///
+/// A composite tile covers a whole `TILE_SIZE` square, and the tiles at the
+/// right and bottom edge of the document stick out past the canvas. The part
+/// outside is not the user's image: a layer whose pixels continue there (a
+/// paste, a moved layer, a placed file) is composited into those tiles, and
+/// drawing the quad whole painted that content outside the canvas. The source
+/// rectangle is remapped so the clip is exact: the visible sub-rectangle keeps
+/// the pixels it had, and `None` means the draw is entirely outside.
+///
+/// Clipping here (unrotated screen space, like `dst` itself) is enough for the
+/// turned view too: the shader rotates every quad about the same centre, and a
+/// rectangle inside another stays inside under a rotation.
+fn clip_to_doc(draw: TileDraw, doc_rect: [f32; 4]) -> Option<TileDraw> {
+	let [x0, y0, x1, y1] = draw.dst;
+	let [u0, v0, u1, v1] = draw.src;
+	// A fraction per axis: where the clamped edge falls inside the quad, and
+	// what that is in the tile's own coordinates.
+	let axis = |lo: f32, hi: f32, want_lo: f32, want_hi: f32, s0: f32, s1: f32| -> (f32, f32, f32, f32) {
+		if hi <= lo {
+			return (lo, hi, s0, s1);
+		}
+		let clip_lo = lo.max(want_lo);
+		let clip_hi = hi.min(want_hi);
+		let (m0, m1) = ((clip_lo - lo) / (hi - lo), (clip_hi - lo) / (hi - lo));
+		(clip_lo, clip_hi, s0 + m0 * (s1 - s0), s0 + m1 * (s1 - s0))
+	};
+	let (cx0, cx1, cu0, cu1) = axis(x0, x1, doc_rect[0], doc_rect[2], u0, u1);
+	let (cy0, cy1, cv0, cv1) = axis(y0, y1, doc_rect[1], doc_rect[3], v0, v1);
+	if cx0 >= cx1 || cy0 >= cy1 {
+		return None;
+	}
+	Some(TileDraw {
+		dst: [cx0, cy0, cx1, cy1],
+		src: [cu0, cv0, cu1, cv1],
+		..draw
+	})
+}
+
 pub fn plan_frame(
 	view: &ViewTransform,
 	viewport: ViewportSize,
@@ -92,12 +131,17 @@ pub fn plan_frame(
 		let key = TileKey { level, tx, ty };
 		let dst = tile_screen_rect(view, viewport, key);
 		if let Some(slot) = ready(key) {
-			sharp.push(TileDraw {
-				slot,
-				src: [0.0, 0.0, 1.0, 1.0],
-				dst,
-				level,
-			});
+			if let Some(draw) = clip_to_doc(
+				TileDraw {
+					slot,
+					src: [0.0, 0.0, 1.0, 1.0],
+					dst,
+					level,
+				},
+				plan.doc_rect,
+			) {
+				sharp.push(draw);
+			}
 			continue;
 		}
 		plan.complete = false;
@@ -113,12 +157,17 @@ pub fn plan_frame(
 			if let Some(slot) = ready(parent) {
 				let n = (1u32 << up) as f32;
 				let (fx, fy) = ((tx % (1 << up)) as f32 / n, (ty % (1 << up)) as f32 / n);
-				fallbacks.push(TileDraw {
-					slot,
-					src: [fx, fy, fx + 1.0 / n, fy + 1.0 / n],
-					dst,
-					level: parent.level,
-				});
+				if let Some(draw) = clip_to_doc(
+					TileDraw {
+						slot,
+						src: [fx, fy, fx + 1.0 / n, fy + 1.0 / n],
+						dst,
+						level: parent.level,
+					},
+					plan.doc_rect,
+				) {
+					fallbacks.push(draw);
+				}
 				covered = true;
 				break;
 			}
@@ -179,6 +228,39 @@ mod tests {
 		assert!(plan.complete);
 		assert_eq!(plan.draws.len(), range.count());
 		assert!(plan.requests.is_empty());
+	}
+
+	/// A composite tile covers a whole 256² square, so the tiles at the right
+	/// and the bottom edge of a document stick out past the canvas. A layer
+	/// whose pixels continue there (a paste, a moved layer) is composited into
+	/// them, and drawing the quad whole painted that content outside the canvas
+	/// — the bleed Rob saw zoomed out.
+	#[test]
+	fn draws_stop_at_the_canvas_edge() {
+		// 1000 × 600: whole tiles cover 768 and 512, so the last column and row
+		// overhang by 232 and 88 pixels.
+		let view = ViewTransform {
+			zoom: 1.0,
+			center_x: 500.0,
+			center_y: 300.0,
+			rotation: 0.0,
+		};
+		let plan = plan_frame(&view, VP, 1000, 600, 3, &|_| Some(0));
+		let doc = plan.doc_rect;
+		let eps = 1e-3;
+		assert_eq!(plan.draws.len(), 12, "4 × 3 tiles, every one visible");
+		assert!(
+			plan.draws
+				.iter()
+				.all(|d| d.dst[0] >= doc[0] - eps && d.dst[1] >= doc[1] - eps && d.dst[2] <= doc[2] + eps && d.dst[3] <= doc[3] + eps),
+			"every quad is inside the canvas"
+		);
+		let right = plan.draws.iter().find(|d| d.src[2] < 1.0).expect("the right column is clipped");
+		assert!((right.src[2] - 232.0 / 256.0).abs() < eps, "{} of the tile is inside", right.src[2]);
+		assert!((right.dst[2] - doc[2]).abs() < eps);
+		let bottom = plan.draws.iter().find(|d| d.src[3] < 1.0).expect("the bottom row is clipped");
+		assert!((bottom.src[3] - 88.0 / 256.0).abs() < eps, "{} of the tile is inside", bottom.src[3]);
+		assert!((bottom.dst[3] - doc[3]).abs() < eps);
 	}
 
 	#[test]
