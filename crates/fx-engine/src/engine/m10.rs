@@ -27,7 +27,43 @@ impl Engine {
 		});
 	}
 
-	/// The brush of a painting tool's option bar, for Stroke Path.
+	/// The custom shapes (M10-T07): into the tool settings, names to the UI.
+	pub(super) fn send_shapes(&mut self) {
+		let mut all = crate::shapes_lib::builtin();
+		all.extend(crate::shapes_lib::load());
+		let map: serde_json::Map<String, serde_json::Value> = all
+			.iter()
+			.map(|s| (s.name.clone(), serde_json::to_value(&s.path).unwrap_or_default()))
+			.collect();
+		self.settings.options.insert("_custom_shapes".into(), serde_json::Value::Object(map));
+		self.to_ui(&EngineToUi::Shapes {
+			names: all.into_iter().map(|s| s.name).collect(),
+		});
+	}
+
+	/// Edit ▸ Define Custom Shape (M10-T07): the selected path (or the Work
+	/// Path) into the user's library.
+	fn define_custom_shape(&mut self, doc_id: DocId, name: &str) {
+		let path = self
+			.docs
+			.get(doc_id)
+			.and_then(|o| o.doc.active_path.and_then(|t| o.doc.path(t)).or(o.doc.work_path.as_ref()).cloned());
+		let Some(unit) = path.as_ref().and_then(crate::shapes_lib::normalise) else {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Define Custom Shape needs a path (draw one with the Pen tool)".into(),
+			});
+			return;
+		};
+		let mut user = crate::shapes_lib::load();
+		let name = if name.trim().is_empty() {
+			format!("Shape {}", user.len() + 1)
+		} else {
+			name.to_owned()
+		};
+		user.push(fx_core::path::NamedPath { name, path: unit });
+		crate::shapes_lib::save(&user);
+		self.send_shapes();
+	}
 	fn brush_of(&self, tool: &str) -> BrushParams {
 		let s = &self.settings;
 		let percent = |key: &str, default: f64| (s.number(tool, key).unwrap_or(default) / 100.0).clamp(0.0, 1.0) as f32;
@@ -180,6 +216,13 @@ impl Engine {
 	}
 
 	pub(super) fn m10_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
+		if id == "misc:define-shape" {
+			if let Some(doc_id) = self.docs.active_id() {
+				let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+				self.define_custom_shape(doc_id, &name);
+			}
+			return true;
+		}
 		if id.starts_with("vmask:") {
 			if let Some(doc_id) = self.docs.active_id() {
 				self.vector_mask_action(doc_id, id);

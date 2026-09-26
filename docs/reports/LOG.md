@@ -281,3 +281,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: Edit Path copies the mask's path into the Work Path (edit it, then Vector Mask ▸ Current Path to apply); the thumbnail's actions act on the active layer; canvas-size / crop / rotate do not move vector mask paths.
 - VERIFY: none.
 - Try it: draw a closed path with P, select a layer, Layer ▸ Vector Mask ▸ Current Path.
+
+## M10-T07 — Triangle, Custom Shape  (Claude, 2026-09-26)
+- Done: `VectorShape::Triangle { w, h, radius }` (corners rounded by a quadratic through each corner; "Triangle N" names) and the Triangle tool ("shape-triangle", Radius); the custom shapes library (`fx-engine/src/shapes_lib.rs`, D-076: eight built-ins in a unit box + the user's `%APPDATA%\Fotox\shapes.json`), put into the tool settings as `_custom_shapes` and sent as `EngineToUi::Shapes`; the Custom Shape tool ("shape-custom", the option bar's Shape picker in `ui/js/native/shapes-lib.js`) scales the chosen path into the drag's box as a path shape; Edit ▸ Define Custom Shape (`misc:define-shape`) stores the selected path / Work Path, normalised.
+- Skipped: Live Shape Properties in Properties (W / H / X / Y, radii, sides, star ratio), stroke options UI (caps, joins, dashes — the renderer has dashes), Line arrowheads, gradient / pattern paint for shapes, Tests (a triangle's corners; a custom shape round-trips; dash lengths; a gradient fill equals the renderer clipped).
+- FAST: custom shapes are stored in documents as plain path shapes (no link to the library).
+- VERIFY: Photoshop's triangle corner rounding (arcs, not quadratics).
+- Try it: U's flyout ▸ Custom Shape, pick Heart, drag. Draw a path with P, Edit ▸ Define Custom Shape.

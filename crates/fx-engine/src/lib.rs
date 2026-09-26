@@ -28,6 +28,7 @@ pub mod ops;
 pub mod patterns;
 pub mod prefs;
 pub mod selection;
+pub mod shapes_lib;
 pub mod snap;
 pub mod stroke;
 pub mod text;

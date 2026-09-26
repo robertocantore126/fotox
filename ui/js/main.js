@@ -25,6 +25,7 @@ import { initTools, sendColors } from "./native/tools.js";
 import { initBrushes, brushExtras } from "./native/brush-settings.js";
 import { initGradients } from "./native/gradients.js";
 import { initPatterns } from "./native/patterns.js";
+import { initShapes } from "./native/shapes-lib.js";
 import { initChannels } from "./native/channels-panel.js";
 import { initInfo } from "./native/info-panel.js";
 import { initPaths } from "./native/paths-panel.js";
@@ -217,6 +218,7 @@ async function boot() {
   // Option-bar pickers of native modules (M8).
   initGradients();
   initPatterns();
+  initShapes();
   initChannels();
   initInfo();
   initPaths();

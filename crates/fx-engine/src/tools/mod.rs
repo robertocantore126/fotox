@@ -431,6 +431,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"shape-ellipse" => Some(Box::new(shape::Shape::new("shape-ellipse", shape::Kind::Ellipse))),
 		"shape-polygon" => Some(Box::new(shape::Shape::new("shape-polygon", shape::Kind::Polygon))),
 		"shape-line" => Some(Box::new(shape::Shape::new("shape-line", shape::Kind::Line))),
+		"shape-triangle" => Some(Box::new(shape::Shape::new("shape-triangle", shape::Kind::Triangle))),
+		"shape-custom" => Some(Box::new(shape::Shape::new("shape-custom", shape::Kind::Custom))),
 		"path-select" => Some(Box::new(path_select::PathSelect::default())),
 		"type" => Some(Box::new(type_tool::TypeTool::default())),
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
@@ -453,7 +455,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"counting" => Some(Box::new(measure::CountTool::default())),
 		// The Magnetic Lasso (M9-T07).
 		"lasso-magnet" => Some(Box::new(magnetic::MagneticLasso::default())),
-		"object-select" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		"object-select" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		// Tools built from a kind (M7-T08, HOWTO R11).
 		other => kinds::registered(other),
 	}

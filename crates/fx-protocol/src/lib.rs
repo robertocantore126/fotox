@@ -403,6 +403,10 @@ pub enum EngineToUi {
 		paths: Vec<String>,
 		active: serde_json::Value,
 	},
+	/// The custom shapes' names (M10-T07), built-in first.
+	Shapes {
+		names: Vec<String>,
+	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {
 		families: Vec<FontFamilyInfo>,

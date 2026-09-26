@@ -37,6 +37,9 @@ pub enum Kind {
 	Ellipse,
 	Polygon,
 	Line,
+	/// M10-T07.
+	Triangle,
+	Custom,
 }
 
 /// The drag in progress: the press, the current point, and the modifiers as
@@ -124,6 +127,26 @@ impl Shape {
 			// The Line tool is handled by [`Shape::pending`], which keeps the
 			// drawn direction; this is only its fallback bounding box.
 			Kind::Line => VectorShape::Line { length: w, width: h },
+			Kind::Triangle => VectorShape::Triangle {
+				w,
+				h,
+				radius: number(ctx, &self.tool, "Radius").unwrap_or(0.0).max(0.0),
+			},
+			// The library's path (unit box), scaled into the drag's box.
+			Kind::Custom => {
+				let name = ctx.settings.string(&self.tool, "Shape").unwrap_or_else(|| "Star".into());
+				let path = ctx
+					.settings
+					.options
+					.get("_custom_shapes")
+					.and_then(|lib| lib.get(&name))
+					.and_then(|p| serde_json::from_value::<fx_core::path::Path>(p.clone()).ok())?;
+				let (bw, bh) = path.bounds().map_or((1.0, 1.0), |b| ((b[2]).max(1e-9), (b[3]).max(1e-9)));
+				let scaled = path.map(|(x, y)| (x / bw * w, y / bh * h));
+				VectorShape::Path {
+					elements: scaled.to_elements(),
+				}
+			}
 		})
 	}
 

@@ -139,7 +139,8 @@ export const optionBars = {
   "shape-ellipse": [{ type: "select", text: "", options: ["Pixels", "Path", "Shape"], value: "Shape" }],
   "shape-polygon": [{ type: "num", text: "Sides:", value: "5", width: 36 }, { type: "select", text: "Kind:", options: ["Smooth", "Star"], value: "Smooth" }],
   "shape-line": [{ type: "num", text: "Weight:", value: "3", unit: "px", width: 40 }],
-  "shape-custom": [{ type: "select", text: "Shape:", options: ["Chirp", "Cloud", "Dog", "Flower", "Leaf", "Moon", "Shield", "Star", "Sun", "Zap"], value: "Star" }],
+  "shape-custom": [{ type: "customshape", key: "Shape" }, { type: "label", text: "Drag to draw; Shift keeps the proportions" }],
+  "shape-triangle": [{ type: "num", text: "Radius:", value: "0", unit: "px", width: 40 }],
   "shape-3d": [{ type: "label", text: "Drag to draw a 3D object, then use the 3D panel to rotate it" }],
 
   hand: [{ type: "toggle", text: "Scroll All Windows", on: false }, { type: "toggle", text: "Zoom to Fit on Resize", on: false }],

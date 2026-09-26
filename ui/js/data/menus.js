@@ -154,7 +154,7 @@ export const menus = [
       sep,
       it("Define Brush Preset...", "", "misc:define-brush", { dis: true }),
       it("Define Pattern...", "", "misc:define-pattern"),
-      it("Define Custom Shape...", "", "misc:define-shape", { dis: true }),
+      it("Define Custom Shape...", "", "misc:define-shape"),
       it("Define Pattern from Selection", "", "misc:define-pattern-sel"),
       sep,
       it("Purge", "", "misc:purge", { dis: true }),
