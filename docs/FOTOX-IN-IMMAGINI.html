@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fotox — come funziona, in immagini</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#161a24; --muted:#5b6478; --line:#dfe3ee;
+    --ui:#2f6fed;    --ui-bg:#e8effd;
+    --engine:#7b3fe4; --engine-bg:#f1e9fe;
+    --gpu:#0f9d63;   --gpu-bg:#e3f7ee;
+    --team:#e07a10;  --team-bg:#fdf0df;
+    --store:#0e7d92; --store-bg:#e2f4f7;
+    --disk:#8a6a12;  --disk-bg:#fbf3d9;
+    --you:#c02a5a;   --you-bg:#fde8ef;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:28px 18px 80px;
+    background:var(--bg); color:var(--ink);
+    font:16px/1.65 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  }
+  .wrap{max-width:1060px;margin:0 auto}
+  h1{font-size:34px;line-height:1.2;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:17px;margin:0 0 24px}
+  h2{font-size:24px;margin:44px 0 6px;padding-top:18px;border-top:2px solid var(--line)}
+  h2 .num{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:34px;height:34px;border-radius:10px;background:var(--ink);color:#fff;
+    font-size:17px;margin-right:10px;vertical-align:2px;
+  }
+  h3{font-size:18px;margin:26px 0 8px}
+  p{margin:10px 0}
+  .lede{font-size:17px;color:var(--muted)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px 22px;margin:16px 0;
+        box-shadow:0 1px 2px rgba(20,25,40,.05)}
+  .figure{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 14px 8px;margin:18px 0;
+          box-shadow:0 1px 3px rgba(20,25,40,.06)}
+  .figure svg{display:block;width:100%;height:auto}
+  .cap{color:var(--muted);font-size:14px;margin:6px 4px 8px}
+  .analogy{display:flex;gap:12px;align-items:flex-start;background:#fffdf3;border:1px solid #f0e4bd;border-radius:14px;padding:14px 16px;margin:16px 0}
+  .analogy .ico{font-size:22px;line-height:1}
+  .analogy b{color:#8a6a12}
+  .note{background:#f2f4f9;border-left:4px solid var(--ui);border-radius:0 12px 12px 0;padding:12px 16px;margin:16px 0;font-size:15px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 4px}
+  .chip{display:inline-flex;align-items:center;gap:8px;font-size:14px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 12px}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .toc{columns:2;column-gap:28px;font-size:15px;margin:6px 0 0;padding-left:20px}
+  .toc li{margin:4px 0}
+  code{background:#eef1f7;border-radius:6px;padding:1px 6px;font-size:14px}
+  .tag{font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted);background:#eef1f7;border-radius:6px;padding:2px 7px;white-space:nowrap}
+  /* mosaico */
+  .mosaic{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+  .tile{aspect-ratio:1/1;border-radius:8px;border:1px solid #cdd6ea;
+        background:linear-gradient(135deg,#9fb6e8,#7f9ddb)}
+  .tile.warm{background:linear-gradient(135deg,#ffd79a,#f0a94b);border-color:#e0a34a}
+  .tile.cool{background:linear-gradient(135deg,#c9d2e6,#aab6d2);border-color:#aab6d2}
+  .tile.eye{outline:3px solid var(--you);outline-offset:2px}
+  .mosaic-legend{display:flex;gap:18px;flex-wrap:wrap;font-size:14px;color:var(--muted);margin-top:12px}
+  /* livelli */
+  .layers{position:relative;height:270px;margin:6px 0 4px}
+  .layers .sheet{position:absolute;border-radius:12px;border:1px solid var(--line);padding:10px 14px;font-size:15px}
+  .sheet.s1{left:6%;top:0;width:64%;height:74px;background:rgba(47,111,237,.16);border-color:#a9c2f4}
+  .sheet.s2{left:16%;top:74px;width:64%;height:74px;background:rgba(15,157,99,.16);border-color:#9ed9c1}
+  .sheet.s3{left:26%;top:148px;width:64%;height:74px;background:rgba(123,63,228,.16);border-color:#c9b0f6}
+  .sheet.s4{left:2%;top:212px;width:96%;height:56px;background:#fff;border-color:#c9cfe0}
+  /* depositi */
+  .tiers{display:grid;gap:10px}
+  .tier{display:grid;grid-template-columns:170px 1fr 130px;gap:14px;align-items:center;
+        border:1px solid var(--line);border-radius:12px;padding:10px 14px;background:#fff}
+  .tier b{font-size:15px}
+  .tier span{font-size:14px;color:var(--muted)}
+  .tier em{font-size:13px;color:var(--muted);font-style:normal;text-align:right;white-space:nowrap}
+  /* timeline */
+  .steps{list-style:none;margin:10px 0 0;padding:0}
+  .steps li{position:relative;padding:0 0 18px 54px}
+  .steps li::before{
+    content:attr(data-n);position:absolute;left:0;top:0;width:34px;height:34px;border-radius:50%;
+    background:var(--engine);color:#fff;font-weight:600;display:flex;align-items:center;justify-content:center;font-size:15px;
+  }
+  .steps li::after{content:"";position:absolute;left:16px;top:36px;bottom:0;width:2px;background:var(--line)}
+  .steps li:last-child::after{display:none}
+  .steps b{display:block;font-size:16px}
+  .steps span{color:var(--muted);font-size:15px}
+  .steps li.fast::before{background:var(--gpu)}
+  .steps li.slow::before{background:var(--team)}
+  /* pellicola undo */
+  .film{display:flex;gap:6px;overflow-x:auto;padding:10px 2px 4px}
+  .frame{flex:0 0 96px;border:2px solid var(--line);border-radius:10px;padding:8px;background:#fff;font-size:13px;text-align:center;color:var(--muted)}
+  .frame b{display:block;color:var(--ink);font-size:14px}
+  .frame.now{border-color:var(--engine);box-shadow:0 0 0 3px var(--engine-bg)}
+  .frame.gone{border-style:dashed;opacity:.55}
+  .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0}
+  .kv div{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:#fff}
+  .kv b{display:block;font-size:15px} .kv span{font-size:14px;color:var(--muted)}
+  .warn{border-color:#f0c2c2;background:#fff6f6}
+  .warn h3{color:#b03434}
+  .footer{color:var(--muted);font-size:14px;margin-top:36px;border-top:2px solid var(--line);padding-top:16px}
+  @media print{body{background:#fff}.card,.figure{box-shadow:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Fotox, raccontato in immagini</h1>
+<p class="sub">Come funziona dentro un editor di immagini “da scrivania”: chi fa cosa, dove vivono i pixel e cosa succede quando disegni, applichi un filtro, salvi o annulli. Nessun codice: solo metafore e disegni.</p>
+
+<div class="card">
+  <h3 style="margin-top:4px">In una frase</h3>
+  <p style="margin-bottom:6px">Fotox è un programma per modificare fotografie. Dentro non tiene mai <em>tutta</em> la foto in memoria: la immagina come un <b>mosaico di piastrelle</b> da 256×256 pixel, e ne carica solo i pezzi che gli servono in quel momento.</p>
+  <p style="margin-bottom:0">E non fa tutto da solo: <b>cinque “persone”</b> lavorano insieme, ognuna con un mestiere preciso, e comunicano tra loro mandandosi messaggi. È questa organizzazione — non un singolo blocco di codice — la cosa da capire per leggere tutto il resto.</p>
+</div>
+
+<div class="legend">
+  <span class="chip"><span class="dot" style="background:var(--you)"></span> Tu (mouse e tastiera)</span>
+  <span class="chip"><span class="dot" style="background:var(--ui)"></span> Interfaccia (menu, pannelli)</span>
+  <span class="chip"><span class="dot" style="background:var(--engine)"></span> Motore (decide)</span>
+  <span class="chip"><span class="dot" style="background:var(--gpu)"></span> Pittore (scheda grafica)</span>
+  <span class="chip"><span class="dot" style="background:var(--team)"></span> Squadra di aiutanti</span>
+  <span class="chip"><span class="dot" style="background:var(--store)"></span> Magazzino delle piastrelle</span>
+  <span class="chip"><span class="dot" style="background:var(--disk)"></span> File sul disco</span>
+</div>
+
+<p class="lede" style="margin-top:22px">Indice:</p>
+<ol class="toc">
+  <li><a href="#a1">I cinque attori</a></li>
+  <li><a href="#a2">Perché un mosaico (e non una foto intera)</a></li>
+  <li><a href="#a3">I fogli trasparenti (i livelli)</a></li>
+  <li><a href="#a4">La piramide delle miniature</a></li>
+  <li><a href="#a5">Disegnare un tratto, passo per passo</a></li>
+  <li><a href="#a6">Un lavoro pesante: il filtro</a></li>
+  <li><a href="#a7">Le selezioni: un cartone forato</a></li>
+  <li><a href="#a8">I quattro depositi delle piastrelle</a></li>
+  <li><a href="#a9">Salvare dentro un “contenitore” .fxd</a></li>
+  <li><a href="#a10">Aprire un file: leggere solo l’indice</a></li>
+  <li><a href="#a11">Annulla e ripristina: un album di fotografie</a></li>
+  <li><a href="#a12">La regola d’oro (il perché di tutto)</a></li>
+  <li><a href="#a13">Dove fa più male (in parole semplici)</a></li>
+</ol>
+
+<!-- ============================================================ 1 -->
+<h2 id="a1"><span class="num">1</span>I cinque attori</h2>
+<p>Immagina una piccola casa editrice. Tu dai le istruzioni a una <b>reception</b>; la reception non disegna nulla, ma passa gli ordini a un <b>direttore</b>; il direttore sa cosa fare e chiama <b>un pittore</b> per i disegni rapidi, una <b>squadra di aiutanti</b> per i lavori lunghi, e un <b>magazziniere</b> che tiene i materiali in ordine. Il tutto senza che tu debba quasi mai aspettare.</p>
+
+<div class="figure">
+<svg viewBox="0 0 1000 470" role="img" aria-label="Schema dei cinque attori di Fotox">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6478"/>
+    </marker>
+    <marker id="arU" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f6fed"/>
+    </marker>
+    <marker id="arE" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7b3fe4"/>
+    </marker>
+    <marker id="arG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0f9d63"/>
+    </marker>
+  </defs>
+
+  <!-- row 1 -->
+  <rect x="20" y="26" width="150" height="86" rx="14" fill="#fde8ef" stroke="#c02a5a" stroke-width="2"/>
+  <text x="95" y="62" text-anchor="middle" font-size="17" font-weight="700" fill="#8d1e42">TU</text>
+  <text x="95" y="86" text-anchor="middle" font-size="13" fill="#8d1e42">mouse, penna, tastiera</text>
+
+  <rect x="210" y="26" width="330" height="86" rx="14" fill="#e8effd" stroke="#2f6fed" stroke-width="2"/>
+  <text x="375" y="58" text-anchor="middle" font-size="17" font-weight="700" fill="#1c4bb0">INTERFACCIA</text>
+  <text x="375" y="80" text-anchor="middle" font-size="13" fill="#1c4bb0">menu, pannelli, cursori: è una vera pagina web</text>
+  <text x="375" y="99" text-anchor="middle" font-size="12" fill="#5b6478">disegnata da Chromium, sovrapposta al disegno</text>
+
+  <rect x="580" y="26" width="400" height="86" rx="14" fill="#f1e9fe" stroke="#7b3fe4" stroke-width="2"/>
+  <text x="780" y="58" text-anchor="middle" font-size="17" font-weight="700" fill="#54249c">MOTORE — il direttore</text>
+  <text x="780" y="80" text-anchor="middle" font-size="13" fill="#54249c">un solo impiegato, una sola coda di ordini, uno alla volta</text>
+
+  <line x1="172" y1="60" x2="208" y2="60" stroke="#2f6fed" stroke-width="2.5" marker-end="url(#arU)"/>
+  <line x1="542" y1="52" x2="578" y2="52" stroke="#7b3fe4" stroke-width="2.5" marker-end="url(#arE)"/>
+  <line x1="578" y1="92" x2="542" y2="92" stroke="#0f9d63" stroke-width="2.5" marker-end="url(#arG)"/>
+  <text x="560" y="42" text-anchor="middle" font-size="12" fill="#5b6478">ordini</text>
+  <text x="560" y="108" text-anchor="middle" font-size="12" fill="#5b6478">risposte</text>
+
+  <!-- row 2 -->
+  <rect x="580" y="176" width="400" height="92" rx="14" fill="#e3f7ee" stroke="#0f9d63" stroke-width="2"/>
+  <text x="780" y="208" text-anchor="middle" font-size="17" font-weight="700" fill="#0a6a44">PITTORE — la scheda grafica</text>
+  <text x="780" y="230" text-anchor="middle" font-size="13" fill="#0a6a44">ricompone le piastrelle in un fotogramma, ~60 volte al secondo</text>
+  <text x="780" y="250" text-anchor="middle" font-size="12" fill="#5b6478">non aspetta MAI il disco: se un pezzo non è pronto, lo lascia vuoto e riprova</text>
+
+  <rect x="580" y="312" width="400" height="92" rx="14" fill="#fdf0df" stroke="#e07a10" stroke-width="2"/>
+  <text x="780" y="344" text-anchor="middle" font-size="17" font-weight="700" fill="#a3560a">SQUADRA DI AIUTANTI</text>
+  <text x="780" y="366" text-anchor="middle" font-size="13" fill="#a3560a">tanti aiutanti quanti sono i nuclei del processore</text>
+  <text x="780" y="386" text-anchor="middle" font-size="12" fill="#5b6478">filtri, mip, apri, esporta, salva, miniature</text>
+
+  <line x1="780" y1="114" x2="780" y2="174" stroke="#7b3fe4" stroke-width="2.5" marker-end="url(#arE)"/>
+  <text x="880" y="148" text-anchor="middle" font-size="12" fill="#5b6478">«mostra questo»</text>
+  <line x1="780" y1="270" x2="780" y2="310" stroke="#7b3fe4" stroke-width="2.5" marker-end="url(#arE)"/>
+  <text x="905" y="294" text-anchor="middle" font-size="12" fill="#5b6478">«lavoro lungo»</text>
+  <line x1="650" y1="312" x2="650" y2="270" stroke="#e07a10" stroke-width="2.5" marker-end="url(#ar)"/>
+  <text x="568" y="296" text-anchor="middle" font-size="12" fill="#5b6478">«fatto»</text>
+
+  <!-- store + disk -->
+  <rect x="20" y="176" width="520" height="92" rx="14" fill="#e2f4f7" stroke="#0e7d92" stroke-width="2"/>
+  <text x="280" y="208" text-anchor="middle" font-size="17" font-weight="700" fill="#0a5c6c">MAGAZZINO DELLE PIASTRELLE</text>
+  <text x="280" y="230" text-anchor="middle" font-size="13" fill="#0a5c6c">RAM veloce · RAM compressa · file temporaneo · dentro il file aperto</text>
+  <text x="280" y="250" text-anchor="middle" font-size="12" fill="#5b6478">sa sempre dove si trova ogni pezzo e quanto spazio occupa</text>
+
+  <rect x="20" y="312" width="520" height="92" rx="14" fill="#fbf3d9" stroke="#8a6a12" stroke-width="2"/>
+  <text x="280" y="344" text-anchor="middle" font-size="17" font-weight="700" fill="#6b5210">IL TUO FILE .fxd</text>
+  <text x="280" y="366" text-anchor="middle" font-size="13" fill="#6b5210">la scatola sul disco con dentro tutti i pezzi + l’indice</text>
+
+  <line x1="580" y1="222" x2="544" y2="222" stroke="#0f9d63" stroke-width="2.5" marker-end="url(#arG)"/>
+  <text x="562" y="210" text-anchor="middle" font-size="12" fill="#5b6478">legge</text>
+  <line x1="580" y1="358" x2="544" y2="358" stroke="#e07a10" stroke-width="2.5" marker-end="url(#ar)"/>
+  <line x1="280" y1="270" x2="280" y2="310" stroke="#0e7d92" stroke-width="2.5" marker-end="url(#ar)"/>
+  <text x="345" y="294" text-anchor="middle" font-size="12" fill="#5b6478">scarica / ricarica</text>
+
+  <text x="500" y="440" text-anchor="middle" font-size="13" fill="#5b6478">Nessuna freccia va “da tutti a tutti”: ogni attore parla solo con il vicino, tramite messaggi.</text>
+</svg>
+<div class="cap">I cinque attori e il loro unico flusso di comunicazione: tu parli all’interfaccia, l’interfaccia parla al motore, il motore comanda pittore, squadra e magazzino.</div>
+</div>
+
+<div class="analogy"><div class="ico">🎼</div><div>
+<b>Perché solo il motore decide.</b> Avere una sola persona che prende le decisioni evita il caos: due ordini non si pestano i piedi e il risultato è sempre coerente. Gli altri lavorano in parallelo solo su cose che possono essere “spezzate” senza pericolo — cioè sulle piastrelle del mosaico.</div></div>
+
+<div class="note">
+<b>Come fa il disegno a stare “dentro” una pagina web?</b> L’interfaccia è una pagina web vera, ma al centro ha un <b>buco trasparente</b> (l’area della tela). Da quel buco si vede il fotogramma prodotto dalla scheda grafica. Il mouse che passa sopra il buco non viene gestito dalla pagina web: va direttamente al motore. Per questo disegnare è reattivo anche se l’interfaccia è “solo” HTML.
+</div>
+
+<!-- ============================================================ 2 -->
+<h2 id="a2"><span class="num">2</span>Perché un mosaico (e non una foto intera)</h2>
+<p>Una foto grande, in memoria, è enorme: una foto da 30.000 × 30.000 pixel a 16 bit pesa circa <b>5,4 GB</b>, e per applicarci un filtro servirebbe il doppio. Tenere tutto in memoria è impossibile. Quindi Fotox taglia l’immagine in <b>piastrelle da 256×256 pixel</b> (0,25 MB ciascuna a 8 bit, 0,5 MB a 16 bit) e ne carica solo quelle che servono.</p>
+
+<div class="figure">
+  <div class="mosaic">
+    <div class="tile cool"></div><div class="tile cool"></div><div class="tile warm"></div><div class="tile cool"></div><div class="tile cool"></div><div class="tile cool"></div>
+    <div class="tile cool"></div><div class="tile warm eye"></div><div class="tile warm eye"></div><div class="tile warm eye"></div><div class="tile cool"></div><div class="tile cool"></div>
+    <div class="tile cool"></div><div class="tile warm eye"></div><div class="tile warm eye"></div><div class="tile warm eye"></div><div class="tile cool"></div><div class="tile cool"></div>
+    <div class="tile cool"></div><div class="tile cool"></div><div class="tile cool"></div><div class="tile cool"></div><div class="tile cool"></div><div class="tile cool"></div>
+  </div>
+  <div class="mosaic-legend">
+    <span>🟧 in memoria, pronte all’uso</span>
+    <span>🟦 non in memoria: arrivano quando servono</span>
+    <span>🔴 la finestra che stai guardando</span>
+  </div>
+  <div class="cap">Un documento immenso può avere 13.000+ piastrelle. Allo stesso istante ne vengono davvero “in mano” solo alcune decine: quelle visibili, più quelle appena modificate.</div>
+</div>
+
+<p>Ogni piastrella ha anche un <b>livello di qualità</b>: quando sei zoomato indietro non serve la piastrella a piena risoluzione, ne basta una versione ridotta. È lo stesso trucco delle mappe online (§4).</p>
+
+<div class="kv">
+  <div><b>256×256</b><span>la dimensione di ogni piastrella</span></div>
+  <div><b>0,5 MB</b><span>una piastrella a 16 bit con trasparenza</span></div>
+  <div><b>5 GB + 3 GB</b><span>spazio che il magazzino può usare per pezzi “caldi” e “tiepidi”</span></div>
+  <div><b>6 GB</b><span>spazio sulla scheda grafica per le piastrelle da mostrare</span></div>
+</div>
+
+<!-- ============================================================ 3 -->
+<h2 id="a3"><span class="num">3</span>I fogli trasparenti (i livelli)</h2>
+<p>Un documento non è una foto sola: è una <b>pila di fogli trasparenti</b>. Ogni foglio può avere il suo grado di trasparenza, il suo “modo di mescolarsi” con quelli sotto, una mascherina che ne nasconde alcune zone, una spunta per essere visibile o no. I gruppi sono semplicemente <b>fogli dentro una cartellina</b>.</p>
+
+<div class="figure">
+  <div class="layers">
+    <div class="sheet s1"><b>Foglio 3 — testo</b><br><span style="color:var(--muted);font-size:14px">mescolamento “moltiplica”, visibilità 40 %</span></div>
+    <div class="sheet s2"><b>Foglio 2 — ritocco</b><br><span style="color:var(--muted);font-size:14px">con mascherina: dipinto solo a metà</span></div>
+    <div class="sheet s3"><b>Foglio 1 — foto originale</b><br><span style="color:var(--muted);font-size:14px">opaco, in fondo</span></div>
+    <div class="sheet s4"><b>Risultato visibile</b> &nbsp;<span style="color:var(--muted);font-size:14px">= i fogli impilati, dal basso verso l’alto, guardati dall’alto</span></div>
+  </div>
+  <div class="cap">Il “foglio risultato” non esiste come foglio vero: viene calcolato al momento dal pittore, piastrella per piastrella, solo per la parte che stai guardando.</div>
+</div>
+
+<div class="analogy"><div class="ico">📚</div><div>
+<b>Il vantaggio.</b> Il foglio risultato si può ricalcolare in qualsiasi momento dai fogli originali, quindi il programma non lo salva. E se modifichi un solo foglio, non deve ricalcolare tutto da zero: sa che i fogli sotto di lui non sono cambiati e ne riusa il risultato già pronto (la “scorciatoia del piano di sotto”, §5).</div></div>
+
+<!-- ============================================================ 4 -->
+<h2 id="a4"><span class="num">4</span>La piramide delle miniature</h2>
+<p>Per ogni foglio il magazzino tiene anche versioni <b>rimpicciolite</b>: la metà, un quarto, un ottavo… come una piramide di fotocopie sempre più piccole. Quando sei zoomato indietro, il pittore chiede direttamente la versione piccola invece di leggere milioni di pixel a piena risoluzione.</p>
+
+<div class="figure">
+<svg viewBox="0 0 1000 340" role="img" aria-label="La piramide delle versioni ridotte">
+  <rect x="60" y="30" width="300" height="240" rx="12" fill="#e8effd" stroke="#2f6fed" stroke-width="2"/>
+  <text x="210" y="150" text-anchor="middle" font-size="18" font-weight="700" fill="#1c4bb0">Livello 0</text>
+  <text x="210" y="176" text-anchor="middle" font-size="14" fill="#1c4bb0">i pixel veri, quelli che modifichi</text>
+  <text x="210" y="200" text-anchor="middle" font-size="13" fill="#5b6478">si salva sempre nel file</text>
+
+  <rect x="420" y="30" width="300" height="240" rx="12" fill="#eef3ff" stroke="#7f9ddb" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="570" y="150" text-anchor="middle" font-size="18" font-weight="700" fill="#1c4bb0">Livelli 1–2</text>
+  <text x="570" y="176" text-anchor="middle" font-size="14" fill="#1c4bb0">metà e un quarto</text>
+  <text x="570" y="200" text-anchor="middle" font-size="13" fill="#5b6478">si rifanno al volo, non si salvano</text>
+
+  <rect x="780" y="30" width="200" height="240" rx="12" fill="#e3f7ee" stroke="#0f9d63" stroke-width="2"/>
+  <text x="880" y="145" text-anchor="middle" font-size="18" font-weight="700" fill="#0a6a44">Livelli 3+</text>
+  <text x="880" y="171" text-anchor="middle" font-size="14" fill="#0a6a44">i più piccoli</text>
+  <text x="880" y="196" text-anchor="middle" font-size="13" fill="#5b6478">si salvano (sono</text>
+  <text x="880" y="214" text-anchor="middle" font-size="13" fill="#5b6478">le “anteprime” del file)</text>
+
+  <text x="500" y="308" text-anchor="middle" font-size="14" fill="#5b6478">Più sono piccoli, più sono “usa e getta”: se manca memoria il magazzino li butta per primi e li ricalcola quando servono.</text>
+</svg>
+<div class="cap">Perché una piramide? Perché così lo zoom indietro è veloce senza leggere tutta la foto, e il file resta piccolo.</div>
+</div>
+
+<!-- ============================================================ 5 -->
+<h2 id="a5"><span class="num">5</span>Disegnare un tratto, passo per passo</h2>
+<p>Ecco la sequenza completa di un singolo tratto di pennello. È l’esempio migliore per capire come i cinque attori si passano il lavoro: <b>nessuno aspetta nessun altro</b>.</p>
+
+<ol class="steps">
+  <li data-n="1"><b>Premi il tasto del mouse</b><span>L’interfaccia manda al motore una busta con: dove, con quanta pressione, che inclinazione ha la penna, che ora è. Sotto il cursore non succede nient’altro: la pagina web si fa da parte.</span></li>
+  <li data-n="2" class="fast"><b>Il motore apre una “sessione di tratto”</b><span>Controlla che ci sia un foglio attivo, che non sia bloccato, e fa una <em>fotografia</em> del documento com’era prima. Questa fotografia diventerà la voce di “Annulla”.</span></li>
+  <li data-n="3"><b>Raccoglie i punti del movimento</b><span>Il pennello non passa ogni punto al motore: ne tiene solo uno ogni tanto (distanza legata alla dimensione del pennello), così un movimento veloce non genera migliaia di micro-aggiornamenti.</span></li>
+  <li data-n="4" class="fast"><b>Dipinge solo le piastrelle toccate</b><span>Per ogni pezzo di mosaico sotto il tratto calcola i pixel nuovi: niente di più. Le piastrelle cambiate diventano piastrelle nuove (le vecchie restano intatte: servono all’annulla).</span></li>
+  <li data-n="5" class="fast"><b>Il pittore mostra il risultato subito</b><span>Le piastrelle appena cambiate vengono date al pittore, che ridisegna il fotogramma in pochi millisecondi. Il tratto appare <em>mentre</em> disegni: non c’è un “salva e vedi dopo”.</span></li>
+  <li data-n="6"><b>Sollevi il tasto</b><span>Il pennello dichiara finito il tratto. Anche qui niente lavoro pesante: chiude la sessione e fa un ultimo disegno.</span></li>
+  <li data-n="7" class="slow"><b>Nasce UNA voce di “Annulla”</b><span>Il tratto intero — dall’inizio alla fine — diventa <b>una sola</b> azione annullabile, con il suo nome (“Pennello”). Non mille voci: una. Ed è per questo che un Ctrl+Z cancella tutto il tratto, come ci si aspetta.</span></li>
+  <li data-n="8"><b>In secondo piano, la miniatura</b><span>Il pannello dei livelli aggiorna l’anteprima del foglio, ma non più di 10 volte al secondo: se disegni veloce, le miniature “rincorrono” senza mai rallentarti.</span></li>
+</ol>
+
+<div class="analogy"><div class="ico">🖌️</div><div>
+<b>La cosa importante.</b> Il lavoro di un tratto è proporzionale a <b>quanto pennelli</b>, non a quanto è grande la foto. Puoi lavorare su una foto da 30.000 pixel con la stessa reattività di una da 1.000, perché il programma non ha mai “tutta la foto in mano”.</div></div>
+
+<!-- ============================================================ 6 -->
+<h2 id="a6"><span class="num">6</span>Un lavoro pesante: il filtro</h2>
+<p>I filtri (sfocatura, contrasto…) devono toccare <em>tutti</em> i pixel del foglio. Se li facesse il motore, l’interfaccia si bloccherebbe. Quindi si dividono in due momenti.</p>
+
+<h3>Prima: l’anteprima, solo dove guardi</h3>
+<p>Mentre sei nella finestra del filtro e muovi un cursore, il motore manda alla squadra un lavoro limitato: <b>solo le piastrelle visibili</b>, calcolate a un livello di riduzione in base a quanto sei zoomato, in gruppetti di 8. Ogni gruppetto è mostrato appena è pronto. Se muovi il cursore di nuovo, il lavoro vecchio si accorge di essere superato e si ferma da solo: <b>vince sempre l’ultimo</b>.</p>
+
+<h3>Poi: “OK”, e parte il lavoro vero</h3>
+
+<ol class="steps">
+  <li data-n="1"><b>Il motore segna il documento come “occupato”</b><span>Compare una barra di avanzamento e le modifiche vengono rifiutate per un attimo con un messaggio del tipo «aspetta che finisca». È voluto: due lavori pesanti sullo stesso foglio si confonderebbero.</span></li>
+  <li data-n="2" class="slow"><b>Un aiutante della squadra riceve il lavoro</b><span>Il motore fa una fotografia del documento e la consegna a un aiutante. Da questo momento il motore è di nuovo libero di ascoltarti.</span></li>
+  <li data-n="3" class="slow"><b>L’aiutante calcola piastrella per piastrella</b><span>…e quando ha finito manda al motore il documento nuovo completo. Nel frattempo puoi guardare in giro, aprire un menu, spostare la vista: il disegno “vecchio” resta a schermo.</span></li>
+  <li data-n="4"><b>Il motore riceve il risultato e lo mette al posto del vecchio</b><span>La sostituzione è un istante perché è una <em>lista</em> di piastrelle nuova, non milioni di pixel copiati.</span></li>
+  <li data-n="5"><b>Registra una voce di “Annulla” e ridisegna</b><span>Anche qui: un filtro = una voce. E la barra di avanzamento sparisce.</span></li>
+</ol>
+
+<div class="warn card">
+  <h3>Punto debole noto di questo meccanismo</h3>
+  <p style="margin-bottom:0">Se il lavoro pesante incontra un pezzo danneggiato (per esempio un pacchetto illeggibile nel file), oggi l’aiutante “muore” e non manda più nessun messaggio: il documento resta <b>occupato per sempre</b> e ogni comando risponde «aspetta che finisca». È uno dei tre problemi critici descritti nel rapporto tecnico (<code>docs/reviews/2026-09-25-deep-code-review.md</code>).</p>
+</div>
+
+<!-- ============================================================ 7 -->
+<h2 id="a7"><span class="num">7</span>Le selezioni: un cartone forato</h2>
+<p>Una selezione è un <b>cartone forato</b> appoggiato sopra il foglio: dipingi, cancelli, riempi solo dove c’è il buco. Fotox non lo riduce a “dentro / fuori”: ogni bordo ha una <b>percentuale di copertura</b>, ed è così che i bordi risultano morbidi invece che seghettati.</p>
+
+<div class="figure">
+<svg viewBox="0 0 1000 250" role="img" aria-label="La selezione come maschera con percentuali">
+  <rect x="40" y="30" width="260" height="180" rx="12" fill="#eef1f7" stroke="#c9cfe0" stroke-width="2"/>
+  <text x="170" y="76" text-anchor="middle" font-size="16" font-weight="700">Il foglio</text>
+  <text x="170" y="104" text-anchor="middle" font-size="14" fill="#5b6478">pixel veri e propri</text>
+  <circle cx="120" cy="150" r="34" fill="#9fb6e8" stroke="#7f9ddb"/>
+  <circle cx="215" cy="160" r="26" fill="#ffd79a" stroke="#e0a34a"/>
+
+  <rect x="360" y="30" width="260" height="180" rx="12" fill="#fde8ef" stroke="#c02a5a" stroke-width="2"/>
+  <text x="490" y="76" text-anchor="middle" font-size="16" font-weight="700" fill="#8d1e42">Il cartone forato</text>
+  <text x="490" y="104" text-anchor="middle" font-size="14" fill="#8d1e42">0 = coperto, 1 = buco,</text>
+  <text x="490" y="124" text-anchor="middle" font-size="14" fill="#8d1e42">0,4 = mezzo buco (bordo morbido)</text>
+  <circle cx="440" cy="150" r="34" fill="#fff" stroke="#c02a5a"/>
+  <circle cx="535" cy="160" r="26" fill="#fff" stroke="#c02a5a"/>
+
+  <rect x="680" y="30" width="280" height="180" rx="12" fill="#e3f7ee" stroke="#0f9d63" stroke-width="2"/>
+  <text x="820" y="80" text-anchor="middle" font-size="16" font-weight="700" fill="#0a6a44">Risultato</text>
+  <text x="820" y="108" text-anchor="middle" font-size="14" fill="#0a6a44">l’effetto si applica al pixel</text>
+  <text x="820" y="128" text-anchor="middle" font-size="14" fill="#0a6a44">in proporzione al buco</text>
+  <text x="820" y="160" text-anchor="middle" font-size="14" fill="#5b6478">mezzo buco = effetto al 50 %</text>
+  <text x="820" y="184" text-anchor="middle" font-size="14" fill="#5b6478">e il bordo resta liscio</text>
+
+  <line x1="304" y1="120" x2="356" y2="120" stroke="#5b6478" stroke-width="2.5" marker-end="url(#ar)"/>
+  <line x1="624" y1="120" x2="676" y2="120" stroke="#5b6478" stroke-width="2.5" marker-end="url(#ar)"/>
+</svg>
+<div class="cap">La selezione è essa stessa fatta di piastrelle, e anche lei è un dato “usa e getta”: <b>non viene salvata nel file</b>. Riaprendo il documento il cartone non c’è più.</div>
+</div>
+
+<p>Il “formicaio” che vedi ai bordi (le linee tratteggiate che si muovono) è calcolato dal motore <b>una volta sola</b> e poi riusato: cambia solo quando cambi qualcosa o sposti la vista. Per questo la selezione non rallenta il disegno.</p>
+
+<!-- ============================================================ 8 -->
+<h2 id="a8"><span class="num">8</span>I quattro depositi delle piastrelle</h2>
+<p>Il magazzino non è una stanza sola: è una <b>catena di quattro stanze</b>, dal ripiano più veloce al più lento. Nessuno decide a mano cosa dove mettere: il magazzino sposta da solo i pezzi in base a quando li hai usati l’ultima volta.</p>
+
+<div class="figure">
+  <div class="tiers">
+    <div class="tier" style="border-left:6px solid var(--gpu)">
+      <b>1 · Caldo (RAM)</b>
+      <span>Pronta all’uso immediato. È qui che vive ciò che stai guardando o modificando in questo momento.</span>
+      <em>fino a ~5 GB</em>
+    </div>
+    <div class="tier" style="border-left:6px solid var(--store)">
+      <b>2 · Tiepido (RAM compressa)</b>
+      <span>Come un piumino sottovuoto: la stessa piastrella occupa molto meno. Serve mezzo secondo di “rigonfiamento” per riusarla.</span>
+      <em>fino a ~3 GB</em>
+    </div>
+    <div class="tier" style="border-left:6px solid var(--team)">
+      <b>3 · Freddo (file temporaneo)</b>
+      <span>Scaricata su disco in una zona di lavoro. Si recupera leggendo, quindi è più lenta ma non occupa RAM.</span>
+      <em>disco</em>
+    </div>
+    <div class="tier" style="border-left:6px solid var(--disk)">
+      <b>4 · Dentro il tuo file</b>
+      <span>Il pezzo è già dentro il <code>.fxd</code>: non viene copiato da nessuna parte, si legge direttamente da lì quando serve.</span>
+      <em>nessun costo</em>
+    </div>
+  </div>
+  <div class="cap">Le miniature ricalcolabili (i livelli 3+ della piramide) sono le prime a essere buttate: se spariscono, si rifanno. I pixel “veri” invece non si buttano mai: al massimo scendono di livello.</div>
+</div>
+
+<div class="analogy"><div class="ico">🧠</div><div>
+<b>La regola non scritta.</b> Un pezzo può sempre scendere di livello, ma non può mai essere distrutto. È per questo che dopo aver usato a lungo una foto enorme il programma resta vivo: la memoria occupata si stabilizza, non cresce all’infinito.</div></div>
+
+<!-- ============================================================ 9 -->
+<h2 id="a9"><span class="num">9</span>Salvare dentro un “contenitore” .fxd</h2>
+<p>Il formato di Fotox è una <b>scatola</b> con dentro tanti pacchetti: uno per ogni piastrella, compressi, più un <b>indice</b> finale che dice dove si trova ogni cosa, e un <b>sigillo</b> in fondo.</p>
+
+<div class="figure">
+<svg viewBox="0 0 1000 470" role="img" aria-label="La struttura di un file .fxd">
+  <text x="20" y="24" font-size="15" font-weight="700">Il file, dall’alto in basso</text>
+
+  <rect x="20" y="40" width="120" height="56" rx="10" fill="#eef1f7" stroke="#c9cfe0" stroke-width="2"/>
+  <text x="80" y="66" text-anchor="middle" font-size="14" font-weight="700">INTESTAZ.</text>
+  <text x="80" y="84" text-anchor="middle" font-size="12" fill="#5b6478">«sono un .fxd»</text>
+
+  <rect x="150" y="40" width="140" height="56" rx="10" fill="#fbf3d9" stroke="#8a6a12" stroke-width="2"/>
+  <text x="220" y="72" text-anchor="middle" font-size="14" font-weight="700">pacchetto 1</text>
+  <rect x="300" y="40" width="140" height="56" rx="10" fill="#fbf3d9" stroke="#8a6a12" stroke-width="2"/>
+  <text x="370" y="72" text-anchor="middle" font-size="14" font-weight="700">pacchetto 2</text>
+  <rect x="450" y="40" width="140" height="56" rx="10" fill="#fbf3d9" stroke="#8a6a12" stroke-width="2"/>
+  <text x="520" y="72" text-anchor="middle" font-size="14" font-weight="700">pacchetto 3</text>
+  <text x="620" y="76" text-anchor="middle" font-size="22" fill="#5b6478">…</text>
+
+  <rect x="660" y="40" width="160" height="56" rx="10" fill="#e8effd" stroke="#2f6fed" stroke-width="2"/>
+  <text x="740" y="66" text-anchor="middle" font-size="14" font-weight="700" fill="#1c4bb0">INDICE</text>
+  <text x="740" y="84" text-anchor="middle" font-size="12" fill="#1c4bb0">chi è dove</text>
+
+  <rect x="840" y="40" width="140" height="56" rx="10" fill="#f1e9fe" stroke="#7b3fe4" stroke-width="2"/>
+  <text x="910" y="66" text-anchor="middle" font-size="14" font-weight="700" fill="#54249c">SIGILLO</text>
+  <text x="910" y="84" text-anchor="middle" font-size="12" fill="#54249c">qui finisce</text>
+
+  <text x="20" y="124" font-size="13" fill="#5b6478">…e così via, uno per ogni piastrella: su un documento grande sono più di 13.000 pacchetti.</text>
+
+  <text x="20" y="176" font-size="15" font-weight="700">Dentro un pacchetto</text>
+  <rect x="20" y="192" width="90" height="52" rx="9" fill="#eef1f7" stroke="#c9cfe0" stroke-width="2"/>
+  <text x="65" y="216" text-anchor="middle" font-size="13">tipo</text>
+  <text x="65" y="234" text-anchor="middle" font-size="12" fill="#5b6478">colori/formato</text>
+  <rect x="118" y="192" width="96" height="52" rx="9" fill="#eef1f7" stroke="#c9cfe0" stroke-width="2"/>
+  <text x="166" y="222" text-anchor="middle" font-size="13">dimensione</text>
+  <rect x="222" y="192" width="120" height="52" rx="9" fill="#fde8ef" stroke="#c02a5a" stroke-width="2"/>
+  <text x="282" y="216" text-anchor="middle" font-size="13" font-weight="700" fill="#8d1e42">sigillo CRC</text>
+  <text x="282" y="234" text-anchor="middle" font-size="12" fill="#8d1e42">anti-danneggiamento</text>
+  <rect x="350" y="192" width="256" height="52" rx="9" fill="#e3f7ee" stroke="#0f9d63" stroke-width="2"/>
+  <text x="478" y="216" text-anchor="middle" font-size="13" font-weight="700" fill="#0a6a44">i pixel, compressi</text>
+  <text x="478" y="234" text-anchor="middle" font-size="12" fill="#0a6a44">(≈4 volte più piccoli)</text>
+
+  <text x="20" y="278" font-size="13" fill="#5b6478">Se il sigillo non torna, quel pacchetto viene dichiarato illeggibile invece di restituire pixel a caso.</text>
+
+  <text x="20" y="322" font-size="15" font-weight="700">Salvare di nuovo (Ctrl+S)</text>
+  <rect x="20" y="338" width="460" height="76" rx="10" fill="#f6f7fb" stroke="#c9cfe0" stroke-width="2"/>
+  <text x="250" y="368" text-anchor="middle" font-size="14">Il vecchio file rimane com’è…</text>
+  <text x="250" y="390" text-anchor="middle" font-size="13" fill="#5b6478">i nuovi pacchetti si aggiungono in coda, poi un nuovo sigillo</text>
+  <rect x="510" y="338" width="470" height="76" rx="10" fill="#e3f7ee" stroke="#0f9d63" stroke-width="2"/>
+  <text x="745" y="368" text-anchor="middle" font-size="14">«Salva con nome» invece</text>
+  <text x="745" y="390" text-anchor="middle" font-size="13" fill="#0a6a44">scrive un file provvisorio e poi lo rinomina al posto del vecchio</text>
+
+  <text x="500" y="448" text-anchor="middle" font-size="13" fill="#5b6478">In entrambi i casi, se il programma si chiude a metà, la versione precedente resta leggibile: il sigillo vecchio è ancora valido.</text>
+</svg>
+<div class="cap">Salvare una seconda volta non riscrive tutto: aggiunge solo i pezzi nuovi in fondo. Per questo “Ctrl+S” su una foto enorme è veloce quasi quanto su una piccola.</div>
+</div>
+
+<div class="warn card">
+  <h3>Punto debole noto di questo meccanismo</h3>
+  <p style="margin-bottom:0">Niente impedisce che <b>due salvataggi partano insieme</b> (per esempio tenendo premuto Ctrl+S: la tastiera “ripete” il tasto da sola). Due scrittori che aggiungono pacchetti nello stesso punto si sovrascrivono a vicenda e il file può risultare danneggiato. È il secondo problema critico del rapporto tecnico.</p>
+</div>
+
+<!-- ============================================================ 10 -->
+<h2 id="a10"><span class="num">10</span>Aprire un file: leggere solo l’indice</h2>
+<p>Aprire una foto enorme è quasi immediato. Non perché sia veloce leggere tutto, ma perché Fotox <b>non legge i pixel</b>: legge solo il sigillo e l’indice.</p>
+
+<div class="figure">
+<svg viewBox="0 0 1000 250" role="img" aria-label="Sequenza di apertura di un file">
+  <rect x="20" y="40" width="200" height="120" rx="14" fill="#f1e9fe" stroke="#7b3fe4" stroke-width="2"/>
+  <text x="120" y="80" text-anchor="middle" font-size="15" font-weight="700" fill="#54249c">1. Cerca il sigillo</text>
+  <text x="120" y="104" text-anchor="middle" font-size="13" fill="#54249c">parte dal fondo,</text>
+  <text x="120" y="122" text-anchor="middle" font-size="13" fill="#54249c">accetta il primo valido</text>
+  <text x="120" y="144" text-anchor="middle" font-size="12" fill="#5b6478">così un file interrotto si apre lo stesso</text>
+
+  <rect x="260" y="40" width="200" height="120" rx="14" fill="#e8effd" stroke="#2f6fed" stroke-width="2"/>
+  <text x="360" y="80" text-anchor="middle" font-size="15" font-weight="700" fill="#1c4bb0">2. Legge l’indice</text>
+  <text x="360" y="104" text-anchor="middle" font-size="13" fill="#1c4bb0">l’elenco dei fogli,</text>
+  <text x="360" y="122" text-anchor="middle" font-size="13" fill="#1c4bb0">dei gruppi e dei pezzi</text>
+  <text x="360" y="144" text-anchor="middle" font-size="12" fill="#5b6478">pochi KB</text>
+
+  <rect x="500" y="40" width="220" height="120" rx="14" fill="#e2f4f7" stroke="#0e7d92" stroke-width="2"/>
+  <text x="610" y="80" text-anchor="middle" font-size="15" font-weight="700" fill="#0a5c6c">3. Segna i pezzi come</text>
+  <text x="610" y="100" text-anchor="middle" font-size="15" font-weight="700" fill="#0a5c6c">«sono nel file»</text>
+  <text x="610" y="126" text-anchor="middle" font-size="13" fill="#0a5c6c">non li copia: punta al file</text>
+  <text x="610" y="148" text-anchor="middle" font-size="12" fill="#5b6478">zero memoria, zero letture</text>
+
+  <rect x="760" y="40" width="220" height="120" rx="14" fill="#e3f7ee" stroke="#0f9d63" stroke-width="2"/>
+  <text x="870" y="80" text-anchor="middle" font-size="15" font-weight="700" fill="#0a6a44">4. Mostra, e legge</text>
+  <text x="870" y="100" text-anchor="middle" font-size="15" font-weight="700" fill="#0a6a44">solo ciò che guardi</text>
+  <text x="870" y="126" text-anchor="middle" font-size="13" fill="#0a6a44">un pezzo alla volta,</text>
+  <text x="870" y="148" text-anchor="middle" font-size="12" fill="#5b6478">mentre lavori</text>
+
+  <line x1="224" y1="100" x2="256" y2="100" stroke="#5b6478" stroke-width="2.5" marker-end="url(#ar)"/>
+  <line x1="464" y1="100" x2="496" y2="100" stroke="#5b6478" stroke-width="2.5" marker-end="url(#ar)"/>
+  <line x1="724" y1="100" x2="756" y2="100" stroke="#5b6478" stroke-width="2.5" marker-end="url(#ar)"/>
+
+  <text x="500" y="214" text-anchor="middle" font-size="13" fill="#5b6478">Conseguenza: un pezzo danneggiato nel file viene scoperto solo quando quella zona entra nell’inquadratura — non all’apertura.</text>
+</svg>
+<div class="cap">Ed è proprio questa pigrizia che rende possibile lavorare su file enormi senza attese all’apertura.</div>
+</div>
+
+<!-- ============================================================ 11 -->
+<h2 id="a11"><span class="num">11</span>Annulla e ripristina: un album di fotografie</h2>
+<p>Per annullare, Fotox non “inverte” le operazioni: tiene un <b>album di fotografie del documento</b>, una prima di ogni modifica. Annullare significa scorrere all’indietro l’album.</p>
+
+<div class="figure">
+  <div class="film">
+    <div class="frame"><b>1</b>nuovo foglio</div>
+    <div class="frame"><b>2</b>pennello</div>
+    <div class="frame"><b>3</b>sfocatura</div>
+    <div class="frame now"><b>4</b>selezione rettangolo</div>
+    <div class="frame gone"><b>5</b>…</div>
+    <div class="frame gone"><b>6</b>…</div>
+  </div>
+  <div class="cap">Il segnalibro è dove ti trovi. Le fotografie a destra sono il “futuro”: se fai una modifica nuova, vengono strappate (non è più possibile “ripristinare” in quel ramo).</div>
+</div>
+
+<p>La cosa furba: una fotografia <b>non contiene i pixel</b>. Contiene solo l’elenco dei fogli e dei pezzi. Se un foglio è cambiato, la fotografia tiene il foglio vecchio; i fogli non toccati sono semplicemente “riusati” per puntatore. Il costo di un’istantanea è quindi solo quello della parte che è cambiata.</p>
+
+<div class="kv">
+  <div><b>50</b><span>le fotografie conservate al massimo: oltre, la più vecchia esce dall’album</span></div>
+  <div><b>1 tratto = 1 fotografia</b><span>non importa quanto lungo: un Ctrl+Z cancella il tratto intero</span></div>
+  <div><b>Il pennello non entra in album</b><span>mentre disegni l’album non cresce: la fotografia è scattata all’inizio e messa in album alla fine</span></div>
+  <div><b>Le selezioni sì, no…</b><span>cambiare selezione crea una voce annullabile, ma non conta come “modifica da salvare”</span></div>
+</div>
+
+<div class="warn card">
+  <h3>Punto debole noto di questo meccanismo</h3>
+  <p style="margin-bottom:0">Se il documento cambia “proprietario” a metà gesto (per esempio cambi strumento mentre tieni premuto il pulsante del mouse), la sessione di tratto resta aperta: alla fine viene messa in album <b>una</b> fotografia che copre <b>due</b> gesti diversi, e un Ctrl+Z ne cancella due. È descritto nella sezione dei difetti “high” del rapporto tecnico.</p>
+</div>
+
+<!-- ============================================================ 12 -->
+<h2 id="a12"><span class="num">12</span>La regola d’oro (il perché di tutto)</h2>
+<div class="card" style="border-color:#c9b0f6;background:#faf7ff">
+  <p style="font-size:19px;margin:4px 0 10px"><b>Nessuna operazione deve costare quanto tutta l’immagine.</b></p>
+  <p style="margin-bottom:0">Sempre: a <b>piastrelle</b> e a <b>bande</b> (strisce orizzontali di piastrelle), mai a fotografia intera. Un tratto costa quanto pennelli; un’anteprima costa quanto vedi; un’apertura costa quanto l’indice; un salvataggio costa quanto è nuovo. È questa unica regola che ha dato forma a: il mosaico, i quattro depositi, la piramide, l’album di fotografie, il file a pacchetti e persino il fatto che ci siano due “operai” diversi (pittore e squadra).</p>
+</div>
+
+<div class="kv">
+  <div><b>Dove è rispettata</b><span>esportazione a bande, anteprima del filtro, apertura pigra, disegno a tratto, conversione di colore</span></div>
+  <div><b>Dove non lo è</b><span>fusione dei livelli, “unisci visibili”, “appiattisci” e i filtri applicati: lì il programma mette da parte <em>tutti</em> i pezzi nuovi prima di usarli (≈6,7 GB su una foto da 30.000²)</span></div>
+</div>
+
+<!-- ============================================================ 13 -->
+<h2 id="a13"><span class="num">13</span>Dove fa più male (in parole semplici)</h2>
+<p>Tre problemi reali, raccontati senza gergo. La versione tecnica, con file e righe, è in <code>docs/reviews/2026-09-25-deep-code-review.md</code>.</p>
+
+<div class="kv">
+  <div class="warn">
+    <b>1 · “Metti da parte tutto” invece di “un pezzo alla volta”</b>
+    <span>Quando unisci i fogli o applichi un filtro, il programma appoggia sul tavolo <em>tutti</em> i pezzi nuovi insieme (più di 13.000 su una foto da 30.000², circa 6,7 GB) invece di prenderne uno, usarlo e passare al successivo. Su una foto grande finisce la memoria. Curiosamente il salvataggio in immagine sa già fare la cosa giusta: procede a strisce.</span>
+  </div>
+  <div class="warn">
+    <b>2 · Due salvataggi nello stesso momento</b>
+    <span>Tenendo premuto Ctrl+S partono tanti salvataggi quanti sono i “clic” della tastiera, tutti che scrivono nello stesso punto della stessa scatola. Il risultato può essere un file danneggiato. Serve un “sto già salvando” e il blocco della ripetizione dei tasti.</span>
+  </div>
+  <div class="warn">
+    <b>3 · Un aiutante che “muore” blocca il documento</b>
+    <span>Se durante un lavoro pesante un pezzo risulta illeggibile, l’aiutante si ferma senza avvisare. Il motore continua a credere che il lavoro sia in corso, la barra resta lì e <em>ogni</em> comando successivo risponde «aspetta che finisca», per sempre: l’unica uscita è chiudere il programma. Difetti "high" correlati: cambiare strumento a metà tratto, e il fatto che lo stato degli strumenti sia condiviso tra documenti diversi.</span>
+  </div>
+</div>
+
+<div class="footer">
+  Documento divulgativo generato insieme al rapporto tecnico <code>docs/reviews/2026-09-25-deep-code-review.md</code> (revisione <code>m6</code> @ <code>b0bd9ef</code>).
+  Nessun file di codice è stato modificato. I numeri (256×256, 0,5 MB, 5/3 GB, 6 GB, 50 fotografie, 13.000 pezzi) sono presi dal programma e non sono stime.
+</div>
+
+</div>
+</body>
+</html>
