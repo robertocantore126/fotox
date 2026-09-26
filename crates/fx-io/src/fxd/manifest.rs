@@ -64,6 +64,11 @@ pub struct Manifest {
 	pub work_path: Option<fx_core::path::Path>,
 	#[serde(default)]
 	pub paths: Vec<fx_core::path::NamedPath>,
+	/// Layer Comps (M12-T06).
+	#[serde(default)]
+	pub comps: Vec<fx_core::comps::LayerComp>,
+	#[serde(default)]
+	pub active_comp: Option<usize>,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -310,6 +315,8 @@ fn manifest_of(doc: &Document, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef
 		annotations: doc.annotations.clone(),
 		work_path: doc.work_path.clone(),
 		paths: doc.paths.clone(),
+		comps: doc.comps.clone(),
+		active_comp: doc.active_comp,
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -461,6 +468,8 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.annotations = manifest.annotations.clone();
 	doc.work_path = manifest.work_path.clone();
 	doc.paths = manifest.paths.clone();
+	doc.comps = manifest.comps.clone();
+	doc.active_comp = manifest.active_comp;
 	for entry in &manifest.channels {
 		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_from_entry(&entry.image, file, store)?);
 		channel.color = entry.color;

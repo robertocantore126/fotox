@@ -136,6 +136,45 @@ impl Engine {
 				}
 				true
 			}
+			// The Layer Comps panel (M12-T06).
+			"comps:refresh" => {
+				self.send_comps(doc_id);
+				true
+			}
+			"comps:new" | "comps:update" | "comps:apply" | "comps:delete" | "comps:rename" | "comps:prev" | "comps:next" => {
+				use fx_core::command::m12::CompAction;
+				let count = self.docs.get(doc_id).map_or(0, |o| o.doc.comps.len());
+				let active = self.docs.get(doc_id).and_then(|o| o.doc.active_comp);
+				let index = args.get("index").and_then(|v| v.as_u64()).map(|v| v as usize).or(active);
+				let flag = |k: &str| args.get(k).and_then(|v| v.as_bool()).unwrap_or(true);
+				let action = match id {
+					"comps:new" => Some(CompAction::New {
+						name: args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+						visibility: flag("visibility"),
+						position: flag("position"),
+						appearance: flag("appearance"),
+					}),
+					"comps:update" => index.map(|index| CompAction::Update { index }),
+					"comps:apply" => index.map(|index| CompAction::Apply { index }),
+					"comps:delete" => index.map(|index| CompAction::Delete { index }),
+					"comps:rename" => index.map(|index| CompAction::Rename {
+						index,
+						name: args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+					}),
+					_ if count == 0 => None,
+					"comps:prev" => Some(CompAction::Apply {
+						index: active.map_or(count - 1, |a| (a + count - 1) % count),
+					}),
+					_ => Some(CompAction::Apply {
+						index: active.map_or(0, |a| (a + 1) % count),
+					}),
+				};
+				if let Some(comp) = action {
+					self.command(doc_id, Command::LayerComp { comp });
+				}
+				self.send_comps(doc_id);
+				true
+			}
 			"smart:edit" => {
 				self.edit_contents(doc_id);
 				true
@@ -283,5 +322,15 @@ impl Engine {
 			enabled: smart.filters_enabled,
 			label: filter.label().to_owned(),
 		}
+	}
+
+	/// The Layer Comps panel's list (M12-T06).
+	pub(super) fn send_comps(&self, id: DocId) {
+		let Some(open) = self.docs.get(id) else { return };
+		self.to_ui(&EngineToUi::Comps {
+			doc: id,
+			names: open.doc.comps.iter().map(|c| c.name.clone()).collect(),
+			active: open.doc.active_comp,
+		});
 	}
 }

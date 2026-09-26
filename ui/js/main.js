@@ -29,6 +29,7 @@ import { initShapes } from "./native/shapes-lib.js";
 import { initChannels } from "./native/channels-panel.js";
 import { initInfo } from "./native/info-panel.js";
 import { initPaths } from "./native/paths-panel.js";
+import { initComps } from "./native/comps-panel.js";
 import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
@@ -222,6 +223,7 @@ async function boot() {
   initChannels();
   initInfo();
   initPaths();
+  initComps();
 
   const shell = buildShell();
   buildMenubar(shell.menubar, menus);

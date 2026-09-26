@@ -14,6 +14,7 @@ pub mod blend;
 pub mod channel;
 pub mod color;
 pub mod command;
+pub mod comps;
 pub mod document;
 pub mod fill;
 pub mod gradient;

@@ -410,3 +410,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: a 33³ LUT is resampled to 16³ (trilinear); `.cube` domains other than 0..1 ignored.
 - VERIFY: Selective Color's range weights and Relative / Absolute formulas (published approximations, not Photoshop's).
 - Try it: Layers panel ◐ ▸ Color Lookup…, pick a `.cube`; ◐ ▸ Selective Color…, Reds, Cyan −100.
+
+## M12-T06 — Layer Comps  (Claude, 2026-09-26)
+- Done: `fx_core::comps` (`LayerComp { name, comment, visibility, position, appearance, states }`, `CompState` per layer: visible, pixel offset / shape-text matrix / Smart Object transform, opacity, fill, blend, styles); `Document::comps` / `active_comp`, saved in `.fxd`; `Command::LayerComp { comp: New | Update | Apply | Delete | Rename }` (Apply redraws the derived caches it moves); engine `comps:*` actions (prev / next wrap round) and `EngineToUi::Comps`; the Layer Comps panel (`ui/js/native/comps-panel.js`): click applies, double-click renames, ◀ ▶ previous / next, update, + new (dialog: name, Visibility, Position, Appearance), delete.
+- Skipped: File ▸ Export ▸ Layer Comps to Files, the Smart Object source state, comments UI, the "Last Document State" row, Tests.
+- FAST: layers added after a comp was recorded are left as they are when it is applied (Photoshop hides nothing either — VERIFY).
+- VERIFY: Photoshop's behaviour for layers the comp does not know.
+- Try it: Window ▸ Layer Comps, + to record, hide a layer, + again; click the first comp.

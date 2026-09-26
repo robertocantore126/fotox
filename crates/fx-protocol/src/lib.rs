@@ -421,6 +421,12 @@ pub enum EngineToUi {
 		paths: Vec<String>,
 		active: serde_json::Value,
 	},
+	/// The document's Layer Comps (M12-T06): names and the applied one.
+	Comps {
+		doc: DocId,
+		names: Vec<String>,
+		active: Option<usize>,
+	},
 	/// The custom shapes' names (M10-T07), built-in first.
 	Shapes {
 		names: Vec<String>,

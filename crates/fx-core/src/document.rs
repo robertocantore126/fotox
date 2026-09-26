@@ -36,6 +36,9 @@ pub struct Document {
 	/// The Work Path and the saved paths (M10-T01), saved with it.
 	pub work_path: Option<crate::path::Path>,
 	pub paths: Vec<crate::path::NamedPath>,
+	/// Layer Comps (M12-T06) and the last one applied.
+	pub comps: Vec<crate::comps::LayerComp>,
+	pub active_comp: Option<usize>,
 	/// The path the Paths panel has selected (transient, not saved): the one
 	/// the pen tools edit and the path commands default to.
 	pub active_path: Option<crate::path::PathTarget>,
@@ -203,6 +206,8 @@ impl Document {
 			global_light: 120.0,
 			guides: Vec::new(),
 			patterns: Vec::new(),
+			comps: Vec::new(),
+			active_comp: None,
 			channels: Vec::new(),
 			annotations: Default::default(),
 			work_path: None,

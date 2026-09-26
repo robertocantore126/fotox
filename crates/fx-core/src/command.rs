@@ -506,6 +506,10 @@ pub enum Command {
 		enabled: bool,
 		label: String,
 	},
+	/// The Layer Comps panel (M12-T06).
+	LayerComp {
+		comp: m12::CompAction,
+	},
 	/// The Content-Aware Move tool's commit (M11-T04).
 	ContentAwareMove {
 		layer: LayerRef,
@@ -866,6 +870,7 @@ impl Command {
 				protect,
 				protect_skin,
 			} => m11::content_aware_scale(doc, layer, *width, *height, *amount, *protect, *protect_skin, ctx),
+			Command::LayerComp { comp } => m12::layer_comp(doc, comp),
 			Command::ConvertToSmartObject { layers } => m12::convert_to_smart(doc, layers, ctx),
 			Command::NewSmartObjectViaCopy { layer } => m12::new_smart_via_copy(doc, layer),
 			Command::SetSmartFilters {

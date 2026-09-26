@@ -182,3 +182,130 @@ pub(super) fn set_smart_filters(
 		..Default::default()
 	})
 }
+
+/// What the Layer Comps panel does (M12-T06).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CompAction {
+	New {
+		name: String,
+		visibility: bool,
+		position: bool,
+		appearance: bool,
+	},
+	Update {
+		index: usize,
+	},
+	Apply {
+		index: usize,
+	},
+	Delete {
+		index: usize,
+	},
+	Rename {
+		index: usize,
+		name: String,
+	},
+}
+
+pub(super) fn layer_comp(doc: &mut Document, action: &CompAction) -> Result<CommandEffect, CommandError> {
+	let missing = || CommandError::NotAllowed("there is no such layer comp".into());
+	let label = match action {
+		CompAction::New {
+			name,
+			visibility,
+			position,
+			appearance,
+		} => {
+			let name = if name.trim().is_empty() {
+				format!("Layer Comp {}", doc.comps.len() + 1)
+			} else {
+				name.clone()
+			};
+			let comp = crate::comps::LayerComp::capture(doc, name, *visibility, *position, *appearance);
+			doc.comps.push(comp);
+			doc.active_comp = Some(doc.comps.len() - 1);
+			"New Layer Comp"
+		}
+		CompAction::Update { index } => {
+			let old = doc.comps.get(*index).ok_or_else(missing)?.clone();
+			let mut comp = crate::comps::LayerComp::capture(doc, old.name, old.visibility, old.position, old.appearance);
+			comp.comment = old.comment;
+			doc.comps[*index] = comp;
+			"Update Layer Comp"
+		}
+		CompAction::Delete { index } => {
+			if *index >= doc.comps.len() {
+				return Err(missing());
+			}
+			doc.comps.remove(*index);
+			doc.active_comp = None;
+			"Delete Layer Comp"
+		}
+		CompAction::Rename { index, name } => {
+			doc.comps.get_mut(*index).ok_or_else(missing)?.name = name.clone();
+			"Rename Layer Comp"
+		}
+		CompAction::Apply { index } => {
+			let comp = doc.comps.get(*index).ok_or_else(missing)?.clone();
+			let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+			let mut changed = Vec::new();
+			for state in &comp.states {
+				let Some(layer) = doc.layer_mut(state.layer) else { continue };
+				if comp.visibility {
+					layer.visible = state.visible;
+				}
+				if comp.appearance {
+					layer.opacity = state.opacity;
+					layer.fill = state.fill;
+					layer.blend = state.blend;
+					if layer.styles != state.styles {
+						layer.styles = state.styles.clone();
+						layer.effects = match &layer.styles {
+							Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
+							None => Vec::new(),
+						};
+					}
+				}
+				if comp.position {
+					match &mut layer.kind {
+						LayerKind::Pixel { offset, .. } => {
+							if let Some(o) = state.offset {
+								*offset = o;
+							}
+						}
+						LayerKind::Shape { transform, cache, .. } | LayerKind::Text { transform, cache, .. } => {
+							if let Some(m) = state.matrix
+								&& *transform != m
+							{
+								*transform = m;
+								*cache = TiledImage::derived(w, h, format);
+							}
+						}
+						LayerKind::Smart { smart, cache } => {
+							if let Some(m) = state.mapping
+								&& smart.transform != m
+							{
+								smart.transform = m;
+								*cache = TiledImage::derived(w, h, format);
+							}
+						}
+						_ => {}
+					}
+				}
+				changed.push(state.layer);
+			}
+			doc.active_comp = Some(*index);
+			return Ok(CommandEffect {
+				label: "Apply Layer Comp".into(),
+				pixels_changed: changed.clone(),
+				props_changed: changed,
+				..Default::default()
+			});
+		}
+	};
+	Ok(CommandEffect {
+		label: label.into(),
+		..Default::default()
+	})
+}

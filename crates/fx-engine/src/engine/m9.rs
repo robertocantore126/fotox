@@ -64,6 +64,7 @@ impl Engine {
 	pub(super) fn after_edit_m9(&mut self, id: DocId) {
 		self.send_annotations(id);
 		self.send_paths(id);
+		self.send_comps(id);
 		let Some(open) = self.docs.get(id) else { return };
 		let sig = signature(&open.doc);
 		if self.m9.channels.get(&id) == Some(&sig) {

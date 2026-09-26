@@ -295,6 +295,7 @@ dialogs["content-aware-fill"] = { title: "Content-Aware Fill", width: 380, field
 dialogs["content-aware-scale"] = { title: "Content-Aware Scale", width: 380, fields: [num("Width:", 100, { unit: "%", w: 60 }), num("Height:", 100, { unit: "%", w: 60 }), num("Amount:", 100, { unit: "%", w: 60 }), sel("Protect:", ["None"], "None"), chk("Protect Skin Tones", false)], ok: "OK", cancel: "Cancel" };
 // The Smart Filters list (M12-T03); its fields are built per layer.
 dialogs["smart-filters"] = { title: "Smart Filters", width: 360, fields: [], ok: "OK", cancel: "Cancel" };
+dialogs["new-layer-comp"] = { title: "New Layer Comp", width: 360, fields: [txt("Name:", "Layer Comp"), chk("Visibility", true), chk("Position", true), chk("Appearance (Layer Style)", true)], ok: "OK", cancel: "Cancel" };
 dialogs["warp-text"] = { title: "Warp Text", width: 460, fields: [sel("Style:", ["None", "Arc", "Arch", "Bulge", "Squeeze", "Fish", "Flag", "Rise", "Wave"], "Arc"), rad("Horizontal / Vertical:", ["Horizontal", "Vertical"], 0, { inline: true }), rng("Bend:", 50, { min: -100, max: 100 }), rng("Horizontal Distortion:", 0, { min: -100, max: 100 }), rng("Vertical Distortion:", 0, { min: -100, max: 100 })], ok: "OK", cancel: "Cancel" };
 dialogs["layer-lock"] = { title: "Lock All Layers", width: 320, fields: [chk("Lock Transparent Pixels", true), chk("Lock Image Pixels", true), chk("Lock Position", false)], ok: "OK", cancel: "Cancel" };
 dialogs.defringe = { title: "Defringe", width: 320, fields: [num("Width:", 1, { unit: "px", w: 60 })], ok: "OK", cancel: "Cancel" };
