@@ -41,6 +41,8 @@ pub enum Kind {
 	ArtHistory,
 	/// The Color Replacement tool (M8-T08).
 	ColorReplace,
+	/// The Mixer Brush (M8-T09).
+	Mixer,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -215,6 +217,32 @@ impl Paint {
 				saturate: s.string(self.id, "Mode").as_deref() != Some("Desaturate"),
 				vibrance: s.bool(self.id, "Vibrance").unwrap_or(true),
 			},
+			Kind::Mixer => {
+				// The preset fills Wet / Load / Mix (Photoshop's menu; VERIFY).
+				let (wet, load, mix) = match s.string(self.id, "Preset").as_deref() {
+					Some("Dry") => (0.0, 50.0, 0.0),
+					Some("Dry, Light Load") => (0.0, 1.0, 0.0),
+					Some("Dry, Heavy Load") => (0.0, 100.0, 0.0),
+					Some("Moist") => (10.0, 5.0, 50.0),
+					Some("Moist, Heavy Load") => (10.0, 100.0, 50.0),
+					Some("Wet, Light Mix") => (50.0, 50.0, 20.0),
+					Some("Wet, Heavy Mix") => (50.0, 50.0, 90.0),
+					Some("Very Wet") => (100.0, 50.0, 90.0),
+					Some("Very Wet, Heavy Mix") => (100.0, 50.0, 100.0),
+					Some("Custom") => (
+						s.number(self.id, "Wet").unwrap_or(50.0),
+						s.number(self.id, "Load").unwrap_or(50.0),
+						s.number(self.id, "Mix").unwrap_or(50.0),
+					),
+					_ => (50.0, 50.0, 50.0),
+				};
+				StrokeTool::Mixer {
+					wet: (wet / 100.0) as f32,
+					load: (load / 100.0) as f32,
+					mix: (mix / 100.0) as f32,
+					sample_all: s.bool(self.id, "Sample All Layers").unwrap_or(false),
+				}
+			}
 			Kind::ColorReplace => {
 				let sample = if s.string(self.id, "Sampling").as_deref() == Some("Background Swatch") {
 					s.bg

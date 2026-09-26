@@ -7,6 +7,7 @@ use super::op::DabSequence;
 pub mod background_eraser;
 pub mod focus;
 pub mod history;
+pub mod mixer;
 pub mod pattern;
 pub mod replace;
 pub mod smudge;
@@ -18,6 +19,7 @@ pub fn sequence_for(tool: &StrokeTool, color: [f64; 3], seed: u64) -> Option<Box
 	let _ = color;
 	match tool {
 		StrokeTool::Smudge { finger_painting, .. } => Some(Box::new(smudge::Smudge::new(*finger_painting))),
+		StrokeTool::Mixer { wet, load, mix, .. } => Some(Box::new(mixer::Mixer::new(f64::from(*wet), f64::from(*load), f64::from(*mix)))),
 		StrokeTool::ArtHistory { style, area, tolerance, .. } => {
 			Some(Box::new(history::ArtHistory::new(*style, f64::from(*area), f64::from(*tolerance), seed)))
 		}

@@ -165,3 +165,10 @@ HARDEN reads this file first, so be honest about what is missing.
 - FAST: the red-eye window is a fixed ±120 px; it writes back every tile of the window.
 - VERIFY: the red-eye formula and threshold; Color Replacement's match edge.
 - Try it: B's flyout ▸ Color Replacement, paint over a coloured area; J's flyout ▸ Red Eye, click a red pupil.
+
+## M8-T09 — Mixer Brush  (Claude, 2026-09-26)
+- Done: `StrokeTool::Mixer { wet, load, mix }` + `brush::ops::mixer` (a `DabSequence`, D-066 **approximation**): the reservoir (foreground, an amount Load spends dab by dab), the pickup (the previous dab's paint moved to the brush, mixed with the canvas by Wet), each dab lays `mix(reservoir, pickup, Mix)` by the dab coverage (Flow); Photoshop's preset combinations (Dry … Very Wet, Heavy Mix) and Custom Wet / Load / Mix in the option bar; tool "mixer-brush" (the old "not implemented" test now expects it).
+- Skipped: Load / Clean Brush menus and the "after each stroke" toggles (always load + clean per stroke), Sample All Layers, the current-brush-load swatch, Tests (should check: Dry with a loaded reservoir paints the reservoir colour; Very Wet mixes a two-colour field along the path; clean after each stroke resets).
+- FAST: the reservoir depletion rate is a guess (2 % × (1 − Load) per dab).
+- VERIFY: the whole model and the preset values (D-066).
+- Try it: B's flyout ▸ Mixer Brush, Preset "Very Wet", drag across two colours.

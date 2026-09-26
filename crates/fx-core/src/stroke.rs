@@ -276,6 +276,15 @@ pub enum StrokeTool {
 		tolerance: f32,
 		mode: crate::blend::BlendMode,
 	},
+	/// The Mixer Brush (M8-T09, D-066): Wet, Load and Mix `0..=1`; the
+	/// stroke colour is the reservoir's.
+	Mixer {
+		wet: f32,
+		load: f32,
+		mix: f32,
+		#[serde(default)]
+		sample_all: bool,
+	},
 	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
 	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
 	BgEraser {
@@ -301,6 +310,7 @@ impl StrokeTool {
 			StrokeTool::Sharpen { .. } => "Sharpen Tool",
 			StrokeTool::Smudge { .. } => "Smudge Tool",
 			StrokeTool::PatternStamp { .. } => "Pattern Stamp",
+			StrokeTool::Mixer { .. } => "Mixer Brush",
 			StrokeTool::ColorReplace { .. } => "Color Replacement Tool",
 			StrokeTool::HistoryBrush { .. } => "History Brush",
 			StrokeTool::ArtHistory { .. } => "Art History Brush",

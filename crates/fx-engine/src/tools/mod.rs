@@ -418,6 +418,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"history-brush" => Some(Box::new(paint::Paint::new("history-brush", paint::Kind::HistoryBrush))),
 		"art-history" => Some(Box::new(paint::Paint::new("art-history", paint::Kind::ArtHistory))),
 		"color-replace" => Some(Box::new(paint::Paint::new("color-replace", paint::Kind::ColorReplace))),
+		"mixer-brush" => Some(Box::new(paint::Paint::new("mixer-brush", paint::Kind::Mixer))),
 		// The shape tools (M6-T06) and the Path Selection tool that moves a
 		// shape by its transform.
 		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),
@@ -634,7 +635,8 @@ mod tests {
 	#[test]
 	fn unknown_tools_have_no_implementation() {
 		let mut tools = Tools::default();
-		assert!(tools.get("mixer-brush").is_none(), "not implemented");
+		assert!(tools.get("no-such-tool").is_none(), "not a tool");
+		assert!(tools.get("mixer-brush").is_some(), "M8-T09");
 		assert!(tools.get("brush").is_some());
 		assert!(tools.get("eyedropper").is_some());
 		for id in [

@@ -146,7 +146,8 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 		| StrokeTool::Smudge { .. }
 		| StrokeTool::PatternStamp { .. }
 		| StrokeTool::HistoryBrush { .. }
-		| StrokeTool::ArtHistory { .. } => Box::new(CloneSource { offset: (0.0, 0.0) }),
+		| StrokeTool::ArtHistory { .. }
+		| StrokeTool::Mixer { .. } => Box::new(CloneSource { offset: (0.0, 0.0) }),
 		StrokeTool::Dodge { range, protect_tones } | StrokeTool::Burn { range, protect_tones } => Box::new(super::ops::tone::Tone {
 			lighten: matches!(tool, StrokeTool::Dodge { .. }),
 			range: *range,
