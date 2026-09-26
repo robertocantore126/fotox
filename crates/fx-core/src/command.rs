@@ -137,6 +137,9 @@ pub enum Command {
 	/// Offsets and placement matrices only, no pixel rewritten; all or
 	/// nothing, a position-locked layer refuses. Labelled "Move".
 	OffsetLayers { layers: Vec<LayerRef>, dx: i32, dy: i32 },
+	/// Align / Distribute (M7-T04): each layer by its own amount, one step
+	/// named `label`.
+	MoveEach { moves: Vec<(LayerRef, i32, i32)>, label: String },
 	/// M2
 	AddMask { layer: LayerRef, fill: MaskFill },
 	/// M2
@@ -375,6 +378,21 @@ impl Command {
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
 			Command::OffsetLayers { layers, dx, dy } => offset_layers(doc, layers, *dx, *dy),
+			Command::MoveEach { moves, label } => {
+				let mut changed = Vec::new();
+				for (layer, dx, dy) in moves {
+					if *dx == 0 && *dy == 0 {
+						continue;
+					}
+					// FAST: a refusal half-way leaves the earlier moves applied.
+					changed.extend(offset_layers(doc, std::slice::from_ref(layer), *dx, *dy)?.props_changed);
+				}
+				Ok(CommandEffect {
+					label: label.clone(),
+					props_changed: changed,
+					..Default::default()
+				})
+			}
 			Command::AddMask { layer, fill } => add_mask(doc, layer, *fill, ctx.tiles),
 			Command::DeleteMask { layer, apply } => delete_mask(doc, layer, *apply, ctx.tiles),
 			Command::SetAdjustment { layer, adjustment } => set_adjustment(doc, layer, adjustment),

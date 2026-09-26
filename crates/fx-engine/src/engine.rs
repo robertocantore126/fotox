@@ -1067,7 +1067,7 @@ impl Engine {
 				}
 				return Changed::default();
 			}
-			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
+			id if ["layer:", "order:", "align:", "dist:"].iter().any(|p| id.starts_with(p)) && self.layer_action(id) => return Changed::default(),
 			// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06): a shape
 			// layer's pixels are drawn from its geometry on demand, so rasterising
 			// draws the level-0 tiles first and then keeps them.
@@ -2505,6 +2505,41 @@ impl Engine {
 			"layer:merge-visible" if visible_roots.len() > 1 => vec![Command::MergeLayers { layers: visible_roots }],
 			"layer:flatten" => vec![Command::Flatten],
 			"layer:stamp-visible" => vec![Command::StampVisible],
+			// Layer ▸ Arrange (M7-T04): within the parent group.
+			"order:front" | "order:forward" | "order:backward" | "order:back" => {
+				let Some(active) = active else { return true };
+				let Some(path) = doc.doc.path_of(active) else { return true };
+				let (&index, parents) = path.split_last().expect("a path has a last index");
+				let mut siblings = &doc.doc.layers[..];
+				let mut parent = None;
+				for &i in parents {
+					let Some(layer) = siblings.get(i) else { return true };
+					parent = Some(layer.id);
+					siblings = layer.children().unwrap_or(&[]);
+				}
+				let last = siblings.len().saturating_sub(1);
+				let to = match id {
+					"order:front" => last,
+					"order:forward" => (index + 1).min(last),
+					"order:backward" => index.saturating_sub(1),
+					_ => 0,
+				};
+				if to == index {
+					return true;
+				}
+				vec![Command::MoveLayer {
+					layer: LayerRef::Id(active),
+					parent: parent.map(LayerRef::Id),
+					index: to,
+				}]
+			}
+			// Layer ▸ Align / Distribute (M7-T04).
+			id if id.starts_with("align:") || id.starts_with("dist:") => {
+				let ids: Vec<LayerId> = doc.doc.selected.clone();
+				let doc_id = doc.id;
+				self.align_action(doc_id, id, &ids);
+				return true;
+			}
 			// Layer Style ▸ Copy / Paste / Clear (M6-T08).
 			"layer:copy-style" => {
 				let styles = active.and_then(|l| doc.doc.layer(l)).and_then(|l| l.styles.clone());
@@ -2544,6 +2579,94 @@ impl Engine {
 			self.command(doc_id, command);
 		}
 		true
+	}
+
+	/// Align and Distribute (M7-T04) on the layers' exact content bounds.
+	fn align_action(&mut self, doc_id: DocId, id: &str, ids: &[LayerId]) {
+		use fx_core::pixels::{Content, Placed, content_bounds};
+		let store = self.store.clone();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		vector::prepare_level0(&mut open.doc, &store, Some(ids));
+		let mut boxes: Vec<(LayerId, (i32, i32, i32, i32))> = Vec::new();
+		for &layer in ids {
+			let Some(l) = open.doc.layer(layer) else { continue };
+			let placed = match &l.kind {
+				LayerKind::Pixel { image, offset } => Placed { image, offset: *offset },
+				LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Placed { image: cache, offset: (0, 0) },
+				_ => continue, // FAST: groups and fills are not aligned
+			};
+			if let Ok(Some(b)) = content_bounds(placed, Content::Opaque, &store) {
+				boxes.push((layer, b));
+			}
+		}
+		if boxes.is_empty() {
+			return;
+		}
+		let canvas = (0, 0, open.doc.width as i32, open.doc.height as i32);
+		let selection = open.doc.selection.as_ref().and_then(|s| {
+			content_bounds(
+				Placed {
+					image: &s.image,
+					offset: s.offset,
+				},
+				Content::Opaque,
+				&store,
+			)
+			.ok()
+			.flatten()
+		});
+		let reference = selection.unwrap_or_else(|| {
+			if boxes.len() == 1 {
+				canvas
+			} else {
+				boxes
+					.iter()
+					.fold(boxes[0].1, |a, (_, b)| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+			}
+		});
+		let mut moves: Vec<(LayerRef, i32, i32)> = Vec::new();
+		let (kind, what) = id.split_once(':').unwrap_or(("", ""));
+		if kind == "align" {
+			for (layer, b) in &boxes {
+				let (dx, dy) = match what {
+					"left" => (reference.0 - b.0, 0),
+					"right" => (reference.2 - b.2, 0),
+					"hcenter" => ((reference.0 + reference.2) / 2 - (b.0 + b.2) / 2, 0),
+					"top" => (0, reference.1 - b.1),
+					"bottom" => (0, reference.3 - b.3),
+					"vcenter" => (0, (reference.1 + reference.3) / 2 - (b.1 + b.3) / 2),
+					_ => (0, 0),
+				};
+				moves.push((LayerRef::Id(*layer), dx, dy));
+			}
+		} else {
+			// Distribute: first and last stay, the others are evenly spaced.
+			let key = |b: &(i32, i32, i32, i32)| -> i32 {
+				match what {
+					"left" => b.0,
+					"right" => b.2,
+					"hcenter" => (b.0 + b.2) / 2,
+					"top" => b.1,
+					"bottom" => b.3,
+					_ => (b.1 + b.3) / 2,
+				}
+			};
+			let horizontal = matches!(what, "left" | "right" | "hcenter" | "hspace");
+			let mut sorted = boxes.clone();
+			sorted.sort_by_key(|(_, b)| key(b));
+			if sorted.len() < 3 {
+				return;
+			}
+			let (first, last) = (key(&sorted[0].1), key(&sorted[sorted.len() - 1].1));
+			let n = (sorted.len() - 1) as f64;
+			for (i, (layer, b)) in sorted.iter().enumerate() {
+				let target = first + ((f64::from(last - first)) * i as f64 / n).round() as i32;
+				let d = target - key(b);
+				moves.push((LayerRef::Id(*layer), if horizontal { d } else { 0 }, if horizontal { 0 } else { d }));
+			}
+		}
+		let label = if kind == "align" { "Align" } else { "Distribute" };
+		self.command(doc_id, Command::MoveEach { moves, label: label.into() });
 	}
 
 	/// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06). Only layers
