@@ -33,6 +33,12 @@ pub struct Document {
 	pub patterns: Vec<crate::pattern::Pattern>,
 	/// Alpha channels (M9-T01, D-068), saved with the document.
 	pub channels: Vec<crate::channel::Channel>,
+	/// The Work Path and the saved paths (M10-T01), saved with it.
+	pub work_path: Option<crate::path::Path>,
+	pub paths: Vec<crate::path::NamedPath>,
+	/// The path the Paths panel has selected (transient, not saved): the one
+	/// the pen tools edit and the path commands default to.
+	pub active_path: Option<crate::path::PathTarget>,
 	/// Notes, counts and colour samplers (M9-T08, D-072), saved with it.
 	pub annotations: crate::annotations::Annotations,
 	next_id: u64,
@@ -188,8 +194,19 @@ impl Document {
 			patterns: Vec::new(),
 			channels: Vec::new(),
 			annotations: Default::default(),
+			work_path: None,
+			paths: Vec::new(),
+			active_path: None,
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
+		}
+	}
+
+	/// A document path (M10-T01).
+	pub fn path(&self, target: crate::path::PathTarget) -> Option<&crate::path::Path> {
+		match target {
+			crate::path::PathTarget::Work => self.work_path.as_ref(),
+			crate::path::PathTarget::Saved(i) => self.paths.get(i).map(|p| &p.path),
 		}
 	}
 

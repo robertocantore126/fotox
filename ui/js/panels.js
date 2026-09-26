@@ -12,6 +12,7 @@ import * as nativeBrushes from "./native/brush-settings.js";
 import * as nativePatterns from "./native/patterns.js";
 import * as nativeChannels from "./native/channels-panel.js";
 import * as nativeInfo from "./native/info-panel.js";
+import * as nativePaths from "./native/paths-panel.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -255,6 +256,7 @@ const renderers = {
   },
 
   paths() {
+    if (bridge.isNative) return nativePaths.pathsPanel();
     const list = h("div", { class: "plist" });
     [["Work Path", "i-paths"], ["Shape 1 Vector Mask", "i-mask"], ["Path 2", "i-pen"]].forEach(([name, ic], i) => {
       const row = listRow({ label: name, thumb: h("span", { class: "pthumb path" }, icon(ic, "ic sm")), extra: h("span", { class: "pmeta", text: "" }) });

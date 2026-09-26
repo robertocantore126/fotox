@@ -59,6 +59,11 @@ pub struct Manifest {
 	/// Notes, counts, samplers (M9-T08).
 	#[serde(default)]
 	pub annotations: fx_core::annotations::Annotations,
+	/// The Work Path and saved paths (M10-T01).
+	#[serde(default)]
+	pub work_path: Option<fx_core::path::Path>,
+	#[serde(default)]
+	pub paths: Vec<fx_core::path::NamedPath>,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -273,6 +278,8 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 			})
 			.collect(),
 		annotations: doc.annotations.clone(),
+		work_path: doc.work_path.clone(),
+		paths: doc.paths.clone(),
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -406,6 +413,8 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.guides = manifest.guides.clone();
 	doc.patterns = manifest.patterns.clone();
 	doc.annotations = manifest.annotations.clone();
+	doc.work_path = manifest.work_path.clone();
+	doc.paths = manifest.paths.clone();
 	for entry in &manifest.channels {
 		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_from_entry(&entry.image, file, store)?);
 		channel.color = entry.color;

@@ -391,6 +391,15 @@ pub enum EngineToUi {
 		annotations: serde_json::Value,
 		samples: Vec<[u16; 4]>,
 	},
+	/// The document's paths (M10-T01): `work` = there is a Work Path,
+	/// `paths` the saved paths' names, `active` the selected one
+	/// (`"work"` / `{"saved": i}` / null).
+	Paths {
+		doc: DocId,
+		work: bool,
+		paths: Vec<String>,
+		active: serde_json::Value,
+	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {
 		families: Vec<FontFamilyInfo>,

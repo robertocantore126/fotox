@@ -20,6 +20,7 @@ pub mod gradient;
 pub mod history;
 pub mod layer;
 pub mod ops;
+pub mod path;
 pub mod pattern;
 pub mod pixels;
 pub mod select_ops;

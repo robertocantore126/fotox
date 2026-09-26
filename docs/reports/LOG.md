@@ -260,3 +260,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Done: the four recommendations recorded as fast defaults D-073..D-076.
 - Skipped: adding `i_overlay` itself (D-074 says why). FAST: none. VERIFY: none.
 - Try it: `docs/DECISIONS.md`.
+
+## M10-T01 — Paths and the Paths panel  (Claude, 2026-09-26)
+- Done: `fx_core::path` (D-073: `Path` / `Subpath` / `Anchor` with in / out handles and smooth flag / `PathOp`; lossless `to_elements` / `from_elements`; flattening, bounds, hit tests, de Casteljau `split`, RDP `simplify`, Catmull-Rom `smooth_through`; `PathTarget` Work / Saved); `Document::{work_path, paths, active_path}` (the first two saved in `.fxd`); commands `SetPath`, `DeletePath`, `RenamePath`, `SaveWorkPath`, `SelectPath` (not a History step), `PathToSelection` (subpaths combined by their operation), `SelectionToPath` (the outline traced on a ≤ 1024² grid, simplified, smooth except at sharp turns), `FillPath` (colour or pattern, through the path's coverage); Stroke Path (engine: one `Command::Stroke` per subpath with the Brush / Pencil / Eraser option bar's brush, optional simulated pressure); `EngineToUi::Paths`; Paths panel (`ui/js/native/paths-panel.js`: Work Path + saved, select, Ctrl+click = load, rename, fill / stroke / load / make from selection / save or new / delete).
+- Skipped: Schneider's curve fit (a traced grid + RDP + Catmull-Rom instead); Fill / Stroke Path dialogs (the panel buttons use the foreground and the Brush); path thumbnails; Tests (should check: a path round-trips through `.fxd`; selection → path → selection within a pixel; Stroke Path with the Brush equals painting the same points).
+- FAST: path operations are winding approximations (D-074); Selection to Path traces at most 1024 cells per side (coarse for big selections).
+- VERIFY: none.
+- Try it: make a selection, Paths panel ▸ Make work path; Ctrl+click it; stroke it with the Brush.

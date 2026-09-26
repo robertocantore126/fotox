@@ -1030,7 +1030,7 @@ impl Engine {
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
-				if self.m8_action(&id, &args) || self.m9_action(&id, &args) {
+				if self.m8_action(&id, &args) || self.m9_action(&id, &args) || self.m10_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -4034,6 +4034,7 @@ fn pixel_job_label(command: &Command) -> String {
 	}
 }
 
+mod m10;
 mod m8;
 mod m9;
 

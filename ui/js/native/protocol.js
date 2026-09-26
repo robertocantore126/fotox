@@ -66,6 +66,7 @@ export const ENGINE = Object.freeze({
   BRUSHES: "brushes",
   PATTERNS: "patterns",
   CHANNELS: "channels",
+  PATHS: "paths",
   ANNOTATIONS: "annotations",
   HISTORY_SOURCE: "history_source",
   // The preferences file (M7-T09).
