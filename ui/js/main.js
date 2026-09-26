@@ -87,6 +87,11 @@ function buildToolbar(container) {
     if (slot.flyout.length) btn.append(h("span", { class: "flyout-dot" }));
 
     btn.addEventListener("click", () => pickTool(slot.id, slot.id));
+    // Double-click the Hand = Fit on Screen, the Zoom tool = 100 % (M7-T07).
+    btn.addEventListener("dblclick", () => {
+      if (slot.id === "hand") runAction({ label: "Fit on Screen", a: "zoom:fit" });
+      if (slot.id === "zoom") runAction({ label: "100%", a: "zoom:100" });
+    });
     btn.addEventListener("contextmenu", (e) => { e.preventDefault(); openFlyout(slot, btn); });
     let pressTimer = null;
     btn.addEventListener("mousedown", () => {

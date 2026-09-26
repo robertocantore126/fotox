@@ -34,6 +34,8 @@ pub struct ViewState {
 	drag: Option<(f64, f64)>,
 	/// Last pointer position of a Rotate View drag in progress (M6-T05).
 	rotate: Option<(f64, f64)>,
+	/// A Zoom tool press (M7-T07): where, the zoom then, and whether it moved.
+	zoom_drag: Option<(f64, f64, f64, bool)>,
 	/// Whether the view has been fitted once (the first viewport size fits).
 	fitted: bool,
 }
@@ -71,6 +73,7 @@ impl ViewState {
 			tool: "move".into(),
 			drag: None,
 			rotate: None,
+			zoom_drag: None,
 			fitted: false,
 		}
 	}
@@ -172,6 +175,10 @@ impl ViewState {
 		// pan: it never reaches a document tool (M6-T05).
 		if self.tool == "rotate-view" {
 			return self.rotate_pointer(input);
+		}
+		// The Zoom tool (M7-T07) is a view gesture too, unless Space pans.
+		if self.tool == "zoom" && !(input.modifiers.space || self.drag.is_some()) {
+			return self.zoom_pointer(input);
 		}
 		match input.kind {
 			PointerKind::Down => {
@@ -292,6 +299,86 @@ impl ViewState {
 					cursor: Some(CursorShape::Grabbing),
 				},
 				consumed: false,
+			},
+		}
+	}
+
+	/// The Zoom tool: a click zooms in about the point (Alt: out), a drag is
+	/// Scrubby Zoom (right = in). FAST: no rectangle zoom (Scrubby off).
+	fn zoom_pointer(&mut self, input: &PointerInput) -> PointerOutcome {
+		let cursor = if input.modifiers.alt { CursorShape::ZoomOut } else { CursorShape::ZoomIn };
+		let Some(viewport) = self.viewport else {
+			return PointerOutcome::default();
+		};
+		match input.kind {
+			PointerKind::Down if input.buttons & BUTTON_LEFT != 0 => {
+				self.zoom_drag = Some((input.x, input.y, self.view.zoom, false));
+				PointerOutcome {
+					changed: Changed {
+						view: false,
+						cursor: Some(cursor),
+					},
+					consumed: true,
+				}
+			}
+			PointerKind::Move => {
+				let Some((sx, sy, z0, moved)) = self.zoom_drag else {
+					return PointerOutcome {
+						changed: Changed {
+							view: false,
+							cursor: Some(cursor),
+						},
+						consumed: true,
+					};
+				};
+				let dx = input.x - sx;
+				if !moved && dx.abs() < 3.0 {
+					return PointerOutcome {
+						changed: Changed::default(),
+						consumed: true,
+					};
+				}
+				self.zoom_drag = Some((sx, sy, z0, true));
+				let before = self.view;
+				self.view.zoom_at(viewport, sx, sy, z0 * 1.01f64.powf(dx));
+				PointerOutcome {
+					changed: Changed {
+						view: self.view != before,
+						cursor: Some(cursor),
+					},
+					consumed: true,
+				}
+			}
+			PointerKind::Up => {
+				let Some((sx, sy, _, moved)) = self.zoom_drag.take() else {
+					return PointerOutcome {
+						changed: Changed::default(),
+						consumed: true,
+					};
+				};
+				if moved {
+					return PointerOutcome {
+						changed: Changed::default(),
+						consumed: true,
+					};
+				}
+				let before = self.view;
+				let target = self.view.step_zoom(if input.modifiers.alt { -1 } else { 1 });
+				self.view.zoom_at(viewport, sx, sy, target);
+				PointerOutcome {
+					changed: Changed {
+						view: self.view != before,
+						cursor: Some(cursor),
+					},
+					consumed: true,
+				}
+			}
+			_ => PointerOutcome {
+				changed: Changed {
+					view: false,
+					cursor: Some(cursor),
+				},
+				consumed: true,
 			},
 		}
 	}
