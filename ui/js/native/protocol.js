@@ -35,6 +35,8 @@ export const UI = Object.freeze({
   // Escape cancels a lasso, Enter closes a polygonal one, Backspace drops its
   // last point. `key` is the DOM's `KeyboardEvent.key`.
   KEY: "key",
+  // The Type tool's textarea (M6-T07): whole text + selection (UTF-8 bytes).
+  TEXT_EDIT: "text_edit",
 });
 
 /** Engine → UI message types (`EngineToUi`). */
@@ -45,6 +47,7 @@ export const ENGINE = Object.freeze({
   CMYK_PROFILES: "cmyk_profiles",
   PROOF_STATE: "proof_state",
   TOOL_INFO: "tool_info",
+  TRANSFORM_BOX: "transform_box",
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
@@ -57,6 +60,9 @@ export const ENGINE = Object.freeze({
   ERROR: "error",
   COLOR_PICKED: "color_picked",
   THUMBNAIL: "thumbnail",
+  // The Type tool's session (M6-T07) and the system font list.
+  TEXT_EDIT: "text_edit",
+  FONTS: "fonts",
 });
 
 const encoder = new TextEncoder();

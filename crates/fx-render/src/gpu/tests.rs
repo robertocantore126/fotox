@@ -26,16 +26,19 @@ fn gpu() -> Option<(wgpu::Device, wgpu_sync::Queue)> {
 	Some((device, queue))
 }
 
+/// The GPU lock (see `testing::one_gpu_test`), a device and its queue, or
+/// skip the test when there is no adapter.
 macro_rules! gpu_or_skip {
-	() => {
+	() => {{
+		let one_at_a_time = crate::testing::one_gpu_test();
 		match gpu() {
-			Some(g) => g,
+			Some((device, queue)) => (one_at_a_time, device, queue),
 			None => {
 				eprintln!("no GPU adapter: test skipped");
 				return;
 			}
 		}
-	};
+	}};
 }
 
 fn small_config() -> CompositorConfig {
@@ -119,7 +122,7 @@ const MODES: [BlendMode; 27] = {
 
 #[test]
 fn every_blend_mode_matches_the_reference() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -144,7 +147,7 @@ fn every_blend_mode_matches_the_reference() {
 
 #[test]
 fn groups_clipping_masks_offsets_adjustments_match() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -159,7 +162,7 @@ fn groups_clipping_masks_offsets_adjustments_match() {
 
 #[test]
 fn hue_saturation_and_brightness_contrast_match_the_reference() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -216,7 +219,7 @@ fn hue_saturation_and_brightness_contrast_match_the_reference() {
 
 #[test]
 fn m4_adjustments_match_the_reference() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -382,7 +385,7 @@ fn complex_doc(store: &TileStore) -> Document {
 
 #[test]
 fn cache_hits_and_deferrals() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -407,7 +410,7 @@ fn cache_hits_and_deferrals() {
 
 #[test]
 fn upload_budget_defers_without_missing_tiles() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut config = small_config();
 	config.upload_budget = 4;
@@ -431,7 +434,7 @@ fn upload_budget_defers_without_missing_tiles() {
 
 #[test]
 fn prefix_cache_is_used_and_exact() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -453,7 +456,7 @@ fn prefix_cache_is_used_and_exact() {
 
 #[test]
 fn viewport_pass_draws_background_checkerboard_and_tiles() {
-	let (device, queue) = gpu_or_skip!();
+	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();
 	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
 	let mut luts = LutCache::default();
@@ -479,6 +482,7 @@ fn viewport_pass_draws_background_checkerboard_and_tiles() {
 		zoom: 0.25,
 		center_x: 256.0,
 		center_y: 128.0,
+		rotation: 0.0,
 	};
 	// Level-0 tiles only exist, so ask the planner at a level-0 zoom for the lookup.
 	let plan = crate::plan_frame(&view, vp, 512, 256, 1, &|k| slots.get(&(k.tx, k.ty)).copied());
@@ -501,7 +505,17 @@ fn viewport_pass_draws_background_checkerboard_and_tiles() {
 	let view_tex = texture.create_view(&Default::default());
 	let mut renderer = super::ViewportRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 	let mut encoder = device.create_command_encoder(&Default::default());
-	renderer.render(&mut encoder, &view_tex, (vp.width, vp.height), &plan, view.zoom, gpu.composite_view(), &[], 0.0);
+	renderer.render(
+		&mut encoder,
+		&view_tex,
+		(vp.width, vp.height),
+		&plan,
+		view.zoom,
+		view.rotation,
+		gpu.composite_view(),
+		&[],
+		0.0,
+	);
 	let readback = device.create_buffer(&wgpu::BufferDescriptor {
 		label: None,
 		size: (512 * vp.height) as u64,

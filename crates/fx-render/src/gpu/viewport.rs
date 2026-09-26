@@ -25,7 +25,9 @@ struct Globals {
 	apply_lut: u32,
 	/// 1.0 = paint out-of-gamut colours grey (the LUT's alpha flag, M4-T04).
 	gamut_warning: f32,
-	_unused: [f32; 3],
+	/// View rotation about the viewport centre, in radians (M6-T05).
+	rotation: f32,
+	_unused: [f32; 2],
 	doc_rect: [f32; 4],
 }
 
@@ -376,6 +378,7 @@ impl ViewportRenderer {
 		size: (u32, u32),
 		plan: &FramePlan,
 		zoom: f64,
+		rotation: f64,
 		tiles: &wgpu::TextureView,
 		overlay: &[OverlayVertex],
 		time: f32,
@@ -402,9 +405,13 @@ impl ViewportRenderer {
 			0,
 			bytemuck::bytes_of(&Globals {
 				size: [size.0 as f32, size.1 as f32],
-				nearest: (zoom >= 1.0) as u32,
+				// Hard pixels at 100 % and above, like Photoshop — but not on a
+				// turned view, where nearest looks jagged and the rotation
+				// resamples the grid anyway (M6-T05).
+				nearest: (zoom >= 1.0 && rotation.abs() < 1e-9) as u32,
 				apply_lut: self.lut_key.is_some() as u32,
 				gamut_warning: if self.gamut_warning && self.lut_key.is_some() { 1.0 } else { 0.0 },
+				rotation: rotation as f32,
 				doc_rect: plan.doc_rect,
 				..Default::default()
 			}),

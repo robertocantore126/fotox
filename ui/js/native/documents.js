@@ -89,6 +89,12 @@ export function activeDocument() {
   return active;
 }
 
+/** What the engine last reported about the active document (size, ppi, …), or null. */
+export function activeDocumentInfo() {
+  const d = active == null ? null : docs.get(active);
+  return d ? d.info : null;
+}
+
 function refresh(id) {
   const d = docs.get(id);
   if (!d) return;

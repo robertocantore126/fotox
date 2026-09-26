@@ -153,6 +153,7 @@ mod tests {
 
 	/// Render a 64 × 64 viewport and read it back as RGBA8 rows.
 	fn render(view: ViewTransform, doc: (u32, u32)) -> Option<Vec<u8>> {
+		let _one_at_a_time = crate::testing::one_gpu_test();
 		let (device, queue) = gpu()?;
 		let size = wgpu::Extent3d {
 			width: 64,
@@ -212,6 +213,7 @@ mod tests {
 			zoom: 1.0,
 			center_x: 16.0,
 			center_y: 16.0,
+			rotation: 0.0,
 		};
 		let Some(data) = render(view, (512, 512)) else {
 			eprintln!("no GPU adapter: test skipped");
@@ -237,6 +239,7 @@ mod tests {
 			zoom: 0.125,
 			center_x: 384.0,
 			center_y: 384.0,
+			rotation: 0.0,
 		};
 		let Some(data) = render(view, (1024, 1024)) else {
 			eprintln!("no GPU adapter: test skipped");

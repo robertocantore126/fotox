@@ -551,6 +551,7 @@ impl ApplicationHandler for App {
 fn engine_cursor(shape: CursorShape) -> Cursor {
 	use winit::cursor::CursorIcon;
 	match shape {
+		CursorShape::Text => Cursor::Icon(CursorIcon::Text),
 		CursorShape::Default => Cursor::Icon(CursorIcon::Default),
 		CursorShape::Crosshair => Cursor::Icon(CursorIcon::Crosshair),
 		CursorShape::Grab => Cursor::Icon(CursorIcon::Grab),

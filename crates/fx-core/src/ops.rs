@@ -15,6 +15,7 @@ use crate::command::CommandError;
 use crate::document::Document;
 use crate::layer::LayerId;
 use crate::selection::{SelectModify, Selection, SelectionShape, WandParams};
+use crate::transform::{Filter, Mapping, Permutation};
 
 /// A destructive filter and its parameters. Serialised in commands, so macros
 /// replay it; variant names are stable.
@@ -110,6 +111,30 @@ pub trait PixelOps: Send + Sync {
 	/// own pixels, or the composite with `sample_all_layers`. `None` when
 	/// nothing matches.
 	fn magic_wand(&self, doc: &Document, params: &WandParams, store: &TileStore) -> Result<Option<Selection>, CommandError>;
+
+	/// `image` (a pixel layer's pixels, a mask, or a selection coverage),
+	/// placed at `offset` in a document of size `canvas`, rotated or mirrored
+	/// by `op` — M6-T02. A permutation is exact: every destination pixel is one
+	/// source pixel, unchanged. Returns the new image and its new offset; the
+	/// caller makes the coarser mip levels dirty.
+	fn rotate(
+		&self,
+		_image: &TiledImage,
+		_offset: (i32, i32),
+		_canvas: (u32, u32),
+		_op: Permutation,
+		_store: &TileStore,
+	) -> Result<(TiledImage, (i32, i32)), CommandError> {
+		Err(CommandError::NotAllowed("rotating an image needs the engine's tile permutation".into()))
+	}
+
+	/// `image` resampled through `mapping` (source image pixels → destination
+	/// image pixels) into an image of `size` pixels — M6-T02's Image Size and
+	/// arbitrary rotation, M6-T04's Free Transform. Only level 0 of the result
+	/// is authoritative; its mips are dirty.
+	fn resample(&self, _image: &TiledImage, _mapping: Mapping, _size: (u32, u32), _filter: Filter, _store: &TileStore) -> Result<TiledImage, CommandError> {
+		Err(CommandError::NotAllowed("resampling an image needs the engine's sampler".into()))
+	}
 
 	/// Replay a brush stroke on `layer` of `doc` (M5-T07): the layer's (or
 	/// its mask's) new image and offset. The engine implements it with the

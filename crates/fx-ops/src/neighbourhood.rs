@@ -137,7 +137,8 @@ pub fn pixel(buffer: &TileBuffer, format: PixelFormat, x: usize, y: usize) -> [u
 }
 
 /// Write straight 0..=1 pixels (256², row-major) into a new tile of `format`,
-/// rounded (SNIPPETS §1).
+/// rounded (SNIPPETS §1). A gray format keeps the first channel only — filters
+/// never pass one, resampling a mask or a selection does.
 pub fn to_tile(pixels: &[Px], format: PixelFormat) -> TileBuffer {
 	let mut tile = TileBuffer::zeroed(format);
 	match format {
@@ -157,7 +158,18 @@ pub fn to_tile(pixels: &[Px], format: PixelFormat) -> TileBuffer {
 				}
 			}
 		}
-		PixelFormat::Gray16 | PixelFormat::Gray8 => unreachable!("filters write RGBA layers only"),
+		PixelFormat::Gray16 => {
+			let out = tile.as_u16_mut();
+			for (i, p) in pixels.iter().enumerate() {
+				out[i] = (p[0].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+			}
+		}
+		PixelFormat::Gray8 => {
+			let out = tile.bytes_mut();
+			for (i, p) in pixels.iter().enumerate() {
+				out[i] = (p[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+			}
+		}
 	}
 	tile
 }

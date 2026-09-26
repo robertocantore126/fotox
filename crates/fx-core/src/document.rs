@@ -24,6 +24,8 @@ pub struct Document {
 	pub reselect: Option<Selection>,
 	/// Incremented by every applied command. Used for cache keys and UI sync.
 	pub revision: u64,
+	/// Photoshop's Global Light angle in degrees (M6-T08), for the shadows.
+	pub global_light: f64,
 	next_id: u64,
 	/// How many layers of each kind this document has created, for the
 	/// Photoshop-style default names (`"Layer 1"`, `"Group 2"`, `"Curves 1"`).
@@ -55,6 +57,19 @@ pub(crate) enum NameKind {
 	ColorBalance,
 	Vibrance,
 	BlackWhite,
+	// M6-T06. A shape layer is named after the shape it holds ("Rectangle 1"),
+	// so each kind of shape has its own counter; `Shape` is the generic one
+	// (a free path).
+	Shape,
+	Rectangle,
+	RoundedRectangle,
+	Ellipse,
+	Polygon,
+	Star,
+	Line,
+	// M6-T07. A text layer is named after its own first line ("Hello"), so the
+	// counter is only used for a layer with no text yet ("Type 1").
+	Type,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -62,7 +77,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 17;
+	const COUNT: usize = 25;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -85,6 +100,27 @@ impl NameKind {
 			NameKind::ColorBalance => "Color Balance",
 			NameKind::Vibrance => "Vibrance",
 			NameKind::BlackWhite => "Black & White",
+			NameKind::Shape => "Shape",
+			NameKind::Rectangle => "Rectangle",
+			NameKind::RoundedRectangle => "Rounded Rectangle",
+			NameKind::Ellipse => "Ellipse",
+			NameKind::Polygon => "Polygon",
+			NameKind::Star => "Star",
+			NameKind::Line => "Line",
+			NameKind::Type => "Type",
+		}
+	}
+
+	/// The counter a shape layer of `stem` uses ([`NameKind::stem`] names it).
+	pub(crate) fn of_shape_stem(stem: &str) -> Self {
+		match stem {
+			"Rectangle" => NameKind::Rectangle,
+			"Rounded Rectangle" => NameKind::RoundedRectangle,
+			"Ellipse" => NameKind::Ellipse,
+			"Polygon" => NameKind::Polygon,
+			"Star" => NameKind::Star,
+			"Line" => NameKind::Line,
+			_ => NameKind::Shape,
 		}
 	}
 
@@ -125,6 +161,7 @@ impl Document {
 			selection: None,
 			reselect: None,
 			revision: 0,
+			global_light: 120.0,
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
 		}
@@ -345,8 +382,9 @@ mod tests {
 		// Counters are saved by index in `.fxd` manifests: kinds are only ever
 		// appended, and COUNT follows the last one.
 		assert_eq!(NameKind::Invert as usize, 8, "the M2 kinds keep their indices");
+		assert_eq!(NameKind::BlackWhite as usize, 16, "the M4 kinds follow them");
 		assert_eq!(
-			NameKind::BlackWhite as usize,
+			NameKind::Type as usize,
 			NameKind::COUNT - 1,
 			"a new NameKind goes at the end, and COUNT must grow"
 		);

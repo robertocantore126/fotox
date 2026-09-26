@@ -27,8 +27,12 @@ use crate::color::{ColorProfile, RenderingIntent};
 use crate::document::{Document, NameKind};
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind, Mask};
 use crate::ops::{FilterParams, PixelOps};
+use crate::pixels::Placed;
 use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
+use crate::text::{TextContent, TextRun};
+use crate::transform::{Anchor9, Filter, Mapping, Permutation, dest_rect};
+use crate::vector::{Paint, StrokeStyle, VectorShape, document_box, grow_box};
 
 /// How a command names a layer. Macros recorded on one document must replay
 /// on another, so besides ids we support relative references.
@@ -74,6 +78,19 @@ pub enum NewLayer {
 	Adjustment(Adjustment),
 	SolidFill {
 		rgba: [u16; 4],
+	},
+	/// A vector shape layer (M6-T06): the geometry is the layer's content, the
+	/// tiles are rendered from it on demand at whatever level is drawn.
+	Shape {
+		shape: VectorShape,
+		fill: Option<Paint>,
+		stroke: Option<StrokeStyle>,
+		transform: [f64; 6],
+	},
+	/// A text layer (M6-T07): the string and its runs are the content, laid out
+	/// and rasterised on demand at whatever level is drawn (D-055).
+	Text {
+		content: TextContent,
 	},
 }
 
@@ -206,6 +223,92 @@ pub enum Command {
 	/// `center` (the view centre, when the source position is not visible),
 	/// or kept where they were when `center` is `None`. M5
 	Paste { in_place: bool, center: Option<(f64, f64)> },
+	/// Image ▸ Rotate 90° CW / CCW / 180° (M6-T02): every pixel layer, mask and
+	/// the selection is permuted **exactly** (no resampling) and its offset is
+	/// recomputed so the content stays where it was relative to the canvas; the
+	/// document's width and height swap for the odd turns. `quarter_turns` is 1
+	/// (clockwise), 2 or 3; 0 (and ±4) is refused.
+	RotateCanvas { quarter_turns: i8 },
+	/// Image ▸ Flip Canvas Horizontal / Vertical (M6-T02): the same exact
+	/// permutation as `RotateCanvas`.
+	FlipCanvas { horizontal: bool },
+	/// Image ▸ Rotate ▸ Arbitrary… (M6-T02): every pixel layer, mask and the
+	/// selection is resampled and the canvas grows to the rotated bounding box.
+	/// `angle_deg` is in degrees, clockwise (screen coordinates, y down); 0 is
+	/// refused.
+	RotateCanvasArbitrary { angle_deg: f64, filter: Filter },
+	/// Image ▸ Canvas Size (M6-T02, Alt+Ctrl+C): only the document's size and
+	/// every offset change — **no pixel is rewritten** (D-015), and content
+	/// outside the new canvas is kept (it reappears if the canvas grows again).
+	CanvasSize { width: u32, height: u32, anchor: Anchor9 },
+	/// Image ▸ Image Size (M6-T02, Alt+Ctrl+I): with `resample` off only `ppi`
+	/// changes (the pixel dimensions must stay); otherwise every pixel layer,
+	/// mask and the selection is resampled with that filter, the offsets scale
+	/// with it and `ppi` becomes the print resolution.
+	ImageSize {
+		width: u32,
+		height: u32,
+		ppi: f32,
+		resample: Option<Filter>,
+	},
+	/// Image ▸ Crop, the Crop tool's ✓ and Trim (M6-T03): the canvas becomes
+	/// `rect` (`(x, y, w, h)` in document pixels). With `angle_deg` 0 and
+	/// `delete_cropped` off this is [`Command::CanvasSize`] — the offsets move,
+	/// **no pixel is rewritten** and content outside the rectangle comes back if
+	/// the canvas grows again (D-056's default). `delete_cropped` clips every
+	/// pixel layer, mask and the selection to the rectangle first, so what falls
+	/// outside it is gone for good. `angle_deg` (degrees, clockwise, about the
+	/// rectangle's centre) **straightens** the image first: every pixel image is
+	/// resampled through the turn, and the rectangle keeps what it shows.
+	Crop {
+		rect: (i32, i32, u32, u32),
+		angle_deg: f64,
+		delete_cropped: bool,
+	},
+	/// Edit ▸ Free Transform and Edit ▸ Transform ▸ … (M6-T04): the layer's
+	/// pixels resampled through `mapping` (canvas pixels → canvas pixels) with
+	/// `filter`. With a selection, only the selected pixels move: they are
+	/// lifted off the layer, transformed and dropped back onto it, and the
+	/// selection moves with them — one history step, as in Photoshop. Without
+	/// one, the whole layer and its linked mask are transformed.
+	Transform {
+		layer: LayerRef,
+		/// Boxed: a warp's 16 control points would make every command large.
+		mapping: Box<Mapping>,
+		filter: Filter,
+	},
+	/// Change a shape layer's geometry, paints or placement (M6-T06). Each
+	/// field is a patch (`None` = leave alone); `fill: Some(None)` clears the
+	/// fill. The shape's tile cache is invalidated, so the next frame draws the
+	/// new geometry at the level on screen.
+	SetShape {
+		layer: LayerRef,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		shape: Option<VectorShape>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		fill: Option<Option<Paint>>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		stroke: Option<Option<StrokeStyle>>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		transform: Option<[f64; 6]>,
+	},
+	/// Change a text layer's content (M6-T07): the string, its formatting runs,
+	/// the frame, the alignment, the anti-aliasing or the placement. `dirty` is
+	/// the document-space box `[x0, y0, x1, y1]` whose tiles have to be drawn
+	/// again — the engine knows the layout, so it measures what the old and the
+	/// new text ink and hands the box over, and undo redraws the same one.
+	SetText { layer: LayerRef, content: TextContent, dirty: [f64; 4] },
+	/// Layer ▸ Layer Style (M6-T08): replace a layer's styles (`None` clears
+	/// them). The effect caches are rebuilt, all dirty.
+	SetLayerStyle {
+		layer: LayerRef,
+		styles: Option<crate::styles::LayerStyles>,
+	},
+	/// Layer ▸ Rasterize ▸ Shape / Layer / Type (M6-T06/T07): every named layer
+	/// becomes a pixel layer holding what it drew, keeping its id, position in
+	/// the stack, name, opacity, blend mode and mask (Photoshop keeps those
+	/// too). Only non-pixel, non-group layers can be rasterised.
+	Rasterize { layers: Vec<LayerRef> },
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -306,6 +409,35 @@ impl Command {
 				color,
 				samples,
 			} => stroke(doc, layer, *target, tool, brush, *color, samples, ctx),
+			Command::RotateCanvas { quarter_turns } => rotate_canvas(doc, *quarter_turns, ctx),
+			Command::FlipCanvas { horizontal } => permute_canvas(
+				doc,
+				if *horizontal {
+					Permutation::FlipHorizontal
+				} else {
+					Permutation::FlipVertical
+				},
+				ctx,
+			),
+			Command::RotateCanvasArbitrary { angle_deg, filter } => rotate_canvas_arbitrary(doc, *angle_deg, *filter, ctx),
+			Command::CanvasSize { width, height, anchor } => canvas_size(doc, *width, *height, *anchor, ctx.tiles),
+			Command::ImageSize { width, height, ppi, resample } => image_size(doc, *width, *height, *ppi, *resample, ctx),
+			Command::Crop {
+				rect,
+				angle_deg,
+				delete_cropped,
+			} => crop(doc, *rect, *angle_deg, *delete_cropped, ctx),
+			Command::Transform { layer, mapping, filter } => transform_layer(doc, layer, **mapping, *filter, ctx),
+			Command::SetShape {
+				layer,
+				shape,
+				fill,
+				stroke,
+				transform,
+			} => set_shape(doc, layer, shape.as_ref(), fill.as_ref(), stroke.as_ref(), *transform),
+			Command::SetText { layer, content, dirty } => set_text(doc, layer, content, *dirty),
+			Command::SetLayerStyle { layer, styles } => set_layer_style(doc, layer, styles.clone()),
+			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
 		doc.revision += 1;
 		Ok(effect)
@@ -338,7 +470,13 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 	// The counter advances even when the caller supplies a name: it counts the
 	// layers of that kind the document created, so the next default name is
 	// never a duplicate of an earlier one.
-	let default_name = doc.next_default_name(name_kind(new));
+	let counted = doc.next_default_name(name_kind(new));
+	// A text layer is named after its own text ("Hello"), like Photoshop; the
+	// counter is only left for a layer that has none yet (M6-T07).
+	let default_name = match new {
+		NewLayer::Text { content } if !content.layer_name().is_empty() && content.layer_name() != "Type" => content.layer_name(),
+		_ => counted,
+	};
 	let id = doc.allocate_layer_id();
 	let kind = match new {
 		// A pixel layer starts empty: no tile memory at all, whatever the size.
@@ -352,6 +490,31 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 		},
 		NewLayer::Adjustment(adjustment) => LayerKind::Adjustment(adjustment.clone()),
 		NewLayer::SolidFill { rgba } => LayerKind::SolidFill { rgba: *rgba },
+		// The cache holds no authority: every tile starts dirty and is drawn
+		// from the geometry at the level being composited (M6-T06).
+		NewLayer::Shape {
+			shape,
+			fill,
+			stroke,
+			transform,
+		} => LayerKind::Shape {
+			shape: shape.clone(),
+			fill: *fill,
+			stroke: stroke.clone(),
+			transform: *transform,
+			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
+		},
+		// The same derived-tile model for text (M6-T07): the layout is the
+		// truth, every tile starts dirty.
+		NewLayer::Text { content } => LayerKind::Text {
+			text: content.text.clone(),
+			runs: content.runs.clone(),
+			frame: content.frame,
+			align: content.align,
+			antialias: content.antialias,
+			transform: content.transform,
+			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
+		},
 	};
 	let layer = Arc::new(Layer::new(id, name.unwrap_or(&default_name).to_owned(), kind));
 	insert_above_active(doc, layer);
@@ -711,6 +874,202 @@ fn set_adjustment(doc: &mut Document, layer: &LayerRef, adjustment: &Adjustment)
 	Ok(CommandEffect {
 		label: NameKind::of_adjustment(adjustment).stem().to_owned(),
 		props_changed: vec![id],
+		..Default::default()
+	})
+}
+
+/// `SetShape` (M6-T06): patch a shape layer's geometry, paints or placement.
+/// The geometry is the truth, so nothing here touches pixels — but the tile
+/// cache is invalidated, because everything it holds was drawn from the old
+/// shape.
+fn set_shape(
+	doc: &mut Document,
+	layer: &LayerRef,
+	shape: Option<&VectorShape>,
+	fill: Option<&Option<Paint>>,
+	stroke: Option<&Option<StrokeStyle>>,
+	transform: Option<[f64; 6]>,
+) -> Result<CommandEffect, CommandError> {
+	let id = resolve(doc, layer)?;
+	// Photoshop's History names the step after what changed.
+	let label = match (shape.is_some(), fill.is_some(), stroke.is_some(), transform.is_some()) {
+		(true, ..) => "Set Shape",
+		(_, true, false, false) => "Fill",
+		(_, false, true, false) => "Stroke",
+		(_, false, false, true) => "Move",
+		_ => "Set Shape",
+	};
+	// What the old geometry drew, to know what has to be drawn again: only the
+	// box the old or the new outline reaches, not the whole document.
+	let before = {
+		let layer = doc.layer(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+		let LayerKind::Shape { shape, stroke, transform, .. } = &layer.kind else {
+			return Err(CommandError::NotAllowed("only shape layers have shape parameters".into()));
+		};
+		box_of(shape, *transform, stroke.as_ref())
+	};
+	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	let LayerKind::Shape {
+		shape: current_shape,
+		fill: current_fill,
+		stroke: current_stroke,
+		transform: current_transform,
+		cache,
+	} = &mut target.kind
+	else {
+		return Err(CommandError::NotAllowed("only shape layers have shape parameters".into()));
+	};
+	if let Some(shape) = shape {
+		*current_shape = shape.clone();
+	}
+	if let Some(fill) = fill {
+		*current_fill = *fill;
+	}
+	if let Some(stroke) = stroke {
+		*current_stroke = stroke.clone();
+	}
+	if let Some(transform) = transform {
+		if !transform.iter().all(|v| v.is_finite()) {
+			return Err(CommandError::InvalidValue {
+				field: "transform",
+				reason: "the matrix has a non-finite component".into(),
+			});
+		}
+		*current_transform = transform;
+	}
+	let after = box_of(current_shape, *current_transform, current_stroke.as_ref());
+	cache.mark_rect_dirty([
+		before[0].min(after[0]),
+		before[1].min(after[1]),
+		before[2].max(after[2]),
+		before[3].max(after[3]),
+	]);
+	Ok(CommandEffect {
+		label: label.into(),
+		props_changed: vec![id],
+		..Default::default()
+	})
+}
+
+/// The document box a shape layer's content reaches, stroke included: a
+/// stroke of `width` sticks out by up to that much.
+fn box_of(shape: &VectorShape, transform: [f64; 6], stroke: Option<&StrokeStyle>) -> [f64; 4] {
+	let reach = stroke.map_or(0.0, |stroke| stroke.width.max(0.0));
+	grow_box(document_box(shape, transform), reach)
+}
+
+/// `SetText` (M6-T07): replace a text layer's content and redraw the tiles the
+/// caller measured as changed.
+///
+/// The layout lives in fx-render (the font stack), so fx-core cannot tell what
+/// the text inks; the engine computes `dirty` from the old and the new layout
+/// and the command carries it, which also makes undo redraw exactly the same
+/// tiles. An empty text layer draws nothing, and its tiles go Empty.
+fn set_layer_style(doc: &mut Document, layer: &LayerRef, styles: Option<crate::styles::LayerStyles>) -> Result<CommandEffect, CommandError> {
+	let id = resolve(doc, layer)?;
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	if matches!(target.kind, LayerKind::Group { .. } | LayerKind::Adjustment(_)) {
+		// FAST: Photoshop allows styles on groups; not here yet.
+		return Err(CommandError::NotAllowed("layer styles need a pixel, shape, text or fill layer".into()));
+	}
+	target.effects = match &styles {
+		Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
+		None => Vec::new(),
+	};
+	target.styles = styles;
+	Ok(CommandEffect {
+		label: "Layer Style".into(),
+		props_changed: vec![id],
+		..Default::default()
+	})
+}
+
+fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: [f64; 4]) -> Result<CommandEffect, CommandError> {
+	if !content.transform.iter().all(|v| v.is_finite()) {
+		return Err(CommandError::InvalidValue {
+			field: "transform",
+			reason: "the matrix has a non-finite component".into(),
+		});
+	}
+	let id = resolve(doc, layer)?;
+	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	let LayerKind::Text {
+		text,
+		runs,
+		frame,
+		align,
+		antialias,
+		transform,
+		cache,
+	} = &mut target.kind
+	else {
+		return Err(CommandError::NotAllowed("only text layers have text parameters".into()));
+	};
+	// A text layer follows its own text until the user renames it (Photoshop
+	// does the same): rename it only while the name still matches the old text.
+	if *text != content.text && target.name == crate::text::TextContent::name_for_text(text) {
+		target.name = content.layer_name();
+	}
+	*text = content.text.clone();
+	*runs = content.runs.clone();
+	*frame = content.frame;
+	*align = content.align;
+	*antialias = content.antialias;
+	*transform = content.transform;
+	cache.mark_rect_dirty(dirty);
+	Ok(CommandEffect {
+		label: "Type Tool".into(),
+		props_changed: vec![id],
+		..Default::default()
+	})
+}
+
+/// `Rasterize` (M6-T06): turn a generated layer into the pixels it drew.
+/// The layer keeps its id, name, place, opacity, blend mode and mask.
+fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if layers.is_empty() {
+		return Err(CommandError::NotAllowed("no layers to rasterise".into()));
+	}
+	let ids = resolve_all(doc, layers, true)?;
+	for &id in &ids {
+		let layer = doc.layer(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+		match layer.kind {
+			LayerKind::Pixel { .. } => return Err(CommandError::NotAllowed("the layer is already pixels".into())),
+			LayerKind::Group { .. } => return Err(CommandError::NotAllowed("a group cannot be rasterised".into())),
+			_ => {}
+		}
+	}
+	// Composite each layer alone, with its own opacity, fill and blend mode
+	// neutralised: those stay on the layer (Photoshop keeps them too).
+	let mut flat = doc.clone();
+	for &id in &ids {
+		if let Some(layer) = flat.layer_mut(id) {
+			layer.visible = true;
+			layer.opacity = 1.0;
+			layer.fill = 1.0;
+			layer.blend = BlendMode::Normal;
+		}
+	}
+	let mut images = Vec::with_capacity(ids.len());
+	for &id in &ids {
+		images.push((id, pixel_ops(ctx, "rasterising")?.composite(&flat, &[id], None, ctx.tiles)?));
+	}
+	let mut changed = Vec::with_capacity(ids.len());
+	for (id, image) in images {
+		if let Some(layer) = doc.layer_mut(id) {
+			layer.kind = LayerKind::Pixel { image, offset: (0, 0) };
+		}
+		changed.push(id);
+	}
+	Ok(CommandEffect {
+		label: if changed.len() == 1 {
+			"Rasterize Layer".into()
+		} else {
+			"Rasterize Layers".into()
+		},
+		pixels_changed: changed.clone(),
+		props_changed: changed,
 		..Default::default()
 	})
 }
@@ -1188,6 +1547,81 @@ fn convert_profile(
 				.convert(image, &conversion, ctx.tiles)
 				.map(|image| LayerKind::Pixel { image, offset: *offset }),
 			LayerKind::SolidFill { rgba } => ops.convert_color(*rgba, &conversion).map(|rgba| LayerKind::SolidFill { rgba }),
+			// A shape's own colours convert with it; the cache is redrawn from
+			// the new geometry afterwards (M6-T06).
+			LayerKind::Shape {
+				shape,
+				fill,
+				stroke,
+				transform,
+				cache,
+			} => {
+				let fill = match fill {
+					Some(paint) => match ops.convert_color(paint.rgba(), &conversion) {
+						Ok(rgba) => Some(Paint::Solid { rgba }),
+						Err(error) => {
+							failure = Some(error);
+							return;
+						}
+					},
+					None => None,
+				};
+				let stroke = match stroke {
+					Some(style) => match ops.convert_color(style.paint.rgba(), &conversion) {
+						Ok(rgba) => Some(StrokeStyle {
+							paint: Paint::Solid { rgba },
+							..style.clone()
+						}),
+						Err(error) => {
+							failure = Some(error);
+							return;
+						}
+					},
+					None => None,
+				};
+				let mut cache = cache.clone();
+				cache.mark_all_dirty();
+				Ok(LayerKind::Shape {
+					shape: shape.clone(),
+					fill,
+					stroke,
+					transform: *transform,
+					cache,
+				})
+			}
+			// A text layer's runs carry its colours; they convert with the
+			// document and the cache is redrawn from them (M6-T07).
+			LayerKind::Text {
+				text,
+				runs,
+				frame,
+				align,
+				antialias,
+				transform,
+				cache,
+			} => {
+				let mut converted = Vec::with_capacity(runs.len());
+				for run in runs {
+					match ops.convert_color(run.color, &conversion) {
+						Ok(color) => converted.push(TextRun { color, ..run.clone() }),
+						Err(error) => {
+							failure = Some(error);
+							return;
+						}
+					}
+				}
+				let mut cache = cache.clone();
+				cache.mark_all_dirty();
+				Ok(LayerKind::Text {
+					text: text.clone(),
+					runs: converted,
+					frame: *frame,
+					align: *align,
+					antialias: *antialias,
+					transform: *transform,
+					cache,
+				})
+			}
 			_ => return,
 		};
 		match kind {
@@ -1227,6 +1661,10 @@ fn name_kind(new: &NewLayer) -> NameKind {
 		NewLayer::SolidFill { .. } => NameKind::SolidFill,
 		NewLayer::Group => NameKind::Group,
 		NewLayer::Adjustment(adjustment) => NameKind::of_adjustment(adjustment),
+		// A rectangle is named "Rectangle 1", like Photoshop's tool, so the
+		// counter follows the kind of shape drawn (M6-T06).
+		NewLayer::Shape { shape, .. } => NameKind::of_shape_stem(shape.stem()),
+		NewLayer::Text { .. } => NameKind::Type,
 	}
 }
 
@@ -1239,6 +1677,9 @@ fn add_label(new: &NewLayer) -> String {
 		NewLayer::Adjustment(adjustment) => {
 			format!("New {} Adjustment Layer", NameKind::of_adjustment(adjustment).stem())
 		}
+		// Photoshop names the step after the shape: "New Rectangle" (M6-T06).
+		NewLayer::Shape { shape, .. } => format!("New {}", shape.stem()),
+		NewLayer::Text { .. } => "New Type Layer".into(),
 	}
 }
 
@@ -1536,6 +1977,667 @@ fn paste(doc: &mut Document, in_place: bool, center: Option<(f64, f64)>, ctx: &C
 	})
 }
 
+// ---------------------------------------------------------------------------
+// Image geometry (M6-T02)
+// ---------------------------------------------------------------------------
+
+/// Every layer of `doc`, depth first (a group's children included).
+fn layer_ids(doc: &Document) -> Vec<LayerId> {
+	let mut ids = Vec::new();
+	doc.walk(|layer, _| ids.push(layer.id));
+	ids
+}
+
+/// Give the document a new canvas size and rebuild every generated layer's
+/// cache for it (M6-T06/T07). A shape's or text's cache is derived from its
+/// geometry and is always the size of the canvas, so a canvas-level command
+/// replaces it — the tiles come back at the next draw, at whatever level is on
+/// screen. Returns the layers whose cache was rebuilt.
+fn set_canvas(doc: &mut Document, width: u32, height: u32) -> Vec<LayerId> {
+	doc.width = width;
+	doc.height = height;
+	let format = doc.color.depth.rgba_format();
+	let mut changed = Vec::new();
+	for id in layer_ids(doc) {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some((_, cache)) = layer.kind.derived_placement()
+		{
+			if (cache.width(), cache.height()) == (width, height) {
+				continue;
+			}
+			*cache = TiledImage::derived(width, height, format);
+			changed.push(id);
+		}
+	}
+	changed
+}
+
+/// Fold a canvas-level mapping into every generated layer's matrix (M6-T06/T07):
+/// a shape or a text layer is placed by a matrix, so the canvas turning,
+/// flipping or scaling turns, flips or scales it exactly, and nothing is
+/// resampled. Returns the layers that changed; a mapping that is not affine
+/// (which no canvas-level command produces) leaves them all alone.
+fn map_generated_layers(doc: &mut Document, mapping: Mapping) -> Vec<LayerId> {
+	let mut changed = Vec::new();
+	for id in layer_ids(doc) {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some((transform, cache)) = layer.kind.derived_placement()
+		{
+			let Some(moved) = mapping.then_affine(*transform) else {
+				continue;
+			};
+			if moved == *transform {
+				continue;
+			}
+			*transform = moved;
+			cache.mark_all_dirty();
+			changed.push(id);
+		}
+	}
+	changed
+}
+
+/// Image ▸ Rotate 90° CW / CCW / 180° (M6-T02).
+fn rotate_canvas(doc: &mut Document, quarter_turns: i8, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let Some(op) = Permutation::from_quarter_turns(quarter_turns) else {
+		return Err(CommandError::InvalidValue {
+			field: "quarter_turns",
+			reason: format!("{quarter_turns} is a whole number of full turns; 1, 2 or 3 (or -1…-3) turns the canvas"),
+		});
+	};
+	permute_canvas(doc, op, ctx)
+}
+
+/// Where a layer's mask sits on the canvas: a linked mask of a pixel layer at
+/// the layer's offset, every other mask at the origin (the renderer's rule,
+/// `fx_render::program`).
+fn mask_origin(layer: &Layer) -> (i32, i32) {
+	match (&layer.kind, layer.mask.as_ref().is_some_and(|m| m.linked)) {
+		(LayerKind::Pixel { offset, .. }, true) => *offset,
+		_ => (0, 0),
+	}
+}
+
+/// A mask's image that a geometry command left at canvas pixel `at`, moved to
+/// where the mask must sit afterwards (`target`, see [`mask_origin`]), padded
+/// with the mask's outside value.
+fn mask_to(image: TiledImage, at: (i32, i32), target: (i32, i32), mask: &Mask, store: &TileStore) -> Result<TiledImage, CommandError> {
+	if at == target {
+		return Ok(image);
+	}
+	Ok(crate::pixels::place_at(
+		&image,
+		at,
+		target,
+		fx_tiles::PixelValue::gray16(mask.outside_value),
+		store,
+	)?)
+}
+
+/// Rotate or mirror the whole canvas (M6-T02): every pixel image is permuted
+/// (bit-exact) and every offset recomputed, so the content stays where it was.
+/// Nothing is resampled and nothing is interpolated, so the work is the tile
+/// I/O of the images that really have pixels — an empty or uniform layer costs
+/// nothing at all.
+fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let ops = pixel_ops(ctx, op.label())?;
+	let canvas = (doc.width, doc.height);
+	let (dest_w, dest_h) = op.size(canvas);
+	// Phase 1: compute every new image. The document stays untouched until all
+	// of them are ready, so a corrupt tile or an offset that does not fit
+	// leaves it exactly as it was (apply either fully succeeds or does nothing).
+	let mut images: Vec<(LayerId, TiledImage, (i32, i32))> = Vec::new();
+	let mut masks: Vec<(LayerId, TiledImage)> = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		let mut target = (0, 0);
+		if let LayerKind::Pixel { image, offset } = &layer.kind {
+			let (image, new_offset) = ops.rotate(image, *offset, canvas, op, ctx.tiles)?;
+			images.push((id, image, new_offset));
+			if layer.mask.as_ref().is_some_and(|m| m.linked) {
+				target = new_offset;
+			}
+		}
+		if let Some(mask) = &layer.mask {
+			// The model stores no offset for a mask (see `mask_origin`): turn it
+			// where it sits, then put it where it must sit afterwards.
+			let (image, at) = ops.rotate(&mask.image, mask_origin(layer), canvas, op, ctx.tiles)?;
+			masks.push((id, mask_to(image, at, target, mask, ctx.tiles)?));
+		}
+	}
+	let selection = match &doc.selection {
+		Some(selection) => Some(ops.rotate(&selection.image, selection.offset, canvas, op, ctx.tiles)?),
+		None => None,
+	};
+	let reselect = match &doc.reselect {
+		Some(selection) => Some(ops.rotate(&selection.image, selection.offset, canvas, op, ctx.tiles)?),
+		None => None,
+	};
+	// Phase 2: commit.
+	let mut changed = Vec::new();
+	for (id, image, offset) in images {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let LayerKind::Pixel { image: pixels, offset: at } = &mut layer.kind
+		{
+			*pixels = image;
+			*at = offset;
+		}
+		changed.push(id);
+	}
+	for (id, image) in masks {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some(mask) = &mut layer.mask
+		{
+			mask.image = image;
+		}
+		changed.push(id);
+	}
+	if let Some((image, offset)) = selection {
+		doc.selection = Some(Selection { image, offset });
+	}
+	if let Some((image, offset)) = reselect {
+		doc.reselect = Some(Selection { image, offset });
+	}
+	// Generated layers (shapes, M6-T06, and text, M6-T07) carry a transform,
+	// not pixels: they turn with the canvas without losing anything.
+	changed.extend(map_generated_layers(doc, op.mapping(canvas)));
+	changed.extend(set_canvas(doc, dest_w, dest_h));
+	changed.sort_unstable();
+	changed.dedup();
+	Ok(CommandEffect {
+		label: op.label().into(),
+		pixels_changed: changed,
+		..Default::default()
+	})
+}
+
+/// Image ▸ Rotate ▸ Arbitrary… (M6-T02): the canvas grows to the rotated
+/// bounding box and every pixel image is resampled through the turn.
+fn rotate_canvas_arbitrary(doc: &mut Document, angle_deg: f64, filter: Filter, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if !angle_deg.is_finite() {
+		return Err(CommandError::InvalidValue {
+			field: "angle_deg",
+			reason: format!("{angle_deg} is not a number"),
+		});
+	}
+	// Photoshop's Rotate Image dialog: the direction picks which way.
+	let angle = angle_deg.rem_euclid(360.0);
+	if angle == 0.0 {
+		return Err(CommandError::InvalidValue {
+			field: "angle_deg",
+			reason: "0° leaves the canvas as it is".into(),
+		});
+	}
+	let ops = pixel_ops(ctx, "Rotate Image")?;
+	let canvas = (doc.width, doc.height);
+	// Turn about the canvas centre (the same point in both the old and the new
+	// canvas), then move the bounding box's top-left corner to the origin: the
+	// new canvas is exactly the rotated canvas's box, with no wasted border.
+	let turn = Mapping::rotation_about(angle.to_radians(), f64::from(canvas.0) / 2.0, f64::from(canvas.1) / 2.0);
+	let Some(((left, top), size)) = dest_rect(&turn, [0.0, 0.0, f64::from(canvas.0), f64::from(canvas.1)]) else {
+		return Err(CommandError::NotAllowed("the rotated canvas has no bounding box".into()));
+	};
+	let mapping = turn.after_destination_translation(-f64::from(left), -f64::from(top));
+	let mut changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	changed.extend(set_canvas(doc, size.0, size.1));
+	Ok(CommandEffect {
+		label: "Rotate Image".into(),
+		pixels_changed: changed,
+		..Default::default()
+	})
+}
+
+/// Image ▸ Canvas Size (M6-T02, D-015): the document's size and every offset
+/// change — no pixel is rewritten, so content outside the new canvas is kept
+/// and reappears if the canvas grows again.
+fn canvas_size(doc: &mut Document, width: u32, height: u32, anchor: Anchor9, store: &TileStore) -> Result<CommandEffect, CommandError> {
+	if width == 0 || height == 0 {
+		return Err(CommandError::InvalidValue {
+			field: if width == 0 { "width" } else { "height" },
+			reason: "a canvas is at least 1 × 1 pixel".into(),
+		});
+	}
+	let (dx, dy) = anchor.offset((doc.width, doc.height), (width, height));
+	let (mut moved, masks) = shift_offsets(doc, dx, dy, store)?;
+	moved.extend(set_canvas(doc, width, height));
+	Ok(CommandEffect {
+		label: "Canvas Size".into(),
+		props_changed: moved,
+		pixels_changed: masks,
+		..Default::default()
+	})
+}
+
+/// Move every layer offset, and the selection's, by `(dx, dy)` — Canvas Size
+/// and Crop's placement change (M6-T02/T03). Every new offset is computed
+/// before anything moves, so a document whose content cannot be expressed in
+/// 32 bits is left exactly as it was. A mask that sits at the canvas origin
+/// (unlinked, or on a group or an adjustment layer) has no offset to move: its
+/// pixels move instead, and what goes past the new origin is dropped. Returns
+/// the layers that moved and the layers whose mask pixels were moved.
+fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Result<(Vec<LayerId>, Vec<LayerId>), CommandError> {
+	let moved_offset = |offset: (i32, i32)| -> Result<(i32, i32), CommandError> { Ok((checked_offset(offset.0, dx)?, checked_offset(offset.1, dy)?)) };
+	// Validate every new offset before moving anything.
+	let mut moved = Vec::new();
+	let mut masks = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		if let LayerKind::Pixel { offset, .. } = &layer.kind {
+			moved.push((id, moved_offset(*offset)?));
+		}
+		if let Some(mask) = &layer.mask
+			&& mask_origin(layer) == (0, 0)
+			&& !(matches!(layer.kind, LayerKind::Pixel { .. }) && mask.linked)
+		{
+			masks.push((id, mask_to(mask.image.clone(), (dx, dy), (0, 0), mask, store)?));
+		}
+	}
+	let selection = match &doc.selection {
+		Some(selection) => Some(moved_offset(selection.offset)?),
+		None => None,
+	};
+	let reselection = match &doc.reselect {
+		Some(selection) => Some(moved_offset(selection.offset)?),
+		None => None,
+	};
+	// Commit.
+	for (id, offset) in &moved {
+		if let Some(layer) = doc.layer_mut(*id)
+			&& let LayerKind::Pixel { offset: at, .. } = &mut layer.kind
+		{
+			*at = *offset;
+		}
+	}
+	if let (Some(selection), Some(offset)) = (doc.selection.as_mut(), selection) {
+		selection.offset = offset;
+	}
+	if let (Some(selection), Some(offset)) = (doc.reselect.as_mut(), reselection) {
+		selection.offset = offset;
+	}
+	// A shape or text layer has no offset to move: its matrix is translated
+	// instead (M6-T06/T07), which is the same thing without touching a tile.
+	let mut shapes = map_generated_layers(doc, Mapping::translation(f64::from(dx), f64::from(dy)));
+	let mut masks_moved = Vec::new();
+	for (id, image) in masks {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some(mask) = &mut layer.mask
+		{
+			mask.image = image;
+		}
+		masks_moved.push(id);
+	}
+	shapes.extend(moved.into_iter().map(|(id, _)| id));
+	Ok((shapes, masks_moved))
+}
+
+/// Keep only the pixels inside `rect`, for every pixel layer, mask and the
+/// selection (M6-T03's Delete Cropped Pixels). Phase 1 computes every new
+/// image, so a corrupt tile leaves the document untouched; the selection's
+/// coverage outside the rectangle simply stops being selected.
+fn clip_document(doc: &mut Document, rect: (i32, i32, u32, u32), store: &TileStore) -> Result<Vec<LayerId>, CommandError> {
+	let mut images = Vec::new();
+	let mut masks = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		if let LayerKind::Pixel { image, offset } = &layer.kind {
+			images.push((id, crate::pixels::clip_to_rect(Placed { image, offset: *offset }, rect, store)?));
+		}
+		if let Some(mask) = &layer.mask {
+			let placed = Placed {
+				image: &mask.image,
+				offset: mask_origin(layer),
+			};
+			masks.push((id, crate::pixels::clip_to_rect(placed, rect, store)?));
+		}
+	}
+	let clip = |selection: &Selection| {
+		crate::pixels::clip_to_rect(
+			Placed {
+				image: &selection.image,
+				offset: selection.offset,
+			},
+			rect,
+			store,
+		)
+	};
+	let selection = doc.selection.as_ref().map(clip).transpose()?;
+	let reselect = doc.reselect.as_ref().map(clip).transpose()?;
+	// Commit.
+	let mut changed = Vec::new();
+	for (id, image) in images {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let LayerKind::Pixel { image: pixels, .. } = &mut layer.kind
+		{
+			*pixels = image;
+		}
+		changed.push(id);
+	}
+	for (id, image) in masks {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some(mask) = &mut layer.mask
+		{
+			mask.image = image;
+		}
+		changed.push(id);
+	}
+	if let (Some(selection), Some(image)) = (doc.selection.as_mut(), selection) {
+		selection.image = image;
+	}
+	if let (Some(selection), Some(image)) = (doc.reselect.as_mut(), reselect) {
+		selection.image = image;
+	}
+	Ok(changed)
+}
+
+/// An image and the canvas pixel of its (0, 0).
+type PlacedImage = (TiledImage, (i32, i32));
+
+/// The part of a placed image that holds tiles: the image cut to the box of
+/// its non-empty tiles (whole tiles, so no pixel is rewritten), and where that
+/// box sits. `None` for an image with no content. A transform then resamples
+/// the content's box, not the whole layer (a small object on a canvas-sized
+/// layer, M6-T04).
+fn tight(image: &TiledImage, offset: (i32, i32), store: &TileStore) -> Result<Option<PlacedImage>, CommandError> {
+	let mut bounds: Option<(u32, u32, u32, u32)> = None;
+	for (tx, ty, _) in image.grid(0).non_empty() {
+		bounds = Some(match bounds {
+			None => (tx, ty, tx, ty),
+			Some(b) => (b.0.min(tx), b.1.min(ty), b.2.max(tx), b.3.max(ty)),
+		});
+	}
+	let Some((tx0, ty0, tx1, ty1)) = bounds else {
+		return Ok(None);
+	};
+	let (x0, y0) = (tx0 * fx_tiles::TILE_SIZE, ty0 * fx_tiles::TILE_SIZE);
+	let x1 = ((tx1 + 1) * fx_tiles::TILE_SIZE).min(image.width());
+	let y1 = ((ty1 + 1) * fx_tiles::TILE_SIZE).min(image.height());
+	let at = (checked_offset(offset.0, x0 as i32)?, checked_offset(offset.1, y0 as i32)?);
+	if (x0, y0, x1, y1) == (0, 0, image.width(), image.height()) {
+		return Ok(Some((image.clone(), offset)));
+	}
+	let cut = crate::pixels::place_in(image, offset, at, Some((x1 - x0, y1 - y0)), fx_tiles::PixelValue::TRANSPARENT, store)?;
+	Ok(Some((cut, at)))
+}
+
+/// Edit ▸ Free Transform and the Transform submenu (M6-T04).
+fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filter: Filter, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if !mapping.is_finite() {
+		return Err(CommandError::InvalidValue {
+			field: "mapping",
+			reason: "the transform is not a finite mapping".into(),
+		});
+	}
+	let id = resolve(doc, layer)?;
+	let ops = pixel_ops(ctx, "Free Transform")?;
+	let store = ctx.tiles;
+	let canvas = (doc.width, doc.height);
+	let target = doc.layer(id).expect("resolved id exists");
+	let LayerKind::Pixel { image, offset } = &target.kind else {
+		return Err(CommandError::NotAllowed("only a pixel layer can be transformed".into()));
+	};
+	if target.locked_position || target.locked_pixels {
+		return Err(CommandError::Locked(id));
+	}
+	let offset = *offset;
+	let mask = target.mask.as_ref().filter(|m| m.linked);
+	// Phase 1: every new image, the document untouched.
+	let (new_image, new_offset, new_mask, new_selection) = match &doc.selection {
+		None => {
+			let Some((content, at)) = tight(image, offset, store)? else {
+				return Err(CommandError::NotAllowed("the layer is empty: there is nothing to transform".into()));
+			};
+			let (moved, moved_at) = resample_placed(ops, &content, at, mapping, filter, store)?;
+			// The linked mask turns with its layer.
+			let new_mask = match mask {
+				Some(mask) => {
+					let (image, at) = resample_placed(ops, &mask.image, offset, mapping, filter, store)?;
+					Some(mask_to(image, at, moved_at, mask, store)?)
+				}
+				None => None,
+			};
+			(moved, moved_at, new_mask, None)
+		}
+		Some(selection) => {
+			let placed = Placed { image, offset };
+			let Some((x0, y0, x1, y1)) = selection.canvas_bounds(canvas) else {
+				return Err(CommandError::NotAllowed("nothing is selected".into()));
+			};
+			// Lift the selected pixels (cut to the selection's bounds), leave a
+			// hole, transform what was lifted and drop it back.
+			let lifted = crate::pixels::extract(placed, Some(selection), canvas, store)?;
+			let at = (x0 as i32, y0 as i32);
+			let lifted = crate::pixels::place_in(&lifted, offset, at, Some((x1 - x0, y1 - y0)), fx_tiles::PixelValue::TRANSPARENT, store)?;
+			let hole = crate::pixels::clear(placed, selection, canvas, store)?;
+			let (moved, moved_at) = resample_placed(ops, &lifted, at, mapping, filter, store)?;
+			let (merged, merged_at) = crate::pixels::over(
+				Placed { image: &hole, offset },
+				Placed {
+					image: &moved,
+					offset: moved_at,
+				},
+				store,
+			)?;
+			// The mask stays where it was: only the layer's origin moved.
+			let new_mask = match mask {
+				Some(mask) => Some(mask_to(mask.image.clone(), offset, merged_at, mask, store)?),
+				None => None,
+			};
+			let (image, at) = resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?;
+			(merged, merged_at, new_mask, Some(Selection { image, offset: at }))
+		}
+	};
+	// Phase 2: commit.
+	let target = doc.layer_mut(id).expect("resolved id exists");
+	if let LayerKind::Pixel { image, offset } = &mut target.kind {
+		*image = new_image;
+		*offset = new_offset;
+	}
+	if let (Some(mask), Some(image)) = (target.mask.as_mut(), new_mask) {
+		mask.image = image;
+	}
+	if let Some(selection) = new_selection {
+		doc.selection = Some(selection);
+	}
+	Ok(CommandEffect {
+		label: "Free Transform".into(),
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}
+
+/// Image ▸ Crop, the Crop tool and Trim (M6-T03). The four combinations the
+/// Crop tool's option bar can ask for:
+///
+/// * no angle, no deletion — exactly Canvas Size; the content outside the
+///   rectangle is kept (off-canvas) and returns if the canvas grows again.
+/// * no angle, deletion — everything outside the rectangle is clipped away
+///   first (every pixel layer, mask and the selection).
+/// * an angle — the image is straightened: every pixel image is resampled
+///   through a turn about the rectangle's centre, into the rectangle's own
+///   frame, and the document becomes the rectangle. With `delete_cropped` the
+///   straighten also clips what the turn brought into the frame from outside
+///   the rectangle; without it those pixels stay, off-canvas.
+fn crop(doc: &mut Document, rect: (i32, i32, u32, u32), angle_deg: f64, delete_cropped: bool, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if rect.2 == 0 || rect.3 == 0 {
+		return Err(CommandError::InvalidValue {
+			field: "rect",
+			reason: "a canvas is at least 1 × 1 pixel".into(),
+		});
+	}
+	if !angle_deg.is_finite() {
+		return Err(CommandError::InvalidValue {
+			field: "angle_deg",
+			reason: format!("{angle_deg} is not a number"),
+		});
+	}
+	let angle = angle_deg.rem_euclid(360.0);
+	let mut pixels_changed = Vec::new();
+	let mut props_changed = Vec::new();
+	if angle != 0.0 {
+		let ops = pixel_ops(ctx, "Crop")?;
+		let (cx, cy) = (f64::from(rect.0) + f64::from(rect.2) / 2.0, f64::from(rect.1) + f64::from(rect.3) / 2.0);
+		// Turn about the crop box's centre, then into the box's own frame: the
+		// straightened images unfold from there, and the ones that end up in
+		// the box are exactly the ones the user sees.
+		let mapping = Mapping::rotation_about(angle.to_radians(), cx, cy).after_destination_translation(-f64::from(rect.0), -f64::from(rect.1));
+		pixels_changed = resample_document(doc, ops, mapping, Filter::BicubicAutomatic, ctx.tiles)?;
+		if delete_cropped {
+			// The images are already in the box's frame: clip to the box.
+			pixels_changed.extend(clip_document(doc, (0, 0, rect.2, rect.3), ctx.tiles)?);
+		}
+	} else {
+		if delete_cropped {
+			pixels_changed = clip_document(doc, rect, ctx.tiles)?;
+		}
+		let (moved, masks) = shift_offsets(doc, -rect.0, -rect.1, ctx.tiles)?;
+		props_changed = moved;
+		pixels_changed.extend(masks);
+	}
+	pixels_changed.sort_unstable();
+	pixels_changed.dedup();
+	props_changed.extend(set_canvas(doc, rect.2, rect.3));
+	Ok(CommandEffect {
+		label: "Crop".into(),
+		pixels_changed,
+		props_changed,
+		..Default::default()
+	})
+}
+
+/// Image ▸ Image Size (M6-T02).
+fn image_size(
+	doc: &mut Document,
+	width: u32,
+	height: u32,
+	ppi: f32,
+	resample: Option<Filter>,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	if width == 0 || height == 0 {
+		return Err(CommandError::InvalidValue {
+			field: if width == 0 { "width" } else { "height" },
+			reason: "an image is at least 1 × 1 pixel".into(),
+		});
+	}
+	if !ppi.is_finite() || ppi <= 0.0 {
+		return Err(CommandError::InvalidValue {
+			field: "ppi",
+			reason: format!("{ppi} is not a positive resolution"),
+		});
+	}
+	let Some(filter) = resample else {
+		// "Resample" off: the print size changes, the pixels do not.
+		if (width, height) != (doc.width, doc.height) {
+			return Err(CommandError::NotAllowed(
+				"resampling is off: only the print resolution can change, so the pixel dimensions must stay".into(),
+			));
+		}
+		doc.ppi = ppi;
+		return Ok(CommandEffect {
+			label: "Image Size".into(),
+			..Default::default()
+		});
+	};
+	let ops = pixel_ops(ctx, "Image Size")?;
+	let mapping = Mapping::scale(f64::from(width) / f64::from(doc.width), f64::from(height) / f64::from(doc.height));
+	let mut changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	changed.extend(set_canvas(doc, width, height));
+	doc.ppi = ppi;
+	Ok(CommandEffect {
+		label: "Image Size".into(),
+		pixels_changed: changed,
+		..Default::default()
+	})
+}
+
+/// Resample every pixel layer, mask and the selection through `mapping`, which
+/// maps old canvas pixels to new ones (M6-T02's Image Size and arbitrary
+/// rotation). Every image's size and offset come from its mapped bounding box,
+/// so the layout scales with the canvas. Returns the layers that changed; the
+/// caller sets the document's new size.
+fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, filter: Filter, store: &TileStore) -> Result<Vec<LayerId>, CommandError> {
+	// Phase 1: every new image, while the document is still untouched.
+	let mut images = Vec::new();
+	let mut masks = Vec::new();
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer(id) else { continue };
+		let mut target = (0, 0);
+		if let LayerKind::Pixel { image, offset } = &layer.kind {
+			let (image, new_offset) = resample_placed(ops, image, *offset, mapping, filter, store)?;
+			images.push((id, (image, new_offset)));
+			if layer.mask.as_ref().is_some_and(|m| m.linked) {
+				target = new_offset;
+			}
+		}
+		if let Some(mask) = &layer.mask {
+			// Resampled where it sits, then put where it must sit (see
+			// `mask_origin`).
+			let (image, at) = resample_placed(ops, &mask.image, mask_origin(layer), mapping, filter, store)?;
+			masks.push((id, mask_to(image, at, target, mask, store)?));
+		}
+	}
+	let selection = match &doc.selection {
+		Some(selection) => Some(resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?),
+		None => None,
+	};
+	let reselect = match &doc.reselect {
+		Some(selection) => Some(resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?),
+		None => None,
+	};
+	// Phase 2: commit.
+	let mut changed = Vec::new();
+	for (id, (image, offset)) in images {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let LayerKind::Pixel { image: pixels, offset: at } = &mut layer.kind
+		{
+			*pixels = image;
+			*at = offset;
+		}
+		changed.push(id);
+	}
+	for (id, image) in masks {
+		if let Some(layer) = doc.layer_mut(id)
+			&& let Some(mask) = &mut layer.mask
+		{
+			mask.image = image;
+		}
+		changed.push(id);
+	}
+	// Generated layers (M6-T06/T07) go through the same mapping as a matrix
+	// instead of as pixels: a straighten or a resize keeps them sharp.
+	changed.extend(map_generated_layers(doc, mapping));
+	if let Some((image, offset)) = selection {
+		doc.selection = Some(Selection { image, offset });
+	}
+	if let Some((image, offset)) = reselect {
+		doc.reselect = Some(Selection { image, offset });
+	}
+	changed.sort_unstable();
+	changed.dedup();
+	Ok(changed)
+}
+
+/// One placed image (`image` at `offset`) resampled through a canvas mapping:
+/// the mapped bounding box becomes the image's new offset and size, and the
+/// same mapping moved to that box maps its pixels (M6-T02; M6-T03's straighten
+/// and M6-T04's Free Transform reuse it).
+fn resample_placed(
+	ops: &dyn PixelOps,
+	image: &TiledImage,
+	offset: (i32, i32),
+	mapping: Mapping,
+	filter: Filter,
+	store: &TileStore,
+) -> Result<(TiledImage, (i32, i32)), CommandError> {
+	let placed = mapping.after_translation(f64::from(offset.0), f64::from(offset.1));
+	let rect = [0.0, 0.0, f64::from(image.width()), f64::from(image.height())];
+	let Some((new_offset, size)) = dest_rect(&placed, rect) else {
+		return Err(CommandError::NotAllowed("this mapping cannot be resampled tile by tile".into()));
+	};
+	let local = placed.after_destination_translation(-f64::from(new_offset.0), -f64::from(new_offset.1));
+	Ok((ops.resample(image, local, size, filter, store)?, new_offset))
+}
+
 fn select_all(doc: &mut Document) -> Result<CommandEffect, CommandError> {
 	if doc.width == 0 || doc.height == 0 {
 		return Err(CommandError::NotAllowed("the document is empty".into()));
@@ -1613,6 +2715,7 @@ mod tests {
 	use crate::color::{BitDepth, ColorProfile, DocumentColor};
 	use crate::history::History;
 	use crate::selection::{SelectMode, SelectModify, SelectionShape, gray_at, set_gray as set_coverage};
+	use crate::text::{FontStyle, TextFrame};
 
 	/// Stands in for the engine's pixel operations: a composite is a solid
 	/// image whose value counts the layers composited; a filter returns the
@@ -1630,6 +2733,61 @@ mod tests {
 			let value = background.map_or([n, n, n, n], |_| [n, n, n, u16::MAX]);
 			image.set_slot(0, 0, TileSlot::Solid(PixelValue(value)));
 			Ok(image)
+		}
+
+		fn rotate(
+			&self,
+			image: &TiledImage,
+			offset: (i32, i32),
+			canvas: (u32, u32),
+			op: Permutation,
+			store: &TileStore,
+		) -> Result<(TiledImage, (i32, i32)), CommandError> {
+			// The same permutation arithmetic `fx_ops::permute` runs (that module
+			// is tested on its own, and `fx-engine` tests the real one end to
+			// end); this one works on the slots directly so the command tests can
+			// see where content lands.
+			let size = (image.width(), image.height());
+			let dest = op.size(size);
+			let format = image.format();
+			let mut out = TiledImage::new(dest.0, dest.1, format);
+			for ty in 0..out.grid(0).rows() {
+				for tx in 0..out.grid(0).cols() {
+					let mut buffer = TileBuffer::zeroed(format);
+					let mut used = false;
+					for y in 0..TILE_SIZE {
+						for x in 0..TILE_SIZE {
+							let (gx, gy) = (tx * TILE_SIZE + x, ty * TILE_SIZE + y);
+							let Some(source) = op.source_pixel((gx, gy), size) else { continue };
+							let px = read_slot(
+								image.slot(0, source.0 / TILE_SIZE, source.1 / TILE_SIZE),
+								format,
+								store,
+								source.0 % TILE_SIZE,
+								source.1 % TILE_SIZE,
+							);
+							used = true;
+							write_pixel(&mut buffer, format, x, y, px);
+						}
+					}
+					if used {
+						out.put_buffer(store, tx, ty, buffer);
+					}
+				}
+			}
+			let new_offset = op.offset(offset, size, canvas).ok_or(CommandError::InvalidValue {
+				field: "offset",
+				reason: "the rotated offset does not fit in 32 bits".into(),
+			})?;
+			Ok((out, new_offset))
+		}
+
+		fn resample(&self, image: &TiledImage, _: Mapping, size: (u32, u32), _: Filter, _: &TileStore) -> Result<TiledImage, CommandError> {
+			// An empty image of the mapped size: these tests check the *geometry*
+			// a command derives from `resample_placed` (which image size and
+			// offset, the document's new size); the pixels are the sampler's job
+			// (`fx-ops`, and the engine's end-to-end tests).
+			Ok(TiledImage::new(size.0, size.1, image.format()))
 		}
 
 		fn convert(&self, image: &TiledImage, _: &crate::ops::Conversion<'_>, _: &TileStore) -> Result<TiledImage, CommandError> {
@@ -1776,6 +2934,59 @@ mod tests {
 			self.add(NewLayer::Pixel, name)
 		}
 
+		/// Add a layer with the document's own default name, which is what a tool
+		/// does (the Shape tool names the layer after the shape it drew).
+		fn add_default(&mut self, new: NewLayer) -> LayerId {
+			self.ok(Command::AddLayer { layer: new, name: None });
+			self.doc.active_layer().expect("AddLayer selects the new layer")
+		}
+
+		/// A shape layer as the Shape tool adds it (M6-T06): `shape` in local
+		/// space, placed by `transform`, filled with one solid colour.
+		fn add_shape(&mut self, shape: VectorShape, transform: [f64; 6]) -> LayerId {
+			self.add_default(NewLayer::Shape {
+				shape,
+				fill: Some(Paint::Solid { rgba: [40_000, 0, 0, 65_535] }),
+				stroke: None,
+				transform,
+			})
+		}
+
+		/// A shape layer's cache.
+		fn cache(&self, id: LayerId) -> &TiledImage {
+			match self.kind(id) {
+				LayerKind::Shape { cache, .. } => cache,
+				other => panic!("not a shape layer: {other:?}"),
+			}
+		}
+
+		/// A shape layer's local → document matrix.
+		fn matrix(&self, id: LayerId) -> [f64; 6] {
+			match self.kind(id) {
+				LayerKind::Shape { transform, .. } => *transform,
+				other => panic!("not a shape layer: {other:?}"),
+			}
+		}
+
+		/// The dirty tiles of a shape layer's level 0.
+		fn dirty_shape_tiles(&self, id: LayerId) -> Vec<(u32, u32)> {
+			self.cache(id).dirty_tiles(0).collect()
+		}
+
+		/// Pretend every tile of a shape layer's cache has been drawn: what is
+		/// dirty after the next command is only what that command invalidated.
+		fn clear_shape_cache(&mut self, id: LayerId) {
+			let Some(layer) = self.doc.layer_mut(id) else { return };
+			let LayerKind::Shape { cache, .. } = &mut layer.kind else { return };
+			for level in 0..cache.level_count() {
+				for ty in 0..cache.grid(level).rows() {
+					for tx in 0..cache.grid(level).cols() {
+						cache.set_derived_slot(level, tx, ty, TileSlot::Empty);
+					}
+				}
+			}
+		}
+
 		fn group(&mut self, name: &str) -> LayerId {
 			self.add(NewLayer::Group, name)
 		}
@@ -1888,6 +3099,23 @@ mod tests {
 			image.put_buffer(store, tile.0, tile.1, TileBuffer::filled(format, PixelValue::gray16(gray)));
 		}
 
+		/// Give a pixel layer an image of its own size (the fixture creates
+		/// document-sized ones), the way an importer of a small image would.
+		fn resize_image(&mut self, id: LayerId, width: u32, height: u32) {
+			let format = self.pixel(id).0.format();
+			if let LayerKind::Pixel { image, .. } = &mut self.doc.layer_mut(id).expect("layer exists").kind {
+				*image = TiledImage::new(width, height, format);
+			}
+		}
+
+		fn size(&self) -> (u32, u32) {
+			(self.doc.width, self.doc.height)
+		}
+
+		fn selection(&self) -> &Selection {
+			self.doc.selection.as_ref().expect("a selection is set")
+		}
+
 		/// One command with undo/redo assertions: after `undo` the document must
 		/// be byte-identical to before, after `redo` to after.
 		fn round_trip(&mut self, command: Command) {
@@ -1921,6 +3149,34 @@ mod tests {
 		let at = ((y * TILE_SIZE + x) * 4) as usize;
 		let samples = buffer.as_u16();
 		[samples[at], samples[at + 1], samples[at + 2], samples[at + 3]]
+	}
+
+	/// One stored pixel of a slot, straight 16-bit (gray: channel 0).
+	fn read_slot(slot: &TileSlot, format: PixelFormat, store: &TileStore, x: u32, y: u32) -> [u16; 4] {
+		match slot {
+			TileSlot::Empty => [0; 4],
+			TileSlot::Solid(value) => value.0,
+			TileSlot::Data(handle) => match store.get(handle) {
+				Err(_) => [0; 4],
+				Ok(buffer) => match format {
+					PixelFormat::Rgba16 => pixel_at(&buffer, x, y),
+					PixelFormat::Gray16 => [buffer.as_u16()[(y * TILE_SIZE + x) as usize], 0, 0, 0],
+					_ => [0; 4],
+				},
+			},
+		}
+	}
+
+	/// Write one pixel of a tile in the fixture formats (see [`read_slot`]).
+	fn write_pixel(buffer: &mut TileBuffer, format: PixelFormat, x: u32, y: u32, px: [u16; 4]) {
+		match format {
+			PixelFormat::Rgba16 => set_pixel(buffer, x, y, px),
+			PixelFormat::Gray16 => {
+				let at = ((y * TILE_SIZE + x) * 2) as usize;
+				buffer.bytes_mut()[at..at + 2].copy_from_slice(&px[0].to_ne_bytes());
+			}
+			_ => {}
+		}
 	}
 
 	/// Tiles of a level-0 grid that hold real pixels (as opposed to empty or
@@ -3538,6 +4794,1035 @@ mod tests {
 			.unwrap(),
 			r#"{"op":"modify_selection","modify":{"kind":"feather","px":3.0}}"#
 		);
+	}
+
+	#[test]
+	fn every_image_geometry_command_round_trips_through_json() {
+		let commands = vec![
+			Command::RotateCanvas { quarter_turns: 1 },
+			Command::RotateCanvas { quarter_turns: 3 },
+			Command::FlipCanvas { horizontal: true },
+			Command::FlipCanvas { horizontal: false },
+			Command::RotateCanvasArbitrary {
+				angle_deg: 12.5,
+				filter: Filter::BicubicAutomatic,
+			},
+			Command::CanvasSize {
+				width: 800,
+				height: 600,
+				anchor: Anchor9::Center,
+			},
+			Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: Some(Filter::BicubicSharper),
+			},
+			Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: None,
+			},
+			Command::Crop {
+				rect: (10, -20, 400, 300),
+				angle_deg: 0.0,
+				delete_cropped: false,
+			},
+			Command::Transform {
+				layer: LayerRef::Active,
+				// Values JSON holds exactly (serde_json's float parse is not bit-exact).
+				mapping: Box::new(Mapping::affine(0.5, 0.25, -0.25, 0.5, 10.0, 20.0)),
+				filter: Filter::Bicubic,
+			},
+			Command::Crop {
+				rect: (0, 0, 400, 300),
+				angle_deg: -7.5,
+				delete_cropped: true,
+			},
+		];
+		for command in commands {
+			let json = serde_json::to_string(&command).unwrap();
+			assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), command, "{json}");
+		}
+		// Pin the wire shapes: `dlg:rotate-arbitrary`, `dlg:canvas-size` and
+		// `dlg:image-size` send exactly these (docs/PROTOCOL.md §4).
+		assert_eq!(
+			serde_json::to_string(&Command::RotateCanvas { quarter_turns: 1 }).unwrap(),
+			r#"{"op":"rotate_canvas","quarter_turns":1}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::FlipCanvas { horizontal: true }).unwrap(),
+			r#"{"op":"flip_canvas","horizontal":true}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::RotateCanvasArbitrary {
+				angle_deg: 12.5,
+				filter: Filter::Bicubic
+			})
+			.unwrap(),
+			r#"{"op":"rotate_canvas_arbitrary","angle_deg":12.5,"filter":"bicubic"}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::CanvasSize {
+				width: 800,
+				height: 600,
+				anchor: Anchor9::TopLeft
+			})
+			.unwrap(),
+			r#"{"op":"canvas_size","width":800,"height":600,"anchor":"top_left"}"#
+		);
+		assert_eq!(
+			serde_json::to_string(&Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: Some(Filter::Lanczos3)
+			})
+			.unwrap(),
+			r#"{"op":"image_size","width":800,"height":600,"ppi":300.0,"resample":"lanczos3"}"#
+		);
+		// "Resample" off: the print resolution changes, the pixels do not.
+		assert_eq!(
+			serde_json::to_string(&Command::ImageSize {
+				width: 800,
+				height: 600,
+				ppi: 300.0,
+				resample: None
+			})
+			.unwrap(),
+			r#"{"op":"image_size","width":800,"height":600,"ppi":300.0,"resample":null}"#
+		);
+		// The crop tool's ✓ and Image ▸ Crop send this (docs/PROTOCOL.md §4).
+		assert_eq!(
+			serde_json::to_string(&Command::Crop {
+				rect: (60, 70, 200, 150),
+				angle_deg: 0.0,
+				delete_cropped: false
+			})
+			.unwrap(),
+			r#"{"op":"crop","rect":[60,70,200,150],"angle_deg":0.0,"delete_cropped":false}"#
+		);
+	}
+
+	#[test]
+	fn quarter_turns_move_the_image_and_its_offset_and_come_back() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [111, 222, 333, 65_535]), (99, 59, [10, 20, 30, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+		assert_eq!(f.size(), (400, 300));
+
+		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
+		assert_eq!(f.size(), (300, 400), "the odd quarter turn swaps the axes");
+		assert_eq!(f.pixel(a).1, (200, 50), "the offset follows the content");
+		assert_eq!(f.pixel(a).0.width(), 60);
+		assert_eq!(f.pixel(a).0.height(), 100);
+		// A clockwise turn puts the image's bottom-left pixel at its top-left.
+		assert_eq!(f.read_pixel(a, 59, 0), [111, 222, 333, 65_535]);
+		assert_eq!(f.read_pixel(a, 0, 0), [0; 4], "the old top-left column is now the bottom row");
+
+		// Four quarter turns are the original document: size, offset and tiles.
+		for _ in 0..3 {
+			f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
+		}
+		assert_eq!(f.size(), (400, 300));
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!((f.pixel(a).0.width(), f.pixel(a).0.height()), (100, 60));
+		assert_eq!(f.read_pixel(a, 0, 0), [111, 222, 333, 65_535]);
+		assert_eq!(f.read_pixel(a, 99, 59), [10, 20, 30, 65_535], "every pixel came home");
+		// The turns are history steps, and undo walks them back.
+		assert_eq!(f.history.labels().count(), 6, "AddLayer, OffsetLayer and the four turns");
+	}
+
+	#[test]
+	fn flipping_the_canvas_mirrors_the_content_and_undoes_itself() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [100, 0, 0, 65_535]), (99, 59, [0, 100, 0, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		assert_eq!(f.size(), (400, 300), "a flip keeps the canvas size");
+		assert_eq!(f.pixel(a).1, (250, 40));
+		assert_eq!(f.read_pixel(a, 99, 0), [100, 0, 0, 65_535], "left ↔ right");
+		assert_eq!(f.read_pixel(a, 0, 59), [0, 100, 0, 65_535]);
+
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!(f.read_pixel(a, 0, 0), [100, 0, 0, 65_535], "twice is the original");
+		assert_eq!(f.read_pixel(a, 99, 59), [0, 100, 0, 65_535]);
+	}
+
+	#[test]
+	fn canvas_size_moves_offsets_and_rewrites_no_pixel() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [7, 8, 9, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+		f.ok(Command::SelectAll);
+		let tile = f.slot(a, 0, 0).clone();
+
+		let effect = f.ok(Command::CanvasSize {
+			width: 600,
+			height: 500,
+			anchor: Anchor9::Center,
+		});
+		assert_eq!(f.size(), (600, 500));
+		assert_eq!(f.pixel(a).1, (150, 140), "the layer moved by the anchor's +100");
+		assert_eq!(f.selection().offset, (100, 100), "the selection moved with it");
+		assert!(f.slot(a, 0, 0).same_as(&tile), "no tile was rewritten (D-015)");
+		assert_eq!(effect.props_changed, vec![a], "an offset change is a property change");
+
+		// And back: the reverse anchor restores the document exactly.
+		f.ok(Command::CanvasSize {
+			width: 400,
+			height: 300,
+			anchor: Anchor9::Center,
+		});
+		assert_eq!(f.size(), (400, 300));
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!(f.selection().offset, (0, 0));
+		assert!(f.slot(a, 0, 0).same_as(&tile));
+	}
+
+	#[test]
+	fn image_size_without_resampling_only_changes_the_resolution() {
+		let mut f = Fixture::new();
+		f.ok(Command::ImageSize {
+			width: 400,
+			height: 300,
+			ppi: 200.0,
+			resample: None,
+		});
+		assert_eq!(f.doc.ppi, 200.0);
+		let error = f.fail(Command::ImageSize {
+			width: 200,
+			height: 150,
+			ppi: 300.0,
+			resample: None,
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+		assert_eq!(f.doc.ppi, 200.0, "nothing was applied");
+	}
+
+	#[test]
+	fn image_size_scales_every_offset_the_masks_and_the_selection() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 40,
+			dy: 20,
+		});
+		f.ok(Command::AddMask {
+			layer: LayerRef::Id(a),
+			fill: MaskFill::RevealAll,
+		});
+		f.ok(Command::SelectAll);
+
+		let effect = f.ok_with_ops(Command::ImageSize {
+			width: 200,
+			height: 150,
+			ppi: 144.0,
+			resample: Some(Filter::Bicubic),
+		});
+		assert_eq!(f.size(), (200, 150));
+		assert_eq!(f.doc.ppi, 144.0);
+		assert!(effect.pixels_changed.contains(&a));
+		// Half scale about the canvas origin: the 100 × 60 image at (40, 20)
+		// becomes 50 × 30 at (20, 10).
+		assert_eq!(f.pixel(a).1, (20, 10));
+		assert_eq!((f.pixel(a).0.width(), f.pixel(a).0.height()), (50, 30));
+		let mask = f.mask(a).image.clone();
+		assert_eq!((mask.width(), mask.height()), (200, 150), "a document-sized mask scales with the canvas");
+		assert_eq!((f.selection().image.width(), f.selection().image.height()), (200, 150));
+	}
+
+	#[test]
+	fn crop_without_deleting_keeps_the_pixels_and_rewrites_nothing() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(0, 0, [7, 8, 9, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 50,
+			dy: 40,
+		});
+		f.ok(Command::SelectAll);
+		let tile = f.slot(a, 0, 0).clone();
+
+		let effect = f.ok(Command::Crop {
+			rect: (60, 70, 200, 150),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		});
+		assert_eq!(effect.label, "Crop");
+		assert_eq!(f.size(), (200, 150));
+		assert_eq!(f.pixel(a).1, (-10, -30), "the layer moved with the canvas");
+		assert_eq!(f.selection().offset, (-60, -70), "and so did the selection");
+		assert!(f.slot(a, 0, 0).same_as(&tile), "no pixel was rewritten (D-015)");
+		assert_eq!(effect.props_changed, vec![a], "an offset change is a property change");
+		assert!(effect.pixels_changed.is_empty());
+		assert_eq!(f.read_pixel(a, 0, 0), [7, 8, 9, 65_535], "the pixels are where they were");
+
+		// Cropping back from the old canvas's own corner is the identity.
+		f.ok(Command::Crop {
+			rect: (-60, -70, 400, 300),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		});
+		assert_eq!(f.size(), (400, 300));
+		assert_eq!(f.pixel(a).1, (50, 40));
+		assert_eq!(f.selection().offset, (0, 0));
+		assert!(f.slot(a, 0, 0).same_as(&tile), "still the same tile handle");
+	}
+
+	#[test]
+	fn crop_with_delete_leaves_nothing_outside_the_rectangle() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		// Two pixels in the first tile, one in the second.
+		f.paint(a, &[(10, 20, [1, 2, 3, 65_535]), (200, 100, [4, 5, 6, 65_535])]);
+		f.paint(a, &[(300, 10, [7, 8, 9, 65_535])]);
+		f.ok(Command::SelectAll);
+
+		let effect = f.ok(Command::Crop {
+			rect: (50, 50, 200, 150),
+			angle_deg: 0.0,
+			delete_cropped: true,
+		});
+		assert_eq!(f.size(), (200, 150));
+		assert_eq!(effect.pixels_changed, vec![a]);
+		assert_eq!(f.pixel(a).1, (-50, -50), "the offsets still move");
+		assert_eq!(f.read_pixel(a, 200, 100), [4, 5, 6, 65_535], "inside the rectangle");
+		assert_eq!(f.read_pixel(a, 10, 20), [0; 4], "outside it the pixel is gone");
+		assert_eq!(f.read_pixel(a, 300, 10), [0; 4], "a whole tile outside was dropped");
+		assert!(matches!(f.slot(a, 1, 0), TileSlot::Empty));
+		// The selection is clipped too, and then moves with the canvas: what the
+		// rectangle kept is selected over the whole new canvas, and the coverage
+		// outside it is gone.
+		let selection = f.selection();
+		assert_eq!(selection.offset, (-50, -50), "it moved with the canvas");
+		assert!(matches!(selection.image.slot(0, 0, 0), TileSlot::Data(_)), "the crossed tile was rewritten");
+		assert!(matches!(selection.image.slot(0, 1, 0), TileSlot::Empty), "a tile below the rectangle went");
+		assert!(matches!(selection.image.slot(1, 0, 0), TileSlot::Empty), "and one to its right");
+		assert_eq!(f.doc.width, 200, "the selection is read in the new canvas's frame");
+	}
+
+	#[test]
+	fn a_straighten_turns_the_images_and_makes_the_document_the_rectangle() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		let b = f.add_pixel("Layer 2");
+		f.resize_image(b, 100, 60);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(b),
+			dx: 40,
+			dy: 20,
+		});
+
+		let effect = f.ok_with_ops(Command::Crop {
+			rect: (100, 80, 200, 150),
+			angle_deg: 10.0,
+			delete_cropped: false,
+		});
+		assert_eq!(f.size(), (200, 150), "the canvas is the rectangle");
+		assert!(effect.pixels_changed.contains(&a) && effect.pixels_changed.contains(&b));
+		assert!(effect.props_changed.is_empty(), "a turn carries the offsets in the image box");
+		// A 10° turn about the rectangle's centre, then into the rectangle's
+		// frame: the 100 × 60 image at (40, 20) unfolds into its mapped box.
+		let (image, offset) = f.pixel(b);
+		assert_eq!((offset, (image.width(), image.height())), ((-45, -86), (110, 77)));
+	}
+
+	#[test]
+	fn an_arbitrary_rotation_grows_the_canvas_to_the_rotated_box() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		let effect = f.ok_with_ops(Command::RotateCanvasArbitrary {
+			angle_deg: 90.0,
+			filter: Filter::Bicubic,
+		});
+		assert_eq!(effect.label, "Rotate Image");
+		assert_eq!(f.size(), (300, 400));
+		// A document-sized layer covers the whole new canvas, from the origin.
+		assert_eq!(f.pixel(a).1, (0, 0));
+		assert_eq!((f.pixel(a).0.width(), f.pixel(a).0.height()), (300, 400));
+
+		// A 45° turn grows the box by ⌈400·sin45 + 300·cos45⌉ each way.
+		let mut g = Fixture::new();
+		g.add_pixel("Layer 1");
+		g.ok_with_ops(Command::RotateCanvasArbitrary {
+			angle_deg: 45.0,
+			filter: Filter::Bilinear,
+		});
+		assert_eq!(g.size(), (496, 496));
+	}
+
+	#[test]
+	fn geometry_commands_refuse_nonsense_and_change_nothing() {
+		let mut f = Fixture::new();
+		f.add_pixel("Layer 1");
+		let before = format!("{:?}", f.doc);
+		let steps = f.history.labels().count();
+		for command in [
+			Command::RotateCanvas { quarter_turns: 0 },
+			Command::RotateCanvas { quarter_turns: 4 },
+			Command::CanvasSize {
+				width: 0,
+				height: 100,
+				anchor: Anchor9::Center,
+			},
+			Command::CanvasSize {
+				width: 100,
+				height: 0,
+				anchor: Anchor9::Center,
+			},
+			Command::ImageSize {
+				width: 100,
+				height: 100,
+				ppi: 0.0,
+				resample: Some(Filter::Nearest),
+			},
+			Command::ImageSize {
+				width: 100,
+				height: 100,
+				ppi: f32::NAN,
+				resample: None,
+			},
+			Command::ImageSize {
+				width: 0,
+				height: 100,
+				ppi: 72.0,
+				resample: None,
+			},
+			Command::RotateCanvasArbitrary {
+				angle_deg: 0.0,
+				filter: Filter::Bicubic,
+			},
+			Command::RotateCanvasArbitrary {
+				angle_deg: f64::NAN,
+				filter: Filter::Bicubic,
+			},
+			Command::Crop {
+				rect: (0, 0, 0, 100),
+				angle_deg: 0.0,
+				delete_cropped: true,
+			},
+			Command::Crop {
+				rect: (0, 0, 100, 0),
+				angle_deg: 0.0,
+				delete_cropped: false,
+			},
+			Command::Crop {
+				rect: (0, 0, 100, 100),
+				angle_deg: f64::NAN,
+				delete_cropped: false,
+			},
+		] {
+			let error = f.fail_with_ops(command.clone());
+			assert!(matches!(error, CommandError::InvalidValue { .. }), "{command:?}: {error:?}");
+		}
+		assert_eq!(format!("{:?}", f.doc), before);
+		assert_eq!(f.history.labels().count(), steps, "a refused command is no history step");
+	}
+
+	#[test]
+	fn geometry_commands_round_trip_through_history() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("Layer 1");
+		f.resize_image(a, 100, 60);
+		f.paint(a, &[(3, 4, [1, 2, 3, 65_535])]);
+		f.ok(Command::OffsetLayer {
+			layer: LayerRef::Id(a),
+			dx: 10,
+			dy: 20,
+		});
+		let ops = FakeOps;
+		for command in [
+			Command::RotateCanvas { quarter_turns: 1 },
+			Command::FlipCanvas { horizontal: false },
+			Command::CanvasSize {
+				width: 500,
+				height: 400,
+				anchor: Anchor9::BottomRight,
+			},
+			Command::ImageSize {
+				width: 200,
+				height: 150,
+				ppi: 72.0,
+				resample: Some(Filter::Bilinear),
+			},
+			Command::RotateCanvasArbitrary {
+				angle_deg: 30.0,
+				filter: Filter::Bicubic,
+			},
+			Command::Crop {
+				rect: (60, 70, 200, 150),
+				angle_deg: 0.0,
+				delete_cropped: true,
+			},
+		] {
+			let before = format!("{:?}", f.doc);
+			let mut ctx = CommandContext {
+				tiles: &f.store,
+				ops: Some(&ops),
+			};
+			f.history
+				.execute(&mut f.doc, command.clone(), &mut ctx)
+				.unwrap_or_else(|e| panic!("{command:?}: {e}"));
+			let after = format!("{:?}", f.doc);
+			assert_ne!(before, after, "{command:?} changed the document");
+			assert!(f.history.undo(&mut f.doc), "{command:?} is undoable");
+			assert_eq!(format!("{:?}", f.doc), before, "undo restores {command:?}");
+			assert!(f.history.redo(&mut f.doc), "{command:?} is redoable");
+			assert_eq!(format!("{:?}", f.doc), after, "redo replays {command:?}");
+		}
+	}
+
+	#[test]
+	fn a_shape_layer_carries_a_document_sized_derived_cache() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 10.0],
+		);
+		let cache = f.cache(id);
+		assert!(cache.is_derived(), "a shape's pixels are drawn from its geometry, never stored");
+		assert_eq!((cache.width(), cache.height()), (400, 300), "the cache is the canvas");
+		assert_eq!(f.dirty_shape_tiles(id).len(), 4, "a new shape has every tile to draw");
+	}
+
+	#[test]
+	fn a_shape_layer_is_named_after_its_shape() {
+		let mut f = Fixture::new();
+		let rect = f.add_shape(
+			VectorShape::Rect {
+				w: 10.0,
+				h: 10.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+		);
+		let rounded = f.add_shape(
+			VectorShape::Rect {
+				w: 10.0,
+				h: 10.0,
+				radii: [3.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+		);
+		let star = f.add_shape(VectorShape::Polygon { sides: 5, star_inset: 0.5 }, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+		let ellipse = f.add_shape(VectorShape::Ellipse { w: 10.0, h: 10.0 }, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+		assert_eq!(f.name(rect), "Rectangle 1", "Photoshop names the layer after the tool");
+		assert_eq!(f.name(rounded), "Rounded Rectangle 1");
+		assert_eq!(f.name(star), "Star 1");
+		assert_eq!(f.name(ellipse), "Ellipse 1", "each kind has its own counter");
+	}
+
+	#[test]
+	fn set_shape_dirties_only_the_tiles_the_outline_reaches() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 10.0],
+		);
+		f.clear_shape_cache(id);
+		assert!(f.dirty_shape_tiles(id).is_empty());
+		// A fill has no effect on the box: only the tile the shape sits in.
+		f.ok(Command::SetShape {
+			layer: LayerRef::Id(id),
+			shape: None,
+			fill: Some(Some(Paint::Solid { rgba: [0, 60_000, 0, 65_535] })),
+			stroke: None,
+			transform: None,
+		});
+		assert_eq!(f.dirty_shape_tiles(id), vec![(0, 0)], "a 100 × 50 rect at (10, 10) is in tile (0, 0)");
+		// Moving it dirties where it was and where it goes — nothing else.
+		f.clear_shape_cache(id);
+		f.ok(Command::SetShape {
+			layer: LayerRef::Id(id),
+			shape: None,
+			fill: None,
+			stroke: None,
+			transform: Some([1.0, 0.0, 0.0, 1.0, 300.0, 250.0]),
+		});
+		let mut dirty = f.dirty_shape_tiles(id);
+		dirty.sort_unstable();
+		assert_eq!(dirty, vec![(0, 0), (1, 1)], "the old tile and the new one");
+	}
+
+	#[test]
+	fn set_shape_only_takes_a_shape_layer() {
+		let mut f = Fixture::new();
+		let pixel = f.add_pixel("Layer 1");
+		let error = f.fail(Command::SetShape {
+			layer: LayerRef::Id(pixel),
+			shape: None,
+			fill: Some(None),
+			stroke: None,
+			transform: None,
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+	}
+
+	#[test]
+	fn rasterising_a_shape_layer_turns_it_into_pixels_and_keeps_the_rest() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(VectorShape::Ellipse { w: 40.0, h: 40.0 }, [1.0, 0.0, 0.0, 1.0, 5.0, 5.0]);
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(id),
+			props: LayerPropsPatch {
+				opacity: Some(0.5),
+				blend: Some(BlendMode::Multiply),
+				..Default::default()
+			},
+		});
+		let before = f.layer(id).clone();
+		let effect = f.ok_with_ops(Command::Rasterize {
+			layers: vec![LayerRef::Id(id)],
+		});
+		assert_eq!(effect.label, "Rasterize Layer");
+		assert_eq!(effect.pixels_changed, vec![id]);
+		assert_eq!(effect.props_changed, vec![id]);
+		let (image, offset) = f.pixel(id);
+		assert_eq!(offset, (0, 0), "a rasterised layer sits at the canvas origin");
+		assert_eq!((image.width(), image.height()), (400, 300));
+		assert_eq!(
+			(f.name(id), f.layer(id).opacity, f.layer(id).blend),
+			(before.name.as_str(), 0.5, BlendMode::Multiply)
+		);
+		assert_eq!(f.layer(id).id, id, "the layer keeps its identity");
+	}
+
+	#[test]
+	fn rasterising_refuses_pixels_a_group_and_nothing_at_all() {
+		let mut f = Fixture::new();
+		let pixel = f.add_pixel("Layer 1");
+		let group = f.group("Group 1");
+		for (layers, expected) in [
+			(vec![LayerRef::Id(pixel)], "already pixels"),
+			(vec![LayerRef::Id(group)], "cannot be rasterised"),
+			(Vec::new(), "no layers"),
+		] {
+			let error = f.fail_with_ops(Command::Rasterize { layers });
+			assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+			assert!(error.to_string().contains(expected), "{error}");
+		}
+	}
+
+	#[test]
+	fn a_shape_layer_turns_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+		);
+		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
+		// A quarter turn clockwise sends (x, y) to (h − 1 − y, x) in a 400 × 300
+		// canvas, so the shape's origin lands at (279, 10) — and the canvas is
+		// now 300 × 400.
+		assert_eq!(f.matrix(id), [0.0, 1.0, -1.0, 0.0, 279.0, 10.0]);
+		assert_eq!((f.cache(id).width(), f.cache(id).height()), (300, 400), "the cache follows the canvas");
+		assert_eq!(f.dirty_shape_tiles(id).len(), 4, "2 × 2 tiles at the new size");
+	}
+
+	#[test]
+	fn a_shape_layer_flips_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+		);
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		// A horizontal flip sends x to w − 1 − x: the matrix becomes a mirror.
+		assert_eq!(f.matrix(id), [-1.0, 0.0, 0.0, 1.0, 389.0, 20.0]);
+		assert_eq!((f.cache(id).width(), f.cache(id).height()), (400, 300), "a flip keeps the size");
+	}
+
+	#[test]
+	fn a_shape_layer_scales_with_image_size() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+		);
+		f.ok_with_ops(Command::ImageSize {
+			width: 200,
+			height: 150,
+			ppi: 72.0,
+			resample: Some(Filter::Bilinear),
+		});
+		assert_eq!(f.matrix(id), [0.5, 0.0, 0.0, 0.5, 5.0, 10.0], "half the canvas, half the placement");
+		assert_eq!(f.dirty_shape_tiles(id).len(), 1, "200 × 150 is one tile");
+	}
+
+	#[test]
+	fn a_shape_layer_crops_and_canvas_sizes_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+		);
+		let shape_before = format!("{:?}", f.kind(id));
+		f.ok_with_ops(Command::Crop {
+			rect: (60, 70, 200, 150),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		});
+		// The crop box's top-left becomes the origin: the shape moves by it and
+		// its geometry is untouched (a shape is not rasterised by a crop).
+		assert_eq!(f.matrix(id), [1.0, 0.0, 0.0, 1.0, -50.0, -50.0]);
+		assert_eq!(format!("{:?}", f.kind(id)), shape_before, "crop must not change the geometry");
+		assert_eq!((f.cache(id).width(), f.cache(id).height()), (200, 150));
+		f.ok_with_ops(Command::CanvasSize {
+			width: 300,
+			height: 250,
+			anchor: Anchor9::TopLeft,
+		});
+		assert_eq!(f.matrix(id), [1.0, 0.0, 0.0, 1.0, -50.0, -50.0], "an anchored canvas grows on one side");
+		assert_eq!((f.cache(id).width(), f.cache(id).height()), (300, 250));
+	}
+
+	#[test]
+	fn a_shape_layer_straightens_with_a_cropped_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_shape(
+			VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [0.0; 4],
+			},
+			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+		);
+		f.ok_with_ops(Command::Crop {
+			rect: (0, 0, 400, 300),
+			angle_deg: 90.0,
+			delete_cropped: false,
+		});
+		// A quarter turn about the crop box's centre (200, 150) maps (x, y) to
+		// (350 − y, x − 50): the same mapping the pixels were resampled through.
+		let m = f.matrix(id);
+		assert!((m[0]).abs() < 1e-9 && (m[1] - 1.0).abs() < 1e-9, "a quarter turn: {m:?}");
+		assert!((m[2] + 1.0).abs() < 1e-9 && m[3].abs() < 1e-9, "and no scale: {m:?}");
+		assert!((m[4] - 330.0).abs() < 1e-9 && (m[5] + 40.0).abs() < 1e-9, "the placement turns too: {m:?}");
+		// A local point of the shape: (100, 50) is the far corner of a 100 × 50
+		// rect, and lands where (10 + 100, 20 + 50) = (110, 70) goes — (280, 60).
+		let (x, y) = (m[0] * 100.0 + m[2] * 50.0 + m[4], m[1] * 100.0 + m[3] * 50.0 + m[5]);
+		assert!((x - 280.0).abs() < 1e-9 && (y - 60.0).abs() < 1e-9, "the far corner lands at ({x}, {y})");
+	}
+
+	/// The shape layers of a document, in the document's own order.
+	fn shape_layers(doc: &Document) -> Vec<LayerId> {
+		let mut ids = Vec::new();
+		doc.walk(|layer, _| {
+			if matches!(layer.kind, LayerKind::Shape { .. }) {
+				ids.push(layer.id);
+			}
+		});
+		ids
+	}
+
+	#[test]
+	fn a_document_without_shapes_keeps_no_shape_state() {
+		let mut f = Fixture::new();
+		f.add_pixel("Layer 1");
+		f.ok(Command::RotateCanvas { quarter_turns: 2 });
+		assert!(shape_layers(&f.doc).is_empty());
+	}
+
+	/// A point text layer as the Type tool adds it (M6-T07).
+	fn text_content(text: &str, x: f64, y: f64) -> TextContent {
+		TextContent {
+			text: text.into(),
+			runs: vec![TextContent::default_run(text)],
+			transform: [1.0, 0.0, 0.0, 1.0, x, y],
+			..Default::default()
+		}
+	}
+
+	impl Fixture {
+		/// A text layer with one run, the way clicking with the Type tool
+		/// starts one.
+		fn add_text(&mut self, text: &str, x: f64, y: f64) -> LayerId {
+			self.add_default(NewLayer::Text {
+				content: text_content(text, x, y),
+			})
+		}
+
+		/// A text layer's whole content.
+		fn text(&self, id: LayerId) -> TextContent {
+			self.kind(id).text_content().expect("a text layer")
+		}
+
+		/// A text layer's derived cache.
+		fn text_cache(&self, id: LayerId) -> &TiledImage {
+			match self.kind(id) {
+				LayerKind::Text { cache, .. } => cache,
+				other => panic!("not a text layer: {other:?}"),
+			}
+		}
+
+		/// The dirty tiles of a text layer's level 0.
+		fn dirty_text_tiles(&self, id: LayerId) -> Vec<(u32, u32)> {
+			self.text_cache(id).dirty_tiles(0).collect()
+		}
+
+		/// Pretend the tiles of a text layer's cache have been drawn.
+		fn clear_text_cache(&mut self, id: LayerId) {
+			let Some(layer) = self.doc.layer_mut(id) else { return };
+			let LayerKind::Text { cache, .. } = &mut layer.kind else { return };
+			for ty in 0..cache.grid(0).rows() {
+				for tx in 0..cache.grid(0).cols() {
+					cache.set_derived_slot(0, tx, ty, TileSlot::Empty);
+				}
+			}
+		}
+
+		/// Replace a text layer's content, dirtying `dirty`.
+		fn set_text(&mut self, id: LayerId, content: TextContent, dirty: [f64; 4]) -> CommandEffect {
+			self.ok(Command::SetText {
+				layer: LayerRef::Id(id),
+				content,
+				dirty,
+			})
+		}
+	}
+
+	/// The text layers of a document, in the document's own order.
+	fn text_layers(doc: &Document) -> Vec<LayerId> {
+		let mut ids = Vec::new();
+		doc.walk(|layer, _| {
+			if matches!(layer.kind, LayerKind::Text { .. }) {
+				ids.push(layer.id);
+			}
+		});
+		ids
+	}
+
+	#[test]
+	fn a_text_layer_carries_a_document_sized_derived_cache() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 40.0, 80.0);
+		let cache = f.text_cache(id);
+		assert!(cache.is_derived(), "text is drawn from its layout, never stored");
+		assert_eq!((cache.width(), cache.height()), (400, 300), "the cache is the canvas");
+		assert_eq!(f.dirty_text_tiles(id).len(), 4, "a new text layer has every tile to draw");
+		assert_eq!(f.text(id).transform, [1.0, 0.0, 0.0, 1.0, 40.0, 80.0], "the click places the frame");
+	}
+
+	#[test]
+	fn a_text_layer_is_named_after_its_text() {
+		let mut f = Fixture::new();
+		let hello = f.add_text("Hello", 0.0, 0.0);
+		let empty = f.add_default(NewLayer::Text {
+			content: TextContent::default(),
+		});
+		assert_eq!(f.name(hello), "Hello", "Photoshop names the layer after its first line");
+		assert_eq!(f.name(empty), "Type 1", "a layer with no text uses the counter");
+	}
+
+	#[test]
+	fn set_text_dirties_only_the_box_it_is_given() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 10.0, 10.0);
+		f.clear_text_cache(id);
+		assert!(f.dirty_text_tiles(id).is_empty());
+		let mut content = f.text(id);
+		content.text = "Hello, world".into();
+		let effect = f.set_text(id, content.clone(), [10.0, 10.0, 120.0, 40.0]);
+		assert_eq!(effect.label, "Type Tool", "Photoshop's history name for a committed edit");
+		assert_eq!(f.text(id).text, "Hello, world");
+		assert_eq!(f.dirty_text_tiles(id), vec![(0, 0)], "the box is inside the first tile");
+		// Undo redraws the same box and restores the old text.
+		assert!(f.history.undo(&mut f.doc));
+		assert_eq!(f.text(id).text, "Hello");
+		assert_eq!(f.dirty_text_tiles(id), vec![(0, 0)]);
+	}
+
+	#[test]
+	fn a_text_layer_follows_its_text_until_it_is_renamed() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 0.0, 0.0);
+		let mut content = f.text(id);
+		content.text = "Goodbye".into();
+		f.set_text(id, content.clone(), [0.0; 4]);
+		assert_eq!(f.name(id), "Goodbye", "the name follows the text");
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(id),
+			props: LayerPropsPatch {
+				name: Some("Title".into()),
+				..Default::default()
+			},
+		});
+		content.text = "Farewell".into();
+		f.set_text(id, content, [0.0; 4]);
+		assert_eq!(f.name(id), "Title", "a renamed layer keeps its name");
+	}
+
+	#[test]
+	fn set_text_only_takes_a_text_layer_and_a_finite_matrix() {
+		let mut f = Fixture::new();
+		let pixel = f.add_pixel("Layer 1");
+		let error = f.fail(Command::SetText {
+			layer: LayerRef::Id(pixel),
+			content: text_content("Hello", 0.0, 0.0),
+			dirty: [0.0; 4],
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+		let id = f.add_text("Hello", 0.0, 0.0);
+		let mut content = f.text(id);
+		content.transform = [1.0, 0.0, 0.0, 1.0, f64::NAN, 0.0];
+		let error = f.fail(Command::SetText {
+			layer: LayerRef::Id(id),
+			content,
+			dirty: [0.0; 4],
+		});
+		assert!(matches!(error, CommandError::InvalidValue { field: "transform", .. }), "{error:?}");
+		assert_eq!(f.text(id).transform[4], 0.0, "the document is untouched");
+	}
+
+	#[test]
+	fn a_text_layer_turns_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 10.0, 20.0);
+		f.set_text(
+			id,
+			{
+				let mut content = f.text(id);
+				content.frame = TextFrame::Box { w: 100.0, h: 50.0 };
+				content
+			},
+			[0.0; 4],
+		);
+		f.ok(Command::RotateCanvas { quarter_turns: 1 });
+		assert_eq!((f.doc.width, f.doc.height), (300, 400), "the canvas turns");
+		assert_eq!(
+			(f.text_cache(id).width(), f.text_cache(id).height()),
+			(300, 400),
+			"and the cache is rebuilt for it"
+		);
+		let m = f.text(id).transform;
+		assert!((m[1] - 1.0).abs() < 1e-9 && (m[2] + 1.0).abs() < 1e-9, "the frame turns with it: {m:?}");
+		// The frame's own size is unchanged: the canvas mapping is in the matrix.
+		assert_eq!(f.text(id).frame, TextFrame::Box { w: 100.0, h: 50.0 });
+		// A point inside the frame lands where the canvas mapping puts it.
+		let (x, y) = (m[0] * 50.0 + m[4], m[1] * 50.0 + m[5]);
+		assert!((x - 330.0).abs() < 1e-9 && (y + 30.0).abs() < 1e-9, "(10 + 50, 20) turns to ({x}, {y})");
+	}
+
+	#[test]
+	fn a_text_layer_crops_and_resizes_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 100.0, 100.0);
+		f.ok(Command::CanvasSize {
+			width: 200,
+			height: 150,
+			anchor: Anchor9::Center,
+		});
+		assert_eq!((f.text_cache(id).width(), f.text_cache(id).height()), (200, 150));
+		assert_eq!(f.text(id).transform[4], 0.0, "a centre canvas resize moves the origin");
+		assert_eq!(f.text(id).transform[5], 25.0, "by the anchor's share of the difference");
+		f.ok(Command::Crop {
+			rect: (0, 0, 100, 100),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		});
+		assert_eq!((f.text_cache(id).width(), f.text_cache(id).height()), (100, 100));
+		assert_eq!(f.text(id).transform[4], -100.0, "the crop's origin folds in too");
+	}
+
+	#[test]
+	fn a_text_layer_converts_its_run_colours_with_the_document() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 0.0, 0.0);
+		f.ok(Command::AssignProfile {
+			profile: ColorProfile::AdobeRgb1998,
+		});
+		let mut content = f.text(id);
+		content.runs[0].color = [100, 200, 300, 65_535];
+		content.runs[0].style = FontStyle::Bold;
+		f.set_text(id, content, [0.0; 4]);
+		f.clear_text_cache(id);
+		f.ok_with_ops(Command::ConvertProfile {
+			profile: ColorProfile::Srgb,
+			intent: RenderingIntent::RelativeColorimetric,
+			bpc: true,
+		});
+		assert_eq!(f.text(id).runs[0].style, FontStyle::Bold, "the formatting stays");
+		assert!(!f.dirty_text_tiles(id).is_empty(), "the colours changed, so the tiles have to be drawn again");
+	}
+
+	#[test]
+	fn rasterising_a_text_layer_keeps_its_identity() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 5.0, 5.0);
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(id),
+			props: LayerPropsPatch {
+				opacity: Some(0.25),
+				..Default::default()
+			},
+		});
+		f.ok_with_ops(Command::Rasterize {
+			layers: vec![LayerRef::Id(id)],
+		});
+		let (image, offset) = f.pixel(id);
+		assert_eq!(offset, (0, 0));
+		assert_eq!((image.width(), image.height()), (400, 300));
+		assert_eq!(f.layer(id).opacity, 0.25, "rasterising keeps the layer's own settings");
+		assert_eq!(f.name(id), "Hello");
+		assert!(text_layers(&f.doc).is_empty(), "and it is no longer a text layer");
+	}
+
+	#[test]
+	fn a_document_without_text_keeps_no_text_state() {
+		let mut f = Fixture::new();
+		f.add_pixel("Layer 1");
+		f.ok(Command::RotateCanvas { quarter_turns: 2 });
+		assert!(text_layers(&f.doc).is_empty());
 	}
 }
 

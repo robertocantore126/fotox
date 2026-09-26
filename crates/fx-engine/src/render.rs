@@ -31,7 +31,7 @@ use fx_render::adjust::LutCache;
 use fx_render::gpu::{CompositorConfig, GpuCompositor, TileOutcome, ViewportRenderer};
 use fx_render::overlay::tessellate;
 use fx_render::{
-	FramePlan, MipRequest, Overlay, TestPatternRenderer, TileKey, TileProgram, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame,
+	FramePlan, Overlay, TestPatternRenderer, TileKey, TileProgram, TileRequest, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame,
 };
 use fx_tiles::{TILE_SIZE, TileId, TileStore};
 
@@ -89,11 +89,12 @@ pub(crate) enum RenderRequest {
 	Stop,
 }
 
-/// Dirty mip tiles a frame needed, for the engine thread to compute.
+/// Tiles a frame needed that were not there yet — dirty mips and shape tiles
+/// — for the engine thread to compute (M1-T05, M6-T06).
 pub(crate) struct MipWork {
 	pub doc: DocId,
 	pub revision: u64,
-	pub requests: Vec<MipRequest>,
+	pub requests: Vec<TileRequest>,
 }
 
 /// Channels and shared state the render thread works with.
@@ -255,8 +256,10 @@ struct TilePipeline {
 	/// Which document / generation / snapshot `ready` and `programs` belong to.
 	current: Option<(DocId, u64)>,
 	snapshot: Option<Arc<Document>>,
-	/// Mip tiles already sent to the engine for this snapshot.
-	mips_sent: HashSet<(LayerId, bool, usize, u32, u32)>,
+	/// Tiles already sent to the engine for this snapshot (`TileRequest`
+	/// carries the layer, kind, level and position, so distinct requests stay
+	/// distinct keys).
+	mips_sent: HashSet<TileRequest>,
 	/// Tiles being loaded by rayon jobs.
 	loading: Arc<Mutex<HashSet<TileId>>>,
 	/// Source tiles uploaded by the last frame, and the running total it is
@@ -351,7 +354,7 @@ impl TilePipeline {
 						self.programs.insert(key, program);
 					}
 					Err(missing) => {
-						mips.extend(missing.into_iter().filter(|m| self.mips_sent.insert((m.layer, m.mask, m.level, m.x, m.y))));
+						mips.extend(missing.into_iter().filter(|m| self.mips_sent.insert(*m)));
 						continue;
 					}
 				}
@@ -405,6 +408,7 @@ impl TilePipeline {
 			(viewport.width, viewport.height),
 			&plan,
 			view.zoom,
+			view.rotation,
 			self.compositor.composite_view(),
 			&vertices,
 			time,

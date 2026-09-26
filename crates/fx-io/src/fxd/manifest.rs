@@ -12,6 +12,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use fx_core::vector::{Paint, StrokeStyle, VectorShape};
 use fx_core::{Adjustment, BlendMode, Document, DocumentColor, Layer, LayerId, LayerKind, Mask};
 use fx_tiles::{Backed, PixelFormat, PixelValue, TileClass, TileHandle, TileSlot, TileStore, TiledImage};
 use serde::de::{self, SeqAccess, Visitor};
@@ -43,6 +44,9 @@ pub struct Manifest {
 	pub selected: Vec<LayerId>,
 	/// Root layers, bottom → top.
 	pub layers: Vec<LayerEntry>,
+	/// Global Light angle (M6-T08).
+	#[serde(default = "default_global_light")]
+	pub global_light: f64,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -64,6 +68,9 @@ pub struct LayerEntry {
 	pub locked_transparency: bool,
 	pub locked_position: bool,
 	pub mask: Option<MaskEntry>,
+	/// Layer styles (M6-T08); absent in older files.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub styles: Option<fx_core::styles::LayerStyles>,
 	#[serde(flatten)]
 	pub kind: LayerKindEntry,
 }
@@ -72,10 +79,36 @@ pub struct LayerEntry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayerKindEntry {
-	Pixel { offset: (i32, i32), image: ImageEntry },
-	Group { expanded: bool, children: Vec<LayerEntry> },
-	Adjustment { adjustment: Adjustment },
-	SolidFill { rgba: [u16; 4] },
+	Pixel {
+		offset: (i32, i32),
+		image: ImageEntry,
+	},
+	Group {
+		expanded: bool,
+		children: Vec<LayerEntry>,
+	},
+	Adjustment {
+		adjustment: Adjustment,
+	},
+	SolidFill {
+		rgba: [u16; 4],
+	},
+	/// A shape layer (M6-T06): only the geometry is stored. The tile cache is
+	/// derived, so it is rebuilt from the outline after opening. The fields are
+	/// `serde(default)` so a manifest written before M6 still loads.
+	Shape {
+		shape: VectorShape,
+		#[serde(default)]
+		fill: Option<Paint>,
+		#[serde(default)]
+		stroke: Option<StrokeStyle>,
+		#[serde(default)]
+		transform: [f64; 6],
+	},
+	/// A text layer (M6-T07): its content; the cache is rebuilt after opening.
+	Text {
+		content: fx_core::TextContent,
+	},
 }
 
 /// A layer mask.
@@ -201,6 +234,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		name_counters: name_counters.to_vec(),
 		selected: doc.selected.clone(),
 		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
+		global_light: doc.global_light,
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -218,6 +252,7 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 		locked_pixels: layer.locked_pixels,
 		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
+		styles: layer.styles.clone(),
 		mask: layer.mask.as_ref().map(|mask| MaskEntry {
 			enabled: mask.enabled,
 			linked: mask.linked,
@@ -237,6 +272,21 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 				adjustment: adjustment.clone(),
 			},
 			LayerKind::SolidFill { rgba } => LayerKindEntry::SolidFill { rgba: *rgba },
+			LayerKind::Shape {
+				shape,
+				fill,
+				stroke,
+				transform,
+				cache: _,
+			} => LayerKindEntry::Shape {
+				shape: shape.clone(),
+				fill: *fill,
+				stroke: stroke.clone(),
+				transform: *transform,
+			},
+			LayerKind::Text { .. } => LayerKindEntry::Text {
+				content: layer.kind.text_content().unwrap_or_default(),
+			},
 		},
 	}
 }
@@ -305,12 +355,15 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 		return Err(IoError::Unsupported(format!("fxd manifest version {}", manifest.version)));
 	}
 	let mut doc = Document::new(manifest.width, manifest.height, manifest.color.clone(), manifest.ppi);
+	let size = (manifest.width, manifest.height);
+	let format = doc.color.depth.rgba_format();
 	doc.layers = manifest
 		.layers
 		.iter()
-		.map(|entry| layer_from_entry(entry, file, store))
+		.map(|entry| layer_from_entry(entry, file, store, size, format))
 		.collect::<Result<Vec<_>, _>>()?;
 	doc.selected = manifest.selected.clone();
+	doc.global_light = manifest.global_light;
 	let mut counters = [0u32; fx_core::NAME_KINDS];
 	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
 		*slot = *value;
@@ -318,7 +371,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	Ok(doc.with_id_state(manifest.next_layer_id, counters))
 }
 
-fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<Arc<Layer>, IoError> {
+fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, size: (u32, u32), format: PixelFormat) -> Result<Arc<Layer>, IoError> {
 	let kind = match &entry.kind {
 		LayerKindEntry::Pixel { offset, image } => LayerKind::Pixel {
 			image: image_from_entry(image, file, store)?,
@@ -326,10 +379,36 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) 
 		},
 		LayerKindEntry::Group { expanded, children } => LayerKind::Group {
 			expanded: *expanded,
-			children: children.iter().map(|child| layer_from_entry(child, file, store)).collect::<Result<_, _>>()?,
+			children: children
+				.iter()
+				.map(|child| layer_from_entry(child, file, store, size, format))
+				.collect::<Result<_, _>>()?,
 		},
 		LayerKindEntry::Adjustment { adjustment } => LayerKind::Adjustment(adjustment.clone()),
 		LayerKindEntry::SolidFill { rgba } => LayerKind::SolidFill { rgba: *rgba },
+		// The cache is derived geometry: it starts empty and dirty, and the
+		// render thread draws it again from the outline (M6-T06).
+		LayerKindEntry::Shape {
+			shape,
+			fill,
+			stroke,
+			transform,
+		} => LayerKind::Shape {
+			shape: shape.clone(),
+			fill: *fill,
+			stroke: stroke.clone(),
+			transform: *transform,
+			cache: TiledImage::derived(size.0, size.1, format),
+		},
+		LayerKindEntry::Text { content } => LayerKind::Text {
+			text: content.text.clone(),
+			runs: content.runs.clone(),
+			frame: content.frame,
+			align: content.align,
+			antialias: content.antialias,
+			transform: content.transform,
+			cache: TiledImage::derived(size.0, size.1, format),
+		},
 	};
 	let mut layer = Layer::new(entry.id, entry.name.clone(), kind);
 	layer.visible = entry.visible;
@@ -340,6 +419,13 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore) 
 	layer.locked_pixels = entry.locked_pixels;
 	layer.locked_transparency = entry.locked_transparency;
 	layer.locked_position = entry.locked_position;
+	if let Some(styles) = &entry.styles {
+		layer.styles = Some(styles.clone());
+		layer.effects = fx_core::styles::EffectKind::ALL
+			.iter()
+			.map(|_| TiledImage::derived(size.0, size.1, format))
+			.collect();
+	}
 	layer.mask = match &entry.mask {
 		Some(mask) => Some(Mask {
 			image: image_from_entry(&mask.image, file, store)?,
@@ -838,6 +924,29 @@ mod tests {
 			}
 			(LayerKind::Adjustment(aa), LayerKind::Adjustment(ab)) => assert_eq!(aa, ab),
 			(LayerKind::SolidFill { rgba: x }, LayerKind::SolidFill { rgba: y }) => assert_eq!(x, y),
+			// A shape layer stores its geometry; its cache is derived from it, so
+			// only the parameters are compared here (M6-T06).
+			(
+				LayerKind::Shape {
+					shape: sa,
+					fill: fa,
+					stroke: sta,
+					transform: ta,
+					cache: _,
+				},
+				LayerKind::Shape {
+					shape: sb,
+					fill: fb,
+					stroke: stb,
+					transform: tb,
+					cache: _,
+				},
+			) => {
+				assert_eq!(sa, sb);
+				assert_eq!(fa, fb);
+				assert_eq!(sta, stb);
+				assert_eq!(ta, tb);
+			}
 			_ => panic!("kind differs for {}", a.name),
 		}
 	}
@@ -893,4 +1002,70 @@ mod tests {
 		let restored = from_manifest(&manifest, &file, &store).unwrap();
 		assert_documents_equal(&doc, &restored, &store);
 	}
+
+	#[test]
+	fn a_shape_layer_round_trips_through_a_file() {
+		// Only the geometry is stored (M6-T06): the tiles are drawn from it, so
+		// the layer comes back with a dirty, canvas-sized cache instead of
+		// pixels, and a file written before shapes existed still loads.
+		let store = store();
+		let dir = std::env::temp_dir().join("fx-io-fxd-manifest-tests");
+		std::fs::create_dir_all(&dir).unwrap();
+		let mut doc = Document::new(
+			400,
+			300,
+			DocumentColor {
+				depth: BitDepth::U16,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		let id = doc.allocate_layer_id();
+		let kind = LayerKind::Shape {
+			shape: fx_core::vector::VectorShape::Rect {
+				w: 100.0,
+				h: 50.0,
+				radii: [8.0, 0.0, 8.0, 0.0],
+			},
+			fill: Some(fx_core::vector::Paint::Solid { rgba: [65_535, 0, 0, 65_535] }),
+			stroke: Some(fx_core::vector::StrokeStyle {
+				width: 3.0,
+				align: fx_core::vector::StrokeAlign::Outside,
+				paint: fx_core::vector::Paint::Solid { rgba: [0, 0, 65_535, 65_535] },
+				dash: Some(vec![4.0, 2.0]),
+			}),
+			transform: [1.0, 0.0, 0.0, 1.0, 30.0, 40.0],
+			cache: TiledImage::derived(400, 300, PixelFormat::Rgba16),
+		};
+		doc.layers.push(Arc::new(Layer::new(id, "Rectangle 1", kind)));
+
+		let path = dir.join("shape.fxd");
+		let file = write_document(&path, &doc, &store);
+		let footer = file.footer();
+		let (kind, payload) = file
+			.read_chunk(ChunkRef {
+				offset: footer.manifest_offset,
+				len: footer.manifest_len,
+			})
+			.unwrap();
+		assert_eq!(kind, ChunkKind::Manifest);
+		let manifest = decode_manifest(&payload).unwrap();
+		let entry = find_layer(&manifest, "Rectangle 1");
+		assert!(matches!(entry.kind, LayerKindEntry::Shape { .. }), "no cache is written: {:?}", entry.kind);
+
+		let restored = from_manifest(&manifest, &file, &store).unwrap();
+		assert_documents_equal(&doc, &restored, &store);
+		let layer = restored.layer(id).expect("the shape layer is there");
+		let LayerKind::Shape { cache, transform, .. } = &layer.kind else {
+			panic!("not a shape layer: {:?}", layer.kind)
+		};
+		assert_eq!(*transform, [1.0, 0.0, 0.0, 1.0, 30.0, 40.0]);
+		assert_eq!((cache.width(), cache.height()), (400, 300), "the cache is the canvas again");
+		assert!(cache.is_derived(), "and it is drawn from the geometry");
+		assert_eq!(cache.dirty_tiles(0).count(), 4, "2 × 2 tiles, all to draw");
+	}
+}
+
+fn default_global_light() -> f64 {
+	120.0
 }

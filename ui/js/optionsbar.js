@@ -50,6 +50,11 @@ export function renderOptionsBar(container, toolId) {
   container.append(h("span", { class: "ob-tail" }));
 }
 
+/** The id whose option bar is shown (a tool, or `"_transform"` while a Free Transform box is up). */
+export function currentBar() {
+  return currentTool;
+}
+
 /** The value of option `key` of the active tool, or `null`. */
 export function optionValue(key) {
   const field = fields.find((f) => f.key === key);
@@ -142,7 +147,9 @@ function control(spec, changed) {
     case "gap": return { el: h("span", { class: "ob-gap" }), read: null };
     case "sep": return { el: h("span", { class: "ob-sep" }), read: null };
     case "label": return { el: h("span", { class: "ob-label", text: spec.text }), read: null };
-    case "btn": return { el: h("button", { class: "ob-btn", type: "button", text: spec.text, onclick: () => emit("mock", spec.text) }), read: null };
+    // A button that acts (`action`) sends that action id instead of the mock
+    // toast, like the ✓/✗ groups above (M6-T05's Reset View).
+    case "btn": return { el: h("button", { class: "ob-btn", type: "button", text: spec.text, onclick: () => emit(spec.action ? "action" : "mock", spec.action || spec.text) }), read: null };
     case "toggle": return toggle(spec);
     case "num": return num(spec);
     case "text": return textField(spec);
@@ -233,10 +240,15 @@ function select(spec, changed) {
 function buttonGroup(spec) {
   const group = h("span", { class: "ob-btngroup" });
   (spec.icons || []).forEach((ic, i) => {
+    // A group that acts (`actions`: one action id per icon) does not select
+    // anything: its click is the engine's, like a menu item's (M6-T03's crop
+    // ✓ and ✗).
+    const action = spec.actions && spec.actions[i];
     const b = h("button", {
       class: "ob-iconbtn" + (i === spec.active ? " on" : ""), type: "button",
       "data-tip": (spec.titles && spec.titles[i]) || "",
       onclick: () => {
+        if (action) return emit("action", action);
         [...group.children].forEach((c, j) => c.classList.toggle("on", j === i));
       },
     }, icon(ic, "ic"));

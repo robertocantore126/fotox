@@ -138,6 +138,12 @@ pub enum UiToEngine {
 	Key {
 		key: String,
 	},
+	/// The Type tool's textarea changed (M6-T07): the whole text and the
+	/// selection, as UTF-8 byte offsets.
+	TextEdit {
+		text: String,
+		selection: (usize, usize),
+	},
 }
 
 /// Answer to the "save changes before closing?" prompt (M3-T06).
@@ -179,6 +185,10 @@ pub enum LayerInfoKind {
 	Group,
 	Adjustment,
 	SolidFill,
+	/// A vector shape layer (M6-T06).
+	Shape,
+	/// A text layer (M6-T07).
+	Text,
 }
 
 /// Flat, UI-friendly description of one layer. The tree is expressed with
@@ -216,6 +226,16 @@ pub struct LayerInfo {
 	/// Colour of a solid fill layer, 16-bit RGBA.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fill_color: Option<[u16; 4]>,
+	/// Layer styles (M6-T08), for the style dialogs and the fx marker.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub styles: Option<fx_core::styles::LayerStyles>,
+}
+
+/// A font family and its styles (M6-T07).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FontFamilyInfo {
+	pub name: String,
+	pub styles: Vec<String>,
 }
 
 /// A CMYK profile the UI can offer (M4-T04).
@@ -316,6 +336,22 @@ pub enum EngineToUi {
 	/// Empty = clear it.
 	ToolInfo {
 		text: String,
+	},
+	/// A Free Transform box went up or down (M6-T04): the UI shows the
+	/// transform option bar (interpolation, ✓, ✗) while it is up.
+	TransformBox {
+		up: bool,
+	},
+	/// The Type tool's session (M6-T07): `open` shows the hidden textarea with
+	/// `text` and `selection` (UTF-8 byte offsets); `false` removes it.
+	TextEdit {
+		open: bool,
+		text: String,
+		selection: (usize, usize),
+	},
+	/// The system's font families (M6-T07), for the Type option bar.
+	Fonts {
+		families: Vec<FontFamilyInfo>,
 	},
 	/// The CMYK profiles for proofing and export (M4-T04), sent after `hello`.
 	CmykProfiles {

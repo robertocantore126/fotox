@@ -1,5 +1,9 @@
 # Review process
 
+> **Suspended from M6-T07 (D-057, fast mode).** There is no review per task.
+> Cards are committed straight onto the milestone branch, and this checklist
+> is used once, in `docs/tasks/HARDEN.md` step H5.
+
 Every task is reviewed before it is merged and before the next one starts.
 
 ## Flow

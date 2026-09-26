@@ -5,6 +5,15 @@ use std::sync::Arc;
 use fx_core::{BitDepth, BlendMode, ColorProfile, Document, DocumentColor, Layer, LayerKind, Mask};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileStore, TileStoreConfig, TiledImage};
 
+/// Serialises the GPU tests of this crate: each creates a device with the
+/// adapter's full limits, and a dozen of them at once on one adapter has been
+/// seen to hang the test binary for good (twice on 25 Sep 2026, ~900 MB, no
+/// progress). The engine's integration harness does the same for its engines.
+pub fn one_gpu_test() -> std::sync::MutexGuard<'static, ()> {
+	static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub fn store() -> TileStore {
 	TileStore::new(TileStoreConfig::for_tests(std::env::temp_dir().join("fx-render-tests"))).unwrap()
 }

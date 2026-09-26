@@ -173,6 +173,10 @@ fn pixel_slot(format: PixelFormat, p: [f32; 4]) -> TileSlot {
 	if v.0[3] == 0 { TileSlot::Empty } else { TileSlot::Solid(v) }
 }
 
+/// The box of the content one tile holds, in the coordinates of the image it
+/// belongs to: `(x0, y0, x1, y1)`, exclusive. `None` when it holds none.
+type TileContent = Option<(i64, i64, i64, i64)>;
+
 /// A computed layer tile.
 enum Out {
 	Slot(TileSlot),
@@ -358,6 +362,382 @@ pub fn extract(layer: Placed<'_>, selection: Option<&Selection>, canvas: (u32, u
 			continue;
 		}
 		out.set_slot(lx, ly, slot.clone());
+	}
+	Ok(out)
+}
+
+/// What counts as content when a trim looks for the borders to remove
+/// (M6-T03).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Content {
+	/// Anything not transparent: alpha ≠ 0 for the RGBA formats, grey ≠ 0 for
+	/// the grey ones (a selection's coverage, a mask).
+	Opaque,
+	/// Anything whose pixels differ from `rgba` (straight 16-bit, the way the
+	/// document stores them): Trim's corner colour.
+	DifferentFrom([u16; 4]),
+}
+
+/// The exact rectangle `(x0, y0, x1, y1)` (exclusive, in canvas pixels) of the
+/// content of a placed image, or `None` when it has none (M6-T03: Trim's
+/// borders, the Crop menu item's selection bounds). Every non-empty tile
+/// decides on its own, in parallel; a uniform tile is answered by its one
+/// value, so an empty or solid 30 000² image costs one byte comparison per
+/// tile.
+pub fn content_bounds(layer: Placed<'_>, content: Content, store: &TileStore) -> Result<Option<(i32, i32, i32, i32)>, TileError> {
+	let format = layer.image.format();
+	let bpp = format.bytes_per_pixel();
+	let channel_bytes = if format.has_alpha() { bpp / 4 } else { bpp };
+	// The byte that carries "is there anything here": alpha, or a grey value.
+	let alpha_at = if format.has_alpha() { channel_bytes * 3 } else { 0 };
+	// `DifferentFrom` compares whole pixels; the wanted pixel is quantised to
+	// the image's format the same way its tiles were stored.
+	let wanted = match content {
+		Content::Opaque => None,
+		Content::DifferentFrom(rgba) => Some(TileBuffer::filled(format, PixelValue(rgba)).bytes()[..bpp].to_vec()),
+	};
+	let is_content = |pixel: &[u8]| match &wanted {
+		None => pixel[alpha_at..alpha_at + channel_bytes].iter().any(|b| *b != 0),
+		Some(wanted) => pixel != wanted.as_slice(),
+	};
+	let tile = i64::from(TILE_SIZE);
+	let (ox, oy) = (i64::from(layer.offset.0), i64::from(layer.offset.1));
+	let (iw, ih) = (i64::from(layer.image.width()), i64::from(layer.image.height()));
+	let tiles: Vec<(u32, u32, TileSlot)> = layer.image.grid(0).non_empty().map(|(x, y, slot)| (x, y, slot.clone())).collect();
+	let results: Result<Vec<TileContent>, TileError> = tiles
+		.par_iter()
+		.map(|(tx, ty, slot)| {
+			let (x0, y0) = (ox + i64::from(*tx) * tile, oy + i64::from(*ty) * tile);
+			// A partial last column or row only reaches the image's edge.
+			let (vw, vh) = ((iw - i64::from(*tx) * tile).min(tile), (ih - i64::from(*ty) * tile).min(tile));
+			let mut box_: TileContent = None;
+			let mut hit = |x: i64, y: i64| {
+				box_ = Some(match box_ {
+					None => (x, y, x + 1, y + 1),
+					Some(b) => (b.0.min(x), b.1.min(y), b.2.max(x + 1), b.3.max(y + 1)),
+				});
+			};
+			match slot {
+				TileSlot::Empty => {}
+				// One value for the whole tile: either all of it is content or
+				// none of it is.
+				TileSlot::Solid(value) => {
+					let buffer = TileBuffer::filled(format, *value);
+					if is_content(&buffer.bytes()[..bpp]) {
+						hit(x0, y0);
+						hit(x0 + vw - 1, y0 + vh - 1);
+					}
+				}
+				TileSlot::Data(handle) => {
+					let buffer = store.get(handle)?;
+					for y in 0..vh {
+						for x in 0..vw {
+							let i = ((y * tile + x) * bpp as i64) as usize;
+							if is_content(&buffer.bytes()[i..i + bpp]) {
+								hit(x0 + x, y0 + y);
+							}
+						}
+					}
+				}
+			}
+			Ok(box_)
+		})
+		.collect();
+	let mut bounds: TileContent = None;
+	for tile in results?.into_iter().flatten() {
+		bounds = Some(match bounds {
+			None => tile,
+			Some(b) => (b.0.min(tile.0), b.1.min(tile.1), b.2.max(tile.2), b.3.max(tile.3)),
+		});
+	}
+	Ok(bounds.map(|(x0, y0, x1, y1)| (x0 as i32, y0 as i32, x1 as i32, y1 as i32)))
+}
+
+/// The same canvas content re-anchored (M6): `image` sits at canvas pixel
+/// `from`; the result sits at `to` and holds, on every canvas pixel it covers,
+/// what `image` held there. Where `image` had no pixel — the band between `to`
+/// and `from` when the new origin lies up or left of the old one — the result
+/// is `pad` (a mask's outside value). What lies up or left of `to` is dropped.
+///
+/// A mask has no offset of its own (a linked one sits at its layer's offset,
+/// an unlinked one at the canvas origin), so a geometry command that moves a
+/// mask's content to another origin needs this. A whole-tile shift moves tiles
+/// without rewriting a pixel; otherwise every new tile is assembled from the
+/// (at most four) old tiles under it, and a tile whose sources are all one
+/// value stays one value.
+pub fn place_at(image: &TiledImage, from: (i32, i32), to: (i32, i32), pad: PixelValue, store: &TileStore) -> Result<TiledImage, TileError> {
+	if from == to {
+		return Ok(image.clone());
+	}
+	place_in(image, from, to, None, pad, store)
+}
+
+/// [`place_at`] into an image of exactly `size` (`None`: up to where the old
+/// image ended). What lies past the new size is dropped, what the old image
+/// did not reach down or right of it is transparent (M6-T04: a floated
+/// selection is cut out to its bounds before it is transformed).
+pub fn place_in(
+	image: &TiledImage,
+	from: (i32, i32),
+	to: (i32, i32),
+	size: Option<(u32, u32)>,
+	pad: PixelValue,
+	store: &TileStore,
+) -> Result<TiledImage, TileError> {
+	let tile = i64::from(TILE_SIZE);
+	let format = image.format();
+	let bpp = format.bytes_per_pixel();
+	// New pixel p holds old pixel p - shift.
+	let shift = (i64::from(from.0) - i64::from(to.0), i64::from(from.1) - i64::from(to.1));
+	let (old_w, old_h) = (i64::from(image.width()), i64::from(image.height()));
+	let (width, height) = match size {
+		Some((w, h)) => (i64::from(w.max(1)), i64::from(h.max(1))),
+		None => ((old_w + shift.0).clamp(1, i64::from(u32::MAX)), (old_h + shift.1).clamp(1, i64::from(u32::MAX))),
+	};
+	let mut out = TiledImage::new(width as u32, height as u32, format);
+	let pad_slot = if pad.is_transparent(format) || (!format.has_alpha() && pad.0[0] == 0) {
+		TileSlot::Empty
+	} else {
+		TileSlot::Solid(pad)
+	};
+	let (old_cols, old_rows) = (i64::from(image.grid(0).cols()), i64::from(image.grid(0).rows()));
+	let (cols, rows) = (out.grid(0).cols(), out.grid(0).rows());
+	// The old slot at an old tile position: the pad up or left of the old
+	// image, nothing down or right of it.
+	let old_slot = |tx: i64, ty: i64| -> TileSlot {
+		if tx < 0 || ty < 0 {
+			pad_slot.clone()
+		} else if tx >= old_cols || ty >= old_rows {
+			TileSlot::Empty
+		} else {
+			image.slot(0, tx as u32, ty as u32).clone()
+		}
+	};
+	// A whole-tile shift moves tiles, unless a partial last tile of the old
+	// image would end up inside the new one (its pixels past the old edge are
+	// not the old image's).
+	let (last_x, last_y) = (old_w % tile != 0, old_h % tile != 0);
+	let edge_inside = (last_x && width > old_w + shift.0) || (last_y && height > old_h + shift.1);
+	if shift.0.rem_euclid(tile) == 0 && shift.1.rem_euclid(tile) == 0 && !edge_inside {
+		let (sx, sy) = (shift.0 / tile, shift.1 / tile);
+		for ty in 0..rows {
+			for tx in 0..cols {
+				out.set_slot(tx, ty, old_slot(i64::from(tx) - sx, i64::from(ty) - sy));
+			}
+		}
+		return Ok(out);
+	}
+	let pad_pixel = TileBuffer::filled(format, pad).bytes()[..bpp].to_vec();
+	let tiles: Vec<(u32, u32)> = (0..rows).flat_map(|ty| (0..cols).map(move |tx| (tx, ty))).collect();
+	let results: Result<Vec<Placement>, TileError> = tiles
+		.par_iter()
+		.map(|&(tx, ty)| {
+			// The old pixel under this tile's top-left corner, and the (up to)
+			// four old tiles the tile reads.
+			let (ox, oy) = (i64::from(tx) * tile - shift.0, i64::from(ty) * tile - shift.1);
+			let (otx, oty) = (ox.div_euclid(tile), oy.div_euclid(tile));
+			let sources = [old_slot(otx, oty), old_slot(otx + 1, oty), old_slot(otx, oty + 1), old_slot(otx + 1, oty + 1)];
+			if sources.iter().all(|s| s.same_as(&sources[0])) && !matches!(sources[0], TileSlot::Data(_)) {
+				return Ok(((tx, ty), Out::Slot(sources[0].clone())));
+			}
+			let buffers = sources
+				.iter()
+				.map(|slot| match slot {
+					TileSlot::Data(handle) => store.get(handle).map(|b| Some(b.bytes().to_vec())),
+					TileSlot::Solid(value) => Ok(Some(TileBuffer::filled(format, *value).bytes().to_vec())),
+					TileSlot::Empty => Ok(None),
+				})
+				.collect::<Result<Vec<_>, _>>()?;
+			let mut buffer = TileBuffer::zeroed(format);
+			let bytes = buffer.bytes_mut();
+			for y in 0..tile {
+				let old_y = oy + y;
+				for x in 0..tile {
+					let old_x = ox + x;
+					let at = ((y * tile + x) as usize) * bpp;
+					if old_x < 0 || old_y < 0 {
+						bytes[at..at + bpp].copy_from_slice(&pad_pixel);
+						continue;
+					}
+					if old_x >= old_w || old_y >= old_h {
+						continue;
+					}
+					let which = usize::from(old_x.div_euclid(tile) > otx) + 2 * usize::from(old_y.div_euclid(tile) > oty);
+					if let Some(source) = &buffers[which] {
+						let from = ((old_y.rem_euclid(tile) * tile + old_x.rem_euclid(tile)) as usize) * bpp;
+						bytes[at..at + bpp].copy_from_slice(&source[from..from + bpp]);
+					}
+				}
+			}
+			Ok(((tx, ty), Out::Buffer(buffer)))
+		})
+		.collect();
+	for ((tx, ty), placed) in results? {
+		match placed {
+			Out::Slot(slot) => out.set_slot(tx, ty, slot),
+			Out::Buffer(buffer) => out.put_buffer(store, tx, ty, buffer),
+		}
+	}
+	Ok(out)
+}
+
+/// The straight RGBA pixels of the 256² canvas block at `(x0, y0)` of a placed
+/// RGBA image; `None` when the block holds nothing of it.
+fn read_block(layer: Placed<'_>, x0: i64, y0: i64, store: &TileStore) -> Result<Option<Tile>, TileError> {
+	let tile = i64::from(TILE_SIZE);
+	let format = layer.image.format();
+	let (lx, ly) = (x0 - i64::from(layer.offset.0), y0 - i64::from(layer.offset.1));
+	let (w, h) = (i64::from(layer.image.width()), i64::from(layer.image.height()));
+	if lx >= w || ly >= h || lx + tile <= 0 || ly + tile <= 0 {
+		return Ok(None);
+	}
+	let (tx0, ty0) = (lx.div_euclid(tile), ly.div_euclid(tile));
+	let mut sources: Vec<Option<Tile>> = Vec::with_capacity(4);
+	for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+		let (tx, ty) = (tx0 + dx, ty0 + dy);
+		let inside = tx >= 0 && ty >= 0 && tx * tile < w && ty * tile < h;
+		sources.push(if inside {
+			Some(read_tile(layer.image.slot(0, tx as u32, ty as u32), format, store)?)
+		} else {
+			None
+		});
+	}
+	let aligned = lx.rem_euclid(tile) == 0 && ly.rem_euclid(tile) == 0;
+	if aligned && let Some(Some(Tile::Uniform(p))) = sources.first() {
+		// The block is one tile, and a uniform one.
+		return Ok(Some(Tile::Uniform(*p)));
+	}
+	let mut out = vec![[0.0; 4]; TILE_PIXELS];
+	for y in 0..tile {
+		for x in 0..tile {
+			let (px, py) = (lx + x, ly + y);
+			if px < 0 || py < 0 || px >= w || py >= h {
+				continue;
+			}
+			let which = usize::from(px.div_euclid(tile) > tx0) + 2 * usize::from(py.div_euclid(tile) > ty0);
+			if let Some(source) = &sources[which] {
+				out[(y * tile + x) as usize] = source.at((py.rem_euclid(tile) * tile + px.rem_euclid(tile)) as usize);
+			}
+		}
+	}
+	Ok(Some(Tile::Data(out)))
+}
+
+/// `top` composited over `base` (Normal, full opacity), both placed RGBA
+/// images of one format: the image covers both, at the union's origin (M6-T04:
+/// a transformed selection is dropped back onto its layer). Blocks where
+/// neither has a pixel stay empty.
+pub fn over(base: Placed<'_>, top: Placed<'_>, store: &TileStore) -> Result<(TiledImage, (i32, i32)), TileError> {
+	let format = base.image.format();
+	let right = |p: Placed<'_>| i64::from(p.offset.0) + i64::from(p.image.width());
+	let bottom = |p: Placed<'_>| i64::from(p.offset.1) + i64::from(p.image.height());
+	let origin = (base.offset.0.min(top.offset.0), base.offset.1.min(top.offset.1));
+	let width = (right(base).max(right(top)) - i64::from(origin.0)).clamp(1, i64::from(u32::MAX)) as u32;
+	let height = (bottom(base).max(bottom(top)) - i64::from(origin.1)).clamp(1, i64::from(u32::MAX)) as u32;
+	let mut out = TiledImage::new(width, height, format);
+	let (cols, rows) = (out.grid(0).cols(), out.grid(0).rows());
+	let tile = i64::from(TILE_SIZE);
+	let tiles: Vec<(u32, u32)> = (0..rows).flat_map(|ty| (0..cols).map(move |tx| (tx, ty))).collect();
+	let results: Result<Vec<Option<Placement>>, TileError> = tiles
+		.par_iter()
+		.map(|&(tx, ty)| {
+			let (x0, y0) = (i64::from(origin.0) + i64::from(tx) * tile, i64::from(origin.1) + i64::from(ty) * tile);
+			let (under, above) = (read_block(base, x0, y0, store)?, read_block(top, x0, y0, store)?);
+			let composite = |b: [f32; 4], t: [f32; 4]| -> [f32; 4] {
+				let alpha = t[3] + b[3] * (1.0 - t[3]);
+				if alpha <= 0.0 {
+					return [0.0; 4];
+				}
+				let mut out = [0.0; 4];
+				for c in 0..3 {
+					out[c] = (t[c] * t[3] + b[c] * b[3] * (1.0 - t[3])) / alpha;
+				}
+				out[3] = alpha;
+				out
+			};
+			Ok(match (under, above) {
+				(None, None) => None,
+				(Some(Tile::Uniform(b)), None) => Some(((tx, ty), Out::Slot(pixel_slot(format, b)))),
+				(None, Some(Tile::Uniform(t))) => Some(((tx, ty), Out::Slot(pixel_slot(format, t)))),
+				(Some(Tile::Uniform(b)), Some(Tile::Uniform(t))) => Some(((tx, ty), Out::Slot(pixel_slot(format, composite(b, t))))),
+				(under, above) => {
+					let pixels: Vec<[f32; 4]> = (0..TILE_PIXELS)
+						.map(|i| {
+							let b = under.as_ref().map_or([0.0; 4], |t| t.at(i));
+							let t = above.as_ref().map_or([0.0; 4], |t| t.at(i));
+							composite(b, t)
+						})
+						.collect();
+					Some(((tx, ty), Out::Buffer(encode(&pixels, format))))
+				}
+			})
+		})
+		.collect();
+	for ((tx, ty), placed) in results?.into_iter().flatten() {
+		match placed {
+			Out::Slot(slot) => out.set_slot(tx, ty, slot),
+			Out::Buffer(buffer) => out.put_buffer(store, tx, ty, buffer),
+		}
+	}
+	Ok((out, origin))
+}
+
+/// Keep only the pixels inside the canvas rectangle `rect` (M6-T03's Delete
+/// Cropped Pixels): a tile entirely outside it goes, and the part of a tile
+/// the rectangle crosses is cleared. The image keeps its size, format and
+/// offset — nothing moves, so every surviving pixel is untouched and a tile
+/// entirely inside keeps its handle. Rows are zeroed, which is the right
+/// "empty" for every format (transparent RGBA, black grey).
+pub fn clip_to_rect(layer: Placed<'_>, rect: (i32, i32, u32, u32), store: &TileStore) -> Result<TiledImage, TileError> {
+	let (rx, ry) = (i64::from(rect.0), i64::from(rect.1));
+	// Exclusive right and bottom, in canvas pixels.
+	let (rx1, ry1) = (rx + i64::from(rect.2), ry + i64::from(rect.3));
+	let tile = i64::from(TILE_SIZE);
+	let format = layer.image.format();
+	let bpp = format.bytes_per_pixel();
+	let (ox, oy) = (i64::from(layer.offset.0), i64::from(layer.offset.1));
+	let tiles: Vec<(u32, u32, TileSlot)> = layer.image.grid(0).non_empty().map(|(x, y, slot)| (x, y, slot.clone())).collect();
+	let results: Result<Vec<Option<Placement>>, TileError> = tiles
+		.par_iter()
+		.map(|(tx, ty, slot)| {
+			let (x0, y0) = (ox + i64::from(*tx) * tile, oy + i64::from(*ty) * tile);
+			let (x1, y1) = (x0 + tile, y0 + tile);
+			// The part of the tile that survives.
+			let (kx0, ky0) = (x0.max(rx), y0.max(ry));
+			let (kx1, ky1) = (x1.min(rx1), y1.min(ry1));
+			if kx0 >= kx1 || ky0 >= ky1 {
+				return Ok(None);
+			}
+			if (kx0, ky0, kx1, ky1) == (x0, y0, x1, y1) {
+				return Ok(Some(((*tx, *ty), Out::Slot(slot.clone()))));
+			}
+			let mut buffer = match slot {
+				TileSlot::Solid(value) => TileBuffer::filled(format, *value),
+				TileSlot::Data(handle) => (*store.get(handle)?).clone(),
+				TileSlot::Empty => return Ok(None),
+			};
+			let row_bytes = TILE_SIZE as usize * bpp;
+			let bytes = buffer.bytes_mut();
+			for (y, row) in bytes.chunks_exact_mut(row_bytes).enumerate() {
+				let cy = y0 + y as i64;
+				if cy < ry || cy >= ry1 {
+					row.fill(0);
+					continue;
+				}
+				let left = (rx - x0).clamp(0, tile) as usize * bpp;
+				let right = (rx1 - x0).clamp(0, tile) as usize * bpp;
+				row[..left].fill(0);
+				row[right..].fill(0);
+			}
+			Ok(Some(((*tx, *ty), Out::Buffer(buffer))))
+		})
+		.collect();
+	let mut out = TiledImage::new(layer.image.width(), layer.image.height(), format);
+	for ((tx, ty), placement) in results?.into_iter().flatten() {
+		match placement {
+			Out::Slot(slot) => out.set_slot(tx, ty, slot),
+			Out::Buffer(buffer) => out.put_buffer(store, tx, ty, buffer),
+		}
 	}
 	Ok(out)
 }
@@ -706,5 +1086,152 @@ mod tests {
 		let eight = convert_depth(&image, PixelFormat::Rgba8, &store).unwrap();
 		let TileSlot::Data(handle) = eight.slot(0, 0, 0) else { panic!() };
 		assert_eq!(&store.get(handle).unwrap().bytes()[..4], &[128, 128, 0, 255]);
+	}
+
+	#[test]
+	fn clip_to_rect_drops_the_outside_tiles_and_clears_the_crossed_ones() {
+		let store = store();
+		let mut image = TiledImage::new(1024, 1024, PixelFormat::Rgba8);
+		for ty in 0..4 {
+			for tx in 0..4 {
+				image.set_slot(tx, ty, TileSlot::Solid(PixelValue::rgba8(10, 20, 30, 255)));
+			}
+		}
+		// The layer sits at (10, 20), so tile (0, 0) is *crossed* by the
+		// rectangle and tile (1, 1) is wholly inside it.
+		let known = Placed {
+			image: &image,
+			offset: (10, 20),
+		};
+		let clipped = clip_to_rect(known, (256, 256, 512, 512), &store).unwrap();
+		// `pixel` reads *image* pixels, and the layer sits at (10, 20).
+		let inside = [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0];
+		assert_eq!(pixel(&clipped, &store, 250, 240), inside, "canvas (260, 260): just inside");
+		assert_eq!(pixel(&clipped, &store, 290, 280), inside, "canvas (300, 300): well inside");
+		assert_eq!(pixel(&clipped, &store, 245, 240)[3], 0.0, "canvas (255, 260): left of the rectangle");
+		assert_eq!(pixel(&clipped, &store, 290, 235)[3], 0.0, "canvas (300, 255): above it");
+		assert_eq!(pixel(&clipped, &store, 890, 880)[3], 0.0, "canvas (900, 900): far outside");
+		assert!(matches!(clipped.slot(0, 1, 1), TileSlot::Solid(_)), "a tile inside keeps its handle");
+		assert!(matches!(clipped.slot(0, 0, 0), TileSlot::Data(_)), "a crossed tile is rewritten once");
+		assert!(matches!(clipped.slot(0, 3, 3), TileSlot::Empty), "a tile outside goes");
+		assert_eq!(clipped.width(), 1024, "the image keeps its size");
+	}
+
+	#[test]
+	fn place_at_keeps_every_canvas_pixel_where_it_was() {
+		let store = store();
+		let mut image = TiledImage::new(300, 280, PixelFormat::Gray8);
+		let mut buffer = TileBuffer::zeroed(PixelFormat::Gray8);
+		buffer.bytes_mut()[(5 * TILE_SIZE + 7) as usize] = 200;
+		image.put_buffer(&store, 0, 0, buffer);
+		image.set_slot(1, 1, TileSlot::Solid(PixelValue::gray16(40 * 257)));
+		let gray = |image: &TiledImage, x: u32, y: u32| -> u8 {
+			match image.slot(0, x / TILE_SIZE, y / TILE_SIZE) {
+				TileSlot::Empty => 0,
+				TileSlot::Solid(v) => (v.0[0] / 257) as u8,
+				TileSlot::Data(h) => store.get(h).unwrap().bytes()[((y % TILE_SIZE) * TILE_SIZE + x % TILE_SIZE) as usize],
+			}
+		};
+		let pad = PixelValue::gray16(65_535);
+		// The image sat at (100, 50); it now starts at (30, 20): canvas pixel
+		// (107, 55) — old pixel (7, 5) — is new pixel (77, 35).
+		let moved = place_at(&image, (100, 50), (30, 20), pad, &store).unwrap();
+		assert_eq!((moved.width(), moved.height()), (370, 310));
+		assert_eq!(gray(&moved, 77, 35), 200, "canvas (107, 55)");
+		assert_eq!(gray(&moved, 78, 35), 0);
+		assert_eq!(gray(&moved, 70 + 256 + 3, 30 + 256 + 3), 40, "inside the solid tile");
+		assert_eq!(gray(&moved, 10, 10), 255, "the band the old image did not cover is the pad");
+		assert_eq!(gray(&moved, 69, 100), 255, "left of the old image");
+		assert_eq!(gray(&moved, 70, 100), 0, "its first column");
+		// Back again: the original pixels (the pad band is gone).
+		let back = place_at(&moved, (30, 20), (100, 50), pad, &store).unwrap();
+		assert_eq!((back.width(), back.height()), (300, 280));
+		for (x, y) in [(7, 5), (8, 5), (260, 260), (0, 0), (299, 279)] {
+			assert_eq!(gray(&back, x, y), gray(&image, x, y), "({x}, {y})");
+		}
+		// A whole-tile shift moves the tiles themselves.
+		let tiles = place_at(&image, (256, 0), (0, 0), pad, &store).unwrap();
+		assert!(tiles.slot(0, 1, 0).same_as(image.slot(0, 0, 0)));
+		assert!(matches!(tiles.slot(0, 0, 0), TileSlot::Solid(v) if v.0[0] == 65_535));
+	}
+
+	#[test]
+	fn over_composites_a_placed_image_onto_another() {
+		let store = store();
+		let mut base = TiledImage::new(300, 300, PixelFormat::Rgba8);
+		base.set_slot(0, 0, TileSlot::Solid(PixelValue::rgba8(200, 0, 0, 255)));
+		base.set_slot(1, 1, TileSlot::Solid(PixelValue::rgba8(0, 0, 200, 255)));
+		let mut top = TiledImage::new(100, 100, PixelFormat::Rgba8);
+		top.set_slot(0, 0, TileSlot::Solid(PixelValue::rgba8(0, 255, 0, 128)));
+		let (merged, origin) = over(
+			Placed {
+				image: &base,
+				offset: (10, 10),
+			},
+			Placed {
+				image: &top,
+				offset: (-40, 200),
+			},
+			&store,
+		)
+		.unwrap();
+		assert_eq!(origin, (-40, 10), "the union's corner");
+		assert_eq!((merged.width(), merged.height()), (350, 300));
+		// Canvas (50, 20): base only (red).
+		assert_eq!(pixel(&merged, &store, 90, 10), [200.0 / 255.0, 0.0, 0.0, 1.0]);
+		// Canvas (20, 250): half-transparent green over red.
+		let p = pixel(&merged, &store, 60, 240);
+		assert!((p[0] - 0.39).abs() < 0.01 && (p[1] - 0.5).abs() < 0.01 && p[3] == 1.0, "{p:?}");
+		// Canvas (−30, 250): the green alone, left of the base.
+		assert_eq!(pixel(&merged, &store, 10, 240)[3], 128.0 / 255.0);
+		// Canvas (0, 20): nothing there.
+		assert_eq!(pixel(&merged, &store, 40, 10)[3], 0.0);
+		// Canvas (300, 300): the base's blue tile.
+		assert_eq!(pixel(&merged, &store, 340, 290)[2], 200.0 / 255.0);
+	}
+
+	#[test]
+	fn content_bounds_find_the_exact_rectangle_of_the_content() {
+		let store = store();
+		let mut image = TiledImage::new(600, 300, PixelFormat::Rgba8);
+		// A tile filled with one colour, but for a single pixel.
+		let mut buffer = TileBuffer::filled(PixelFormat::Rgba8, PixelValue::rgba8(1, 2, 3, 255));
+		let at = |x: u32, y: u32| ((y * TILE_SIZE + x) * 4) as usize;
+		buffer.bytes_mut()[at(200, 150)..at(200, 150) + 4].copy_from_slice(&[4, 5, 6, 200]);
+		image.put_buffer(&store, 0, 0, buffer);
+		image.set_slot(1, 0, TileSlot::Solid(PixelValue::rgba8(9, 9, 9, 255)));
+		let placed = Placed {
+			image: &image,
+			offset: (100, 50),
+		};
+		assert_eq!(
+			content_bounds(placed, Content::Opaque, &store).unwrap(),
+			Some((100, 50, 612, 306)),
+			"from the opaque tile's corner to the solid tile's far corner"
+		);
+		// The pixels that *are* the corner colour are not content (the value is
+		// 16-bit, like every `PixelValue`, and quantises to the image's format).
+		assert_eq!(
+			content_bounds(placed, Content::DifferentFrom(PixelValue::rgba8(1, 2, 3, 255).0), &store).unwrap(),
+			Some((300, 50, 612, 306)),
+			"the background pixels and the solid tile: the painted one is not"
+		);
+		// Grey images read their value at byte 0 (a mask, a selection).
+		let mut coverage = TiledImage::new(300, 300, PixelFormat::Gray8);
+		let mut buffer = TileBuffer::zeroed(PixelFormat::Gray8);
+		buffer.bytes_mut()[(10 * TILE_SIZE + 20) as usize] = 255;
+		coverage.put_buffer(&store, 0, 0, buffer);
+		assert_eq!(
+			content_bounds(
+				Placed {
+					image: &coverage,
+					offset: (0, 0)
+				},
+				Content::Opaque,
+				&store
+			)
+			.unwrap(),
+			Some((20, 10, 21, 11))
+		);
 	}
 }

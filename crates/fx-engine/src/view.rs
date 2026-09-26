@@ -32,6 +32,8 @@ pub struct ViewState {
 	pub tool: String,
 	/// Last pointer position of a pan drag in progress.
 	drag: Option<(f64, f64)>,
+	/// Last pointer position of a Rotate View drag in progress (M6-T05).
+	rotate: Option<(f64, f64)>,
 	/// Whether the view has been fitted once (the first viewport size fits).
 	fitted: bool,
 }
@@ -63,10 +65,12 @@ impl ViewState {
 				zoom: 1.0,
 				center_x: doc.0 as f64 / 2.0,
 				center_y: doc.1 as f64 / 2.0,
+				rotation: 0.0,
 			},
 			viewport: None,
 			tool: "move".into(),
 			drag: None,
+			rotate: None,
 			fitted: false,
 		}
 	}
@@ -98,12 +102,28 @@ impl ViewState {
 			"zoom:100" => 1.0,
 			"zoom:fit" => {
 				let viewport = self.viewport?;
-				self.view = ViewTransform::fit(viewport, self.doc.0, self.doc.1);
+				// Fit keeps the view rotation (Photoshop): only zoom and centre
+				// are refitted.
+				let fit = ViewTransform::fit(viewport, self.doc.0, self.doc.1);
+				self.view.zoom = fit.zoom;
+				self.view.center_x = fit.center_x;
+				self.view.center_y = fit.center_y;
 				return Some(Changed { view: true, cursor: None });
 			}
+			// Rotate View ▸ Reset View (and Esc with the Rotate View tool).
+			"view:reset-rotation" => return Some(self.set_rotation(0.0)),
 			_ => return None,
 		};
 		Some(self.set_zoom(zoom))
+	}
+
+	/// Set the view rotation (radians about the viewport centre), M6-T05.
+	pub fn set_rotation(&mut self, radians: f64) -> Changed {
+		if !radians.is_finite() || radians == self.view.rotation {
+			return Changed::default();
+		}
+		self.view.rotation = radians;
+		Changed { view: true, cursor: None }
 	}
 
 	/// Zoom to `zoom` (1.0 = 100 %), keeping the viewport centre fixed.
@@ -148,6 +168,11 @@ impl ViewState {
 	/// until every button is released. Events the view does not consume as a
 	/// pan (`outcome.consumed == false`) go on to the active tool (M5-T01).
 	pub fn pointer(&mut self, input: &PointerInput) -> PointerOutcome {
+		// The Rotate View tool (R) is a view gesture, in screen space, like a
+		// pan: it never reaches a document tool (M6-T05).
+		if self.tool == "rotate-view" {
+			return self.rotate_pointer(input);
+		}
 		match input.kind {
 			PointerKind::Down => {
 				let pan = input.buttons & BUTTON_MIDDLE != 0 || (input.buttons & BUTTON_LEFT != 0 && self.hand_active(input.modifiers));
@@ -200,9 +225,85 @@ impl ViewState {
 		}
 	}
 
+	/// Handle the pointer with the Rotate View tool: a left-button drag turns
+	/// the view about the viewport centre; Shift snaps to 15° steps.
+	fn rotate_pointer(&mut self, input: &PointerInput) -> PointerOutcome {
+		match input.kind {
+			PointerKind::Down if input.buttons & BUTTON_LEFT != 0 => {
+				self.rotate = Some((input.x, input.y));
+				PointerOutcome {
+					changed: Changed {
+						view: false,
+						cursor: Some(CursorShape::Grabbing),
+					},
+					consumed: true,
+				}
+			}
+			PointerKind::Move => {
+				let Some((lx, ly)) = self.rotate else {
+					return PointerOutcome {
+						changed: Changed {
+							view: false,
+							cursor: Some(CursorShape::Grabbing),
+						},
+						consumed: false,
+					};
+				};
+				self.rotate = Some((input.x, input.y));
+				let Some(viewport) = self.viewport else {
+					return PointerOutcome::default();
+				};
+				let (cx, cy) = (viewport.width as f64 / 2.0, viewport.height as f64 / 2.0);
+				let previous = (ly - cy).atan2(lx - cx);
+				let current = (input.y - cy).atan2(input.x - cx);
+				let mut delta = current - previous;
+				// Take the short way around the wrap at ±π.
+				while delta > std::f64::consts::PI {
+					delta -= std::f64::consts::TAU;
+				}
+				while delta < -std::f64::consts::PI {
+					delta += std::f64::consts::TAU;
+				}
+				let rotation = self.view.rotation + delta;
+				let rotation = if input.modifiers.shift {
+					let step = fx_render::viewport::ROTATE_VIEW_STEP_DEG.to_radians();
+					(rotation / step).round() * step
+				} else {
+					rotation
+				};
+				PointerOutcome {
+					changed: self.set_rotation(rotation),
+					consumed: true,
+				}
+			}
+			PointerKind::Up if self.rotate.is_some() && input.buttons == 0 => {
+				self.rotate = None;
+				PointerOutcome {
+					changed: Changed {
+						view: false,
+						cursor: Some(CursorShape::Grabbing),
+					},
+					consumed: true,
+				}
+			}
+			_ => PointerOutcome {
+				changed: Changed {
+					view: false,
+					cursor: Some(CursorShape::Grabbing),
+				},
+				consumed: false,
+			},
+		}
+	}
+
 	/// Whether a pan drag is in progress.
 	pub fn dragging(&self) -> bool {
 		self.drag.is_some()
+	}
+
+	/// Whether a Rotate View drag is in progress (M6-T05).
+	pub fn rotating(&self) -> bool {
+		self.rotate.is_some()
 	}
 
 	fn hand_active(&self, modifiers: Modifiers) -> bool {
@@ -353,5 +454,43 @@ mod tests {
 		assert!(!s.set_zoom(f64::NAN).view);
 		assert!(!s.set_zoom(-1.0).view);
 		assert_eq!(s.view.zoom, z);
+	}
+
+	#[test]
+	fn rotate_view_drag_turns_and_shift_snaps() {
+		let mut s = state();
+		s.action("tool:rotate-view");
+		let vp = s.viewport.unwrap();
+		let (cx, cy) = (vp.width as f64 / 2.0, vp.height as f64 / 2.0);
+
+		// Press right of the centre, drag below it: a quarter turn.
+		s.pointer(&pointer(PointerKind::Down, cx + 100.0, cy, BUTTON_LEFT, Modifiers::default()));
+		assert!(s.rotating());
+		let moved = s.pointer(&pointer(PointerKind::Move, cx, cy + 100.0, BUTTON_LEFT, Modifiers::default()));
+		assert!(moved.changed.view && moved.consumed);
+		assert!((s.view.rotation - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "{}", s.view.rotation);
+		s.pointer(&pointer(PointerKind::Up, cx, cy + 100.0, 0, Modifiers::default()));
+		assert!(!s.rotating());
+
+		// A document point round-trips through the rotated view.
+		let (x, y) = s.view.screen_to_doc(vp, 300.0, 200.0);
+		let (sx, sy) = s.view.doc_to_screen(vp, x, y);
+		assert!((sx - 300.0).abs() < 1e-9 && (sy - 200.0).abs() < 1e-9);
+
+		// Reset View (and Esc in the engine) goes back to 0.
+		assert!(s.action("view:reset-rotation").unwrap().view);
+		assert_eq!(s.view.rotation, 0.0);
+
+		// Shift snaps to 15° steps.
+		s.pointer(&pointer(PointerKind::Down, cx + 100.0, cy, BUTTON_LEFT, Modifiers::default()));
+		let shift = Modifiers {
+			shift: true,
+			..Default::default()
+		};
+		s.pointer(&pointer(PointerKind::Move, cx + 100.0, cy + 40.0, BUTTON_LEFT, shift));
+		let step = fx_render::viewport::ROTATE_VIEW_STEP_DEG.to_radians();
+		let snapped = (s.view.rotation / step).round() * step;
+		assert!((s.view.rotation - snapped).abs() < 1e-9);
+		assert!(s.view.rotation > 0.0);
 	}
 }

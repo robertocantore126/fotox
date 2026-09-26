@@ -37,14 +37,33 @@ export const optionBars = {
   "magic-wand": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
   "object-select": [{ type: "btngroup", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "toggle", text: "Sample All Layers", on: false }],
 
+  // The crop tool reads Ratio / W / H and the Delete Cropped Pixels toggle
+  // (M6-T03): the engine's crop command takes exactly those.
   crop: [
     { type: "select", text: "Ratio:", options: ["Unconstrained", "1:1 (Square)", "5:4", "4:3", "3:2", "16:9", "Original Ratio"], value: "Unconstrained" },
     { type: "num", text: "W:", value: "", width: 44 }, { type: "num", text: "H:", value: "", width: 44 },
-    { type: "toggle", text: "Straighten", on: false },
     { type: "gap" },
-    { type: "btngroup", icons: ["i-grid", "i-presets", "i-eye-off"], titles: ["Grid overlay", "Presets", "Delete cropped pixels"], active: 0 },
+    { type: "toggle", text: "Delete Cropped Pixels", on: false },
     { type: "gap" },
-    { type: "label", text: "Delete Cropped Pixels: off · Content-Aware: off" },
+    // The ✓ and ✗ are actions, not values: the engine commits the box with
+    // the same `Enter` / `Escape` the keyboard sends.
+    { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Crop (Enter)", "Cancel (Esc)"], actions: ["tool:commit", "tool:cancel"] },
+  ],
+  // Free Transform's bar (M6-T04), shown while the box is up whatever the
+  // tool: the interpolation, Warp, and the commit / cancel buttons.
+  _transform: [
+    { type: "label", text: "Free Transform" },
+    { type: "gap" },
+    // Numeric fields (M6-T09): empty = keep; the status bar shows the live values.
+    { type: "num", text: "X:", value: "", unit: "px", width: 52 }, { type: "num", text: "Y:", value: "", unit: "px", width: 52 },
+    { type: "num", text: "W:", value: "", unit: "%", width: 44 }, { type: "num", text: "H:", value: "", unit: "%", width: 44 },
+    { type: "num", text: "Angle:", value: "", unit: "°", width: 44 },
+    { type: "gap" },
+    { type: "select", text: "Interpolation:", options: ["Nearest Neighbor", "Bilinear", "Bicubic", "Bicubic Smoother", "Bicubic Sharper", "Bicubic Automatic", "Lanczos 3"], value: "Bicubic" },
+    { type: "gap" },
+    { type: "btngroup", icons: ["i-grid"], titles: ["Switch between free transform and warp modes"], actions: ["xf:warp"] },
+    { type: "gap" },
+    { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Commit Transform (Enter)", "Cancel Transform (Esc)"], actions: ["tool:commit", "tool:cancel"] },
   ],
   "crop-persp": [{ type: "label", text: "Drag the corner handles to define the perspective plane" }],
   slice: [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
@@ -100,11 +119,11 @@ export const optionBars = {
   "anchor-convert": [{ type: "label", text: "Drag a direction handle to convert a point" }],
 
   type: [
-    { type: "select", text: "", options: ["Open Sans", "Arimo", "Bitter", "Lato", "Lora", "Merriweather", "Montserrat", "Open Sans Condensed", "Oswald", "Playfair Display", "Poppins", "Raleway", "Roboto", "Roboto Condensed", "Source Sans Pro", "Ubuntu"], value: "Open Sans", width: 130 },
-    { type: "select", text: "", options: ["Regular", "Italic", "Bold", "Bold Italic"], value: "Regular" },
-    { type: "num", text: "", value: "24", unit: "pt", width: 40 },
-    { type: "select", text: "", options: ["Sharp", "Crisp", "Strong", "Smooth", "None"], value: "Sharp" },
-    { type: "btngroup", icons: ["i-quote", "i-props", "i-quote"], titles: ["Left align text", "Center text", "Right align text"], active: 0 },
+    { type: "select", key: "Font", text: "", options: ["Open Sans", "Arimo", "Bitter", "Lato", "Lora", "Merriweather", "Montserrat", "Open Sans Condensed", "Oswald", "Playfair Display", "Poppins", "Raleway", "Roboto", "Roboto Condensed", "Source Sans Pro", "Ubuntu"], value: "Open Sans", width: 130 },
+    { type: "select", key: "Style", text: "", options: ["Regular", "Italic", "Bold", "Bold Italic"], value: "Regular" },
+    { type: "num", key: "Size", text: "", value: "24", unit: "pt", width: 40 },
+    { type: "select", key: "Anti-alias", text: "", options: ["Sharp", "Crisp", "Strong", "Smooth", "None"], value: "Sharp" },
+    { type: "btngroup", key: "Align", icons: ["i-quote", "i-props", "i-quote"], titles: ["Left align text", "Center text", "Right align text"], active: 0 },
     { type: "select", text: "", options: ["Faux Bold", "Faux Italic"], value: "Faux Bold" },
     { type: "swatch", title: "Text colour" },
   ],
@@ -122,7 +141,7 @@ export const optionBars = {
   "shape-3d": [{ type: "label", text: "Drag to draw a 3D object, then use the 3D panel to rotate it" }],
 
   hand: [{ type: "toggle", text: "Scroll All Windows", on: false }, { type: "toggle", text: "Zoom to Fit on Resize", on: false }],
-  "rotate-view": [{ type: "btn", text: "Reset View" }, { type: "toggle", text: "Rotate All Windows", on: false }],
+  "rotate-view": [{ type: "btn", text: "Reset View", action: "view:reset-rotation" }, { type: "toggle", text: "Rotate All Windows", on: false }],
   zoom: [{ type: "btngroup", icons: ["i-zoom-in", "i-zoom-out"], titles: ["Zoom In", "Zoom Out"], active: 0 }, { type: "toggle", text: "Resize Windows to Fit", on: true }, { type: "toggle", text: "Scrubby Zoom", on: false }, { type: "btn", text: "Fit on Screen" }, { type: "btn", text: "100%" }],
   "quick-mask": [{ type: "label", text: "Masked areas are protected while you paint" }, { type: "btn", text: "Exit Quick Mask" }],
   screen: [{ type: "label", text: "Press F repeatedly: Standard · Full Screen with Menu · Full Screen" }],

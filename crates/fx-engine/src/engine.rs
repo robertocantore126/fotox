@@ -13,11 +13,15 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select_biased};
 use fx_core::command::{LayerPropsPatch, MaskFill, NewLayer};
-use fx_core::{ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef, PixelOps};
+use fx_core::pixels::{Content, Placed, content_bounds};
+use fx_core::{
+	ColorProfile, Command, CommandContext, CommandEffect, CommandError, Document, FilterParams, LayerId, LayerKind, LayerRef, Permutation, PixelOps,
+};
 use fx_io::fxd::{self, FxdFile, OpenedFxd, SaveRequest, SaveTarget};
 use fx_io::{ImportedImage, IoError};
 use fx_protocol::{CloseAnswer, DocId, EngineToUi, MemoryStats, UI_LOCAL_ACTION_PREFIXES, UiToEngine};
-use fx_tiles::{TileError, TileStore};
+use fx_render::TileRequest;
+use fx_tiles::{PixelFormat, PixelValue, TILE_SIZE, TileError, TileSlot, TileStore, TiledImage};
 
 use crate::documents::{Documents, OpenDoc};
 use crate::filters::{FilterPreview, PreviewJob};
@@ -25,9 +29,11 @@ use crate::ops::EngineOps;
 use crate::render::{Frame, MipWork, RenderRequest};
 use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
+use crate::tools::transform::{self as free_transform, Mode as TransformMode, Update as TransformUpdate};
 use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
+use crate::transform_preview::{Prepared, PreviewJob as TransformJob, TransformPreview};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
+use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips, vector};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -118,6 +124,18 @@ pub(crate) enum Internal {
 	},
 	/// The B3 layers are built (M2-T08).
 	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
+	/// Free Transform's source is cut out and its mips are valid (M6-T04).
+	TransformPrepared {
+		doc: DocId,
+		layer: LayerId,
+		result: Result<Option<Prepared>, TileError>,
+	},
+	/// A Free Transform preview update (M6-T04).
+	TransformShown {
+		doc: DocId,
+		request: u64,
+		result: Result<Option<crate::transform_preview::Shown>, TileError>,
+	},
 	/// A batch of filter-preview tiles (M4-T05).
 	PreviewTiles {
 		doc: DocId,
@@ -171,6 +189,10 @@ struct Engine {
 	preview_latest: HashMap<DocId, Arc<AtomicU64>>,
 	/// The last filter applied, for Filter ▸ Last Filter (Ctrl+F).
 	last_filter: Option<FilterParams>,
+	/// The font list went to the UI (M6-T07), the first time Type was picked.
+	fonts_sent: bool,
+	/// Layer ▸ Layer Style ▸ Copy Layer Style (M6-T08).
+	style_clipboard: Option<fx_core::styles::LayerStyles>,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -191,7 +213,17 @@ struct Engine {
 	selection_overlay: Option<(SelectionOverlayKey, Arc<fx_render::Overlay>)>,
 	/// The brush stroke being painted (M5-T07).
 	stroke: Option<crate::stroke::Session>,
+	/// The Free Transform box that is up, and on which document (M6-T04).
+	transform: Option<(DocId, free_transform::Session)>,
+	/// The latest transform-preview request (jobs compare with it).
+	transform_latest: Arc<AtomicU64>,
+	/// When a drag's coarse preview is refined at the view level.
+	transform_refine: Option<Instant>,
 }
+
+/// How long the pointer must rest before a dragged transform is previewed at
+/// full view resolution (M6-T04).
+const TRANSFORM_REFINE_AFTER: Duration = Duration::from_millis(150);
 
 /// Cache key of the selection contour (M5-T03).
 type SelectionOverlayKey = (DocId, u64, usize, (i64, i64, i64, i64));
@@ -203,6 +235,13 @@ enum EditKey {
 	Props(LayerRef, [bool; 9]),
 	/// `set_adjustment` of the same layer.
 	Adjustment(LayerRef),
+	/// `set_shape` of the same layer: the option bar's fields and the Path
+	/// Selection tool send a command per change, and a drag is one history step
+	/// (M6-T06). The fields touched are part of the key, so a fill drag and a
+	/// move do not merge into each other.
+	Shape(LayerRef, [bool; 4]),
+	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
+	Style(LayerRef),
 }
 
 impl EditKey {
@@ -236,6 +275,17 @@ impl EditKey {
 				))
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
+			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
+			Command::SetShape {
+				layer,
+				shape,
+				fill,
+				stroke,
+				transform,
+			} => Some(Self::Shape(
+				layer.clone(),
+				[shape.is_some(), fill.is_some(), stroke.is_some(), transform.is_some()],
+			)),
 			_ => None,
 		}
 	}
@@ -285,6 +335,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		ops: EngineOps::default(),
 		preview_latest: HashMap::new(),
 		last_filter: None,
+		fonts_sent: false,
+		style_clipboard: None,
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -293,13 +345,21 @@ pub(crate) fn run(ctx: EngineContext) {
 		settings: ToolSettings::default(),
 		selection_overlay: None,
 		stroke: None,
+		transform: None,
+		transform_latest: Arc::new(AtomicU64::new(0)),
+		transform_refine: None,
 	};
 
 	loop {
-		let deadline = [engine.view_message_deadline(), engine.hot_expiry(), engine.thumbs_due.values().min().copied()]
-			.into_iter()
-			.flatten()
-			.fold(engine.next_status, Instant::min);
+		let deadline = [
+			engine.view_message_deadline(),
+			engine.hot_expiry(),
+			engine.thumbs_due.values().min().copied(),
+			engine.transform_refine,
+		]
+		.into_iter()
+		.flatten()
+		.fold(engine.next_status, Instant::min);
 		let timeout = deadline.saturating_duration_since(Instant::now());
 		select_biased! {
 			recv(inputs) -> input => match input {
@@ -314,6 +374,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		engine.send_status_if_due();
 		engine.cool_hot_layer();
 		engine.render_due_thumbnails();
+		engine.refine_transform_if_due();
 	}
 
 	let _ = engine.render.send(RenderRequest::Stop);
@@ -409,6 +470,9 @@ impl Engine {
 		}
 		if changed.view {
 			self.refresh_preview();
+			if self.transform.is_some() {
+				self.restart_transform_preview(false);
+			}
 			self.request_frame();
 			self.view_message_pending = true;
 		}
@@ -446,6 +510,16 @@ impl Engine {
 				},
 			)
 		};
+		// A Free Transform box takes every pointer event while it is up.
+		if let Some((doc, session)) = &mut self.transform
+			&& *doc == doc_id
+		{
+			let zoom = self.docs.get(doc_id).map_or(1.0, |open| open.view.view.zoom);
+			let update = session.pointer(&event, zoom);
+			changed.cursor = Some(session.cursor());
+			self.transform_update(doc_id, update);
+			return changed;
+		}
 		let store = self.store.clone();
 		let (result, idle_cursor) = {
 			let Some(tool) = self.tools.get(&tool_id) else {
@@ -484,6 +558,24 @@ impl Engine {
 		let Some(doc_id) = self.docs.active_id() else {
 			return changed;
 		};
+		if let Some((doc, session)) = &mut self.transform
+			&& *doc == doc_id
+		{
+			let update = session.key(key);
+			self.transform_update(doc_id, update);
+			return changed;
+		}
+		// Esc with the Rotate View tool (R) resets the rotation to 0°, the same
+		// as Rotate View ▸ Reset View (M6-T05).
+		if key == "Escape"
+			&& let Some(open) = self.docs.get_mut(doc_id)
+			&& open.view.tool == "rotate-view"
+		{
+			let reset = open.view.set_rotation(0.0);
+			if reset.view {
+				return reset;
+			}
+		}
 		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
 		let store = self.store.clone();
 		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
@@ -512,6 +604,31 @@ impl Engine {
 		changed
 	}
 
+	/// Run `f` on the active document's active tool and apply its answer.
+	fn with_active_tool(&mut self, f: impl FnOnce(&mut Box<dyn crate::tools::Tool>, &mut ToolContext<'_>) -> ToolResult) {
+		let Some(doc_id) = self.docs.active_id() else { return };
+		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
+		let store = self.store.clone();
+		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
+			(Some(tool), Some(open)) => {
+				let mask_target = open.paints_mask();
+				let mut ctx = ToolContext {
+					doc: &mut open.doc,
+					store: &store,
+					ops: &self.ops,
+					settings: &self.settings,
+					view: open.view.view,
+					mask_target,
+				};
+				f(tool, &mut ctx)
+			}
+			_ => return,
+		};
+		let mut changed = Changed::default();
+		self.apply_tool_result(doc_id, result, &mut changed);
+		self.apply(changed);
+	}
+
 	/// Apply what a tool answered (M5-T01): the cursor, a status line, a picked
 	/// colour for the UI, a command to execute (R1), or an overlay redraw
 	/// (M5-T04: a marquee or lasso rubber band, which needs no re-composite).
@@ -538,11 +655,47 @@ impl Engine {
 		for event in result.strokes {
 			self.stroke_event(doc_id, event);
 		}
+		// The Type tool edits the document outside the history (M6-T07).
+		if result.doc_changed
+			&& let Some(open) = self.docs.get_mut(doc_id)
+		{
+			open.changed();
+			self.send_layers();
+			self.request_frame();
+		}
+		match result.text_session {
+			Some(crate::tools::type_tool::TextSession::Open { text, selection }) => {
+				self.to_ui(&EngineToUi::TextEdit { open: true, text, selection });
+			}
+			Some(crate::tools::type_tool::TextSession::Closed) => {
+				self.to_ui(&EngineToUi::TextEdit {
+					open: false,
+					text: String::new(),
+					selection: (0, 0),
+				});
+			}
+			None => {}
+		}
 		if result.redraw {
 			self.request_frame();
 		}
 		if let Some(command) = result.command {
+			// A command that changes the canvas hands the tool the new document
+			// when it lands (`after_edit`), which for a job is later than now.
 			self.command(doc_id, command);
+		}
+	}
+
+	/// Hand the active tool the active document again (M6-T03): a crop box
+	/// starts as the canvas, so a new canvas size, an undo across a crop or
+	/// another document starts it over. `activate` is the only hook a tool gets
+	/// before its first event; the tools that keep no box ignore it.
+	fn reactivate_tool(&mut self) {
+		let Some(open) = self.docs.active_id().and_then(|id| self.docs.get(id)) else {
+			return;
+		};
+		if let Some(tool) = self.tools.get(&open.view.tool) {
+			tool.activate(&open.doc);
 		}
 	}
 
@@ -734,11 +887,16 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::Action { id, args } => {
-				if self.edit_action(&id, &args) {
-					Changed::default()
-				} else {
-					self.action(&id)
+				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
+				// enters it with all the text selected. The UI has switched the
+				// tool to Type first.
+				if id == "type:edit-layer" {
+					if let Some(layer) = args.get("layer").and_then(|v| v.as_u64()) {
+						self.with_active_tool(|tool, ctx| tool.edit_layer(ctx, fx_core::LayerId(layer)));
+					}
+					return Changed::default();
 				}
+				if self.edit_action(&id, &args) { Changed::default() } else { self.action(&id) }
 			}
 			UiToEngine::SetZoom { doc, zoom } => match self.docs.get_mut(doc) {
 				Some(open) => open.view.set_zoom(zoom),
@@ -787,7 +945,27 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::ToolOptions { tool, options } => {
+				let transform = tool == "_transform";
+				let active = self.docs.active_mut().is_some_and(|open| open.view.tool == tool);
 				self.settings.options.insert(tool, options);
+				if active {
+					self.with_active_tool(|tool, ctx| tool.options_changed(ctx));
+				}
+				// The transform bar's Interpolation applies to the box that is up.
+				if transform && self.transform.is_some() {
+					let filter = self.transform_filter();
+					let n = |key: &str| self.settings.number("_transform", key);
+					let (x, y, w, h, a) = (n("X"), n("Y"), n("W"), n("H"), n("Angle"));
+					if let Some((_, session)) = &mut self.transform {
+						session.filter = filter;
+						// The numeric fields (M6-T09).
+						if x.is_some() || y.is_some() || w.is_some() || h.is_some() || a.is_some() {
+							session.set_numeric(x, y, w, h, a);
+						}
+					}
+					self.restart_transform_preview(false);
+					self.request_frame();
+				}
 				Changed::default()
 			}
 			UiToEngine::SetColors { fg, bg } => {
@@ -796,6 +974,10 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::Key { key } => self.tool_key(&key),
+			UiToEngine::TextEdit { text, selection } => {
+				self.with_active_tool(|tool, ctx| tool.text_input(ctx, &text, selection));
+				Changed::default()
+			}
 			UiToEngine::ProofSetup {
 				doc,
 				path,
@@ -824,6 +1006,13 @@ impl Engine {
 				return Changed::default();
 			}
 			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
+			// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06): a shape
+			// layer's pixels are drawn from its geometry on demand, so rasterising
+			// draws the level-0 tiles first and then keeps them.
+			id if id.starts_with("raster:") => {
+				self.rasterize_action(id);
+				return Changed::default();
+			}
 			// Build the B3 benchmark on top of the active document (M2-T08).
 			// View ▸ Proof Colors (Ctrl+Y) / Gamut Warning (Shift+Ctrl+Y), M4-T04.
 			"view:proof-colors" | "view:gamut-warning" => {
@@ -846,6 +1035,39 @@ impl Engine {
 				}
 				return Changed::default();
 			}
+			// Image ▸ Rotate / Flip (M6-T02): the canvas-level permutations. One
+			// action = one command, so History shows them like Photoshop does.
+			"img:rot90cw" | "img:rot90ccw" | "img:rot180" | "img:flip-h" | "img:flip-v" => {
+				if let Some(doc) = self.docs.active_id() {
+					let command = match id {
+						"img:rot90cw" => Command::RotateCanvas { quarter_turns: 1 },
+						"img:rot90ccw" => Command::RotateCanvas { quarter_turns: 3 },
+						"img:rot180" => Command::RotateCanvas { quarter_turns: 2 },
+						"img:flip-h" => Command::FlipCanvas { horizontal: true },
+						_ => Command::FlipCanvas { horizontal: false },
+					};
+					self.command(doc, command);
+				}
+				return Changed::default();
+			}
+			// Edit ▸ Free Transform (Ctrl+T) and Edit ▸ Transform ▸ … (M6-T04).
+			id if id.starts_with("xf:") => {
+				self.transform_action(id);
+				return Changed::default();
+			}
+			// Image ▸ Crop (M6-T03): the canvas becomes the pixels the selection
+			// covers. Without a selection there is nothing to crop to, exactly
+			// like the greyed-out item in Photoshop.
+			"img:crop" => {
+				self.crop_to_selection();
+				return Changed::default();
+			}
+			// A tool's ✓ and ✗ in the option bar (M6-T03): the same keys Enter
+			// and Escape send to the active tool, so the crop box commits and
+			// cancels exactly as it does from the keyboard. Free Transform
+			// (M6-T04) reuses them.
+			"tool:commit" => return self.tool_key("Enter"),
+			"tool:cancel" => return self.tool_key("Escape"),
 			// Select ▸ All / Deselect / Reselect / Inverse (M5-T04): the four
 			// selection commands the M5-T03 core added. Deselect and Reselect
 			// are quiet when there is nothing to do: Photoshop greys the items
@@ -910,13 +1132,34 @@ impl Engine {
 			"export:png" | "export:tiff" | "export:jpg" | "export:as" => return Changed::default(),
 			_ => {}
 		}
+		// Leaving a tool finishes what it has under way (the Type tool commits).
+		if id.starts_with("tool:") {
+			self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+			if id == "tool:type" && !self.fonts_sent {
+				self.fonts_sent = true;
+				let families = crate::text::families()
+					.into_iter()
+					.map(|f| fx_protocol::FontFamilyInfo {
+						name: f.name,
+						styles: f.styles.iter().map(|s| s.label().to_owned()).collect(),
+					})
+					.collect();
+				self.to_ui(&EngineToUi::Fonts { families });
+			}
+		}
 		if let Some(changed) = self.view_mut().action(id) {
 			let mut changed = changed;
-			// A tool change also sets the tool's cursor (M5-T01).
+			// A tool change also sets the tool's cursor (M5-T01) and hands the
+			// tool the document, so a crop box starts as the canvas and the view
+			// draws it at once (M6-T03).
 			if let Some(tool) = id.strip_prefix("tool:")
 				&& let Some(t) = self.tools.get(tool)
 			{
 				changed.cursor = Some(t.cursor(Modifiers::default()));
+				if let Some(open) = self.docs.active_id().and_then(|id| self.docs.get(id)) {
+					t.activate(&open.doc);
+				}
+				changed.view = true;
 			}
 			return changed;
 		}
@@ -1002,7 +1245,10 @@ impl Engine {
 			});
 			return;
 		};
-		// A snapshot: editing may go on while the export runs.
+		// A snapshot: editing may go on while the export runs. Shape layers
+		// are rasterised from their geometry, so their level-0 tiles are
+		// drawn first (M6-T06).
+		vector::prepare_level0(&mut open.doc, &self.store, None);
 		let doc = open.doc.clone();
 		if let Err(error) = crate::export::options_for(&doc, &path, false) {
 			self.to_ui(&EngineToUi::Error {
@@ -1044,6 +1290,267 @@ impl Engine {
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the export: {error}"),
 			});
+		}
+	}
+
+	// ------------------------------------------------------------ free transform (M6-T04)
+
+	/// `xf:free` (Ctrl+T) and the Transform submenu: start a box, or switch the
+	/// box's gesture; the turns and flips act on the box when one is up, else
+	/// they transform the active layer at once.
+	fn transform_action(&mut self, id: &str) {
+		let Some(doc_id) = self.docs.active_id() else { return };
+		let up = matches!(self.transform, Some((doc, _)) if doc == doc_id);
+		if let Some(mode) = TransformMode::of_action(id) {
+			if up {
+				if let Some((_, session)) = &mut self.transform {
+					session.set_mode(mode);
+				}
+				self.transform_update(doc_id, TransformUpdate::Changed { dragging: false });
+			} else {
+				self.start_transform(doc_id, mode);
+			}
+			return;
+		}
+		let Some(linear) = free_transform::instant_turn(id) else {
+			return;
+		};
+		if up {
+			if let Some((_, session)) = &mut self.transform {
+				session.turn(linear);
+			}
+			self.transform_update(doc_id, TransformUpdate::Changed { dragging: false });
+			return;
+		}
+		// No box: the whole layer (or the selection) at once, about its centre.
+		let Some(open) = self.docs.get(doc_id) else { return };
+		let Some(layer) = open.doc.active_layer() else { return };
+		match crate::transform_preview::start_rect(&open.doc, layer, &self.store) {
+			Ok(Some(rect)) => {
+				let mapping = free_transform::turn_mapping(linear, rect);
+				self.command(
+					doc_id,
+					Command::Transform {
+						layer: LayerRef::Id(layer),
+						mapping: Box::new(mapping),
+						filter: fx_core::Filter::Bicubic,
+					},
+				);
+			}
+			Ok(None) => self.to_ui(&EngineToUi::Toast {
+				text: "Nothing to transform: the layer is empty".into(),
+			}),
+			Err(error) => self.to_ui(&EngineToUi::Error { text: error.to_string() }),
+		}
+	}
+
+	/// Put a Free Transform box over the active layer (or the selection).
+	fn start_transform(&mut self, doc_id: DocId, mode: TransformMode) {
+		let filter = self.transform_filter();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		if let Some(job) = &open.busy {
+			let text = format!("Wait until {job} is finished");
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
+		let Some(layer_id) = open.doc.active_layer() else { return };
+		let refusal = match open.doc.layer(layer_id) {
+			Some(layer) if !matches!(layer.kind, LayerKind::Pixel { .. }) => Some("Free Transform works on a pixel layer"),
+			Some(layer) if layer.locked_position || layer.locked_pixels => Some("The layer is locked"),
+			None => Some("Select a layer to transform"),
+			_ => None,
+		};
+		if let Some(text) = refusal {
+			self.to_ui(&EngineToUi::Toast { text: text.into() });
+			return;
+		}
+		let rect = match crate::transform_preview::start_rect(&open.doc, layer_id, &self.store) {
+			Ok(Some(rect)) => rect,
+			Ok(None) => {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Nothing to transform: the layer is empty".into(),
+				});
+				return;
+			}
+			Err(error) => {
+				self.to_ui(&EngineToUi::Error { text: error.to_string() });
+				return;
+			}
+		};
+		self.end_stroke();
+		let session = free_transform::Session::new(layer_id, rect, mode, filter);
+		let status = session.status();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		open.transform_preview = Some(TransformPreview {
+			layer: layer_id,
+			prepared: None,
+			shown: None,
+			request: 0,
+		});
+		// Cut the source out and make its mips valid, off the engine thread.
+		let doc = open.doc.clone();
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		rayon::spawn(move || {
+			let result = Prepared::new(&doc, layer_id, &store);
+			let _ = internal.send(Internal::TransformPrepared {
+				doc: doc_id,
+				layer: layer_id,
+				result,
+			});
+		});
+		self.transform = Some((doc_id, session));
+		self.to_ui(&EngineToUi::TransformBox { up: true });
+		self.to_ui(&EngineToUi::ToolInfo { text: status });
+		self.request_frame();
+	}
+
+	/// The option bar's Interpolation for Free Transform (Bicubic by default,
+	/// as in Photoshop).
+	fn transform_filter(&self) -> fx_core::Filter {
+		use fx_core::Filter;
+		match self.settings.string("_transform", "Interpolation").as_deref() {
+			Some("Nearest Neighbor") => Filter::Nearest,
+			Some("Bilinear") => Filter::Bilinear,
+			Some("Bicubic Smoother") => Filter::BicubicSmoother,
+			Some("Bicubic Sharper") => Filter::BicubicSharper,
+			Some("Bicubic Automatic") => Filter::BicubicAutomatic,
+			Some("Lanczos 3") => Filter::Lanczos3,
+			_ => Filter::Bicubic,
+		}
+	}
+
+	/// Act on what an event did to the box.
+	fn transform_update(&mut self, doc_id: DocId, update: TransformUpdate) {
+		match update {
+			TransformUpdate::None => {}
+			TransformUpdate::Redraw => self.request_frame(),
+			TransformUpdate::Changed { dragging } => {
+				if let Some((_, session)) = &self.transform {
+					let text = session.status();
+					self.to_ui(&EngineToUi::ToolInfo { text });
+				}
+				self.restart_transform_preview(dragging);
+				self.transform_refine = dragging.then(|| Instant::now() + TRANSFORM_REFINE_AFTER);
+				self.request_frame();
+			}
+			TransformUpdate::Commit(command) => {
+				// The preview stays on screen until the job's pixels land.
+				self.end_transform(true);
+				self.command(doc_id, command);
+				let started = self.docs.get(doc_id).is_some_and(|open| open.busy.is_some());
+				if !started && let Some(open) = self.docs.get_mut(doc_id) {
+					open.transform_preview = None;
+					open.preview_rev += 1;
+					self.request_frame();
+				}
+			}
+			TransformUpdate::Cancel => self.end_transform(false),
+		}
+	}
+
+	/// Take the box down; `keep_preview` leaves the transformed pixels on
+	/// screen (a commit, until its job is done).
+	fn end_transform(&mut self, keep_preview: bool) {
+		let Some((doc_id, _)) = self.transform.take() else { return };
+		self.transform_refine = None;
+		// Whatever preview job is running is now stale.
+		self.transform_latest.fetch_add(1, Ordering::Relaxed);
+		if !keep_preview
+			&& let Some(open) = self.docs.get_mut(doc_id)
+			&& open.transform_preview.take().is_some()
+		{
+			open.preview_rev += 1;
+		}
+		self.to_ui(&EngineToUi::TransformBox { up: false });
+		self.to_ui(&EngineToUi::ToolInfo { text: String::new() });
+		self.request_frame();
+	}
+
+	/// The source is ready: show the first preview.
+	fn transform_prepared(&mut self, doc_id: DocId, layer: LayerId, result: Result<Option<Prepared>, TileError>) {
+		let current = matches!(&self.transform, Some((doc, session)) if *doc == doc_id && session.layer == layer);
+		if !current {
+			return;
+		}
+		match result {
+			Ok(Some(prepared)) => {
+				if let Some(preview) = self.docs.get_mut(doc_id).and_then(|open| open.transform_preview.as_mut()) {
+					preview.prepared = Some(Arc::new(prepared));
+				}
+				self.restart_transform_preview(false);
+			}
+			Ok(None) => {
+				self.end_transform(false);
+				self.to_ui(&EngineToUi::Toast {
+					text: "Nothing to transform".into(),
+				});
+			}
+			Err(error) => {
+				self.end_transform(false);
+				self.to_ui(&EngineToUi::Error {
+					text: format!("Free Transform: {error}"),
+				});
+			}
+		}
+	}
+
+	/// Start a preview job for the box as it is now (latest request wins).
+	fn restart_transform_preview(&mut self, coarser: bool) {
+		let Some((doc_id, session)) = &self.transform else { return };
+		let (doc_id, mapping, filter) = (*doc_id, session.mapping(), session.filter);
+		let Some(mapping) = mapping else { return };
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		let Some(viewport) = open.view.viewport else { return };
+		let (view, canvas) = (open.view.view, (open.doc.width, open.doc.height));
+		let Some(preview) = open.transform_preview.as_mut() else { return };
+		let Some(prepared) = preview.prepared.clone() else { return };
+		let request = self.transform_latest.fetch_add(1, Ordering::Relaxed) + 1;
+		preview.request = request;
+		let job = TransformJob {
+			request,
+			latest: self.transform_latest.clone(),
+			prepared,
+			mapping,
+			filter,
+			coarser,
+			view,
+			viewport,
+			canvas,
+		};
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		rayon::spawn(move || {
+			let result = job.run(&store);
+			let _ = internal.send(Internal::TransformShown { doc: doc_id, request, result });
+		});
+	}
+
+	/// A preview update arrived: show it if it is the newest.
+	fn transform_shown(&mut self, doc_id: DocId, request: u64, result: Result<Option<crate::transform_preview::Shown>, TileError>) {
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		let Some(preview) = open.transform_preview.as_mut() else { return };
+		if preview.request != request {
+			return;
+		}
+		match result {
+			Ok(Some(shown)) => {
+				preview.shown = Some(shown);
+				open.preview_rev += 1;
+				if self.docs.active_id() == Some(doc_id) {
+					self.request_frame();
+				}
+			}
+			Ok(None) => {}
+			// A derived tile went while the job ran: the next update retries.
+			Err(TileError::Evicted) => {}
+			Err(error) => tracing::warn!("transform preview failed: {error}"),
+		}
+	}
+
+	/// The pointer rested after a drag: preview at the view's own level.
+	fn refine_transform_if_due(&mut self) {
+		if self.transform_refine.is_some_and(|at| Instant::now() >= at) {
+			self.transform_refine = None;
+			self.restart_transform_preview(false);
 		}
 	}
 
@@ -1171,6 +1678,9 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let label = pixel_job_label(&command);
 		open.busy = Some(label.clone());
+		// These commands read level 0 of layers the view may not have drawn
+		// (M6-T06): fill in the shape tiles before the snapshot is taken.
+		vector::prepare_level0(&mut open.doc, &self.store, None);
 		let before = open.doc.clone();
 		self.next_task += 1;
 		let task = self.next_task;
@@ -1227,6 +1737,10 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		open.busy = None;
 		if open.preview.take().is_some() {
+			open.preview_rev += 1;
+		}
+		// A committed Free Transform stayed on screen until its pixels landed.
+		if open.transform_preview.take().is_some() {
 			open.preview_rev += 1;
 		}
 		match result {
@@ -1290,6 +1804,8 @@ impl Engine {
 				}
 			}
 			Internal::PixelJobDone { task, doc, command, result } => self.pixel_job_done(task, doc, *command, result),
+			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
+			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
 			Internal::Exported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
@@ -1498,6 +2014,9 @@ impl Engine {
 
 	/// Close without asking (the document must already be clean).
 	fn force_close(&mut self, id: DocId) {
+		if matches!(self.transform, Some((doc, _)) if doc == id) {
+			self.end_transform(false);
+		}
 		if self.docs.close(id).is_some() {
 			self.thumbs_wanted.retain(|(d, _), _| *d != id);
 			self.thumbs_last.retain(|(d, _), _| *d != id);
@@ -1609,6 +2128,12 @@ impl Engine {
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
 		self.end_stroke();
+		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+		// Any other edit while a transform box is up drops the box (Photoshop
+		// greys everything else out; here the edit wins).
+		if matches!(self.transform, Some((doc, _)) if doc == id) && !matches!(command, Command::Transform { .. }) {
+			self.end_transform(false);
+		}
 		let store = self.store.clone();
 		let Some(doc) = self.docs.get_mut(id) else {
 			tracing::warn!("command for unknown document {id:?}");
@@ -1687,6 +2212,13 @@ impl Engine {
 	/// Undo (`redo == false`) or redo one step.
 	fn step_history(&mut self, id: DocId, redo: bool) {
 		self.end_stroke();
+		// FAST: undo while typing commits first, then undoes the commit.
+		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+		if matches!(self.transform, Some((doc, _)) if doc == id) {
+			// Undo while the box is up cancels the box, as in Photoshop.
+			self.end_transform(false);
+			return;
+		}
 		let Some(doc) = self.docs.get_mut(id) else { return };
 		if let Some(job) = &doc.busy {
 			let text = format!("Wait until {job} is finished");
@@ -1714,6 +2246,11 @@ impl Engine {
 	/// Tell the UI what an edit changed and redraw.
 	fn after_edit(&mut self, id: DocId, content: bool) {
 		let Some(doc) = self.docs.get_mut(id) else { return };
+		// A command may have changed the document's size (Canvas Size, Image Size,
+		// an arbitrary rotation in M6): the view and the viewport maths read this
+		// copy of it, and `zoom:fit` uses it.
+		let resized = doc.view.doc != (doc.doc.width, doc.doc.height);
+		doc.view.doc = (doc.doc.width, doc.doc.height);
 		let layers = EngineToUi::Layers {
 			doc: id,
 			revision: doc.doc.revision,
@@ -1729,6 +2266,9 @@ impl Engine {
 		let info = doc.info();
 		self.to_ui(&layers);
 		self.to_ui(&history);
+		if resized && self.docs.active_id() == Some(id) {
+			self.reactivate_tool();
+		}
 		if content {
 			self.to_ui(&EngineToUi::DocumentChanged { info });
 			if self.docs.active_id() == Some(id) {
@@ -1895,6 +2435,34 @@ impl Engine {
 			"layer:merge-visible" if visible_roots.len() > 1 => vec![Command::MergeLayers { layers: visible_roots }],
 			"layer:flatten" => vec![Command::Flatten],
 			"layer:stamp-visible" => vec![Command::StampVisible],
+			// Layer Style ▸ Copy / Paste / Clear (M6-T08).
+			"layer:copy-style" => {
+				let styles = active.and_then(|l| doc.doc.layer(l)).and_then(|l| l.styles.clone());
+				if styles.is_none() {
+					self.to_ui(&EngineToUi::Toast {
+						text: "The layer has no layer style".into(),
+					});
+				}
+				self.style_clipboard = styles;
+				return true;
+			}
+			"layer:paste-style" => match &self.style_clipboard {
+				Some(styles) => selected
+					.iter()
+					.map(|l| Command::SetLayerStyle {
+						layer: l.clone(),
+						styles: Some(styles.clone()),
+					})
+					.collect(),
+				None => return true,
+			},
+			"layer:clear-style" => selected
+				.iter()
+				.map(|l| Command::SetLayerStyle {
+					layer: l.clone(),
+					styles: None,
+				})
+				.collect(),
 			"layer:merge-visible" => return true,
 			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
 				// Nothing selected / nothing hidden: nothing to do, and no toast.
@@ -1908,15 +2476,175 @@ impl Engine {
 		true
 	}
 
+	/// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06). Only layers
+	/// whose pixels come from something outside the document can be rasterised,
+	/// so on a pixel layer (or a group) the item does nothing: Photoshop greys
+	/// it out, and the UI cannot know the layer kind yet (T05/T10).
+	///
+	/// `Command::Rasterize` composites each layer at level 0, and a shape's
+	/// level-0 tiles are only drawn for the tiles the viewport has asked for so
+	/// far, so the rest are drawn here first.
+	fn rasterize_action(&mut self, id: &str) {
+		let Some(doc) = self.docs.active_mut() else { return };
+		let doc_id = doc.id;
+		let mut layers: Vec<LayerId> = Vec::new();
+		if id == "raster:all" {
+			doc.doc.walk(|layer, _| {
+				if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. }) {
+					layers.push(layer.id);
+				}
+			});
+		} else if let Some(active) = doc.doc.active_layer() {
+			// `raster:shape` only fires on a shape layer, so the other ids stay
+			// silent on one; `raster:layer` takes whatever can be rasterised.
+			let kind = doc.doc.layer(active).map(|layer| &layer.kind);
+			let wanted = match kind {
+				Some(LayerKind::Shape { .. }) => id == "raster:shape" || id == "raster:layer",
+				Some(LayerKind::SolidFill { .. }) => id == "raster:layer",
+				Some(LayerKind::Text { .. }) => id == "raster:type" || id == "raster:layer",
+				_ => false,
+			};
+			if wanted {
+				layers.push(active);
+			}
+		}
+		if layers.is_empty() {
+			return;
+		}
+		let drawn = vector::prepare_level0(&mut doc.doc, &self.store, Some(&layers));
+		tracing::debug!("rasterising drew {drawn} level-0 shape tiles");
+		let refs: Vec<LayerRef> = layers.iter().map(|&id| LayerRef::Id(id)).collect();
+		self.command(doc_id, Command::Rasterize { layers: refs });
+	}
+
+	/// Image ▸ Crop (M6-T03): one `Command::Crop` around the pixels the
+	/// selection covers, measured exactly on the coverage image (the Crop tool's
+	/// box does the same for a dragged rectangle).
+	fn crop_to_selection(&mut self) {
+		let Some(doc_id) = self.docs.active_id() else {
+			return;
+		};
+		let store = self.store.clone();
+		let bounds = self.docs.get(doc_id).map(|open| {
+			open.doc.selection.as_ref().map_or(Ok(None), |selection| {
+				content_bounds(
+					Placed {
+						image: &selection.image,
+						offset: selection.offset,
+					},
+					Content::Opaque,
+					&store,
+				)
+			})
+		});
+		match bounds {
+			Some(Ok(Some((x0, y0, x1, y1)))) => self.command(
+				doc_id,
+				Command::Crop {
+					rect: (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32),
+					angle_deg: 0.0,
+					// D-056: Delete Cropped Pixels is off by default, so the menu
+					// item keeps what the new canvas does not show.
+					delete_cropped: false,
+				},
+			),
+			Some(Ok(None)) => self.to_ui(&EngineToUi::Toast {
+				text: "Nothing is selected to crop to".into(),
+			}),
+			Some(Err(error)) => self.to_ui(&EngineToUi::Toast { text: error.to_string() }),
+			None => {}
+		}
+	}
+
+	/// Image ▸ Trim (M6-T03): the borders the dialog names are cut off as one
+	/// `Command::Crop`. The content is the **active layer's own pixels** — the
+	/// "Based On" choice picks what counts as content (anything not transparent,
+	/// or anything that is not the corner's colour) — and "Trim Away" picks the
+	/// edges that may go.
+	fn trim(&mut self, doc_id: DocId, args: &serde_json::Value) {
+		let store = self.store.clone();
+		let away = trim_edges(args);
+		let Some(based_on) = args.get("based_on").and_then(|v| v.as_str()) else {
+			return;
+		};
+		let trimmed = {
+			let Some(open) = self.docs.get(doc_id) else {
+				return;
+			};
+			let Some(layer) = open.doc.active_layer().and_then(|id| open.doc.layer(id)) else {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Nothing to trim: the active layer has no pixels".into(),
+				});
+				return;
+			};
+			let LayerKind::Pixel { image, offset } = &layer.kind else {
+				self.to_ui(&EngineToUi::Toast {
+					text: "Nothing to trim: rasterise the layer first".into(),
+				});
+				return;
+			};
+			// "Based On: Top Left / Bottom Right Pixel Colour" counts the pixels
+			// that differ from the corner the user named.
+			let content = match based_on {
+				"Top Left Pixel Colour" => stored_pixel(image, (0, 0), &store).map_or(Content::Opaque, Content::DifferentFrom),
+				"Bottom Right Pixel Colour" => {
+					let corner = (i64::from(image.width()) - 1, i64::from(image.height()) - 1);
+					stored_pixel(image, corner, &store).map_or(Content::Opaque, Content::DifferentFrom)
+				}
+				_ => Content::Opaque,
+			};
+			match content_bounds(Placed { image, offset: *offset }, content, &store) {
+				Ok(Some(bounds)) => bounds,
+				Ok(None) => {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Nothing to trim from that layer".into(),
+					});
+					return;
+				}
+				Err(error) => {
+					self.to_ui(&EngineToUi::Toast { text: error.to_string() });
+					return;
+				}
+			}
+		};
+		let (width, height) = self.docs.get(doc_id).map_or((0, 0), |open| (open.doc.width, open.doc.height));
+		// Only the edges the dialog ticked are pulled in, and the pixels are
+		// clipped to the canvas they live on.
+		let (x0, y0, x1, y1) = trimmed;
+		let left = if away.0 { x0.clamp(0, width as i32) } else { 0 };
+		let top = if away.1 { y0.clamp(0, height as i32) } else { 0 };
+		let right = if away.2 { x1.clamp(left, width as i32) } else { width as i32 };
+		let bottom = if away.3 { y1.clamp(top, height as i32) } else { height as i32 };
+		let rect = (left, top, (right - left) as u32, (bottom - top) as u32);
+		if rect == (0, 0, width, height) {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Nothing to trim: the layer fills the canvas".into(),
+			});
+			return;
+		}
+		self.command(
+			doc_id,
+			Command::Crop {
+				rect,
+				angle_deg: 0.0,
+				delete_cropped: false,
+			},
+		);
+	}
+
 	/// Edit and Layer menu actions that use the selection or the clipboard
 	/// (M5-T05). `true` when `id` was one of them.
 	fn edit_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
 		let Some(doc_id) = self.docs.active_id() else {
 			return matches!(
 				id,
-				"clip:copy" | "clip:copy-merged" | "clip:cut" | "clip:paste" | "clip:paste-special" | "clip:clear" | "edit:fill"
+				"clip:copy" | "clip:copy-merged" | "clip:cut" | "clip:paste" | "clip:paste-special" | "clip:clear" | "edit:fill" | "edit:trim"
 			);
 		};
+		if id == "edit:trim" {
+			self.trim(doc_id, args);
+			return true;
+		}
 		let has_selection = self.docs.get(doc_id).is_some_and(|open| open.doc.selection.is_some());
 		match id {
 			"clip:copy" | "clip:cut" => {
@@ -2050,6 +2778,10 @@ impl Engine {
 	/// nothing to copy (a toast says why).
 	fn copy_layer(&mut self, doc_id: DocId) -> bool {
 		let store = self.store.clone();
+		// A shape layer is copied as the pixels it draws (M6-T06).
+		if let Some(open) = self.docs.get_mut(doc_id) {
+			vector::prepare_level0(&mut open.doc, &store, None);
+		}
 		let result = {
 			let Some(open) = self.docs.get(doc_id) else { return false };
 			let Some((image, offset)) = crate::clipboard::active_pixels(&open.doc) else {
@@ -2193,6 +2925,10 @@ impl Engine {
 
 	fn after_active_change(&mut self) {
 		self.to_ui(&EngineToUi::ActiveDocument { doc: self.docs.active_id() });
+		if self.transform.as_ref().is_some_and(|(doc, _)| Some(*doc) != self.docs.active_id()) {
+			self.end_transform(false);
+		}
+		self.reactivate_tool();
 		self.send_layers();
 		self.request_frame();
 		self.view_message_pending = true;
@@ -2218,22 +2954,38 @@ impl Engine {
 			// The document changed meanwhile; the next frame asks again.
 			return;
 		}
+		let mut shape_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
+		let mut effect_tiles: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
 		for request in &work.requests {
-			let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
-			let image = if request.mask {
-				match layer.mask.as_mut() {
-					Some(mask) => &mut mask.image,
-					None => continue,
+			match request {
+				TileRequest::Mip(request) => {
+					let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
+					let image = if request.mask {
+						match layer.mask.as_mut() {
+							Some(mask) => &mut mask.image,
+							None => continue,
+						}
+					} else {
+						match &mut layer.kind {
+							fx_core::LayerKind::Pixel { image, .. } => image,
+							_ => continue,
+						}
+					};
+					if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
+						tracing::warn!("mip {request:?} failed: {error}");
+					}
 				}
-			} else {
-				match &mut layer.kind {
-					fx_core::LayerKind::Pixel { image, .. } => image,
-					_ => continue,
-				}
-			};
-			if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
-				tracing::warn!("mip {request:?} failed: {error}");
+				// Shape tiles are drawn from the geometry, all levels alike
+				// (M6-T06); collect them and draw one parallel batch per layer.
+				TileRequest::Vector(request) => shape_tiles.push((request.layer, request.level, request.x, request.y)),
+				TileRequest::Effect(request) => effect_tiles.push((request.layer, request.effect, request.level, request.x, request.y)),
 			}
+		}
+		if !shape_tiles.is_empty() {
+			vector::draw_requests(&mut doc.doc, &store, &shape_tiles);
+		}
+		if !effect_tiles.is_empty() {
+			crate::effects::draw_effect_requests(&mut doc.doc, &store, &effect_tiles);
 		}
 		doc.invalidate_snapshot();
 		if self.docs.active_id() == Some(work.doc) {
@@ -2301,6 +3053,12 @@ impl Engine {
 	/// Everything to draw over the image: the active tool's overlay plus the
 	/// selection's marching ants (M5-T02/T03). `None` when there is nothing.
 	fn active_overlay(&mut self) -> Option<Arc<fx_render::Overlay>> {
+		// A Free Transform box replaces the tool's overlay and the ants.
+		if let (Some((doc, session)), Some(active)) = (&self.transform, self.docs.active_id())
+			&& *doc == active
+		{
+			return Some(Arc::new(session.overlay()));
+		}
 		let mut items = Vec::new();
 		let mut nudge = None;
 		if let Some(tool_id) = self.docs.active_mut().map(|doc| doc.view.tool.clone())
@@ -2534,7 +3292,7 @@ impl Engine {
 			zoom: view.zoom,
 			center_x: view.center_x,
 			center_y: view.center_y,
-			rotation_deg: 0.0,
+			rotation_deg: view.rotation.to_degrees(),
 		});
 		self.last_view_message = Some(Instant::now());
 		self.view_message_pending = false;
@@ -2655,6 +3413,52 @@ fn cmyk_profile_files() -> Vec<fx_color::CmykProfileFile> {
 	fx_color::cmyk_profiles(&dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>())
 }
 
+/// Which edges Image ▸ Trim may cut, from the dialog's "Trim Away" list
+/// (M6-T03), as `(left, top, right, bottom)`.
+fn trim_edges(args: &serde_json::Value) -> (bool, bool, bool, bool) {
+	let has = |name: &str| {
+		args.get("away")
+			.and_then(|v| v.as_array())
+			.is_some_and(|list| list.iter().any(|v| v.as_str() == Some(name)))
+	};
+	(has("Left"), has("Top"), has("Right"), has("Bottom"))
+}
+
+/// The stored value of one pixel of a placed image, in the document's 16-bit
+/// scale (Trim's corner colour, M6-T03): `None` outside the image or when the
+/// tile cannot be read.
+fn stored_pixel(image: &TiledImage, corner: (i64, i64), store: &TileStore) -> Option<[u16; 4]> {
+	if corner.0 < 0 || corner.1 < 0 || corner.0 >= i64::from(image.width()) || corner.1 >= i64::from(image.height()) {
+		return None;
+	}
+	let tile = i64::from(TILE_SIZE);
+	let (tx, ty) = ((corner.0 / tile) as u32, (corner.1 / tile) as u32);
+	let format = image.format();
+	let value = match image.slot(0, tx, ty) {
+		TileSlot::Empty => return Some(PixelValue::TRANSPARENT.0),
+		TileSlot::Solid(value) => *value,
+		TileSlot::Data(handle) => {
+			let buffer = store.get(handle).ok()?;
+			let (x, y) = ((corner.0 % tile) as u32, (corner.1 % tile) as u32);
+			let bpp = format.bytes_per_pixel();
+			let index = ((y * TILE_SIZE + x) * bpp as u32) as usize;
+			let bytes = buffer.bytes();
+			let channel = |c: usize| -> u16 {
+				match format {
+					// 16-bit formats keep two bytes per channel.
+					PixelFormat::Rgba16 | PixelFormat::Gray16 => u16::from_ne_bytes([bytes[index + c * 2], bytes[index + c * 2 + 1]]),
+					_ => u16::from(bytes[index + c]) * 257,
+				}
+			};
+			match format {
+				PixelFormat::Gray8 | PixelFormat::Gray16 => PixelValue::gray16(channel(0)),
+				_ => PixelValue::rgba16(channel(0), channel(1), channel(2), channel(3)),
+			}
+		}
+	};
+	Some(value.0)
+}
+
 /// Commands whose pixel work is too heavy for the engine thread (M4).
 fn is_pixel_job(command: &Command) -> bool {
 	matches!(
@@ -2666,7 +3470,16 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::ConvertProfile { .. }
 			| Command::ModifySelection { .. }
 			| Command::MagicWand { .. }
+			// Rotating a big canvas is tile I/O, resampling is a full pass over
+			// every layer (M6-T02): both would freeze the engine thread.
+			| Command::RotateCanvas { .. }
+			| Command::FlipCanvas { .. }
+			| Command::RotateCanvasArbitrary { .. }
+			// Crop clips (and a straighten resamples) every layer (M6-T03).
+			| Command::Crop { .. }
 	)
+	// Image Size without resampling only changes the print resolution: instant.
+	|| matches!(command, Command::ImageSize { resample: Some(_), .. })
 }
 
 /// The progress label of a pixel job, as Photoshop names the operation.
@@ -2679,6 +3492,13 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
 		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
 		Command::MagicWand { .. } => "Magic Wand".to_owned(),
+		Command::RotateCanvas { quarter_turns } => {
+			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
+		}
+		Command::FlipCanvas { horizontal } => if *horizontal { "Flip Canvas Horizontal" } else { "Flip Canvas Vertical" }.to_owned(),
+		Command::RotateCanvasArbitrary { .. } => "Rotate Image".to_owned(),
+		Command::ImageSize { .. } => "Image Size".to_owned(),
+		Command::Crop { .. } => "Crop".to_owned(),
 		_ => "Working".to_owned(),
 	}
 }

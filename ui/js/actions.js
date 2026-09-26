@@ -12,6 +12,8 @@ import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
 import { isEngineFilter, openFilterDialog } from "./native/filters.js";
 import { cmykProfiles, isColorDialog, openColorDialog } from "./native/color.js";
+import { isImageDialog, openImageDialog } from "./native/image.js";
+import { isStyleDialog, openStyleDialog } from "./native/styles.js";
 import { activeDocument } from "./native/documents.js";
 import { dialogDef } from "./data/dialogs.js";
 
@@ -33,6 +35,11 @@ export function runAction(item) {
   // In the app, layer and history actions are the engine's (sent above): it
   // answers with the result, or a toast for what is not implemented yet.
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
+  // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
+  // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
+  // Layer ▸ Rasterize (M6-T06): the mock's "not implemented" toast must not
+  // follow them.
+  if (bridge.isNative && ["img:", "xf:", "sel:", "filter:", "raster:"].some((p) => a.startsWith(p))) return;
   // Other debug actions are the engine's (sent above); nothing to do here.
   if (a.startsWith("debug:")) {
     if (!bridge.isNative) toast(label + " needs the app (not available in a browser)");
@@ -88,12 +95,28 @@ export function runAction(item) {
     });
     return;
   }
+  // In the app, Image ▸ Trim (M6-T03) looks at the layer's pixels in the
+  // engine: the dialog's choices travel with the action.
+  if (a === "dlg:trim" && bridge.isNative) {
+    openDialog("trim", {
+      onOk: (v) => bridge.send({
+        type: UI.ACTION, id: "edit:trim",
+        args: { based_on: v["Based On:"], away: Array.isArray(v["Trim Away:"]) ? v["Trim Away:"] : [] },
+      }),
+    });
+    return;
+  }
+  // In the app, Image Size / Canvas Size / Rotate Arbitrary are the engine's
+  // commands (M6-T02).
+  if (a.startsWith("dlg:") && bridge.isNative && isImageDialog(a.slice(4))) { openImageDialog(a.slice(4)); return; }
   // In the app, colour management dialogs and the proof toggles (M4-T03/T04).
   if (a.startsWith("dlg:") && bridge.isNative && isColorDialog(a.slice(4))) { openColorDialog(a.slice(4)); return; }
   if ((a === "view:proof-colors" || a === "view:gamut-warning") && bridge.isNative) return;
   // In the app, Gaussian Blur and Unsharp Mask preview live and apply as a
   // job in the engine (M4-T05).
   if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
+  // In the app, the five layer styles and Blending Options are live (M6-T08).
+  if (a.startsWith("dlg:") && bridge.isNative && isStyleDialog(a.slice(4))) { openStyleDialog(a.slice(4)); return; }
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }
@@ -111,6 +134,9 @@ export function runAction(item) {
   if (a === "panels:reset") { panels.resetPanels(); toast("Workspace reset"); return; }
 
   // strumenti ------------------------------------------------------------
+  // The option bar's ✓ and ✗ (M6-T03) are the active tool's commit and
+  // cancel: the engine owns them (sent above), they are not tool picks.
+  if (a === "tool:commit" || a === "tool:cancel") return;
   if (a.startsWith("tool:")) { setTool(a.slice(5)); return; }
 
   // vista ----------------------------------------------------------------

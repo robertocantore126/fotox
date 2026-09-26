@@ -43,6 +43,15 @@ pub enum OverlayItem {
 	Handle { at: (f64, f64), size_px: f32 },
 	/// A small crosshair (a clone source).
 	Crosshair { at: (f64, f64) },
+	/// Everything *outside* a convex document quadrilateral, filled (the crop
+	/// tool dims what the crop will throw away, M6-T03). The corners go round
+	/// the quad in either direction; a straightened crop box (and any box under
+	/// a rotated view, M6-T05) is not axis-aligned on screen.
+	Shade { quad: [(f64, f64); 4], color: [f32; 4] },
+	/// A convex document quadrilateral, filled — the *inside* counterpart of
+	/// [`OverlayItem::Shade`]. The Type tool paints the text selection with it
+	/// (M6-T07); the corners go round the quad in either direction.
+	Fill { quad: [(f64, f64); 4], color: [f32; 4] },
 }
 
 /// Everything the tools draw over the document this frame.
@@ -72,6 +81,14 @@ impl OverlayItem {
 				size_px: *size_px,
 			},
 			OverlayItem::Crosshair { at } => OverlayItem::Crosshair { at: shift(*at) },
+			OverlayItem::Shade { quad, color } => OverlayItem::Shade {
+				quad: quad.map(shift),
+				color: *color,
+			},
+			OverlayItem::Fill { quad, color } => OverlayItem::Fill {
+				quad: quad.map(shift),
+				color: *color,
+			},
 		}
 	}
 }
@@ -81,7 +98,7 @@ impl Overlay {
 	pub fn has_ants(&self) -> bool {
 		self.items.iter().any(|item| match item {
 			OverlayItem::Polyline { style, .. } | OverlayItem::Circle { style, .. } => *style == OverlayStyle::Ants,
-			OverlayItem::Handle { .. } | OverlayItem::Crosshair { .. } => false,
+			OverlayItem::Handle { .. } | OverlayItem::Crosshair { .. } | OverlayItem::Shade { .. } | OverlayItem::Fill { .. } => false,
 		})
 	}
 }
@@ -126,7 +143,8 @@ pub fn tessellate(overlay: &Overlay, view: &ViewTransform, viewport: ViewportSiz
 			OverlayItem::Circle { centre, radius, style } => {
 				let (cx, cy) = *centre;
 				// A circle in document space stays a circle on screen at any
-				// zoom (the view has no rotation yet).
+				// zoom, and at any view rotation: the mapping is a rigid
+				// transform (M6-T05).
 				let points: Vec<[f32; 2]> = (0..CIRCLE_SEGMENTS)
 					.map(|i| {
 						let angle = std::f64::consts::TAU * (i as f64) / (CIRCLE_SEGMENTS as f64);
@@ -151,9 +169,126 @@ pub fn tessellate(overlay: &Overlay, view: &ViewTransform, viewport: ViewportSiz
 					stroke(arm, false, OverlayStyle::Xor, &mut out);
 				}
 			}
+			OverlayItem::Shade { quad, color } => {
+				let screen = quad.map(|(x, y)| to_screen(x, y));
+				shade(&screen, [viewport.width as f32, viewport.height as f32], *color, &mut out);
+			}
+			OverlayItem::Fill { quad, color } => {
+				let screen = quad.map(|(x, y)| to_screen(x, y));
+				fill(screen, *color, &mut out);
+			}
 		}
 	}
 	out
+}
+
+/// One filled convex quad (two triangles), for [`OverlayItem::Shade`].
+fn fill(quad: [[f32; 2]; 4], color: [f32; 4], out: &mut Vec<OverlayVertex>) {
+	for index in [0, 1, 2, 0, 2, 3] {
+		out.push(OverlayVertex {
+			pos: quad[index],
+			color,
+			arc: 0.0,
+			ants: 0.0,
+		});
+	}
+}
+
+/// The viewport `[0, w] × [0, h]` less the convex polygon `hole` (screen
+/// pixels), as triangles. The hole is first clipped to the viewport; then the
+/// viewport is cut into angular sectors about the hole's centroid, one at
+/// every corner of either polygon, and each sector between the hole's edge
+/// and the viewport's edge is one quad. Both polygons are convex and hold the
+/// centroid, so a ray from it leaves each of them exactly once.
+fn shade(hole: &[[f32; 2]], size: [f32; 2], color: [f32; 4], out: &mut Vec<OverlayVertex>) {
+	let [w, h] = size;
+	let frame = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+	let inner = clip_to_rect(hole, w, h);
+	if inner.len() < 3 || polygon_area(&inner).abs() < 1e-3 {
+		// Nothing of the box is on screen: everything on screen is dimmed.
+		fill(frame, color, out);
+		return;
+	}
+	let n = inner.len() as f32;
+	let centre = inner.iter().fold([0.0, 0.0], |c, p| [c[0] + p[0] / n, c[1] + p[1] / n]);
+	let mut angles: Vec<f32> = frame.iter().chain(&inner).map(|p| (p[1] - centre[1]).atan2(p[0] - centre[0])).collect();
+	angles.sort_by(f32::total_cmp);
+	angles.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+	for (i, &from) in angles.iter().enumerate() {
+		let to = if i + 1 < angles.len() {
+			angles[i + 1]
+		} else {
+			angles[0] + std::f32::consts::TAU
+		};
+		let (Some(near0), Some(far0), Some(near1), Some(far1)) = (
+			ray_exit(centre, from, &inner),
+			ray_exit(centre, from, &frame),
+			ray_exit(centre, to, &inner),
+			ray_exit(centre, to, &frame),
+		) else {
+			continue;
+		};
+		fill([near0, far0, far1, near1], color, out);
+	}
+}
+
+/// Where a ray from `origin` at `angle` leaves the convex polygon `polygon`,
+/// which holds `origin`.
+fn ray_exit(origin: [f32; 2], angle: f32, polygon: &[[f32; 2]]) -> Option<[f32; 2]> {
+	let d = [angle.cos(), angle.sin()];
+	let mut best: Option<f32> = None;
+	for (i, a) in polygon.iter().enumerate() {
+		let b = polygon[(i + 1) % polygon.len()];
+		let e = [b[0] - a[0], b[1] - a[1]];
+		let denom = d[0] * e[1] - d[1] * e[0];
+		if denom.abs() < 1e-9 {
+			continue;
+		}
+		let ao = [a[0] - origin[0], a[1] - origin[1]];
+		let t = (ao[0] * e[1] - ao[1] * e[0]) / denom;
+		let s = (ao[0] * d[1] - ao[1] * d[0]) / denom;
+		if t >= 0.0 && (-1e-4..=1.0 + 1e-4).contains(&s) {
+			best = Some(best.map_or(t, |b| b.min(t)));
+		}
+	}
+	best.map(|t| [origin[0] + d[0] * t, origin[1] + d[1] * t])
+}
+
+/// The signed area of a polygon (shoelace).
+fn polygon_area(points: &[[f32; 2]]) -> f32 {
+	let mut sum = 0.0;
+	for (i, a) in points.iter().enumerate() {
+		let b = points[(i + 1) % points.len()];
+		sum += a[0] * b[1] - b[0] * a[1];
+	}
+	sum / 2.0
+}
+
+/// A convex polygon clipped to `[0, w] × [0, h]` (Sutherland–Hodgman).
+fn clip_to_rect(points: &[[f32; 2]], w: f32, h: f32) -> Vec<[f32; 2]> {
+	// (axis, value, keep the side above it)
+	let planes: [(usize, f32, bool); 4] = [(0, 0.0, true), (0, w, false), (1, 0.0, true), (1, h, false)];
+	let mut poly = points.to_vec();
+	for (axis, value, keep_above) in planes {
+		let inside = |p: &[f32; 2]| if keep_above { p[axis] >= value } else { p[axis] <= value };
+		let mut next = Vec::with_capacity(poly.len() + 2);
+		for (i, a) in poly.iter().enumerate() {
+			let b = poly[(i + 1) % poly.len()];
+			let (ia, ib) = (inside(a), inside(&b));
+			if ia {
+				next.push(*a);
+			}
+			if ia != ib {
+				let t = (value - a[axis]) / (b[axis] - a[axis]);
+				next.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+			}
+		}
+		poly = next;
+		if poly.is_empty() {
+			break;
+		}
+	}
+	poly
 }
 
 /// One stroked path: an [`OverlayStyle::Xor`] line is a black halo then the
@@ -210,6 +345,7 @@ mod tests {
 			zoom,
 			center_x: 5.0,
 			center_y: 5.0,
+			rotation: 0.0,
 		}
 	}
 
@@ -223,6 +359,12 @@ mod tests {
 				style: OverlayStyle::Solid([1.0, 0.0, 0.0, 1.0]),
 			}],
 		}
+	}
+
+	/// The area of one triangle of the vertex list.
+	fn triangle_area(triangle: &[OverlayVertex]) -> f32 {
+		let (a, b, c) = (triangle[0].pos, triangle[1].pos, triangle[2].pos);
+		((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
 	}
 
 	fn bounds(vertices: &[OverlayVertex]) -> [f32; 4] {
@@ -287,6 +429,70 @@ mod tests {
 		// The second segment starts where the first ended (10 px).
 		assert!(vertices.iter().any(|v| (v.arc - 10.0).abs() < 1e-4));
 		assert!(vertices.iter().any(|v| (v.arc - 20.0).abs() < 1e-4), "the corner to the end");
+	}
+
+	#[test]
+	fn a_shade_covers_the_viewport_but_for_the_rectangle() {
+		let square = |x0: f64, y0: f64, x1: f64, y1: f64| [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+		let overlay = Overlay {
+			items: vec![OverlayItem::Shade {
+				quad: square(0.0, 0.0, 10.0, 10.0),
+				color: [0.0, 0.0, 0.0, 0.5],
+			}],
+		};
+		let vertices = tessellate(&overlay, &view(1.0), VP);
+		assert!(vertices.iter().all(|v| v.color == [0.0, 0.0, 0.0, 0.5] && v.ants == 0.0));
+		// The document rectangle is screen 45..55: 10 000 pixels of viewport
+		// less the 100 it covers.
+		let area: f32 = vertices.chunks_exact(3).map(triangle_area).sum();
+		assert!((area - 9900.0).abs() < 1e-3, "{area}");
+		// A rectangle that covers the whole viewport dims nothing at all.
+		let overlay = Overlay {
+			items: vec![OverlayItem::Shade {
+				quad: square(-50.0, -50.0, 60.0, 60.0),
+				color: [0.0, 0.0, 0.0, 0.5],
+			}],
+		};
+		let area: f32 = tessellate(&overlay, &view(1.0), VP).chunks_exact(3).map(triangle_area).sum();
+		assert!(area < 1e-3, "{area}");
+		// A box wholly off screen dims all of it.
+		let overlay = Overlay {
+			items: vec![OverlayItem::Shade {
+				quad: square(500.0, 500.0, 510.0, 510.0),
+				color: [0.0, 0.0, 0.0, 0.5],
+			}],
+		};
+		let area: f32 = tessellate(&overlay, &view(1.0), VP).chunks_exact(3).map(triangle_area).sum();
+		assert!((area - 10_000.0).abs() < 1e-2, "{area}");
+	}
+
+	#[test]
+	fn a_turned_shade_leaves_exactly_the_turned_box() {
+		// A 20 × 20 square turned 45° about the document point (0, 0), which is
+		// the viewport's centre: a diamond of area 400.
+		let r = 200f64.sqrt();
+		let overlay = Overlay {
+			items: vec![OverlayItem::Shade {
+				quad: [(0.0, -r), (r, 0.0), (0.0, r), (-r, 0.0)],
+				color: [0.0, 0.0, 0.0, 0.5],
+			}],
+		};
+		let vertices = tessellate(&overlay, &view(1.0), VP);
+		let area: f32 = vertices.chunks_exact(3).map(triangle_area).sum();
+		assert!((area - 9600.0).abs() < 0.05, "{area}");
+		// Nothing is drawn inside the diamond: every triangle's centroid lies
+		// outside it.
+		let [cx, cy] = {
+			let (x, y) = view(1.0).doc_to_screen(VP, 0.0, 0.0);
+			[x as f32, y as f32]
+		};
+		for triangle in vertices.chunks_exact(3).filter(|t| triangle_area(t) > 1e-3) {
+			let c = [
+				(triangle[0].pos[0] + triangle[1].pos[0] + triangle[2].pos[0]) / 3.0 - cx,
+				(triangle[0].pos[1] + triangle[1].pos[1] + triangle[2].pos[1]) / 3.0 - cy,
+			];
+			assert!(c[0].abs() + c[1].abs() >= r as f32 - 1e-3, "{c:?}");
+		}
 	}
 
 	#[test]
