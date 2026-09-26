@@ -26,10 +26,20 @@ pub struct Document {
 	pub revision: u64,
 	/// Photoshop's Global Light angle in degrees (M6-T08), for the shadows.
 	pub global_light: f64,
+	/// Ruler guides (M7-T06), document pixels.
+	pub guides: Vec<Guide>,
 	next_id: u64,
 	/// How many layers of each kind this document has created, for the
 	/// Photoshop-style default names (`"Layer 1"`, `"Group 2"`, `"Curves 1"`).
 	name_counters: [u32; NameKind::COUNT],
+}
+
+/// A ruler guide (M7-T06): a vertical guide at x = `position`, or a
+/// horizontal one at y = `position`, in document pixels.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Guide {
+	pub vertical: bool,
+	pub position: f64,
 }
 
 /// Counter key for default layer names: one counter per key, per document.
@@ -162,6 +172,7 @@ impl Document {
 			reselect: None,
 			revision: 0,
 			global_light: 120.0,
+			guides: Vec::new(),
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
 		}

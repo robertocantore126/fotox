@@ -3,10 +3,12 @@
 //! tiles). Live strokes and their replay share [`stroke::Stroke`].
 
 pub mod heal;
+pub mod op;
 pub mod path;
 pub mod stroke;
 pub mod tip;
 
+pub use op::{DabContext, DabOp, Needs, StatefulDabOp, op_for};
 pub use path::{Dab, DabPath};
 pub use stroke::{LayerSource, SourceTiles, Stroke, StrokeSetup, replay};
 pub use tip::Tip;

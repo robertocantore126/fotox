@@ -132,10 +132,27 @@ pub enum Command {
 	SetLayerProps { layer: LayerRef, props: LayerPropsPatch },
 	/// Move a layer by whole pixels. Never rewrites pixels. M2
 	OffsetLayer { layer: LayerRef, dx: i32, dy: i32 },
+	/// The Move tool's drop and nudges (M7-T02): every listed layer (empty =
+	/// the selected layers; a group = everything in it) moves by `(dx, dy)`.
+	/// Offsets and placement matrices only, no pixel rewritten; all or
+	/// nothing, a position-locked layer refuses. Labelled "Move".
+	OffsetLayers { layers: Vec<LayerRef>, dx: i32, dy: i32 },
+	/// Align / Distribute (M7-T04): each layer by its own amount, one step
+	/// named `label`.
+	MoveEach { moves: Vec<(LayerRef, i32, i32)>, label: String },
+	/// New / move / clear guides (M7-T06): a history step that does not dirty
+	/// the pixels.
+	SetGuides { guides: Vec<crate::document::Guide>, label: String },
 	/// M2
 	AddMask { layer: LayerRef, fill: MaskFill },
 	/// M2
 	DeleteMask { layer: LayerRef, apply: bool },
+	/// Layer ▸ Layer Mask ▸ Disable / Enable, and the link toggle (M7-T05).
+	SetMaskFlags {
+		layer: LayerRef,
+		enabled: Option<bool>,
+		linked: Option<bool>,
+	},
 	/// Change the parameters of an adjustment layer. M2
 	SetAdjustment { layer: LayerRef, adjustment: Adjustment },
 	/// Merge the given layers into one pixel layer (rasterises). The result
@@ -369,6 +386,60 @@ impl Command {
 			Command::GroupLayers { layers, name } => group_layers(doc, layers, name.as_deref()),
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
+			Command::OffsetLayers { layers, dx, dy } => offset_layers(doc, layers, *dx, *dy),
+			Command::SetGuides { guides, label } => {
+				if guides.iter().any(|g| !g.position.is_finite()) {
+					return Err(CommandError::InvalidValue {
+						field: "guides",
+						reason: "a guide position is not finite".into(),
+					});
+				}
+				doc.guides = guides.clone();
+				Ok(CommandEffect {
+					label: label.clone(),
+					history_only: true,
+					..Default::default()
+				})
+			}
+			Command::SetMaskFlags { layer, enabled, linked } => {
+				let id = resolve(doc, layer)?;
+				let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+				let Some(mask) = target.mask.as_mut() else {
+					return Err(CommandError::NotAllowed("the layer has no mask".into()));
+				};
+				if let Some(e) = enabled {
+					mask.enabled = *e;
+				}
+				if let Some(l) = linked {
+					mask.linked = *l;
+				}
+				let label = match (enabled, linked) {
+					(Some(true), _) => "Enable Layer Mask",
+					(Some(false), _) => "Disable Layer Mask",
+					(None, Some(true)) => "Link Layer Mask",
+					_ => "Unlink Layer Mask",
+				};
+				Ok(CommandEffect {
+					label: label.into(),
+					props_changed: vec![id],
+					..Default::default()
+				})
+			}
+			Command::MoveEach { moves, label } => {
+				let mut changed = Vec::new();
+				for (layer, dx, dy) in moves {
+					if *dx == 0 && *dy == 0 {
+						continue;
+					}
+					// FAST: a refusal half-way leaves the earlier moves applied.
+					changed.extend(offset_layers(doc, std::slice::from_ref(layer), *dx, *dy)?.props_changed);
+				}
+				Ok(CommandEffect {
+					label: label.clone(),
+					props_changed: changed,
+					..Default::default()
+				})
+			}
 			Command::AddMask { layer, fill } => add_mask(doc, layer, *fill, ctx.tiles),
 			Command::DeleteMask { layer, apply } => delete_mask(doc, layer, *apply, ctx.tiles),
 			Command::SetAdjustment { layer, adjustment } => set_adjustment(doc, layer, adjustment),
@@ -745,6 +816,58 @@ fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Resul
 	Ok(CommandEffect {
 		label: "Offset".into(),
 		props_changed: vec![id],
+		..Default::default()
+	})
+}
+
+fn offset_layers(doc: &mut Document, layers: &[LayerRef], dx: i32, dy: i32) -> Result<CommandEffect, CommandError> {
+	let roots: Vec<LayerId> = if layers.is_empty() {
+		doc.selected.clone()
+	} else {
+		layers.iter().map(|l| resolve(doc, l)).collect::<Result<_, _>>()?
+	};
+	if roots.is_empty() {
+		return Err(CommandError::NotAllowed("no layer to move".into()));
+	}
+	// Groups move everything inside them.
+	let mut ids: Vec<LayerId> = Vec::new();
+	fn collect(layer: &Layer, out: &mut Vec<LayerId>) {
+		if !out.contains(&layer.id) {
+			out.push(layer.id);
+		}
+		if let Some(children) = layer.children() {
+			for child in children {
+				collect(child, out);
+			}
+		}
+	}
+	for id in &roots {
+		if let Some(layer) = doc.layer(*id) {
+			collect(layer, &mut ids);
+		}
+	}
+	for &id in &ids {
+		if doc.layer(id).is_some_and(|l| l.locked_position) {
+			return Err(CommandError::Locked(id));
+		}
+	}
+	for &id in &ids {
+		let Some(target) = doc.layer_mut(id) else { continue };
+		match &mut target.kind {
+			LayerKind::Pixel { offset, .. } => {
+				*offset = (checked_offset(offset.0, dx)?, checked_offset(offset.1, dy)?);
+			}
+			LayerKind::Shape { transform, cache, .. } | LayerKind::Text { transform, cache, .. } => {
+				transform[4] += f64::from(dx);
+				transform[5] += f64::from(dy);
+				cache.mark_all_dirty();
+			}
+			_ => {}
+		}
+	}
+	Ok(CommandEffect {
+		label: "Move".into(),
+		props_changed: ids,
 		..Default::default()
 	})
 }

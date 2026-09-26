@@ -284,3 +284,25 @@ The model is the mip pyramid (`fx-engine/src/mips.rs`,
   across I/O, only `try_get_hot` (`ARCHITECTURE.md` §3.2).
 * **Document-sized buffers are forbidden** — also for masks, selections,
   flood-fill "visited" sets and undo data: use tiles.
+
+## R11 — A new tool in six steps (M7-T08)
+
+Every M8 tool is one of three kinds; pick the kind, not a pipeline.
+
+1. **The op.**
+   - A painting tool implements `fx_ops::brush::DabOp` (`op.rs`): `needs()`
+     (a source window?) and `pixel(backdrop, source, k, ctx)`. Carrying a
+     buffer along the path → `StatefulDabOp`.
+   - A click tool implements `tools::kinds::ClickTool::click` → a `Command`.
+   - A drag tool implements `tools::kinds::DragTool::release` → a `Command`.
+2. **Its params**: read them from the option bar with
+   `ctx.settings.number/string/bool(id, key)`; a new command's fields are
+   plain serde data (R1).
+3. **The registry line**:
+   - a kind tool: `kinds::registered` (`Click(MyTool)`, `Drag::new(MyTool)`);
+   - a painting tool: a `StrokeTool` variant plus its `op_for` arm.
+4. **The option bar**: `ui/js/data/options.js`, keys = the labels without
+   the colon (or `key:`).
+5. **The test**: deferred to HARDEN in fast mode (D-057); write what it
+   should check in `docs/reports/LOG.md`.
+6. **The log entry** in `docs/reports/LOG.md`.

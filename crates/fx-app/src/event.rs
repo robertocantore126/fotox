@@ -21,6 +21,8 @@ pub(crate) enum AppEvent {
 	Engine(fx_engine::EngineOutput),
 	/// Files chosen in the native open dialog.
 	OpenFiles(Vec<std::path::PathBuf>),
+	/// File ▸ Place Embedded's choice (M7-T03).
+	PlaceFiles(Vec<std::path::PathBuf>),
 	/// File chosen in the native export dialog, with the Export As options.
 	ExportTo(std::path::PathBuf, Option<fx_engine::ExportChoice>),
 	/// File chosen in the native "save as .fxd" dialog (M3-T06).

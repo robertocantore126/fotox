@@ -22,8 +22,10 @@ use crate::{CursorShape, Modifiers, PointerKind};
 
 pub mod crop;
 pub mod eyedropper;
+pub mod kinds;
 pub mod lasso;
 pub mod marquee;
+pub mod move_tool;
 pub mod paint;
 pub mod path_select;
 pub mod shape;
@@ -267,6 +269,9 @@ pub struct ToolResult {
 	/// The Type tool's session changed (M6-T07): the UI shows or hides its
 	/// textarea.
 	pub text_session: Option<type_tool::TextSession>,
+	/// Commands to execute after `command`, in order (M7-T02: Alt+drag's
+	/// duplicate, then the move).
+	pub then: Vec<Command>,
 }
 
 /// What a painting tool asks the engine to do with its stroke (M5-T07).
@@ -409,8 +414,10 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"shape-line" => Some(Box::new(shape::Shape::new("shape-line", shape::Kind::Line))),
 		"path-select" => Some(Box::new(path_select::PathSelect::default())),
 		"type" => Some(Box::new(type_tool::TypeTool::default())),
+		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		"quick-select" | "object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
-		_ => None,
+		// Tools built from a kind (M7-T08, HOWTO R11).
+		other => kinds::registered(other),
 	}
 }
 

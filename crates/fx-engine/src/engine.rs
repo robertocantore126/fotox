@@ -43,6 +43,9 @@ const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A repeat of the same edit within this interval replaces the previous
 /// history step instead of adding one (slider drags, live dialogs).
+/// Tools whose pointer snaps to guides, grid and canvas (M7-T06).
+const SNAPPING_TOOLS: &[&str] = &["marquee", "crop", "shape", "move", "type"];
+
 const MERGE_EDITS_WITHIN: Duration = Duration::from_secs(1);
 
 /// A layer's thumbnail is re-rendered at most this often while it changes (M2-T07).
@@ -98,6 +101,8 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
+		/// Place into this document instead of opening (M7-T03).
+		place: Option<DocId>,
 	},
 	/// An export finished or failed (M3).
 	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
@@ -193,6 +198,10 @@ struct Engine {
 	fonts_sent: bool,
 	/// Layer ▸ Layer Style ▸ Copy Layer Style (M6-T08).
 	style_clipboard: Option<fx_core::styles::LayerStyles>,
+	/// File ▸ New's "Untitled-N" counter (M7-T01).
+	untitled: u32,
+	/// The preferences file (M7-T09).
+	prefs: crate::prefs::Prefs,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -242,6 +251,8 @@ enum EditKey {
 	Shape(LayerRef, [bool; 4]),
 	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
 	Style(LayerRef),
+	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running total.
+	Move,
 }
 
 impl EditKey {
@@ -276,6 +287,7 @@ impl EditKey {
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
 			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
+			Command::OffsetLayers { layers, .. } if layers.is_empty() => Some(Self::Move),
 			Command::SetShape {
 				layer,
 				shape,
@@ -337,6 +349,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		last_filter: None,
 		fonts_sent: false,
 		style_clipboard: None,
+		untitled: 0,
+		prefs: crate::prefs::Prefs::load(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -424,7 +438,16 @@ impl Engine {
 			}
 			EngineInput::Open(paths) => {
 				for path in paths {
-					self.open(path);
+					self.open(path, None);
+				}
+				Changed::default()
+			}
+			EngineInput::Place(paths) => {
+				let target = self.docs.active_id();
+				for path in paths {
+					// FAST: a placed .fxd opens instead of being flattened into a layer.
+					let place = target.filter(|_| !is_fxd(&path));
+					self.open(path, place);
 				}
 				Changed::default()
 			}
@@ -510,6 +533,15 @@ impl Engine {
 				},
 			)
 		};
+		// Snapping (M7-T06): the tools that place things get a snapped point.
+		let mut event = event;
+		if SNAPPING_TOOLS.iter().any(|t| tool_id.starts_with(t)) || self.transform.is_some() {
+			if let Some(open) = self.docs.get(doc_id) {
+				let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
+				event.x = x;
+				event.y = y;
+			}
+		}
 		// A Free Transform box takes every pointer event while it is up.
 		if let Some((doc, session)) = &mut self.transform
 			&& *doc == doc_id
@@ -604,6 +636,57 @@ impl Engine {
 		changed
 	}
 
+	/// Send the preferences to the UI (M7-T09).
+	fn send_prefs(&self) {
+		self.to_ui(&EngineToUi::Preferences {
+			prefs: serde_json::Value::Object(self.prefs.0.clone()),
+		});
+	}
+
+	/// Remember an opened or saved file in Open Recent (M7-T09).
+	fn remember_recent(&mut self, path: &std::path::Path) {
+		self.prefs.add_recent(path);
+		self.prefs.save();
+		self.send_prefs();
+	}
+
+	/// File ▸ New (M7-T01): `{name?, width, height, ppi, depth: 8|16,
+	/// background: "white"|"black"|"background"|"transparent"|[r,g,b]}`.
+	fn new_document(&mut self, args: &serde_json::Value) {
+		let width = args.get("width").and_then(|v| v.as_f64()).unwrap_or(1920.0).round().clamp(1.0, 300_000.0) as u32;
+		let height = args.get("height").and_then(|v| v.as_f64()).unwrap_or(1080.0).round().clamp(1.0, 300_000.0) as u32;
+		let ppi = args.get("ppi").and_then(|v| v.as_f64()).unwrap_or(72.0).clamp(1.0, 10_000.0) as f32;
+		let depth = match args.get("depth").and_then(|v| v.as_u64()) {
+			Some(16) => fx_core::BitDepth::U16,
+			_ => fx_core::BitDepth::U8,
+		};
+		let background = match args.get("background") {
+			Some(serde_json::Value::String(s)) if s == "transparent" => None,
+			Some(serde_json::Value::String(s)) if s == "black" => Some([0, 0, 0, u16::MAX]),
+			Some(serde_json::Value::String(s)) if s == "background" => Some(self.settings.bg),
+			Some(serde_json::Value::Array(rgb)) if rgb.len() >= 3 => {
+				let c = |i: usize| (rgb[i].as_f64().unwrap_or(1.0).clamp(0.0, 1.0) * 65535.0).round() as u16;
+				Some([c(0), c(1), c(2), u16::MAX])
+			}
+			_ => Some([u16::MAX; 4]),
+		};
+		self.untitled += 1;
+		let name = args
+			.get("name")
+			.and_then(|v| v.as_str())
+			.filter(|s| !s.trim().is_empty())
+			.map_or_else(|| format!("Untitled-{}", self.untitled), str::to_owned);
+		let id = self.docs.allocate_id();
+		let mut doc = OpenDoc::blank(id, name, width, height, depth, ppi, background);
+		if let Some(viewport) = self.virtual_view.viewport {
+			doc.view.resize(viewport.width, viewport.height);
+		}
+		let info = doc.info();
+		self.docs.add(doc);
+		self.to_ui(&EngineToUi::DocumentOpened { info });
+		self.after_active_change();
+	}
+
 	/// Run `f` on the active document's active tool and apply its answer.
 	fn with_active_tool(&mut self, f: impl FnOnce(&mut Box<dyn crate::tools::Tool>, &mut ToolContext<'_>) -> ToolResult) {
 		let Some(doc_id) = self.docs.active_id() else { return };
@@ -682,6 +765,9 @@ impl Engine {
 		if let Some(command) = result.command {
 			// A command that changes the canvas hands the tool the new document
 			// when it lands (`after_edit`), which for a job is later than now.
+			self.command(doc_id, command);
+		}
+		for command in result.then {
 			self.command(doc_id, command);
 		}
 	}
@@ -870,6 +956,8 @@ impl Engine {
 					})
 					.collect();
 				self.to_ui(&EngineToUi::CmykProfiles { profiles });
+				self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
+				self.send_prefs();
 				self.to_ui(&EngineToUi::Toast {
 					text: "Engine connected".into(),
 				});
@@ -890,6 +978,32 @@ impl Engine {
 				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
 				// enters it with all the text selected. The UI has switched the
 				// tool to Type first.
+				// Preferences (M7-T09): merge, save, apply.
+				if id == "prefs:set" {
+					self.prefs.merge(&args);
+					self.prefs.save();
+					self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
+					self.send_prefs();
+					self.request_frame();
+					return Changed::default();
+				}
+				if id == "misc:clear-recent" {
+					self.prefs.0.remove("recent");
+					self.prefs.save();
+					self.send_prefs();
+					return Changed::default();
+				}
+				if let Some(index) = id.strip_prefix("doc:open-recent:") {
+					if let Some(path) = index.parse::<usize>().ok().and_then(|i| self.prefs.recent().get(i).cloned()) {
+						self.open(path, None);
+					}
+					return Changed::default();
+				}
+				// File ▸ New (M7-T01): the dialog's values.
+				if id == "doc:new" {
+					self.new_document(&args);
+					return Changed::default();
+				}
 				if id == "type:edit-layer" {
 					if let Some(layer) = args.get("layer").and_then(|v| v.as_u64()) {
 						self.with_active_tool(|tool, ctx| tool.edit_layer(ctx, fx_core::LayerId(layer)));
@@ -942,6 +1056,12 @@ impl Engine {
 			}
 			UiToEngine::FilterPreviewCancel { doc } => {
 				self.cancel_preview(doc);
+				Changed::default()
+			}
+			UiToEngine::ToolOptions { tool, options } if tool == "_view" || tool == "_prefs" => {
+				// The View flags and the grid preferences (M7-T06).
+				self.settings.options.insert(tool, options);
+				self.request_frame();
 				Changed::default()
 			}
 			UiToEngine::ToolOptions { tool, options } => {
@@ -1005,7 +1125,7 @@ impl Engine {
 				}
 				return Changed::default();
 			}
-			id if id.starts_with("layer:") && self.layer_action(id) => return Changed::default(),
+			id if ["layer:", "order:", "align:", "dist:"].iter().any(|p| id.starts_with(p)) && self.layer_action(id) => return Changed::default(),
 			// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06): a shape
 			// layer's pixels are drawn from its geometry on demand, so rasterising
 			// draws the level-0 tiles first and then keeps them.
@@ -1113,6 +1233,8 @@ impl Engine {
 			// The shell answers dlg:open with the native file dialog and sends
 			// the chosen files as `EngineInput::Open`.
 			"dlg:open" => return Changed::default(),
+			// The shell shows the Place dialog and sends `EngineInput::Place` (M7-T03).
+			"misc:place-embedded" | "misc:place-linked" => return Changed::default(),
 			// File ▸ Save / Save As (M3-T06). Save As always asks the shell for a
 			// path; Save only does so when the document has no file yet.
 			"doc:save" => {
@@ -1178,7 +1300,7 @@ impl Engine {
 
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
-	fn open(&mut self, path: PathBuf) {
+	fn open(&mut self, path: PathBuf, place: Option<DocId>) {
 		self.next_task += 1;
 		let task = self.next_task;
 		let (store, internal) = (self.store.clone(), self.internal.clone());
@@ -1227,7 +1349,7 @@ impl Engine {
 				mips::ensure_all_mips(&mut imported.image, &store)?;
 				Ok(imported)
 			});
-			let _ = internal.send(Internal::Imported { task, path, result });
+			let _ = internal.send(Internal::Imported { task, path, result, place });
 		});
 		if let Err(error) = spawned {
 			self.to_ui(&EngineToUi::ProgressDone { task });
@@ -1861,8 +1983,14 @@ impl Engine {
 				Err(error) => tracing::warn!("thumbnail of {layer:?} failed: {error}"),
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
-			Internal::Imported { task, path, result } => {
+			Internal::Imported { task, path, result, place } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let (Some(doc), Ok(imported)) = (place, &result)
+					&& self.docs.get(doc).is_some()
+				{
+					self.place_imported(doc, &path, imported.image.clone());
+					return;
+				}
 				match result {
 					Ok(imported) => {
 						let id = self.docs.allocate_id();
@@ -1871,6 +1999,7 @@ impl Engine {
 							doc.view.resize(viewport.width, viewport.height);
 						}
 						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
+						self.remember_recent(&path);
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
@@ -1895,6 +2024,7 @@ impl Engine {
 							doc.view.resize(viewport.width, viewport.height);
 						}
 						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
+						self.remember_recent(&path);
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
@@ -1932,6 +2062,7 @@ impl Engine {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
 						tracing::info!("saved {}", path.display());
+						self.remember_recent(&path);
 						self.to_ui(&EngineToUi::Toast {
 							text: format!("Saved {}", path.display()),
 						});
@@ -2435,6 +2566,41 @@ impl Engine {
 			"layer:merge-visible" if visible_roots.len() > 1 => vec![Command::MergeLayers { layers: visible_roots }],
 			"layer:flatten" => vec![Command::Flatten],
 			"layer:stamp-visible" => vec![Command::StampVisible],
+			// Layer ▸ Arrange (M7-T04): within the parent group.
+			"order:front" | "order:forward" | "order:backward" | "order:back" => {
+				let Some(active) = active else { return true };
+				let Some(path) = doc.doc.path_of(active) else { return true };
+				let (&index, parents) = path.split_last().expect("a path has a last index");
+				let mut siblings = &doc.doc.layers[..];
+				let mut parent = None;
+				for &i in parents {
+					let Some(layer) = siblings.get(i) else { return true };
+					parent = Some(layer.id);
+					siblings = layer.children().unwrap_or(&[]);
+				}
+				let last = siblings.len().saturating_sub(1);
+				let to = match id {
+					"order:front" => last,
+					"order:forward" => (index + 1).min(last),
+					"order:backward" => index.saturating_sub(1),
+					_ => 0,
+				};
+				if to == index {
+					return true;
+				}
+				vec![Command::MoveLayer {
+					layer: LayerRef::Id(active),
+					parent: parent.map(LayerRef::Id),
+					index: to,
+				}]
+			}
+			// Layer ▸ Align / Distribute (M7-T04).
+			id if id.starts_with("align:") || id.starts_with("dist:") => {
+				let ids: Vec<LayerId> = doc.doc.selected.clone();
+				let doc_id = doc.id;
+				self.align_action(doc_id, id, &ids);
+				return true;
+			}
 			// Layer Style ▸ Copy / Paste / Clear (M6-T08).
 			"layer:copy-style" => {
 				let styles = active.and_then(|l| doc.doc.layer(l)).and_then(|l| l.styles.clone());
@@ -2474,6 +2640,94 @@ impl Engine {
 			self.command(doc_id, command);
 		}
 		true
+	}
+
+	/// Align and Distribute (M7-T04) on the layers' exact content bounds.
+	fn align_action(&mut self, doc_id: DocId, id: &str, ids: &[LayerId]) {
+		use fx_core::pixels::{Content, Placed, content_bounds};
+		let store = self.store.clone();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		vector::prepare_level0(&mut open.doc, &store, Some(ids));
+		let mut boxes: Vec<(LayerId, (i32, i32, i32, i32))> = Vec::new();
+		for &layer in ids {
+			let Some(l) = open.doc.layer(layer) else { continue };
+			let placed = match &l.kind {
+				LayerKind::Pixel { image, offset } => Placed { image, offset: *offset },
+				LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Placed { image: cache, offset: (0, 0) },
+				_ => continue, // FAST: groups and fills are not aligned
+			};
+			if let Ok(Some(b)) = content_bounds(placed, Content::Opaque, &store) {
+				boxes.push((layer, b));
+			}
+		}
+		if boxes.is_empty() {
+			return;
+		}
+		let canvas = (0, 0, open.doc.width as i32, open.doc.height as i32);
+		let selection = open.doc.selection.as_ref().and_then(|s| {
+			content_bounds(
+				Placed {
+					image: &s.image,
+					offset: s.offset,
+				},
+				Content::Opaque,
+				&store,
+			)
+			.ok()
+			.flatten()
+		});
+		let reference = selection.unwrap_or_else(|| {
+			if boxes.len() == 1 {
+				canvas
+			} else {
+				boxes
+					.iter()
+					.fold(boxes[0].1, |a, (_, b)| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+			}
+		});
+		let mut moves: Vec<(LayerRef, i32, i32)> = Vec::new();
+		let (kind, what) = id.split_once(':').unwrap_or(("", ""));
+		if kind == "align" {
+			for (layer, b) in &boxes {
+				let (dx, dy) = match what {
+					"left" => (reference.0 - b.0, 0),
+					"right" => (reference.2 - b.2, 0),
+					"hcenter" => ((reference.0 + reference.2) / 2 - (b.0 + b.2) / 2, 0),
+					"top" => (0, reference.1 - b.1),
+					"bottom" => (0, reference.3 - b.3),
+					"vcenter" => (0, (reference.1 + reference.3) / 2 - (b.1 + b.3) / 2),
+					_ => (0, 0),
+				};
+				moves.push((LayerRef::Id(*layer), dx, dy));
+			}
+		} else {
+			// Distribute: first and last stay, the others are evenly spaced.
+			let key = |b: &(i32, i32, i32, i32)| -> i32 {
+				match what {
+					"left" => b.0,
+					"right" => b.2,
+					"hcenter" => (b.0 + b.2) / 2,
+					"top" => b.1,
+					"bottom" => b.3,
+					_ => (b.1 + b.3) / 2,
+				}
+			};
+			let horizontal = matches!(what, "left" | "right" | "hcenter" | "hspace");
+			let mut sorted = boxes.clone();
+			sorted.sort_by_key(|(_, b)| key(b));
+			if sorted.len() < 3 {
+				return;
+			}
+			let (first, last) = (key(&sorted[0].1), key(&sorted[sorted.len() - 1].1));
+			let n = (sorted.len() - 1) as f64;
+			for (i, (layer, b)) in sorted.iter().enumerate() {
+				let target = first + ((f64::from(last - first)) * i as f64 / n).round() as i32;
+				let d = target - key(b);
+				moves.push((LayerRef::Id(*layer), if horizontal { d } else { 0 }, if horizontal { 0 } else { d }));
+			}
+		}
+		let label = if kind == "align" { "Align" } else { "Distribute" };
+		self.command(doc_id, Command::MoveEach { moves, label: label.into() });
 	}
 
 	/// Layer ▸ Rasterize ▸ Shape / Layer / All Layers (M6-T06). Only layers
@@ -2727,6 +2981,133 @@ impl Engine {
 				};
 				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
 			}
+			// Guides (M7-T06).
+			"guide:add" | "guides:clear" | "guide:layout" => {
+				let Some(open) = self.docs.get(doc_id) else { return true };
+				if self.settings.bool("_view", "lockguides").unwrap_or(false) && id != "guides:clear" {
+					return true;
+				}
+				let (w, h) = (f64::from(open.doc.width), f64::from(open.doc.height));
+				let mut guides = open.doc.guides.clone();
+				let label = match id {
+					"guides:clear" => {
+						guides.clear();
+						"Clear Guides"
+					}
+					"guide:add" => {
+						let vertical = args.get("vertical").and_then(serde_json::Value::as_bool).unwrap_or(true);
+						let position = if let Some(p) = args.get("position").and_then(serde_json::Value::as_f64) {
+							if args.get("percent").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+								p / 100.0 * if vertical { w } else { h }
+							} else {
+								p
+							}
+						} else {
+							// Dropped from a ruler: a viewport pixel.
+							let Some(viewport) = open.view.viewport else { return true };
+							let s = args.get("screen").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+							let (x, y) = if vertical {
+								open.view.view.screen_to_doc(viewport, s, 0.0)
+							} else {
+								open.view.view.screen_to_doc(viewport, 0.0, s)
+							};
+							(if vertical { x } else { y }).round()
+						};
+						guides.push(fx_core::Guide { vertical, position });
+						"New Guide"
+					}
+					_ => {
+						let n = |k: &str, d: f64| args.get(k).and_then(serde_json::Value::as_f64).unwrap_or(d);
+						let (cols, rows, gutter, margin) = (n("columns", 0.0) as u32, n("rows", 0.0) as u32, n("gutter", 0.0), n("margin", 0.0));
+						for (count, size, vertical) in [(cols, w, true), (rows, h, false)] {
+							if count == 0 {
+								continue;
+							}
+							let inner = size - 2.0 * margin;
+							let cell = (inner - gutter * f64::from(count - 1)) / f64::from(count);
+							for i in 0..count {
+								let start = margin + f64::from(i) * (cell + gutter);
+								guides.push(fx_core::Guide { vertical, position: start });
+								guides.push(fx_core::Guide {
+									vertical,
+									position: start + cell,
+								});
+							}
+						}
+						"New Guide Layout"
+					}
+				};
+				self.command(doc_id, Command::SetGuides { guides, label: label.into() });
+			}
+			// The rest of Layer ▸ Layer Mask (M7-T05).
+			"mask:reveal-all" | "mask:hide-all" => {
+				let fill = if id == "mask:hide-all" { MaskFill::HideAll } else { MaskFill::RevealAll };
+				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
+			}
+			"mask:delete" | "mask:apply" => self.command(
+				doc_id,
+				Command::DeleteMask {
+					layer: LayerRef::Active,
+					apply: id == "mask:apply",
+				},
+			),
+			"mask:disable" | "mask:link" => {
+				let mask = self
+					.docs
+					.get(doc_id)
+					.and_then(|open| open.doc.active_layer().and_then(|l| open.doc.layer(l)))
+					.and_then(|l| l.mask.as_ref().map(|m| (m.enabled, m.linked)));
+				let Some((enabled, linked)) = mask else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "The layer has no mask".into(),
+					});
+					return true;
+				};
+				let (enabled, linked) = if id == "mask:disable" {
+					(Some(!enabled), None)
+				} else {
+					(None, Some(!linked))
+				};
+				self.command(
+					doc_id,
+					Command::SetMaskFlags {
+						layer: LayerRef::Active,
+						enabled,
+						linked,
+					},
+				);
+			}
+			// Layer ▸ New ▸ Layer from Background (M7-T05).
+			"layer:new-from-bg" => {
+				let is_bg = self
+					.docs
+					.get(doc_id)
+					.and_then(|open| open.doc.active_layer().and_then(|l| open.doc.layer(l)))
+					.is_some_and(|l| l.name == "Background" && l.locked_position);
+				if is_bg {
+					self.command(
+						doc_id,
+						Command::SetLayerProps {
+							layer: LayerRef::Active,
+							props: LayerPropsPatch {
+								name: Some("Layer 0".into()),
+								locked_position: Some(false),
+								..Default::default()
+							},
+						},
+					);
+				}
+			}
+			// File ▸ Revert (M7-T05). FAST: every history step is undone, which is
+			// the opened state as long as the history kept every step.
+			"doc:revert" => {
+				if let Some(open) = self.docs.get_mut(doc_id) {
+					while open.history.undo(&mut open.doc) {}
+					open.dirty = false;
+					open.changed();
+				}
+				self.after_edit(doc_id, true);
+			}
 			"mask:reveal-sel" | "mask:hide-sel" => {
 				let fill = if id == "mask:hide-sel" {
 					MaskFill::HideSelection
@@ -2867,6 +3248,60 @@ impl Engine {
 
 	/// An image from the Windows clipboard: it becomes the clipboard, then a
 	/// new layer (M5-T05).
+	/// Place an imported image as a layer of `doc` (M7-T03): pasted centred on
+	/// the canvas, named after the file, then a Free Transform box is put up,
+	/// already scaled to fit when the image is larger than the canvas
+	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc keeps
+	/// the layer at its size (FAST: Photoshop removes it).
+	fn place_imported(&mut self, doc: DocId, path: &std::path::Path, image: fx_tiles::TiledImage) {
+		let (w, h) = (image.width(), image.height());
+		let Some(open) = self.docs.get(doc) else { return };
+		let (cw, ch) = (open.doc.width, open.doc.height);
+		let clip = fx_core::pixels::ClipboardImage {
+			image,
+			offset: (0, 0),
+			bounds: (0, 0, w as i32, h as i32),
+		};
+		// Borrow the clipboard for the paste, then put the user's back.
+		let previous = {
+			let mut slot = self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			slot.replace(clip)
+		};
+		self.command(
+			doc,
+			Command::Paste {
+				in_place: false,
+				center: Some((f64::from(cw) / 2.0, f64::from(ch) / 2.0)),
+			},
+		);
+		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
+		let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+		if let Some(name) = name {
+			self.command(
+				doc,
+				Command::SetLayerProps {
+					layer: LayerRef::Active,
+					props: LayerPropsPatch {
+						name: Some(name),
+						..Default::default()
+					},
+				},
+			);
+		}
+		if self.docs.active_id() != Some(doc) {
+			return;
+		}
+		self.start_transform(doc, TransformMode::Free);
+		let fit = (f64::from(cw) / f64::from(w)).min(f64::from(ch) / f64::from(h));
+		if fit < 1.0
+			&& let Some((_, session)) = &mut self.transform
+		{
+			session.set_numeric(None, None, Some(fit * 100.0), Some(fit * 100.0), None);
+			self.restart_transform_preview(false);
+			self.request_frame();
+		}
+	}
+
 	fn paste_image(&mut self, width: u32, height: u32, rgba8: &[u8]) {
 		let Some(doc_id) = self.docs.active_id() else { return };
 		if rgba8.len() != (width as usize) * (height as usize) * 4 || width == 0 || height == 0 {
@@ -3068,6 +3503,14 @@ impl Engine {
 				items.extend(overlay.items);
 			}
 			nudge = tool.selection_nudge();
+		}
+		// Guides and grid (M7-T06), under the tool's own overlay items.
+		if let Some(open) = self.docs.active_mut()
+			&& let Some(viewport) = open.view.viewport
+		{
+			let mut extras = crate::snap::overlay(&open.doc, &self.settings, &open.view.view, viewport);
+			extras.append(&mut items);
+			items = extras;
 		}
 		if let Some(selection) = self.selection_overlay() {
 			match nudge {

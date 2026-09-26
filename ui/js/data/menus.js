@@ -105,7 +105,7 @@ export const menus = [
         it("Embedded...", "", "misc:place-embedded"),
         it("Linked...", "", "misc:place-linked"),
       ]),
-      it("Revert", "", "doc:revert", { dis: true }),
+      it("Revert", "", "doc:revert"),
       sep,
       it("Close", "Ctrl+W", "tab:close"),
       it("Close All", "Alt+Ctrl+W", "tab:close-all"),
@@ -302,6 +302,7 @@ export const menus = [
         it("Delete", "", "mask:delete"),
         it("Apply", "", "mask:apply"),
         it("Disable", "", "mask:disable"),
+        it("Link / Unlink", "", "mask:link"),
       ]),
       it("Create Clipping Mask", "Alt+Ctrl+G", "layer:clip"),
       sub("Smart Objects", [

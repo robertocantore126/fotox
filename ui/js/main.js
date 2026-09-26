@@ -9,6 +9,7 @@ import { toolSlots, findTool } from "./data/tools.js";
 import { initPopupEngine, openDropdown, openPopup, closeAll, isPopupOpen } from "./popup.js";
 import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
 import { initType } from "./native/type.js";
+import { initPrefs } from "./native/prefs.js";
 import { renderOptionsBar, onOptionsChange, readOptions, currentBar } from "./optionsbar.js";
 import { renderDock, focusPanel, togglePanel } from "./panels.js";
 import { openDialog, isDialogOpen } from "./dialogs.js";
@@ -87,6 +88,11 @@ function buildToolbar(container) {
     if (slot.flyout.length) btn.append(h("span", { class: "flyout-dot" }));
 
     btn.addEventListener("click", () => pickTool(slot.id, slot.id));
+    // Double-click the Hand = Fit on Screen, the Zoom tool = 100 % (M7-T07).
+    btn.addEventListener("dblclick", () => {
+      if (slot.id === "hand") runAction({ label: "Fit on Screen", a: "zoom:fit" });
+      if (slot.id === "zoom") runAction({ label: "100%", a: "zoom:100" });
+    });
     btn.addEventListener("contextmenu", (e) => { e.preventDefault(); openFlyout(slot, btn); });
     let pressTimer = null;
     btn.addEventListener("mousedown", () => {
@@ -253,6 +259,7 @@ async function boot() {
     initNativePanels();
     initColor();
     initTools();
+    initPrefs();
     initType(() => { if (state.tool === "type") { renderOptionsBar(shell.optionsbar, "type"); sendToolOptions(readOptions()); } });
   }
   bridge.on(ENGINE.TOAST, (m) => toast(m.text));

@@ -47,6 +47,9 @@ pub struct Manifest {
 	/// Global Light angle (M6-T08).
 	#[serde(default = "default_global_light")]
 	pub global_light: f64,
+	/// Ruler guides (M7-T06).
+	#[serde(default)]
+	pub guides: Vec<fx_core::Guide>,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -235,6 +238,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		selected: doc.selected.clone(),
 		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
 		global_light: doc.global_light,
+		guides: doc.guides.clone(),
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -364,6 +368,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 		.collect::<Result<Vec<_>, _>>()?;
 	doc.selected = manifest.selected.clone();
 	doc.global_light = manifest.global_light;
+	doc.guides = manifest.guides.clone();
 	let mut counters = [0u32; fx_core::NAME_KINDS];
 	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
 		*slot = *value;

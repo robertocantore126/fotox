@@ -349,6 +349,11 @@ pub enum EngineToUi {
 		text: String,
 		selection: (usize, usize),
 	},
+	/// The preferences file's content (M7-T09): after `hello` and on every
+	/// change (Open Recent is built from `recent`).
+	Preferences {
+		prefs: serde_json::Value,
+	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {
 		families: Vec<FontFamilyInfo>,

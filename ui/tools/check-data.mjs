@@ -19,6 +19,12 @@ const { panelDefs, dockGroups, initialActiveTab } = await import(new URL("../js/
 const { optionBars } = await import(new URL("../js/data/options.js", import.meta.url));
 
 const problems = [];
+// Menu honesty (M7-T09): the list of implemented actions must be current.
+{
+  const { scan, body } = await import(new URL("./gen-implemented.mjs", import.meta.url));
+  const current = readFileSync(join(root, "js/data/implemented.js"), "utf8").replace(/\r\n/g, "\n");
+  if (current !== body(scan())) problems.push("js/data/implemented.js is stale: run node ui/tools/gen-implemented.mjs");
+}
 const warnings = [];
 const say = (ok, msg) => (ok ? "" : problems.push(msg));
 

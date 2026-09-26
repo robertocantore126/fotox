@@ -23,7 +23,9 @@ pub mod filters;
 pub mod layers;
 pub mod mips;
 pub mod ops;
+pub mod prefs;
 pub mod selection;
+pub mod snap;
 pub mod stroke;
 pub mod text;
 pub mod thumbs;
@@ -124,6 +126,9 @@ pub enum EngineInput {
 	},
 	/// Open these files (native file dialog, drag and drop, command line).
 	Open(Vec<PathBuf>),
+	/// File ▸ Place Embedded and drops (M7-T03): each file becomes a layer of
+	/// the active document; with no document open, the files are opened.
+	Place(Vec<PathBuf>),
 	/// Export the active document, flattened, to `path` (the shell's save
 	/// dialog; the format comes from the extension). `choice`: the Export As
 	/// dialog's options, `None` for the defaults (File ▸ Export ▸ PNG…). M3.
@@ -229,7 +234,14 @@ impl EngineHandle {
 		output: impl Fn(EngineOutput) + Send + Sync + 'static,
 	) -> std::io::Result<Self> {
 		let output: OutputSink = Arc::new(output);
-		let store = Arc::new(TileStore::new(TileStoreConfig::reference_machine(scratch_dir)).map_err(std::io::Error::other)?);
+		// The preferences' memory budget and scratch folder apply at start (M7-T09).
+		let prefs = prefs::Prefs::load();
+		let scratch_dir = prefs.string("scratch_dir").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(scratch_dir);
+		let mut config = TileStoreConfig::reference_machine(scratch_dir);
+		if let Some(mb) = prefs.number("memory_budget_mb").filter(|mb| *mb >= 256.0) {
+			config.hot_budget = (mb as u64) << 20;
+		}
+		let store = Arc::new(TileStore::new(config).map_err(std::io::Error::other)?);
 		let (input, inputs) = crossbeam_channel::unbounded();
 		let (render_requests, render_inbox) = crossbeam_channel::unbounded();
 		let (internal, internal_rx) = crossbeam_channel::unbounded();
