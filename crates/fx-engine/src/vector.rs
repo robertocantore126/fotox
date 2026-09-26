@@ -74,6 +74,19 @@ pub fn prepare_level0(doc: &mut fx_core::Document, store: &TileStore, layers: Op
 		}
 	});
 	let mut drawn = if requests.is_empty() { 0 } else { draw_requests(doc, store, &requests) };
+	// Vector masks (M10-T06; artboards, M12-T07) are derived tiles too.
+	let mut masks: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
+	doc.walk(|layer, _| {
+		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
+			return;
+		}
+		if let Some(vm) = &layer.vector_mask {
+			masks.extend(vm.cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, 0, tx, ty)));
+		}
+	});
+	if !masks.is_empty() {
+		drawn += draw_vector_mask_requests(doc, store, &masks);
+	}
 	// Layer-style effects (M6-T08) are derived tiles too.
 	let mut effects: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
 	doc.walk(|layer, _| {

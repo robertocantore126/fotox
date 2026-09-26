@@ -340,6 +340,18 @@ pub struct Layer {
 	pub effects: Vec<TiledImage>,
 	/// The vector mask (M10-T06), multiplied with the pixel mask.
 	pub vector_mask: Option<VectorMask>,
+	/// An artboard (M12-T07, D-085): a top-level group with bounds (its
+	/// vector mask clips the children to them) and a background.
+	pub artboard: Option<Artboard>,
+}
+
+/// An artboard's bounds and background colour.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Artboard {
+	/// `(x, y, width, height)`, document pixels.
+	pub rect: (i32, i32, u32, u32),
+	/// Straight 16-bit RGBA; `None` = transparent.
+	pub background: Option<[u16; 4]>,
 }
 
 /// A layer's vector mask (M10-T06): a path in document coordinates, drawn
@@ -378,6 +390,7 @@ impl Layer {
 			styles: None,
 			effects: Vec::new(),
 			vector_mask: None,
+			artboard: None,
 		}
 	}
 

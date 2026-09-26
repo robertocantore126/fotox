@@ -96,6 +96,7 @@ export const optionBars = {
     { type: "gap" },
     { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Commit Perspective Warp (Enter)", "Cancel (Esc)"], actions: ["tool:commit", "tool:cancel"] },
   ],
+  artboard: [{ type: "label", text: "Drag to draw an artboard · drag inside one to move it · Alt+drag to resize" }, { type: "btn", text: "Artboard from Layers", action: "layer:artboard-from" }],
   "crop-persp": [{ type: "num", text: "W:", value: "", unit: "px", width: 60 }, { type: "num", text: "H:", value: "", unit: "px", width: 60 }, { type: "btn", text: "✓", action: "tool:commit" }, { type: "btn", text: "✗", action: "tool:cancel" }, { type: "label", text: "Drag a box, move its corners onto the plane, Enter" }],
   slice: [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
   "slice-select": [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice select"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],

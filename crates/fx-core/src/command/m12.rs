@@ -309,3 +309,133 @@ pub(super) fn layer_comp(doc: &mut Document, action: &CompAction) -> Result<Comm
 		..Default::default()
 	})
 }
+
+/// A closed rectangle path (an artboard's vector mask).
+fn rect_path(rect: (i32, i32, u32, u32)) -> crate::path::Path {
+	use crate::path::{Anchor, Path, PathOp, Subpath};
+	let (x0, y0) = (f64::from(rect.0), f64::from(rect.1));
+	let (x1, y1) = (x0 + f64::from(rect.2), y0 + f64::from(rect.3));
+	Path {
+		subpaths: vec![Subpath {
+			anchors: vec![
+				Anchor::corner((x0, y0)),
+				Anchor::corner((x1, y0)),
+				Anchor::corner((x1, y1)),
+				Anchor::corner((x0, y1)),
+			],
+			closed: true,
+			op: PathOp::Combine,
+		}],
+	}
+}
+
+/// Grow the canvas (right / down) so it holds `rect`, resetting every
+/// canvas-sized derived cache. FAST: the canvas never shrinks, and an
+/// artboard left of / above the origin is not supported (D-085's union).
+fn grow_canvas_for(doc: &mut Document, rect: (i32, i32, u32, u32)) -> bool {
+	let w = (i64::from(rect.0) + i64::from(rect.2)).max(i64::from(doc.width)) as u32;
+	let h = (i64::from(rect.1) + i64::from(rect.3)).max(i64::from(doc.height)) as u32;
+	if (w, h) == (doc.width, doc.height) {
+		return false;
+	}
+	set_canvas(doc, w, h);
+	let (format, gray) = (doc.color.depth.rgba_format(), crate::selection::gray_format(doc.color.depth));
+	for id in layer_ids(doc) {
+		let Some(layer) = doc.layer_mut(id) else { continue };
+		if let Some(vm) = layer.vector_mask.as_mut() {
+			vm.cache = TiledImage::derived(w, h, gray);
+		}
+		match &mut layer.kind {
+			LayerKind::Smart { cache, .. } | LayerKind::FillLayer { cache, .. } => *cache = TiledImage::derived(w, h, format),
+			_ => {}
+		}
+	}
+	true
+}
+
+fn artboard_mask(doc: &Document, rect: (i32, i32, u32, u32)) -> crate::layer::VectorMask {
+	crate::layer::VectorMask {
+		path: rect_path(rect),
+		enabled: true,
+		feather: 0.0,
+		density: 1.0,
+		cache: TiledImage::derived(doc.width, doc.height, crate::selection::gray_format(doc.color.depth)),
+	}
+}
+
+/// Layer ▸ New ▸ Artboard / Artboard from Layers, the Artboard tool (M12-T07).
+pub(super) fn new_artboard(
+	doc: &mut Document,
+	rect: (i32, i32, u32, u32),
+	name: Option<&str>,
+	layers: &[LayerRef],
+	background: Option<[u16; 4]>,
+) -> Result<CommandEffect, CommandError> {
+	if rect.2 == 0 || rect.3 == 0 || rect.0 < 0 || rect.1 < 0 {
+		return Err(CommandError::NotAllowed("an artboard needs a size, inside the canvas's top-left".into()));
+	}
+	let ids = resolve_all(doc, layers, true)?;
+	// Bottom → top, as stored.
+	let mut order: Vec<LayerId> = doc.panel_order().into_iter().filter(|id| ids.contains(id)).collect();
+	order.reverse();
+	let children: Vec<Arc<Layer>> = order.iter().filter_map(|id| find_arc(&doc.layers, *id)).collect();
+	for id in &order {
+		remove_layer(doc, *id);
+	}
+	grow_canvas_for(doc, rect);
+	let count = doc.layers.iter().filter(|l| l.artboard.is_some()).count();
+	let id = doc.allocate_layer_id();
+	let mut group = Layer::new(
+		id,
+		name.map_or_else(|| format!("Artboard {}", count + 1), str::to_owned),
+		LayerKind::Group { children, expanded: true },
+	);
+	group.vector_mask = Some(artboard_mask(doc, rect));
+	group.artboard = Some(crate::layer::Artboard { rect, background });
+	doc.layers.push(Arc::new(group));
+	doc.selected = vec![id];
+	Ok(CommandEffect {
+		label: "New Artboard".into(),
+		structure_changed: true,
+		..Default::default()
+	})
+}
+
+/// Move / resize an artboard or change its background; a moved artboard
+/// takes its layers along.
+pub(super) fn set_artboard(
+	doc: &mut Document,
+	layer: &LayerRef,
+	rect: (i32, i32, u32, u32),
+	background: Option<[u16; 4]>,
+) -> Result<CommandEffect, CommandError> {
+	let id = resolve(doc, layer)?;
+	let old = doc
+		.layer(id)
+		.and_then(|l| l.artboard.clone())
+		.ok_or_else(|| CommandError::NotAllowed("the layer is not an artboard".into()))?;
+	if rect.2 == 0 || rect.3 == 0 || rect.0 < 0 || rect.1 < 0 {
+		return Err(CommandError::NotAllowed("an artboard needs a size, inside the canvas's top-left".into()));
+	}
+	let (dx, dy) = (rect.0 - old.rect.0, rect.1 - old.rect.1);
+	if dx != 0 || dy != 0 {
+		let children: Vec<LayerRef> = match &doc.layer(id).expect("resolved").kind {
+			LayerKind::Group { children, .. } => children.iter().map(|c| LayerRef::Id(c.id)).collect(),
+			_ => Vec::new(),
+		};
+		if !children.is_empty() {
+			offset_layers(doc, &children, dx, dy)?;
+		}
+	}
+	grow_canvas_for(doc, rect);
+	let mask = artboard_mask(doc, rect);
+	let target = doc.layer_mut(id).expect("resolved");
+	target.vector_mask = Some(mask);
+	target.artboard = Some(crate::layer::Artboard { rect, background });
+	Ok(CommandEffect {
+		label: "Artboard".into(),
+		pixels_changed: vec![id],
+		structure_changed: true,
+		..Default::default()
+	})
+}

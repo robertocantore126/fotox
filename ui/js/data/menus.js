@@ -266,6 +266,8 @@ export const menus = [
         it("Layer from Background...", "", "layer:new-from-bg"),
         it("Group...", "", "layer:new-group"),
         it("Group from Layers...", "", "layer:group-from"),
+        it("Artboard...", "", "layer:artboard"),
+        it("Artboard from Layers...", "", "layer:artboard-from"),
         sep,
         it("Layer via Copy", "Ctrl+J", "layer:via-copy"),
         it("Layer via Cut", "Shift+Ctrl+J", "layer:via-cut"),

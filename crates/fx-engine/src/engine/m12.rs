@@ -136,6 +136,36 @@ impl Engine {
 				}
 				true
 			}
+			// Layer ▸ New ▸ Artboard (the canvas) / Artboard from Layers (the
+			// selected layers' bounds) (M12-T07).
+			"layer:artboard" | "layer:artboard-from" => {
+				let Some(open) = self.docs.get(doc_id) else { return true };
+				let from = id == "layer:artboard-from";
+				let ids = if from { open.doc.selected.clone() } else { Vec::new() };
+				let mut rect = (0, 0, open.doc.width, open.doc.height);
+				if from {
+					let mut b: Option<[f64; 4]> = None;
+					for &l in &ids {
+						if let Ok(Some(r)) = crate::transform_preview::start_rect(&open.doc, l, &self.store) {
+							b = Some(b.map_or(r, |o| [o[0].min(r[0]), o[1].min(r[1]), o[2].max(r[2]), o[3].max(r[3])]));
+						}
+					}
+					if let Some(b) = b {
+						let (x0, y0) = (b[0].max(0.0).floor(), b[1].max(0.0).floor());
+						rect = (x0 as i32, y0 as i32, (b[2] - x0).ceil().max(1.0) as u32, (b[3] - y0).ceil().max(1.0) as u32);
+					}
+				}
+				self.command(
+					doc_id,
+					Command::NewArtboard {
+						rect,
+						name: None,
+						layers: ids.into_iter().map(LayerRef::Id).collect(),
+						background: Some([65_535; 4]),
+					},
+				);
+				true
+			}
 			// The Layer Comps panel (M12-T06).
 			"comps:refresh" => {
 				self.send_comps(doc_id);

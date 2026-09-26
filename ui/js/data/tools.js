@@ -4,7 +4,7 @@
 // click destro sullo slot).
 
 export const toolSlots = [
-  { id: "move", name: "Move Tool", key: "V", icon: "i-move", flyout: [] },
+  { id: "move", name: "Move Tool", key: "V", icon: "i-move", flyout: [{ id: "artboard", name: "Artboard Tool", key: "V", icon: "i-template" }] },
   {
     id: "marquee", name: "Rectangular Marquee Tool", key: "M", icon: "i-marquee",
     flyout: [

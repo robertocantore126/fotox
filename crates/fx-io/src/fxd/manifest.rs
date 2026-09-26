@@ -96,6 +96,9 @@ pub struct LayerEntry {
 	/// The vector mask (M10-T06).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub vector_mask: Option<fx_core::select_ops::VectorMaskSpec>,
+	/// An artboard's bounds and background (M12-T07).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub artboard: Option<fx_core::layer::Artboard>,
 	#[serde(flatten)]
 	pub kind: LayerKindEntry,
 }
@@ -335,6 +338,7 @@ fn layer_entry(layer: &Layer, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>
 		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
 		styles: layer.styles.clone(),
+		artboard: layer.artboard.clone(),
 		vector_mask: layer.vector_mask.as_ref().map(|v| fx_core::select_ops::VectorMaskSpec {
 			path: v.path.clone(),
 			enabled: v.enabled,
@@ -569,6 +573,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			cache: TiledImage::derived(size.0, size.1, fx_core::selection::gray_format(depth_of(format))),
 		});
 	}
+	layer.artboard = entry.artboard.clone();
 	if let Some(styles) = &entry.styles {
 		layer.styles = Some(styles.clone());
 		layer.effects = fx_core::styles::EffectKind::ALL

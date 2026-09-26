@@ -417,3 +417,11 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: layers added after a comp was recorded are left as they are when it is applied (Photoshop hides nothing either — VERIFY).
 - VERIFY: Photoshop's behaviour for layers the comp does not know.
 - Try it: Window ▸ Layer Comps, + to record, hide a layer, + again; click the first comp.
+
+## M12-T07 — Artboards  (Claude, 2026-09-26)
+- Done: `Layer::artboard: Option<Artboard { rect, background }>` on a top-level group whose vector mask is the artboard's rectangle (it clips the children); the program draws the background under the children; `Command::NewArtboard { rect, name, layers, background }` (the layers move in; the canvas grows to hold it, every canvas-sized derived cache reset) and `Command::SetArtboard` (move takes the layers along, resize, background); `.fxd` `LayerEntry.artboard`; the Artboard tool ("artboard", Move's flyout: drag = new, drag inside = move, Alt+drag = resize, outlines of every artboard); Layer ▸ New ▸ Artboard / Artboard from Layers (the selected layers' bounds). `prepare_level0` now also draws vector-mask tiles (merge / export of vector-masked layers and artboards needed it).
+- Also fixed: shape, text and vector-mask tiles sized their tiny-skia pixmap with `TILE_PIXELS` (65 536) instead of `TILE_SIZE`: every such tile tried to allocate 16 GB and aborted (separate commit). The fx-engine suite is green again; fx-render has 4 test expectations that the crash had hidden (text layout / a rotated line's anti-aliasing) — for HARDEN.
+- Skipped: export per artboard (File ▸ Export ▸ Artboards to Files), side handles, "+" adjacent buttons, presets, guides / snapping knowing artboards, artboards left of / above the origin (the canvas only grows right / down), an artboard marker in the Layers panel, Tests.
+- FAST: an artboard is a pass-through group with a vector mask; its background is a solid op inside it.
+- VERIFY: none.
+- Try it: select the Artboard tool (Move's flyout), drag a rectangle; drag a layer into its group in Layers.

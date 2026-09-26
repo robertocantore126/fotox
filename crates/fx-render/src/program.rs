@@ -367,7 +367,22 @@ impl Builder<'_> {
 		}
 		match &layer.kind {
 			LayerKind::Group { children, .. } => {
-				let inner = self.list(children);
+				let mut inner = self.list(children);
+				// An artboard's background under its layers (M12-T07); the
+				// group's vector mask clips both to its bounds.
+				if let Some(bg) = layer.artboard.as_ref().and_then(|a| a.background) {
+					inner.insert(
+						0,
+						Op::Layer {
+							layer: layer.id,
+							source: Source::Solid(bg.map(|v| v as f32 / 65535.0)),
+							blend: BlendMode::Normal,
+							alpha: 1.0,
+							mask: None,
+							clip: false,
+						},
+					);
+				}
 				if inner.is_empty() {
 					return Vec::new();
 				}

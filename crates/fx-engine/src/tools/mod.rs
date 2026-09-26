@@ -20,6 +20,7 @@ use fx_tiles::TileStore;
 use crate::ops::EngineOps;
 use crate::{CursorShape, Modifiers, PointerKind};
 
+pub mod artboard;
 pub mod bucket;
 pub mod crop;
 pub mod eyedropper;
@@ -417,6 +418,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
 		"patch" => Some(Box::new(patch::Patch::new("patch", patch::Kind::Patch))),
+		"artboard" => Some(Box::new(artboard::ArtboardTool::default())),
 		"content-move" => Some(Box::new(patch::Patch::new("content-move", patch::Kind::ContentMove))),
 		"eraser-bg" => Some(Box::new(paint::Paint::new("eraser-bg", paint::Kind::BgEraser))),
 		"dodge" => Some(Box::new(paint::Paint::new("dodge", paint::Kind::Dodge))),
