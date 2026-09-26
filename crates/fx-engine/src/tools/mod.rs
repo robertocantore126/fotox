@@ -32,6 +32,7 @@ pub mod magnetic;
 pub mod marquee;
 pub mod measure;
 pub mod move_tool;
+pub mod object_select;
 pub mod paint;
 pub mod patch;
 pub mod path_select;
@@ -285,6 +286,22 @@ pub struct ToolResult {
 	/// Commands to execute after `command`, in order (M7-T02: Alt+drag's
 	/// duplicate, then the move).
 	pub then: Vec<Command>,
+	/// A model to run after the commands (M13): the engine starts the job.
+	pub ai: Option<AiRequest>,
+}
+
+/// What a tool asks the local AI for (M13).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AiRequest {
+	/// The Object Selection tool (T04): a box and / or points, canvas pixels.
+	Object {
+		boxed: Option<[f64; 4]>,
+		points: Vec<((f64, f64), bool)>,
+		mode: SelectMode,
+	},
+	/// The Crop tool's Generative Expand (T06): the old canvas in the new
+	/// canvas's pixels, after the crop grew it.
+	Expand { old: (i64, i64, i64, i64), prompt: String },
 }
 
 /// What a painting tool asks the engine to do with its stroke (M5-T07).
@@ -456,6 +473,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
+		// Object Selection (M13-T04).
+		"object-select" => Some(Box::new(object_select::ObjectSelect::default())),
 		// The pen tools and Direct Selection (M10-T02..T05).
 		"pen" => Some(Box::new(pen::Pen::new("pen", pen::Kind::Pen))),
 		"pen-freeform" => Some(Box::new(pen::Pen::new("pen-freeform", pen::Kind::Freeform))),
@@ -473,7 +492,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"counting" => Some(Box::new(measure::CountTool::default())),
 		// The Magnetic Lasso (M9-T07).
 		"lasso-magnet" => Some(Box::new(magnetic::MagneticLasso::default())),
-		"object-select" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		"shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		// Tools built from a kind (M7-T08, HOWTO R11).
 		other => kinds::registered(other),
 	}
@@ -701,9 +720,9 @@ mod tests {
 	fn a_tool_that_is_not_implemented_says_so_once_per_click() {
 		let mut tools = Tools::default();
 		let mut fixture = Fixture::new("tools", (10, 10), 1.0);
-		let tool = tools.get("object-select").expect("object selection has a placeholder");
+		let tool = tools.get("shape-3d").expect("3D Object has a placeholder");
 		let result = fixture.pointer(&mut **tool, PointerKind::Down, 0.0, 0.0, Modifiers::default());
-		assert!(result.info.unwrap().contains("Object Selection"));
+		assert!(result.info.unwrap().contains("3D Object"));
 		assert!(result.command.is_none(), "nothing to undo");
 		// A move after the click stays quiet, so a drag does not spam toasts.
 		assert!(fixture.pointer(&mut **tool, PointerKind::Move, 5.0, 5.0, Modifiers::default()).info.is_none());

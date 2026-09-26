@@ -541,6 +541,22 @@ pub enum Command {
 		#[serde(default)]
 		extend: bool,
 	},
+	/// Properties ▸ Remove Background (M13-T02): a model's subject mask as
+	/// the layer's mask.
+	MaskFromModel {
+		layer: LayerRef,
+		mask: crate::select_ops::ModelMask,
+	},
+	/// Generative Fill / Expand (M13-T06): the generated images as a group of
+	/// masked variation layers. `mask` = Expand's new area; `None` = the
+	/// selection.
+	GenerativeLayer {
+		name: String,
+		rect: (i64, i64, i64, i64),
+		variations: Vec<m13::Variation>,
+		#[serde(default)]
+		mask: Option<crate::select_ops::ModelMask>,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -916,6 +932,8 @@ impl Command {
 				enabled,
 				label,
 			} => m12::set_smart_filters(doc, layer, filters, *enabled, label),
+			Command::MaskFromModel { layer, mask } => m13::mask_from_model(doc, layer, mask, ctx),
+			Command::GenerativeLayer { name, rect, variations, mask } => m13::generative_layer(doc, name, *rect, variations, mask.as_ref(), ctx),
 			Command::ContentAwareMove { layer, dx, dy, extend } => m11::content_aware_move(doc, layer, *dx, *dy, *extend, ctx),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
@@ -977,6 +995,7 @@ impl Command {
 mod m10;
 pub mod m11;
 pub mod m12;
+pub mod m13;
 mod m8;
 pub mod m9;
 

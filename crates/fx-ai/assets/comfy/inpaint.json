@@ -1,0 +1,18 @@
+{
+  "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "{{checkpoint}}" } },
+  "2": { "class_type": "CLIPTextEncode", "inputs": { "text": "{{prompt}}", "clip": ["1", 1] } },
+  "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "{{negative}}", "clip": ["1", 1] } },
+  "4": { "class_type": "LoadImage", "inputs": { "image": "{{image}}" } },
+  "5": { "class_type": "VAEEncodeForInpaint", "inputs": { "pixels": ["4", 0], "vae": ["1", 2], "mask": ["4", 1], "grow_mask_by": 12 } },
+  "6": { "class_type": "RepeatLatentBatch", "inputs": { "samples": ["5", 0], "amount": "{{count}}" } },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["6", 0],
+      "seed": "{{seed}}", "steps": "{{steps}}", "cfg": "{{cfg}}",
+      "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0
+    }
+  },
+  "8": { "class_type": "VAEDecode", "inputs": { "samples": ["7", 0], "vae": ["1", 2] } },
+  "9": { "class_type": "SaveImage", "inputs": { "images": ["8", 0], "filename_prefix": "fotox/fill" } }
+}

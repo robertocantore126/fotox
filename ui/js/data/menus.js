@@ -171,6 +171,7 @@ export const menus = [
         it("Interface...", "", "dlg:prefs-interface"),
         it("Performance...", "", "dlg:prefs-performance"),
         it("Guides, Grid & Slices...", "", "dlg:prefs-guides"),
+        it("AI Models & ComfyUI...", "", "dlg:prefs-ai"),
         it("Plugins...", "", "dlg:prefs-plugins"),
         it("Keyboard Shortcuts...", "Alt+Shift+Ctrl+K", "dlg:shortcuts"),
         sep,
@@ -257,7 +258,7 @@ export const menus = [
       it("Trap...", "", "dlg:trap"),
       it("Flatten Visible Layers", "", "layer:flatten-visible", { dis: true }),
       it("Remove Background", "", "ai:remove-bg"),
-      it("Generative Fill...", "", "ai:fill"),
+      it("Generative Fill...", "", "dlg:generative-fill"),
     ],
   },
 

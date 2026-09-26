@@ -353,6 +353,8 @@ impl EngineOps {
 			} => Self::with_source(doc, *sample_all, store, |src| {
 				select::quick::quick_select(src, size, dabs, *enhance_edge, depth, store)
 			}),
+			// M13: the model read the composite, so the refinement does too.
+			SelectOp::Model(mask) => Self::with_source(doc, true, store, |src| select::model::model_selection(src, mask, size, depth, store)),
 		}
 	}
 }

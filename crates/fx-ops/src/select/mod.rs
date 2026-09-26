@@ -20,6 +20,7 @@ use crate::flood::{WandSource, WandTile};
 pub mod focus;
 pub mod grow;
 pub mod livewire;
+pub mod model;
 pub mod quick;
 pub mod range;
 pub mod refine;

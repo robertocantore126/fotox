@@ -163,6 +163,8 @@ pub(crate) enum Internal {
 		revision: u64,
 		result: Result<Thumbnail, TileError>,
 	},
+	/// An AI job finished (M13).
+	Ai(Box<m13::AiDone>),
 }
 
 struct Engine {
@@ -206,6 +208,8 @@ struct Engine {
 	resources: m8::Resources,
 	/// M9's per-document UI state (channel list signatures).
 	m9: m9::State,
+	/// M13's AI jobs and the Object Selection embedding.
+	m13: m13::State,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -359,6 +363,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		prefs: crate::prefs::Prefs::load(),
 		resources: m8::Resources::load(),
 		m9: m9::State::default(),
+		m13: m13::State::default(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -647,8 +652,11 @@ impl Engine {
 
 	/// Send the preferences to the UI (M7-T09).
 	fn send_prefs(&self) {
+		// `_ai` (M13): the runtime and models, for Preferences ▸ AI; not saved.
+		let mut prefs = self.prefs.0.clone();
+		prefs.insert("_ai".into(), m13::ai_info());
 		self.to_ui(&EngineToUi::Preferences {
-			prefs: serde_json::Value::Object(self.prefs.0.clone()),
+			prefs: serde_json::Value::Object(prefs),
 		});
 	}
 
@@ -778,6 +786,10 @@ impl Engine {
 		}
 		for command in result.then {
 			self.command(doc_id, command);
+		}
+		// The Object Selection tool, Generative Expand (M13).
+		if let Some(request) = result.ai {
+			self.ai_request(doc_id, request);
 		}
 	}
 
@@ -1154,6 +1166,8 @@ impl Engine {
 				self.settings.bg = bg;
 				Changed::default()
 			}
+			// Escape cancels a running AI job first (M13).
+			UiToEngine::Key { key } if key == "Escape" && self.ai_escape() => Changed::default(),
 			UiToEngine::Key { key } => self.tool_key(&key),
 			UiToEngine::TextEdit { text, selection } => {
 				self.with_active_tool(|tool, ctx| tool.text_input(ctx, &text, selection));
@@ -2008,6 +2022,7 @@ impl Engine {
 				}
 			}
 			Internal::PixelJobDone { task, doc, command, result } => self.pixel_job_done(task, doc, *command, result),
+			Internal::Ai(done) => self.ai_done(*done),
 			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
 			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
 			Internal::Exported { task, path, result } => {
@@ -4039,6 +4054,9 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::ContentAwareMove { .. }
 			| Command::ContentAwareScale { .. }
 			| Command::SetSmartFilters { .. }
+			// A model's mask refined at full resolution, the generated layers (M13).
+			| Command::MaskFromModel { .. }
+			| Command::GenerativeLayer { .. }
 			| Command::SaveSelection { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
@@ -4075,6 +4093,8 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::ContentAwareScale { .. } => "Content-Aware Scale".to_owned(),
 		Command::SetSmartFilters { label, .. } => label.clone(),
 		Command::SaveSelection { .. } => "Save Selection".to_owned(),
+		Command::MaskFromModel { .. } => "Remove Background".to_owned(),
+		Command::GenerativeLayer { mask, .. } => if mask.is_some() { "Generative Expand" } else { "Generative Fill" }.to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
 		}

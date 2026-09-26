@@ -15,6 +15,9 @@ import * as nativeInfo from "./native/info-panel.js";
 import * as nativePaths from "./native/paths-panel.js";
 import * as nativeComps from "./native/comps-panel.js";
 
+/** Properties ▸ Quick Actions the app runs (M13-T02): label → action. */
+const QUICK = { "Remove background": "ai:remove-bg", "Select subject": "ai:subject" };
+
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
 let dockEl = null;
@@ -327,7 +330,7 @@ const renderers = {
       h("div", { class: "pblock-title", text: "Quick Actions" }),
       h("div", { class: "pf-actions" },
         ...[["Remove background", "i-object-select"], ["Select subject", "i-marquee"], ["Crop to square", "i-crop"], ["Enhance colours", "i-sun"]].map(([label, ic]) =>
-          h("button", { class: "pf-action", type: "button", onclick: () => emit("mock", label) }, icon(ic, "ic sm"), h("span", { text: label })))),
+          h("button", { class: "pf-action", type: "button", onclick: () => (bridge.isNative && QUICK[label] ? emit("action", QUICK[label]) : emit("mock", label)) }, icon(ic, "ic sm"), h("span", { text: label })))),
     );
     return wrap;
   },
