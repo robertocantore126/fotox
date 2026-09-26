@@ -363,3 +363,8 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Skipped: the whole card (a modal workspace with planes, perspective marquee / stamp / brush, paste into a plane). The pieces it needs exist (homographies in `Mapping::from_quad`, `Mapping::Custom` meshes, the Clone Stamp); left for HARDEN or a later milestone after two cards' worth of warp sessions.
 
 ## M11-T10 — Acceptance: deferred to HARDEN (S32–S34, Rob's comparison with Photoshop).
+
+## M12-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the recommendations recorded as fast defaults D-082 (Smart Objects, reverses D-055), D-083, D-085, D-086, D-087. Point 3 had no recommendation ("Rob's call"): the filter families go in as M12-T03b (D-084), flagged for Rob.
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
