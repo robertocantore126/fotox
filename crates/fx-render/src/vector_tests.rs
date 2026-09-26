@@ -229,3 +229,18 @@ fn tile_origins_place_the_shape_in_the_tile_it_belongs_to() {
 	assert_eq!(alpha(&right, 0, 49), 255, "document x = 256 is inside it too");
 	assert_eq!(alpha(&right, 150, 49), 0, "document x = 406 is past its end");
 }
+
+/// HARDEN: a tile other than (0, 0) at a level ≥ 1 was offset by half (the
+/// tile origin was divided by the scale twice), so shapes and text repeated
+/// across tiles below 50 % zoom. A 100 × 50 rect at document (600, 100) is,
+/// at level 1, level pixels 300..350 × 50..75: tile (1, 0), local x 44..94.
+#[test]
+fn a_shape_lands_in_the_right_tile_at_level_one() {
+	let shape = rect(100.0, 50.0, [0.0; 4]);
+	let tile = render_shape_tile(&shape, Some(&RED), None, at(600.0, 100.0), 1, (1, 0), PixelFormat::Rgba8);
+	assert_eq!(alpha(&tile, 60, 60), 255, "inside the rect");
+	assert_eq!(alpha(&tile, 20, 60), 0, "left of it");
+	assert_eq!(alpha(&tile, 180, 60), 0, "where the doubled offset put it");
+	let other = render_shape_tile(&shape, Some(&RED), None, at(600.0, 100.0), 1, (0, 0), PixelFormat::Rgba8);
+	assert!((0..256).all(|x| alpha(&other, x, 60) == 0), "and nothing in the tile to its left");
+}

@@ -286,3 +286,21 @@ fn glyphs_are_drawn_upright() {
 		"the bar is at the top: {upper} ink px under the cap height, {lower} over the baseline"
 	);
 }
+
+/// HARDEN: text in a tile other than (0, 0) at level 1 was drawn at the wrong
+/// place (the same doubled-offset bug as shapes), repeated across tiles.
+#[test]
+fn text_lands_in_the_right_tile_at_level_one() {
+	let (mut fonts, _) = stack!();
+	let content = point_text("H", "Arial", 100.0, 0.0, 0.0);
+	let layout = layout_of(&mut fonts, &content, 72.0);
+	// Baseline at document (700, 300): level-1 pixels (350, 150), tile (1, 0),
+	// local x from about 94.
+	let transform = [1.0, 0.0, 0.0, 1.0, 700.0, 300.0];
+	let right = render_text_tile(&layout, transform, 1, (1, 0), PixelFormat::Rgba16, TextAntialias::Smooth);
+	let left = render_text_tile(&layout, transform, 1, (0, 0), PixelFormat::Rgba16, TextAntialias::Smooth);
+	let inked = |b: &fx_tiles::TileBuffer, x0: u32, x1: u32| (x0..x1).any(|x| (100..150).any(|y| b.as_u16()[((y * 256 + x) * 4 + 3) as usize] > 32768));
+	assert!(inked(&right, 90, 140), "the H is in tile (1, 0) near x = 94");
+	assert!(!inked(&right, 0, 80), "not to its left in that tile");
+	assert!(!any_ink(&left), "and not in tile (0, 0)");
+}

@@ -702,8 +702,11 @@ pub fn render_text_tile(layout: &TextLayout, transform: [f64; 6], level: usize, 
 		0.0,
 		0.0,
 		1.0 / scale as f32,
-		(-origin.0 / scale) as f32,
-		(-origin.1 / scale) as f32,
+		// `origin` is already in level pixels (tile × 256): dividing it by the
+		// scale again drew every tile of a level ≥ 1 at the wrong place, so the
+		// content repeated across tiles below 50 % zoom (HARDEN).
+		-origin.0 as f32,
+		-origin.1 as f32,
 	);
 	let frame_to_doc = Transform::from_row(
 		transform[0] as f32,
