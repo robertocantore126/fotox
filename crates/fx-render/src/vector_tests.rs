@@ -2,7 +2,7 @@
 //! shape covering the same area at a mip level, and the stroke alignments.
 
 use fx_core::vector::{Paint, StrokeAlign, StrokeStyle, VectorShape};
-use fx_tiles::{PixelFormat, TILE_PIXELS, TileBuffer};
+use fx_tiles::{PixelFormat, TILE_PIXELS, TILE_SIZE, TileBuffer};
 
 use crate::vector::{IDENTITY, render_shape_tile};
 
@@ -16,7 +16,7 @@ const BLUE: Paint = Paint::Solid {
 /// The straight-alpha RGBA pixel `(x, y)` of a tile buffer.
 fn pixel(buffer: &TileBuffer, x: u32, y: u32) -> [u8; 4] {
 	let bytes = buffer.bytes();
-	let at = ((y * TILE_PIXELS as u32 + x) * 4) as usize;
+	let at = ((y * TILE_SIZE + x) * 4) as usize;
 	[bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
 }
 
@@ -50,8 +50,8 @@ fn a_rect_at_level_zero_covers_exactly_its_pixels() {
 	// partial coverage, so every pixel is either fully opaque or empty.
 	let shape = rect(100.0, 50.0, [0.0; 4]);
 	let tile = render_shape_tile(&shape, Some(&RED), None, at(10.0, 10.0), 0, (0, 0), PixelFormat::Rgba8);
-	for y in 0..TILE_PIXELS as u32 {
-		for x in 0..TILE_PIXELS as u32 {
+	for y in 0..TILE_SIZE {
+		for x in 0..TILE_SIZE {
 			let inside = (10..110).contains(&x) && (10..60).contains(&y);
 			assert_eq!(alpha(&tile, x, y), if inside { 255 } else { 0 }, "pixel ({x},{y})");
 			if inside {
@@ -71,15 +71,15 @@ fn a_rect_covers_the_same_area_at_level_two() {
 	let level0 = render_shape_tile(&shape, Some(&RED), None, transform, 0, (0, 0), PixelFormat::Rgba8);
 	let level2 = render_shape_tile(&shape, Some(&RED), None, transform, 2, (0, 0), PixelFormat::Rgba8);
 	let area = |buffer: &TileBuffer| -> f64 {
-		(0..TILE_PIXELS as u32)
-			.map(|y| (0..TILE_PIXELS as u32).map(|x| f64::from(alpha(buffer, x, y)) / 255.0).sum::<f64>())
+		(0..TILE_SIZE)
+			.map(|y| (0..TILE_SIZE).map(|x| f64::from(alpha(buffer, x, y)) / 255.0).sum::<f64>())
 			.sum()
 	};
 	// One level-2 pixel is 4 × 4 document pixels, so the areas are comparable
 	// once the level-0 one is scaled down.
 	let covered = area(&level2);
 	let scaled = area(&level0) / 16.0;
-	let tolerance = f64::from(TILE_PIXELS as u32 * TILE_PIXELS as u32) * (2.0 / 255.0);
+	let tolerance = TILE_PIXELS as f64 * (2.0 / 255.0);
 	assert!(
 		(covered - scaled).abs() <= tolerance,
 		"level 2 covers {covered} level-2 pixels, level 0 covers {scaled} (tolerance {tolerance})"
