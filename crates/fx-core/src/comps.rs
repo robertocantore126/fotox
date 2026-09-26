@@ -74,3 +74,41 @@ impl LayerComp {
 		}
 	}
 }
+
+/// A user slice (M12-T08): a named canvas rectangle exported as one image.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Slice {
+	pub name: String,
+	/// `(x, y, width, height)`, document pixels.
+	pub rect: (i32, i32, u32, u32),
+}
+
+/// The auto slices that fill the canvas around the user slices (Photoshop's
+/// grey slices): the grid of every user-slice edge, minus the covered cells.
+/// FAST: cells are not merged into bigger rectangles.
+pub fn auto_slices(slices: &[Slice], size: (u32, u32)) -> Vec<(i32, i32, u32, u32)> {
+	let (w, h) = (size.0 as i32, size.1 as i32);
+	let mut xs = vec![0, w];
+	let mut ys = vec![0, h];
+	for s in slices {
+		xs.extend([s.rect.0.clamp(0, w), (s.rect.0 + s.rect.2 as i32).clamp(0, w)]);
+		ys.extend([s.rect.1.clamp(0, h), (s.rect.1 + s.rect.3 as i32).clamp(0, h)]);
+	}
+	xs.sort_unstable();
+	xs.dedup();
+	ys.sort_unstable();
+	ys.dedup();
+	let mut out = Vec::new();
+	for y in ys.windows(2) {
+		for x in xs.windows(2) {
+			let (cx, cy) = ((x[0] + x[1]) / 2, (y[0] + y[1]) / 2);
+			let covered = slices
+				.iter()
+				.any(|s| cx >= s.rect.0 && cy >= s.rect.1 && cx < s.rect.0 + s.rect.2 as i32 && cy < s.rect.1 + s.rect.3 as i32);
+			if !covered && x[1] > x[0] && y[1] > y[0] {
+				out.push((x[0], y[0], (x[1] - x[0]) as u32, (y[1] - y[0]) as u32));
+			}
+		}
+	}
+	out
+}

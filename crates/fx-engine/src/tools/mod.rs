@@ -41,6 +41,7 @@ pub mod perspective_warp;
 pub mod puppet;
 pub mod quick_select;
 pub mod shape;
+pub mod slice;
 pub mod transform;
 pub mod type_tool;
 pub mod wand;
@@ -419,6 +420,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
 		"patch" => Some(Box::new(patch::Patch::new("patch", patch::Kind::Patch))),
 		"artboard" => Some(Box::new(artboard::ArtboardTool::default())),
+		"slice" => Some(Box::new(slice::SliceTool::new(false))),
+		"slice-select" => Some(Box::new(slice::SliceTool::new(true))),
 		"content-move" => Some(Box::new(patch::Patch::new("content-move", patch::Kind::ContentMove))),
 		"eraser-bg" => Some(Box::new(paint::Paint::new("eraser-bg", paint::Kind::BgEraser))),
 		"dodge" => Some(Box::new(paint::Paint::new("dodge", paint::Kind::Dodge))),

@@ -523,6 +523,12 @@ pub enum Command {
 		#[serde(default)]
 		background: Option<[u16; 4]>,
 	},
+	/// The user slices, replaced as a whole (M12-T08: add, move, resize,
+	/// delete, Slices from Guides).
+	SetSlices {
+		slices: Vec<crate::comps::Slice>,
+		label: String,
+	},
 	/// The Layer Comps panel (M12-T06).
 	LayerComp {
 		comp: m12::CompAction,
@@ -888,6 +894,13 @@ impl Command {
 				protect_skin,
 			} => m11::content_aware_scale(doc, layer, *width, *height, *amount, *protect, *protect_skin, ctx),
 			Command::LayerComp { comp } => m12::layer_comp(doc, comp),
+			Command::SetSlices { slices, label } => {
+				doc.slices = slices.clone();
+				Ok(CommandEffect {
+					label: label.clone(),
+					..Default::default()
+				})
+			}
 			Command::NewArtboard {
 				rect,
 				name,

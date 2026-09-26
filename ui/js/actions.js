@@ -52,7 +52,7 @@ export function runAction(item) {
   }
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
   // M8/M9 engine actions (brushes, patterns, measuring tools, Define Pattern).
-  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-", "path:", "vmask:", "type:work-path", "type:to-shape", "smart:", "raster:smart", "layer:artboard", "comps:"].some((p) => a.startsWith(p))) return;
+  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-", "path:", "vmask:", "type:work-path", "type:to-shape", "smart:", "raster:smart", "layer:artboard", "comps:", "slices:", "misc:export-slices", "misc:export-artboards"].some((p) => a.startsWith(p))) return;
   // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
   // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
   // Layer ▸ Rasterize (M6-T06): the mock's "not implemented" toast must not

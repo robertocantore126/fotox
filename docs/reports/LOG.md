@@ -425,3 +425,12 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: an artboard is a pass-through group with a vector mask; its background is a solid op inside it.
 - VERIFY: none.
 - Try it: select the Artboard tool (Move's flyout), drag a rectangle; drag a layer into its group in Layers.
+
+## M12-T08 — Slices and slice export  (Claude, 2026-09-26)
+- Done: `fx_core::comps::Slice { name, rect }` in `Document::slices` (saved in `.fxd`), `auto_slices` (the grid of the user slices' edges minus the covered cells), `Command::SetSlices`; the Slice tool (drag = new slice) and the Slice Select tool (click, drag = move, Alt+drag = resize, Delete) drawing user slices (blue, selected orange) and auto slices (grey) — `tools/slice.rs`; Slices From Guides (bar button, `slices:from-guides`); `export::export_region` (one row of tiles across the rectangle at a time); File ▸ Export ▸ Slices to Files (user + auto slices, top-left order, `<doc>-slices/<doc>_NN.png`) and Artboards to Files (`<doc>-<artboard>.png`) next to the saved document.
+- Skipped: Divide Slice, the Slice Options dialog, layer-based slices, slice numbers drawn on the canvas, JPEG / WebP choice for slices (PNG only), Tests.
+- FAST: the exports run on the engine thread without a progress bar; auto slices are not merged into bigger rectangles.
+- VERIFY: Photoshop's auto-slice layout and numbering.
+- Try it: C's flyout ▸ Slice Tool, drag two rectangles; save the document; File ▸ Export ▸ Slices to Files.
+
+## M12-T09 — Acceptance: deferred to HARDEN (S35–S37, Rob's mock-up and the styles comparison).

@@ -39,6 +39,8 @@ pub struct Document {
 	/// Layer Comps (M12-T06) and the last one applied.
 	pub comps: Vec<crate::comps::LayerComp>,
 	pub active_comp: Option<usize>,
+	/// User slices (M12-T08).
+	pub slices: Vec<crate::comps::Slice>,
 	/// The path the Paths panel has selected (transient, not saved): the one
 	/// the pen tools edit and the path commands default to.
 	pub active_path: Option<crate::path::PathTarget>,
@@ -208,6 +210,7 @@ impl Document {
 			patterns: Vec::new(),
 			comps: Vec::new(),
 			active_comp: None,
+			slices: Vec::new(),
 			channels: Vec::new(),
 			annotations: Default::default(),
 			work_path: None,

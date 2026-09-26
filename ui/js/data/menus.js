@@ -78,6 +78,8 @@ export const menus = [
       it("Print...", "Ctrl+P", "dlg:print"),
       sep,
       it("Export Layers...", "", "dlg:export-layers"),
+      it("Slices to Files", "", "misc:export-slices"),
+      it("Artboards to Files", "", "misc:export-artboards"),
       it("Export Color Lookup...", "", "misc:export-lut", { dis: true }),
       sep,
       it("File Info...", "Alt+Shift+Ctrl+I", "dlg:file-info"),

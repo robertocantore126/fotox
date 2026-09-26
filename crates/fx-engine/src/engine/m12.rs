@@ -166,6 +166,46 @@ impl Engine {
 				);
 				true
 			}
+			// Slices from Guides (M12-T08): the guides' grid as user slices.
+			"slices:from-guides" => {
+				let Some(open) = self.docs.get(doc_id) else { return true };
+				let (w, h) = (open.doc.width as i32, open.doc.height as i32);
+				let mut xs = vec![0, w];
+				let mut ys = vec![0, h];
+				for g in &open.doc.guides {
+					let p = g.position.round() as i32;
+					if g.vertical { xs.push(p.clamp(0, w)) } else { ys.push(p.clamp(0, h)) }
+				}
+				xs.sort_unstable();
+				xs.dedup();
+				ys.sort_unstable();
+				ys.dedup();
+				let mut slices = Vec::new();
+				for y in ys.windows(2) {
+					for x in xs.windows(2) {
+						if x[1] > x[0] && y[1] > y[0] {
+							slices.push(fx_core::comps::Slice {
+								name: format!("{:02}", slices.len() + 1),
+								rect: (x[0], y[0], (x[1] - x[0]) as u32, (y[1] - y[0]) as u32),
+							});
+						}
+					}
+				}
+				self.command(
+					doc_id,
+					Command::SetSlices {
+						slices,
+						label: "Slices From Guides".into(),
+					},
+				);
+				true
+			}
+			// File ▸ Export ▸ Slices / Artboards to Files (M12-T07/T08): PNG
+			// files next to the document.
+			"misc:export-slices" | "misc:export-artboards" => {
+				self.export_regions(doc_id, id == "misc:export-slices");
+				true
+			}
 			// The Layer Comps panel (M12-T06).
 			"comps:refresh" => {
 				self.send_comps(doc_id);
@@ -361,6 +401,67 @@ impl Engine {
 			doc: id,
 			names: open.doc.comps.iter().map(|c| c.name.clone()).collect(),
 			active: open.doc.active_comp,
+		});
+	}
+
+	/// Write every slice (user and auto, D-087) or every artboard as PNG.
+	/// FAST: runs on the engine thread (no progress bar); PNG only.
+	fn export_regions(&mut self, doc_id: DocId, slices: bool) {
+		let store = self.store.clone();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		let Some(path) = open.path.clone() else {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Save the document first: the files go next to it".into(),
+			});
+			return;
+		};
+		vector::prepare_level0(&mut open.doc, &store, None);
+		let doc = open.doc.clone();
+		let stem = path.file_stem().map_or_else(|| "export".to_owned(), |s| s.to_string_lossy().into_owned());
+		let dir = path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+		let regions: Vec<(String, (i32, i32, u32, u32))> = if slices {
+			let mut all: Vec<(i32, i32, u32, u32)> = doc.slices.iter().map(|s| s.rect).collect();
+			all.extend(fx_core::comps::auto_slices(&doc.slices, (doc.width, doc.height)));
+			all.sort_by_key(|r| (r.1, r.0));
+			all.into_iter().enumerate().map(|(i, r)| (format!("{stem}_{:02}.png", i + 1), r)).collect()
+		} else {
+			doc.layers
+				.iter()
+				.filter_map(|l| {
+					l.artboard
+						.as_ref()
+						.map(|a| (format!("{stem}-{}.png", l.name.replace(['/', '\\', ':'], "_")), a.rect))
+				})
+				.collect()
+		};
+		if regions.is_empty() {
+			self.to_ui(&EngineToUi::Toast {
+				text: if slices { "There are no slices" } else { "There are no artboards" }.into(),
+			});
+			return;
+		}
+		let folder = if slices { dir.join(format!("{stem}-slices")) } else { dir };
+		if let Err(error) = std::fs::create_dir_all(&folder) {
+			self.to_ui(&EngineToUi::Error { text: error.to_string() });
+			return;
+		}
+		let mut written = 0;
+		for (name, rect) in regions {
+			let target = folder.join(&name);
+			let result = crate::export::options_for(&doc, &target, false)
+				.and_then(|options| crate::export::export_region(&doc, &store, &target, options, rect, &mut |_| true));
+			match result {
+				Ok(()) => written += 1,
+				Err(error) => {
+					self.to_ui(&EngineToUi::Error {
+						text: format!("{name}: {error}"),
+					});
+					return;
+				}
+			}
+		}
+		self.to_ui(&EngineToUi::Toast {
+			text: format!("{written} files written to {}", folder.display()),
 		});
 	}
 }
