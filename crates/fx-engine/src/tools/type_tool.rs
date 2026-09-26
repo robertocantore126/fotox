@@ -373,6 +373,42 @@ impl Tool for TypeTool {
 		}
 	}
 
+	fn edit_layer(&mut self, ctx: &mut ToolContext<'_>, layer: LayerId) -> ToolResult {
+		let committed = self.finish(ctx, true);
+		if committed.command.is_some() {
+			// FAST: a pending edit of another layer is committed and this
+			// request dropped; the second double-click works.
+			return committed;
+		}
+		let Some(content) = ctx.doc.layer(layer).and_then(|l| l.kind.text_content()) else {
+			return ToolResult::default();
+		};
+		let before = ctx.doc.clone();
+		let all = (0, content.text.len());
+		let _ = Command::SelectLayers {
+			layers: vec![LayerRef::Id(layer)],
+		}
+		.apply(ctx.doc, &mut CommandContext { tiles: ctx.store, ops: None });
+		self.edit = Some(Edit {
+			layer,
+			before,
+			created: false,
+			original: Some(content.clone()),
+			content: content.clone(),
+			selection: all,
+		});
+		self.refresh_overlay(ctx);
+		ToolResult {
+			text_session: Some(TextSession::Open {
+				text: content.text,
+				selection: all,
+			}),
+			doc_changed: true,
+			redraw: true,
+			..Default::default()
+		}
+	}
+
 	fn deactivate(&mut self, ctx: &mut ToolContext<'_>) -> ToolResult {
 		self.press = None;
 		self.drag = None;

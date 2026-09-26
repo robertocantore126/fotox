@@ -11,7 +11,7 @@
 import { h, icon, clear, add } from "../el.js";
 import { openDropdown } from "../popup.js";
 import { openDialog } from "../dialogs.js";
-import { state } from "../state.js";
+import { state, setTool } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
@@ -360,7 +360,13 @@ function row(i, v) {
   let thumb;
   if (l.kind === "group") thumb = h("span", { class: "pthumb adj" }, icon("i-group", "ic sm"));
   // A text layer shows Photoshop's "T" (M6-T07).
-  else if (l.kind === "text") thumb = h("span", { class: "pthumb adj", "data-tip": "Text layer", style: { fontWeight: "700", fontFamily: "serif", display: "grid", placeItems: "center" }, text: "T" });
+  else if (l.kind === "text") {
+    thumb = h("span", {
+      class: "pthumb adj", "data-tip": "Text layer (double-click to edit)", style: { fontWeight: "700", fontFamily: "serif", display: "grid", placeItems: "center" }, text: "T",
+      // Double-click: the Type tool, all the text selected (M6-T09).
+      ondblclick: (e) => { e.stopPropagation(); setTool("type"); bridge.send({ type: UI.ACTION, id: "type:edit-layer", args: { layer: l.id } }); },
+    });
+  }
   else if (l.kind === "adjustment") {
     thumb = h("span", {
       class: "pthumb adj", "data-tip": "Double-click to edit the adjustment",

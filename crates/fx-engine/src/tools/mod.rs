@@ -345,6 +345,11 @@ pub trait Tool {
 		ToolResult::default()
 	}
 
+	/// Start editing `layer` (the Type tool, from the Layers panel).
+	fn edit_layer(&mut self, _ctx: &mut ToolContext<'_>, _layer: fx_core::LayerId) -> ToolResult {
+		ToolResult::default()
+	}
+
 	/// Another tool is being picked: finish what is under way.
 	fn deactivate(&mut self, _ctx: &mut ToolContext<'_>) -> ToolResult {
 		ToolResult::default()

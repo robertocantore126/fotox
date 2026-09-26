@@ -887,11 +887,16 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::Action { id, args } => {
-				if self.edit_action(&id, &args) {
-					Changed::default()
-				} else {
-					self.action(&id)
+				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
+				// enters it with all the text selected. The UI has switched the
+				// tool to Type first.
+				if id == "type:edit-layer" {
+					if let Some(layer) = args.get("layer").and_then(|v| v.as_u64()) {
+						self.with_active_tool(|tool, ctx| tool.edit_layer(ctx, fx_core::LayerId(layer)));
+					}
+					return Changed::default();
 				}
+				if self.edit_action(&id, &args) { Changed::default() } else { self.action(&id) }
 			}
 			UiToEngine::SetZoom { doc, zoom } => match self.docs.get_mut(doc) {
 				Some(open) => open.view.set_zoom(zoom),
@@ -949,10 +954,17 @@ impl Engine {
 				// The transform bar's Interpolation applies to the box that is up.
 				if transform && self.transform.is_some() {
 					let filter = self.transform_filter();
+					let n = |key: &str| self.settings.number("_transform", key);
+					let (x, y, w, h, a) = (n("X"), n("Y"), n("W"), n("H"), n("Angle"));
 					if let Some((_, session)) = &mut self.transform {
 						session.filter = filter;
+						// The numeric fields (M6-T09).
+						if x.is_some() || y.is_some() || w.is_some() || h.is_some() || a.is_some() {
+							session.set_numeric(x, y, w, h, a);
+						}
 					}
 					self.restart_transform_preview(false);
+					self.request_frame();
 				}
 				Changed::default()
 			}

@@ -239,6 +239,44 @@ impl Session {
 		}
 	}
 
+	/// The option bar's numbers (M6-T09): reference point, size in percent of
+	/// the source, angle of the top side in degrees.
+	pub fn numbers(&self) -> (f64, f64, f64, f64, f64) {
+		let [tl, tr, _, bl] = self.quad;
+		let (w, h) = (self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]);
+		let angle = (tr.1 - tl.1).atan2(tr.0 - tl.0).to_degrees();
+		(
+			self.reference.0,
+			self.reference.1,
+			100.0 * distance(tl, tr) / w,
+			100.0 * distance(tl, bl) / h,
+			angle,
+		)
+	}
+
+	/// Set the box from the option bar's numbers (M6-T09); `None` keeps a
+	/// value. The box becomes a rotated rectangle around the reference point
+	/// (FAST: skew and perspective are lost; Warp ignores this).
+	pub fn set_numeric(&mut self, x: Option<f64>, y: Option<f64>, w: Option<f64>, h: Option<f64>, angle: Option<f64>) {
+		if self.patch.is_some() {
+			return;
+		}
+		let (cx, cy, cw, ch, ca) = self.numbers();
+		let (x, y) = (x.unwrap_or(cx), y.unwrap_or(cy));
+		let (w, h, a) = (w.unwrap_or(cw) / 100.0, h.unwrap_or(ch) / 100.0, angle.unwrap_or(ca).to_radians());
+		let (sw, sh) = (self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]);
+		// Where the reference sits inside the box, as a fraction of it.
+		let fx = 0.5;
+		let fy = 0.5;
+		let (cos, sin) = (a.cos(), a.sin());
+		let corner = |u: f64, v: f64| -> Point {
+			let (dx, dy) = ((u - fx) * sw * w, (v - fy) * sh * h);
+			(x + dx * cos - dy * sin, y + dx * sin + dy * cos)
+		};
+		self.quad = [corner(0.0, 0.0), corner(1.0, 0.0), corner(1.0, 1.0), corner(0.0, 1.0)];
+		self.reference = (x, y);
+	}
+
 	/// Move the whole box by whole pixels (the arrow keys).
 	pub fn nudge(&mut self, dx: f64, dy: f64) {
 		let shift = |p: Point| (p.0 + dx, p.1 + dy);

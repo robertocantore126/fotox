@@ -54,6 +54,11 @@ export const optionBars = {
   _transform: [
     { type: "label", text: "Free Transform" },
     { type: "gap" },
+    // Numeric fields (M6-T09): empty = keep; the status bar shows the live values.
+    { type: "num", text: "X:", value: "", unit: "px", width: 52 }, { type: "num", text: "Y:", value: "", unit: "px", width: 52 },
+    { type: "num", text: "W:", value: "", unit: "%", width: 44 }, { type: "num", text: "H:", value: "", unit: "%", width: 44 },
+    { type: "num", text: "Angle:", value: "", unit: "°", width: 44 },
+    { type: "gap" },
     { type: "select", text: "Interpolation:", options: ["Nearest Neighbor", "Bilinear", "Bicubic", "Bicubic Smoother", "Bicubic Sharper", "Bicubic Automatic", "Lanczos 3"], value: "Bicubic" },
     { type: "gap" },
     { type: "btngroup", icons: ["i-grid"], titles: ["Switch between free transform and warp modes"], actions: ["xf:warp"] },
