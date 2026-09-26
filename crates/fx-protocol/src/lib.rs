@@ -199,8 +199,8 @@ pub enum LayerInfoKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SmartInfo {
 	pub linked: bool,
-	/// The Smart Filters, bottom → top: label and whether it is on.
-	pub filters: Vec<(String, bool)>,
+	/// The Smart Filters, bottom → top: label, whether it is on, opacity.
+	pub filters: Vec<(String, bool, f32)>,
 	pub filters_enabled: bool,
 }
 

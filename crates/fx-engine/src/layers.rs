@@ -83,7 +83,7 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 		smart: match &layer.kind {
 			LayerKind::Smart { smart, .. } => Some(fx_protocol::SmartInfo {
 				linked: smart.source.linked.is_some(),
-				filters: smart.filters.iter().map(|f| (f.filter.label().to_owned(), f.enabled)).collect(),
+				filters: smart.filters.iter().map(|f| (f.filter.label().to_owned(), f.enabled, f.opacity)).collect(),
 				filters_enabled: smart.filters_enabled,
 			}),
 			_ => None,

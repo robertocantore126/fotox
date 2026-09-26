@@ -1764,6 +1764,8 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let base = match open.doc.layer(layer).map(|l| &l.kind) {
 			Some(LayerKind::Pixel { image, .. }) => image.clone(),
+			// FAST: no live preview for a Smart Filter (M12-T03); OK applies it.
+			Some(LayerKind::Smart { .. }) => return,
 			_ => {
 				self.to_ui(&EngineToUi::Toast {
 					text: "Select a pixel layer to filter it".into(),
@@ -2337,6 +2339,8 @@ impl Engine {
 
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
+		// A filter on a Smart Object becomes a Smart Filter (M12-T03).
+		let command = self.smart_filter_rewrite(id, command);
 		self.end_stroke();
 		self.before_command(id, &command);
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));

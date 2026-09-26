@@ -382,3 +382,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: the history entry's command is a placeholder (history is by snapshots); instances that share the source are not updated with it; closing the child tab without saving asks nothing special.
 - VERIFY: none.
 - Try it: double-click a Smart Object's thumbnail, paint in the new tab, Ctrl+S, switch back.
+
+## M12-T03 — Smart Filters  (Claude, 2026-09-26)
+- Done: `SmartObject.filters` / `filters_enabled`; `Command::SetSmartFilters` (the whole list + the stack's eye, one history step, cache redrawn); a filter applied to a Smart Object (Filter menu, Ctrl+F) is rewritten into a new Smart Filter (`smart_filter_rewrite`); evaluation per requested tile and level in `fx-engine/src/smart_filters.rs`: each filter is a `LevelSource` stage (memoised) over the one below, the bottom one resampling the source lazily so aprons and coarser blur levels are served; per-filter opacity. Filter ▸ Convert for Smart Filters. The Layers row shows "⧉ Gaussian Blur, (Unsharp Mask)"; a click opens the Smart Filters dialog (stack on/off; per filter on/off, opacity, order, delete).
+- Skipped: the filter mask; per-filter blend modes; filter rows under the layer with drag-reorder; double-click to re-edit a filter's parameters with the live preview; Tests (a Smart Filter equals the destructive filter: checked by hand, max difference 0 at level 0).
+- FAST: no live preview while the filter dialog is open on a Smart Object (OK applies); aprons are re-resampled on every draw; the mode is ignored (Normal).
+- VERIFY: none.
+- Try it: convert a layer, Filter ▸ Blur ▸ Gaussian Blur…, OK; click the "⧉" text in its row.

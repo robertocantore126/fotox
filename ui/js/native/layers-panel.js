@@ -427,10 +427,20 @@ function row(i, v) {
       ondblclick: () => bridge.send({ type: UI.ACTION, id: "vmask:edit" }),
     }, icon("i-pen", "ic xs"))
     : null;
+  // Smart Filters (M12-T03): a summary; a click opens the list's dialog.
+  const filters = l.smart?.filters?.length
+    ? h("span", {
+      class: "pmeta", style: { cursor: "pointer", textDecoration: l.smart.filters_enabled ? "none" : "line-through" },
+      "data-tip": "Smart Filters (click to edit the list)",
+      text: "⧉ " + l.smart.filters.map(([n, on]) => (on ? n : `(${n})`)).join(", "),
+      onclick: (e) => { e.stopPropagation(); openSmartFilters(l); },
+    })
+    : null;
   add(el, [eye, expander, thumb,
     maskThumb,
     vmaskThumb,
     name,
+    filters,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
     l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
 
@@ -806,4 +816,32 @@ function hexToRgba16(hex) {
 
 function rgba16ToCss([r, g, b, a]) {
   return `rgba(${Math.round(r / 257)}, ${Math.round(g / 257)}, ${Math.round(b / 257)}, ${(a / 65535).toFixed(3)})`;
+}
+
+/** The Smart Filters dialog (M12-T03): eye, opacity, order and delete per filter. */
+function openSmartFilters(l) {
+  const list = l.smart?.filters || [];
+  const fields = [{ type: "check", label: "Smart Filters on", on: !!l.smart.filters_enabled }];
+  list.forEach(([n, on, op], i) => {
+    fields.push({ type: "sep" });
+    fields.push({ type: "check", label: `${i + 1}. ${n}`, on });
+    fields.push({ type: "num", label: `Opacity ${i + 1}:`, value: Math.round((op ?? 1) * 100), unit: "%", w: 50 });
+    fields.push({ type: "num", label: `Order ${i + 1}:`, value: i + 1, w: 40 });
+    fields.push({ type: "check", label: `Delete ${i + 1}`, on: false });
+  });
+  openDialog("smart-filters", {
+    fields,
+    onOk: (v) => bridge.send({
+      type: UI.ACTION, id: "smart:filters-set",
+      args: {
+        enabled: !!v["Smart Filters on"],
+        filters: list.map(([n], i) => ({
+          enabled: !!v[`${i + 1}. ${n}`],
+          opacity: Number(v[`Opacity ${i + 1}:`]),
+          order: Number(v[`Order ${i + 1}:`]),
+          delete: !!v[`Delete ${i + 1}`],
+        })),
+      },
+    }),
+  });
 }

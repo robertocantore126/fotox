@@ -59,6 +59,7 @@ export const IMPLEMENTED = new Set([
   "dlg:content-aware-fill",
   "misc:content-aware-scale",
   "smart:convert",
+  "filter:smart",
   "smart:copy",
   "smart:edit",
   "smart:rasterize",

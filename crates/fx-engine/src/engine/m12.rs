@@ -36,6 +36,45 @@ impl Engine {
 				);
 				true
 			}
+			// Filter ▸ Convert for Smart Filters.
+			"filter:smart" => {
+				let ids = self.docs.get(doc_id).map(|o| o.doc.selected.clone()).unwrap_or_default();
+				self.convert_to_smart(doc_id, &ids);
+				true
+			}
+			// The Smart Filters dialog (M12-T03): the list's eyes, opacities,
+			// deletions and order, all at once.
+			"smart:filters-set" => {
+				let Some((mut filters, _)) = self.smart_filters(doc_id) else { return true };
+				let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+				if let Some(rows) = args.get("filters").and_then(|v| v.as_array()) {
+					for (f, row) in filters.iter_mut().zip(rows) {
+						f.enabled = row.get("enabled").and_then(|v| v.as_bool()).unwrap_or(f.enabled);
+						if let Some(o) = row.get("opacity").and_then(|v| v.as_f64()) {
+							f.opacity = (o / 100.0).clamp(0.0, 1.0) as f32;
+						}
+					}
+					let mut keep: Vec<(i64, fx_core::smart::SmartFilter)> = filters
+						.into_iter()
+						.zip(rows)
+						.filter(|(_, row)| !row.get("delete").and_then(|v| v.as_bool()).unwrap_or(false))
+						.enumerate()
+						.map(|(i, (f, row))| (row.get("order").and_then(|v| v.as_i64()).unwrap_or(i as i64), f))
+						.collect();
+					keep.sort_by_key(|(o, _)| *o);
+					filters = keep.into_iter().map(|(_, f)| f).collect();
+				}
+				self.command(
+					doc_id,
+					Command::SetSmartFilters {
+						layer: LayerRef::Active,
+						filters,
+						enabled,
+						label: "Smart Filters".into(),
+					},
+				);
+				true
+			}
 			"smart:edit" => {
 				self.edit_contents(doc_id);
 				true
@@ -146,5 +185,42 @@ impl Engine {
 		self.to_ui(&EngineToUi::Toast {
 			text: "The Smart Object was updated".into(),
 		});
+	}
+
+	/// The active Smart Object's filters and stack eye.
+	fn smart_filters(&self, doc_id: DocId) -> Option<(Vec<fx_core::smart::SmartFilter>, bool)> {
+		let open = self.docs.get(doc_id)?;
+		let layer = open.doc.layer(open.doc.active_layer()?)?;
+		match &layer.kind {
+			LayerKind::Smart { smart, .. } => Some((smart.filters.clone(), smart.filters_enabled)),
+			_ => None,
+		}
+	}
+
+	/// `ApplyFilter` on a Smart Object adds a Smart Filter instead.
+	pub(super) fn smart_filter_rewrite(&self, doc_id: DocId, command: Command) -> Command {
+		let Command::ApplyFilter { layer, filter } = &command else {
+			return command;
+		};
+		let Some(open) = self.docs.get(doc_id) else { return command };
+		let Ok(id) = fx_core::command::resolve(&open.doc, layer) else {
+			return command;
+		};
+		let Some(LayerKind::Smart { smart, .. }) = open.doc.layer(id).map(|l| &l.kind) else {
+			return command;
+		};
+		let mut filters = smart.filters.clone();
+		filters.push(fx_core::smart::SmartFilter {
+			filter: filter.clone(),
+			enabled: true,
+			mode: fx_core::BlendMode::Normal,
+			opacity: 1.0,
+		});
+		Command::SetSmartFilters {
+			layer: LayerRef::Id(id),
+			filters,
+			enabled: smart.filters_enabled,
+			label: filter.label().to_owned(),
+		}
 	}
 }
