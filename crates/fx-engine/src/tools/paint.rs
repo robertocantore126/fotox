@@ -34,6 +34,8 @@ pub enum Kind {
 	Blur,
 	Sharpen,
 	Smudge,
+	/// The Pattern Stamp (M8-T06).
+	PatternStamp,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -174,6 +176,17 @@ impl Paint {
 				finger_painting: s.bool(self.id, "Finger Painting").unwrap_or(false),
 				sample_all: s.bool(self.id, "Sample All Layers").unwrap_or(false),
 			},
+			Kind::PatternStamp => {
+				let Some(pattern) = s.number(self.id, "Pattern").filter(|p| *p > 0.0) else {
+					return Err("Pick a pattern in the option bar or the Patterns panel".into());
+				};
+				let aligned = s.bool(self.id, "Aligned").unwrap_or(true);
+				StrokeTool::PatternStamp {
+					pattern: pattern as u64,
+					origin: if aligned { (0, 0) } else { (at.0.round() as i64, at.1.round() as i64) },
+					impressionist: s.bool(self.id, "Impressionist").unwrap_or(false),
+				}
+			}
 			Kind::Sponge => StrokeTool::Sponge {
 				saturate: s.string(self.id, "Mode").as_deref() != Some("Desaturate"),
 				vibrance: s.bool(self.id, "Vibrance").unwrap_or(true),

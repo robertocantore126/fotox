@@ -23,6 +23,7 @@ export const panelDefs = {
   "brush-settings": { title: "Brush Settings", icon: "i-brush", kind: "brush-settings" },
   toolpresets: { title: "Tool Presets", icon: "i-presets", kind: "toolpresets" },
   libraries: { title: "Libraries", icon: "i-libs", kind: "libraries" },
+  patterns: { title: "Patterns", icon: "i-pattern-stamp", kind: "patterns" },
   timeline: { title: "Timeline", icon: "i-video", kind: "timeline" },
   notes: { title: "Notes", icon: "i-note", kind: "simple", note: "No notes in this document" },
 };
@@ -36,7 +37,7 @@ export const dockGroups = [
   { id: "g-nav", tabs: ["navigator", "info", "measurements"], open: true },
   { id: "g-text", tabs: ["character", "paragraph"], open: false },
   { id: "g-brush", tabs: ["brush", "brush-settings", "toolpresets"], open: false },
-  { id: "g-libs", tabs: ["libraries", "timeline", "notes"], open: false },
+  { id: "g-libs", tabs: ["libraries", "patterns", "timeline", "notes"], open: false },
 ];
 
 /** Scheda attiva di partenza per ogni gruppo. */

@@ -800,6 +800,9 @@ impl Engine {
 				samples,
 			} => {
 				self.end_stroke();
+				if let fx_core::stroke::StrokeTool::PatternStamp { pattern, .. } = tool {
+					self.ensure_pattern(doc_id, pattern);
+				}
 				// The Background Eraser turns the Background into a layer first
 				// (M8-T02, Photoshop): its own History step.
 				if matches!(tool, fx_core::stroke::StrokeTool::BgEraser { .. }) {
@@ -2293,6 +2296,7 @@ impl Engine {
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
 		self.end_stroke();
+		self.before_command(id, &command);
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 		// Any other edit while a transform box is up drops the box (Photoshop
 		// greys everything else out; here the edit wins).
@@ -2980,6 +2984,16 @@ impl Engine {
 			// Alt+Backspace foreground, Ctrl+Backspace background, Shift keeps
 			// transparency.
 			"edit:fill" | "edit:fill-fg" | "edit:fill-bg" | "edit:fill-fg-preserve" | "edit:fill-bg-preserve" => {
+				// Use: Pattern (M8-T06).
+				if args.get("use").and_then(serde_json::Value::as_str) == Some("Pattern") {
+					match self.fill_pattern_command(args) {
+						Some(command) => self.command(doc_id, command),
+						None => self.to_ui(&EngineToUi::Toast {
+							text: "Pick a pattern in the Patterns panel first".into(),
+						}),
+					}
+					return true;
+				}
 				let command = self.fill_command(id, args);
 				self.command(doc_id, command);
 			}

@@ -9,6 +9,7 @@ import { getDocCanvas } from "./canvas.js";
 import * as bridge from "./native/bridge.js";
 import * as nativePanels from "./native/layers-panel.js";
 import * as nativeBrushes from "./native/brush-settings.js";
+import * as nativePatterns from "./native/patterns.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -491,6 +492,11 @@ const renderers = {
 
   notes() {
     return h("div", { class: "pnotes" }, listRow({ label: "Review note — check the headline kerning", thumb: h("span", { class: "pthumb note" }, icon("i-note", "ic sm")) }), bar([barBtn("i-plus", "New note"), barBtn("i-trash", "Delete note")]));
+  },
+
+  patterns(def) {
+    if (bridge.isNative) return nativePatterns.patternsPanel();
+    return renderers.simple({ ...def, note: "Patterns live in the app's library." });
   },
 
   simple(def) {

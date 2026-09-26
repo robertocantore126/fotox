@@ -24,6 +24,7 @@ import { initColor } from "./native/color.js";
 import { initTools, sendColors } from "./native/tools.js";
 import { initBrushes, brushExtras } from "./native/brush-settings.js";
 import { initGradients } from "./native/gradients.js";
+import { initPatterns } from "./native/patterns.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -206,6 +207,7 @@ async function boot() {
   await loadSprite();
   // Option-bar pickers of native modules (M8).
   initGradients();
+  initPatterns();
 
   const shell = buildShell();
   buildMenubar(shell.menubar, menus);

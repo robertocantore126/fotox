@@ -1035,6 +1035,7 @@ dependencies = [
  "fx-protocol",
  "fx-render",
  "fx-tiles",
+ "png",
  "pollster 1.0.1",
  "rayon",
  "serde",

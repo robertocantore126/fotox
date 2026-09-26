@@ -6,6 +6,7 @@ use super::op::DabSequence;
 
 pub mod background_eraser;
 pub mod focus;
+pub mod pattern;
 pub mod smudge;
 pub mod tone;
 

@@ -365,6 +365,18 @@ pub enum EngineToUi {
 	Brushes {
 		presets: Vec<serde_json::Value>,
 	},
+	/// The pattern library (M8-T06): id, name, width, height, `thumb`
+	/// (base64 RGBA8, 48 × 48); `current` is the pattern the tools use.
+	Patterns {
+		patterns: Vec<serde_json::Value>,
+		current: Option<u64>,
+	},
+	/// The History Brush's source state (M8-T07): an index into the History
+	/// panel's rows (0 = the opened state), `None` = the first state.
+	HistorySource {
+		doc: DocId,
+		state: Option<usize>,
+	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {
 		families: Vec<FontFamilyInfo>,

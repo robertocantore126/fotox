@@ -414,6 +414,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"blur" => Some(Box::new(paint::Paint::new("blur", paint::Kind::Blur))),
 		"sharpen" => Some(Box::new(paint::Paint::new("sharpen", paint::Kind::Sharpen))),
 		"smudge" => Some(Box::new(paint::Paint::new("smudge", paint::Kind::Smudge))),
+		"pattern-stamp" => Some(Box::new(paint::Paint::new("pattern-stamp", paint::Kind::PatternStamp))),
 		// The shape tools (M6-T06) and the Path Selection tool that moves a
 		// shape by its transform.
 		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),

@@ -150,7 +150,12 @@ impl Stroke {
 		}
 		if matches!(
 			setup.tool,
-			StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::Blur { .. } | StrokeTool::Sharpen { .. }
+			StrokeTool::Clone { .. }
+				| StrokeTool::Heal { .. }
+				| StrokeTool::SpotHeal
+				| StrokeTool::Blur { .. }
+				| StrokeTool::Sharpen { .. }
+				| StrokeTool::PatternStamp { .. }
 		) && setup.source.is_none()
 		{
 			return Err(CommandError::NotAllowed("the clone source is missing".into()));

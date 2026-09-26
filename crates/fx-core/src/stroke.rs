@@ -248,6 +248,13 @@ pub enum StrokeTool {
 		#[serde(default)]
 		sample_all: bool,
 	},
+	/// The Pattern Stamp (M8-T06): a document pattern, tiled from `origin`.
+	PatternStamp {
+		pattern: u64,
+		origin: (i64, i64),
+		#[serde(default)]
+		impressionist: bool,
+	},
 	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
 	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
 	BgEraser {
@@ -272,6 +279,7 @@ impl StrokeTool {
 			StrokeTool::Blur { .. } => "Blur Tool",
 			StrokeTool::Sharpen { .. } => "Sharpen Tool",
 			StrokeTool::Smudge { .. } => "Smudge Tool",
+			StrokeTool::PatternStamp { .. } => "Pattern Stamp",
 			StrokeTool::Dodge { .. } => "Dodge Tool",
 			StrokeTool::Burn { .. } => "Burn Tool",
 			StrokeTool::Sponge { .. } => "Sponge Tool",
