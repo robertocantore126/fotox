@@ -403,8 +403,9 @@ mod tests {
 		// appended, and COUNT follows the last one.
 		assert_eq!(NameKind::Invert as usize, 8, "the M2 kinds keep their indices");
 		assert_eq!(NameKind::BlackWhite as usize, 16, "the M4 kinds follow them");
+		assert_eq!(NameKind::Type as usize, 24, "the M6 kinds follow them");
 		assert_eq!(
-			NameKind::Type as usize,
+			NameKind::PatternFill as usize,
 			NameKind::COUNT - 1,
 			"a new NameKind goes at the end, and COUNT must grow"
 		);

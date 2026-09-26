@@ -181,3 +181,5 @@ HARDEN reads this file first, so be honest about what is missing.
 - Try it: open the toolbar flyouts in the app — only Quick Selection, Object Selection, Magnetic Lasso, Custom Shape and the rest of M9+ are dimmed.
 
 ## M8-T11 — Acceptance: deferred to HARDEN (S24–S26, the tool-by-tool comparison with Photoshop feeding M14's VERIFY list).
+
+M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures that are already on `main` (M6 shape/text/rotate tests: rotate needs the engine's ops in fx-core tests, shape crop/dirty-tile expectations, "Type 1" naming, two vector tests); `cargo test -p fx-engine --lib` aborts (SIGABRT) in a GPU-less Linux container on `main` too. `fx-ops` (78) passes. M8 changed one test: `every_name_kind_has_a_counter` (two name kinds appended).
