@@ -121,36 +121,75 @@ pub enum MaskFill {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
 	/// Replace the layer selection (Layers panel click). M2
-	SelectLayers { layers: Vec<LayerRef> },
+	SelectLayers {
+		layers: Vec<LayerRef>,
+	},
 	/// Insert above the active layer (or at the top if none). M2
-	AddLayer { layer: NewLayer, name: Option<String> },
+	AddLayer {
+		layer: NewLayer,
+		name: Option<String>,
+	},
 	/// M2
-	DeleteLayers { layers: Vec<LayerRef> },
+	DeleteLayers {
+		layers: Vec<LayerRef>,
+	},
 	/// M2
-	DuplicateLayers { layers: Vec<LayerRef> },
+	DuplicateLayers {
+		layers: Vec<LayerRef>,
+	},
 	/// Move to `index` inside `parent` (`None` = root), bottom = 0. M2
-	MoveLayer { layer: LayerRef, parent: Option<LayerRef>, index: usize },
+	MoveLayer {
+		layer: LayerRef,
+		parent: Option<LayerRef>,
+		index: usize,
+	},
 	/// Wrap the given layers in a new group. M2
-	GroupLayers { layers: Vec<LayerRef>, name: Option<String> },
+	GroupLayers {
+		layers: Vec<LayerRef>,
+		name: Option<String>,
+	},
 	/// Implemented (reference example). M2 extends validation.
-	SetLayerProps { layer: LayerRef, props: LayerPropsPatch },
+	SetLayerProps {
+		layer: LayerRef,
+		props: LayerPropsPatch,
+	},
 	/// Move a layer by whole pixels. Never rewrites pixels. M2
-	OffsetLayer { layer: LayerRef, dx: i32, dy: i32 },
+	OffsetLayer {
+		layer: LayerRef,
+		dx: i32,
+		dy: i32,
+	},
 	/// The Move tool's drop and nudges (M7-T02): every listed layer (empty =
 	/// the selected layers; a group = everything in it) moves by `(dx, dy)`.
 	/// Offsets and placement matrices only, no pixel rewritten; all or
 	/// nothing, a position-locked layer refuses. Labelled "Move".
-	OffsetLayers { layers: Vec<LayerRef>, dx: i32, dy: i32 },
+	OffsetLayers {
+		layers: Vec<LayerRef>,
+		dx: i32,
+		dy: i32,
+	},
 	/// Align / Distribute (M7-T04): each layer by its own amount, one step
 	/// named `label`.
-	MoveEach { moves: Vec<(LayerRef, i32, i32)>, label: String },
+	MoveEach {
+		moves: Vec<(LayerRef, i32, i32)>,
+		label: String,
+	},
 	/// New / move / clear guides (M7-T06): a history step that does not dirty
 	/// the pixels.
-	SetGuides { guides: Vec<crate::document::Guide>, label: String },
+	SetGuides {
+		guides: Vec<crate::document::Guide>,
+		label: String,
+	},
 	/// M2
-	AddMask { layer: LayerRef, fill: MaskFill },
+	AddMask {
+		layer: LayerRef,
+		fill: MaskFill,
+	},
 	/// M2
-	DeleteMask { layer: LayerRef, apply: bool },
+	DeleteMask {
+		layer: LayerRef,
+		apply: bool,
+	},
 	/// Layer ▸ Layer Mask ▸ Disable / Enable, and the link toggle (M7-T05).
 	SetMaskFlags {
 		layer: LayerRef,
@@ -158,11 +197,16 @@ pub enum Command {
 		linked: Option<bool>,
 	},
 	/// Change the parameters of an adjustment layer. M2
-	SetAdjustment { layer: LayerRef, adjustment: Adjustment },
+	SetAdjustment {
+		layer: LayerRef,
+		adjustment: Adjustment,
+	},
 	/// Merge the given layers into one pixel layer (rasterises). The result
 	/// takes the place, id and name of the bottom-most of them (Photoshop's
 	/// Merge Down), Normal, 100 %. M4
-	MergeLayers { layers: Vec<LayerRef> },
+	MergeLayers {
+		layers: Vec<LayerRef>,
+	},
 	/// Flatten the whole document into one "Background" pixel layer, the
 	/// transparency filled with white; hidden layers are discarded. M4
 	Flatten,
@@ -171,7 +215,9 @@ pub enum Command {
 	StampVisible,
 	/// Give the document another profile without touching the numbers (the
 	/// look changes). M4
-	AssignProfile { profile: ColorProfile },
+	AssignProfile {
+		profile: ColorProfile,
+	},
 	/// Convert every pixel layer (level 0) and solid fill colour to `profile`,
 	/// keeping the look. Masks and adjustment parameters stay as they are
 	/// (Photoshop does the same). M4
@@ -182,7 +228,10 @@ pub enum Command {
 	},
 	/// Run a destructive filter on a pixel layer (level 0; the engine shows a
 	/// live preview first). M4
-	ApplyFilter { layer: LayerRef, filter: FilterParams },
+	ApplyFilter {
+		layer: LayerRef,
+		filter: FilterParams,
+	},
 	/// Combine a shape into the pixel selection (M5-T03). `feather` blurs the
 	/// new shape's edge before combining.
 	Select {
@@ -200,12 +249,20 @@ pub enum Command {
 	/// Invert the pixel selection across the canvas. M5
 	InvertSelection,
 	/// Expand / contract / border / smooth / feather the selection. M5
-	ModifySelection { modify: SelectModify },
+	ModifySelection {
+		modify: SelectModify,
+	},
 	/// Move the selection outline by whole pixels (never rewrites tiles). M5
-	OffsetSelection { dx: i32, dy: i32 },
+	OffsetSelection {
+		dx: i32,
+		dy: i32,
+	},
 	/// Select what the Magic Wand finds at a point, combined with the
 	/// current selection by `mode`. M5
-	MagicWand { params: WandParams, mode: SelectMode },
+	MagicWand {
+		params: WandParams,
+		mode: SelectMode,
+	},
 	/// Edit ▸ Fill a pixel layer through the selection (the whole canvas
 	/// without one). `color` is straight 16-bit RGBA; the engine resolves the
 	/// dialog's "Foreground Colour" etc. before sending. M5
@@ -231,7 +288,11 @@ pub enum Command {
 	},
 	/// The Magic Eraser (M8-T02): the Magic Wand's region goes transparent;
 	/// a Background layer becomes a normal layer first (Photoshop).
-	MagicErase { layer: LayerRef, params: WandParams, opacity: f64 },
+	MagicErase {
+		layer: LayerRef,
+		params: WandParams,
+		opacity: f64,
+	},
 	/// The Gradient tool's drag (M8-T03): the gradient through the selection
 	/// with the mode and opacity.
 	FillGradient {
@@ -251,10 +312,15 @@ pub enum Command {
 		preserve_transparency: bool,
 	},
 	/// Change a gradient / pattern fill layer's parameters (M8-T03/T06).
-	SetFillLayer { layer: LayerRef, content: crate::fill::FillLayer },
+	SetFillLayer {
+		layer: LayerRef,
+		content: crate::fill::FillLayer,
+	},
 	/// Edit ▸ Define Pattern (M8-T06): add a pattern to the document's
 	/// resources (a history step that does not dirty the pixels).
-	DefinePattern { pattern: crate::pattern::PatternData },
+	DefinePattern {
+		pattern: crate::pattern::PatternData,
+	},
 	/// The Red Eye tool (M8-T08): find the red pupil around `point` and
 	/// darken it.
 	RedEye {
@@ -265,6 +331,68 @@ pub enum Command {
 		/// `0..=1`.
 		darken: f64,
 	},
+	/// Select ▸ Save Selection (M9-T01): into a new channel (`channel: None`,
+	/// named `name`) or combined into an existing one by `mode`.
+	SaveSelection {
+		channel: Option<usize>,
+		name: Option<String>,
+		mode: SelectMode,
+	},
+	/// Select ▸ Load Selection (M9-T01): a channel (inverted or not) combined
+	/// with the selection by `mode`.
+	LoadSelection {
+		channel: usize,
+		invert: bool,
+		mode: SelectMode,
+	},
+	/// The Channels panel (M9-T01).
+	DeleteChannel {
+		channel: usize,
+	},
+	DuplicateChannel {
+		channel: usize,
+	},
+	/// Rename / recolour a channel (`None` = unchanged).
+	SetChannel {
+		channel: usize,
+		#[serde(default)]
+		name: Option<String>,
+		#[serde(default)]
+		color: Option<[u16; 4]>,
+		#[serde(default)]
+		opacity: Option<f32>,
+	},
+	/// Quick Mask on (the selection becomes a red overlay layer whose mask is
+	/// painted) or off (the mask becomes the selection) — M9-T01.
+	QuickMask {
+		on: bool,
+	},
+	/// The selection tools and commands that compute a coverage from the
+	/// document (M9-T02..T06): combined with the selection by `mode`.
+	SelectBy {
+		select: crate::select_ops::SelectOp,
+		mode: SelectMode,
+	},
+	/// Select ▸ Transform Selection (M9-T02): the coverage resampled through
+	/// `mapping` (canvas → canvas); pixels are untouched.
+	TransformSelection {
+		mapping: Box<Mapping>,
+		filter: Filter,
+	},
+	/// Notes, counts and samplers (M9-T08): replace them; a history step that
+	/// dirties the document but no pixel.
+	SetAnnotations {
+		annotations: crate::annotations::Annotations,
+		label: String,
+	},
+	/// The Perspective Crop tool (M9-T09): the quad (canvas pixels, clockwise
+	/// from the top-left) becomes a `width × height` canvas, every pixel
+	/// layer resampled through the projective mapping.
+	PerspectiveCrop {
+		quad: [(f64, f64); 4],
+		width: u32,
+		height: u32,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -274,7 +402,9 @@ pub enum Command {
 	},
 	/// Layer ▸ New ▸ Layer via Copy / via Cut (Ctrl+J / Shift+Ctrl+J): the
 	/// selected pixels of the active layer on a new layer above it. M5
-	LayerViaCopy { cut: bool },
+	LayerViaCopy {
+		cut: bool,
+	},
 	/// A brush stroke (M5-T07): the samples after smoothing, replayed through
 	/// the brush engine; the live stroke painted exactly these pixels.
 	Stroke {
@@ -291,25 +421,39 @@ pub enum Command {
 	/// keeps its canvas position; otherwise its bounds are centred on
 	/// `center` (the view centre, when the source position is not visible),
 	/// or kept where they were when `center` is `None`. M5
-	Paste { in_place: bool, center: Option<(f64, f64)> },
+	Paste {
+		in_place: bool,
+		center: Option<(f64, f64)>,
+	},
 	/// Image ▸ Rotate 90° CW / CCW / 180° (M6-T02): every pixel layer, mask and
 	/// the selection is permuted **exactly** (no resampling) and its offset is
 	/// recomputed so the content stays where it was relative to the canvas; the
 	/// document's width and height swap for the odd turns. `quarter_turns` is 1
 	/// (clockwise), 2 or 3; 0 (and ±4) is refused.
-	RotateCanvas { quarter_turns: i8 },
+	RotateCanvas {
+		quarter_turns: i8,
+	},
 	/// Image ▸ Flip Canvas Horizontal / Vertical (M6-T02): the same exact
 	/// permutation as `RotateCanvas`.
-	FlipCanvas { horizontal: bool },
+	FlipCanvas {
+		horizontal: bool,
+	},
 	/// Image ▸ Rotate ▸ Arbitrary… (M6-T02): every pixel layer, mask and the
 	/// selection is resampled and the canvas grows to the rotated bounding box.
 	/// `angle_deg` is in degrees, clockwise (screen coordinates, y down); 0 is
 	/// refused.
-	RotateCanvasArbitrary { angle_deg: f64, filter: Filter },
+	RotateCanvasArbitrary {
+		angle_deg: f64,
+		filter: Filter,
+	},
 	/// Image ▸ Canvas Size (M6-T02, Alt+Ctrl+C): only the document's size and
 	/// every offset change — **no pixel is rewritten** (D-015), and content
 	/// outside the new canvas is kept (it reappears if the canvas grows again).
-	CanvasSize { width: u32, height: u32, anchor: Anchor9 },
+	CanvasSize {
+		width: u32,
+		height: u32,
+		anchor: Anchor9,
+	},
 	/// Image ▸ Image Size (M6-T02, Alt+Ctrl+I): with `resample` off only `ppi`
 	/// changes (the pixel dimensions must stay); otherwise every pixel layer,
 	/// mask and the selection is resampled with that filter, the offsets scale
@@ -366,7 +510,11 @@ pub enum Command {
 	/// the document-space box `[x0, y0, x1, y1]` whose tiles have to be drawn
 	/// again — the engine knows the layout, so it measures what the old and the
 	/// new text ink and hands the box over, and undo redraws the same one.
-	SetText { layer: LayerRef, content: TextContent, dirty: [f64; 4] },
+	SetText {
+		layer: LayerRef,
+		content: TextContent,
+		dirty: [f64; 4],
+	},
 	/// Layer ▸ Layer Style (M6-T08): replace a layer's styles (`None` clears
 	/// them). The effect caches are rebuilt, all dirty.
 	SetLayerStyle {
@@ -377,7 +525,9 @@ pub enum Command {
 	/// becomes a pixel layer holding what it drew, keeping its id, position in
 	/// the stack, name, opacity, blend mode and mask (Photoshop keeps those
 	/// too). Only non-pixel, non-group layers can be rasterised.
-	Rasterize { layers: Vec<LayerRef> },
+	Rasterize {
+		layers: Vec<LayerRef>,
+	},
 }
 
 /// What a command changed. The engine uses it to invalidate render caches and
@@ -541,6 +691,22 @@ impl Command {
 			} => m8::fill_pattern(doc, layer, *pattern, *mode, *opacity, *preserve_transparency, ctx),
 			Command::SetFillLayer { layer, content } => m8::set_fill_layer(doc, layer, content),
 			Command::DefinePattern { pattern } => m8::define_pattern(doc, pattern),
+			Command::SaveSelection { channel, name, mode } => m9::save_selection(doc, *channel, name.as_deref(), *mode, ctx),
+			Command::LoadSelection { channel, invert, mode } => m9::load_selection(doc, *channel, *invert, *mode, ctx),
+			Command::DeleteChannel { channel } => m9::delete_channel(doc, *channel),
+			Command::DuplicateChannel { channel } => m9::duplicate_channel(doc, *channel),
+			Command::SetChannel { channel, name, color, opacity } => m9::set_channel(doc, *channel, name.as_deref(), *color, *opacity),
+			Command::QuickMask { on } => m9::quick_mask(doc, *on, ctx),
+			Command::SelectBy { select, mode } => m9::select_by(doc, select, *mode, ctx),
+			Command::TransformSelection { mapping, filter } => m9::transform_selection(doc, mapping, *filter, ctx),
+			Command::SetAnnotations { annotations, label } => {
+				doc.annotations = annotations.clone();
+				Ok(CommandEffect {
+					label: label.clone(),
+					..Default::default()
+				})
+			}
+			Command::PerspectiveCrop { quad, width, height } => m9::perspective_crop(doc, *quad, *width, *height, ctx),
 			Command::RedEye {
 				layer,
 				point,
@@ -597,6 +763,7 @@ impl Command {
 // ---------------------------------------------------------------------------
 
 mod m8;
+pub mod m9;
 
 fn select_layers(doc: &mut Document, layers: &[LayerRef]) -> Result<CommandEffect, CommandError> {
 	let mut selected = Vec::with_capacity(layers.len());

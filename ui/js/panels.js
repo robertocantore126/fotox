@@ -10,6 +10,7 @@ import * as bridge from "./native/bridge.js";
 import * as nativePanels from "./native/layers-panel.js";
 import * as nativeBrushes from "./native/brush-settings.js";
 import * as nativePatterns from "./native/patterns.js";
+import * as nativeChannels from "./native/channels-panel.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -240,6 +241,7 @@ const renderers = {
   },
 
   channels() {
+    if (bridge.isNative) return nativeChannels.channelsPanel();
     const rows = [["RGB", "#b9b9bd", true], ["Red", "#e26060", true], ["Green", "#7ac74f", true], ["Blue", "#5b8df5", true],
       ["Alpha 1", "#d9d9de", false], ["Alpha 2", "#d9d9de", false]];
     const list = h("div", { class: "plist" });

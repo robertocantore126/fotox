@@ -377,6 +377,20 @@ pub enum EngineToUi {
 		doc: DocId,
 		state: Option<usize>,
 	},
+	/// The alpha channels of `doc` (M9-T01): name, color, opacity, `thumb`
+	/// (base64 8-bit grey, 48 × 48); `quick_mask` = Quick Mask is on.
+	Channels {
+		doc: DocId,
+		channels: Vec<serde_json::Value>,
+		quick_mask: bool,
+	},
+	/// Notes, counts and samplers of `doc` with the samplers' current values
+	/// (M9-T08).
+	Annotations {
+		doc: DocId,
+		annotations: serde_json::Value,
+		samples: Vec<[u16; 4]>,
+	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {
 		families: Vec<FontFamilyInfo>,

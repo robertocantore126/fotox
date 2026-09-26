@@ -9,7 +9,9 @@
 //!   and batch processing. There is no other way to mutate a document.
 //! * This crate does no rendering and no file I/O.
 
+pub mod annotations;
 pub mod blend;
+pub mod channel;
 pub mod color;
 pub mod command;
 pub mod document;
@@ -20,6 +22,7 @@ pub mod layer;
 pub mod ops;
 pub mod pattern;
 pub mod pixels;
+pub mod select_ops;
 pub mod selection;
 pub mod stroke;
 pub mod styles;

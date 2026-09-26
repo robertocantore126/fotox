@@ -204,6 +204,8 @@ struct Engine {
 	prefs: crate::prefs::Prefs,
 	/// Brush presets and patterns (M8-T01/T06).
 	resources: m8::Resources,
+	/// M9's per-document UI state (channel list signatures).
+	m9: m9::State,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -354,6 +356,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
 		resources: m8::Resources::load(),
+		m9: m9::State::default(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -1027,7 +1030,7 @@ impl Engine {
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
-				if self.m8_action(&id, &args) {
+				if self.m8_action(&id, &args) || self.m9_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -2454,6 +2457,8 @@ impl Engine {
 				self.request_frame();
 			}
 		}
+		// Channels, notes and samplers (M9).
+		self.after_edit_m9(id);
 	}
 
 	fn hot_expiry(&mut self) -> Option<Instant> {
@@ -4019,6 +4024,7 @@ fn pixel_job_label(command: &Command) -> String {
 }
 
 mod m8;
+mod m9;
 
 #[cfg(test)]
 mod tests {

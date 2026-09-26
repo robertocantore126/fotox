@@ -262,6 +262,8 @@ pub(crate) fn images_of(doc: &Document) -> Vec<&TiledImage> {
 	for layer in &doc.layers {
 		go(layer, &mut out);
 	}
+	// Alpha channels (M9-T01).
+	out.extend(doc.channels.iter().map(|c| &c.image));
 	out
 }
 
