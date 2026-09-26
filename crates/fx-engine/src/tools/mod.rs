@@ -408,6 +408,9 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
 		"eraser-bg" => Some(Box::new(paint::Paint::new("eraser-bg", paint::Kind::BgEraser))),
+		"dodge" => Some(Box::new(paint::Paint::new("dodge", paint::Kind::Dodge))),
+		"burn" => Some(Box::new(paint::Paint::new("burn", paint::Kind::Burn))),
+		"sponge" => Some(Box::new(paint::Paint::new("sponge", paint::Kind::Sponge))),
 		// The shape tools (M6-T06) and the Path Selection tool that moves a
 		// shape by its transform.
 		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),

@@ -321,7 +321,7 @@ impl Stroke {
 				let k = opacity * f64::from(state.coverage[at]);
 				if gray {
 					let v = gray_at(&before, self.format, at);
-					let out = v + (self.color[0] - v) * k;
+					let out = op.gray(v, k, &ctx);
 					set_gray(&mut state.working, self.format, at, out);
 					continue;
 				}

@@ -38,6 +38,12 @@ pub trait DabOp: Send + Sync {
 	/// `source` (the source window's premultiplied pixel, when asked for) and
 	/// `k` = opacity × coverage.
 	fn pixel(&self, backdrop: [f64; 4], source: Option<[f32; 4]>, k: f64, ctx: &DabContext) -> [f64; 4];
+
+	/// The new value of a grey target (a mask) from `v` (`0..=1`) (M8-T04);
+	/// by default the paint colour's grey, `v + (grey − v)·k`.
+	fn gray(&self, v: f64, k: f64, ctx: &DabContext) -> f64 {
+		v + (ctx.color[0] - v) * k
+	}
 }
 
 /// A `DabOp` that carries a buffer along the path (Smudge, Mixer Brush in
@@ -112,6 +118,15 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 		StrokeTool::Eraser => Box::new(Erase),
 		StrokeTool::Clone { dx, dy, .. } | StrokeTool::Heal { dx, dy, .. } => Box::new(CloneSource { offset: (*dx, *dy) }),
 		StrokeTool::SpotHeal => Box::new(Veil),
+		StrokeTool::Dodge { range, protect_tones } | StrokeTool::Burn { range, protect_tones } => Box::new(super::ops::tone::Tone {
+			lighten: matches!(tool, StrokeTool::Dodge { .. }),
+			range: *range,
+			protect_tones: *protect_tones,
+		}),
+		StrokeTool::Sponge { saturate, vibrance } => Box::new(super::ops::tone::Sponge {
+			saturate: *saturate,
+			vibrance: *vibrance,
+		}),
 		StrokeTool::BgEraser { sample, tolerance, protect } => {
 			let rgb = |c: [u16; 3]| c.map(|v| f64::from(v) / 65535.0);
 			Box::new(super::ops::background_eraser::BackgroundEraser {

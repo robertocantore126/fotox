@@ -130,3 +130,10 @@ HARDEN reads this file first, so be honest about what is missing.
 - FAST: coarse levels of a fill layer sample one point per pixel (no averaging); the gradient editor is lists of numbers, not Photoshop's draggable stops; a fill layer bakes "fg"/"bg" colours when created.
 - VERIFY: midpoint curve, Perceptual space, dither pattern, Angle direction, the fill layer's Scale meaning (fraction of the canvas extent along the angle).
 - Try it: G, drag on a pixel layer; Layer ▸ New Fill Layer ▸ Gradient…, then double-click its thumbnail.
+
+## M8-T04 — Dodge, Burn, Sponge  (Claude, 2026-09-26)
+- Done: `StrokeTool::{Dodge, Burn, Sponge}` + `brush::ops::tone` (`Tone`, `Sponge` DabOps): Range weights (Shadows `(1−v)²`, Midtones `4v(1−v)`, Highlights `v²`), dodge/burn by half the weighted strength, Protect Tones on luminance with a saturation clamp, Sponge saturate/desaturate about the grey with Vibrance weighting by unsaturation; Exposure / Flow are the stroke's flow at 100 % opacity; `DabOp::gray` so a mask target dodges/burns its grey and the sponge leaves it alone; tools "dodge", "burn", "sponge" wired with Photoshop's option bars (+ Hardness).
+- Skipped: Sponge's skin-tone protection; Tests (should check: midtone dodge lifts 50 % grey more than black/white; Protect Tones keeps hue; desaturate reaches grey; vibrance protects a saturated pixel).
+- FAST: none beyond the `// FAST:` marks.
+- VERIFY: every formula (D-064), Photoshop's default Protect Tones (on), Exposure as flow.
+- Try it: O, paint over a photo's midtones; Shift+O cycles to Burn / Sponge.

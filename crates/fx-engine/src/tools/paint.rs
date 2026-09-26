@@ -8,7 +8,7 @@
 //! colour on Alt+click like Photoshop's temporary eyedropper.
 
 use fx_core::BlendMode;
-use fx_core::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
+use fx_core::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool, ToneRange};
 use fx_render::{Overlay, OverlayItem, OverlayStyle};
 
 use crate::tools::{ColorTarget, DocPointer, StrokeEvent, Tool, ToolContext, ToolResult, sample_pixel};
@@ -26,6 +26,10 @@ pub enum Kind {
 	SpotHeal,
 	/// The Background Eraser (M8-T02).
 	BgEraser,
+	/// Dodge, Burn, Sponge (M8-T04).
+	Dodge,
+	Burn,
+	Sponge,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -80,7 +84,7 @@ impl Paint {
 			.unwrap_or_default();
 		let default_size = if self.kind == Kind::Pencil { 3.0 } else { 40.0 };
 		let pencil_like = self.kind == Kind::Pencil || (self.kind == Kind::Eraser && s.string(self.id, "Mode").is_some_and(|m| m != "Brush"));
-		BrushParams {
+		let brush = BrushParams {
 			diameter: s.number(self.id, "Size").unwrap_or(default_size).clamp(1.0, 5000.0) as f32,
 			hardness: if pencil_like {
 				1.0
@@ -103,7 +107,29 @@ impl Paint {
 			dynamics: Default::default(),
 			seed: 0,
 		}
-		.with_settings(s.options.get(self.id).and_then(|o| o.get("_brush")))
+		.with_settings(s.options.get(self.id).and_then(|o| o.get("_brush")));
+		self.m8_brush(ctx, brush)
+	}
+
+	/// M8's tools read their strength from their own option-bar fields: the
+	/// stroke's opacity is 100 % and the flow is Exposure / Flow / Strength.
+	fn m8_brush(&self, ctx: &ToolContext<'_>, mut brush: BrushParams) -> BrushParams {
+		let s = ctx.settings;
+		let percent = |key: &str, default: f64| (s.number(self.id, key).unwrap_or(default) / 100.0).clamp(0.0, 1.0) as f32;
+		match self.kind {
+			Kind::Dodge | Kind::Burn => {
+				brush.opacity = 1.0;
+				brush.flow = percent("Exposure", 50.0);
+				brush.mode = BlendMode::Normal;
+			}
+			Kind::Sponge => {
+				brush.opacity = 1.0;
+				brush.flow = percent("Flow", 50.0);
+				brush.mode = BlendMode::Normal;
+			}
+			_ => {}
+		}
+		brush
 	}
 
 	/// The stroke tool, or why the stroke cannot start.
@@ -115,6 +141,23 @@ impl Paint {
 			// The eraser's Pencil/Block modes use a hard tip (see `brush`).
 			Kind::Eraser => StrokeTool::Eraser,
 			Kind::SpotHeal => StrokeTool::SpotHeal,
+			Kind::Dodge | Kind::Burn => {
+				let range = match s.string(self.id, "Range").as_deref() {
+					Some("Shadows") => ToneRange::Shadows,
+					Some("Highlights") => ToneRange::Highlights,
+					_ => ToneRange::Midtones,
+				};
+				let protect_tones = s.bool(self.id, "Protect Tones").unwrap_or(true);
+				if self.kind == Kind::Dodge {
+					StrokeTool::Dodge { range, protect_tones }
+				} else {
+					StrokeTool::Burn { range, protect_tones }
+				}
+			}
+			Kind::Sponge => StrokeTool::Sponge {
+				saturate: s.string(self.id, "Mode").as_deref() != Some("Desaturate"),
+				vibrance: s.bool(self.id, "Vibrance").unwrap_or(true),
+			},
 			Kind::BgEraser => {
 				let rgb = |c: [u16; 4]| [c[0], c[1], c[2]];
 				let sample = if s.string(self.id, "Sampling").as_deref() == Some("Background Swatch") {

@@ -211,6 +211,24 @@ pub enum StrokeTool {
 	Heal { dx: f64, dy: f64, sample_all: bool },
 	/// The Spot Healing Brush (J): the source is chosen near the stroke.
 	SpotHeal,
+	/// Dodge (M8-T04): lighten the `range`; the brush's flow is the Exposure.
+	Dodge {
+		range: ToneRange,
+		#[serde(default)]
+		protect_tones: bool,
+	},
+	/// Burn (M8-T04): darken the `range`.
+	Burn {
+		range: ToneRange,
+		#[serde(default)]
+		protect_tones: bool,
+	},
+	/// Sponge (M8-T04): saturate or desaturate; the brush's flow is the Flow.
+	Sponge {
+		saturate: bool,
+		#[serde(default)]
+		vibrance: bool,
+	},
 	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
 	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
 	BgEraser {
@@ -232,8 +250,21 @@ impl StrokeTool {
 			StrokeTool::Heal { .. } => "Healing Brush",
 			StrokeTool::SpotHeal => "Spot Healing Brush",
 			StrokeTool::BgEraser { .. } => "Background Eraser",
+			StrokeTool::Dodge { .. } => "Dodge Tool",
+			StrokeTool::Burn { .. } => "Burn Tool",
+			StrokeTool::Sponge { .. } => "Sponge Tool",
 		}
 	}
+}
+
+/// Dodge / Burn's Range (M8-T04).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneRange {
+	Shadows,
+	#[default]
+	Midtones,
+	Highlights,
 }
 
 /// What a stroke paints on: the layer's pixels or its mask.
