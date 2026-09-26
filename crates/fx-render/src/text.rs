@@ -357,7 +357,12 @@ impl Fonts {
 			TextFrame::Box { .. } => (0.0, 0.0),
 		};
 		let lines = collect_lines(&layout, origin);
-		let runs = collect_outlines(&layout, content, origin);
+		let mut runs = collect_outlines(&layout, content, origin);
+		// Warp Text (M10-T08): every outline point through the warp, over the
+		// glyphs' own box. FAST: control points are moved, not re-fitted.
+		if let Some(warp) = content.warp {
+			warp_runs(&mut runs, &warp);
+		}
 		let glyphs = runs.iter().map(|run| run.glyphs.len()).sum();
 		TextLayout {
 			layout,
@@ -496,6 +501,92 @@ fn collect_outlines(layout: &Layout<TextBrush>, content: &TextContent, origin: (
 		}
 	}
 	runs
+}
+
+/// The glyphs' box in frame space, `[x0, y0, x1, y1]`.
+fn runs_box(runs: &[RunOutlines]) -> Option<[f64; 4]> {
+	let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+	for run in runs {
+		for g in &run.glyphs {
+			let r = g.bounds();
+			b = [
+				b[0].min(f64::from(r.left())),
+				b[1].min(f64::from(r.top())),
+				b[2].max(f64::from(r.right())),
+				b[3].max(f64::from(r.bottom())),
+			];
+		}
+	}
+	b[0].is_finite().then_some(b)
+}
+
+/// A tiny-skia path with every point moved by `f`.
+fn map_path(path: &Path, f: &dyn Fn(f64, f64) -> (f64, f64)) -> Option<Path> {
+	use tiny_skia::PathSegment;
+	let mut b = PathBuilder::new();
+	let p = |pt: tiny_skia::Point| {
+		let (x, y) = f(f64::from(pt.x), f64::from(pt.y));
+		(x as f32, y as f32)
+	};
+	for seg in path.segments() {
+		match seg {
+			PathSegment::MoveTo(a) => {
+				let (x, y) = p(a);
+				b.move_to(x, y);
+			}
+			PathSegment::LineTo(a) => {
+				let (x, y) = p(a);
+				b.line_to(x, y);
+			}
+			PathSegment::QuadTo(c, a) => {
+				let ((cx, cy), (x, y)) = (p(c), p(a));
+				b.quad_to(cx, cy, x, y);
+			}
+			PathSegment::CubicTo(c1, c2, a) => {
+				let ((x1, y1), (x2, y2), (x, y)) = (p(c1), p(c2), p(a));
+				b.cubic_to(x1, y1, x2, y2, x, y);
+			}
+			PathSegment::Close => b.close(),
+		}
+	}
+	b.finish()
+}
+
+fn warp_runs(runs: &mut [RunOutlines], warp: &fx_core::text::Warp) {
+	let Some(bx) = runs_box(runs) else { return };
+	for run in runs.iter_mut() {
+		run.glyphs = run.glyphs.iter().filter_map(|g| map_path(g, &|x, y| warp.apply((x, y), bx))).collect();
+	}
+}
+
+impl TextLayout {
+	/// Every glyph outline as path elements in document coordinates, through
+	/// the layer's `transform` (Type ▸ Create Work Path / Convert to Shape /
+	/// type masks, M10-T08), and the first run's colour.
+	pub fn outline_elements(&self, transform: [f64; 6]) -> (Vec<fx_core::vector::PathEl>, [u16; 4]) {
+		use fx_core::vector::PathEl;
+		use tiny_skia::PathSegment;
+		let m = transform;
+		let t = |pt: tiny_skia::Point| {
+			let (x, y) = (f64::from(pt.x), f64::from(pt.y));
+			[m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+		};
+		let mut out = Vec::new();
+		for run in &self.runs {
+			for g in &run.glyphs {
+				for seg in g.segments() {
+					out.push(match seg {
+						PathSegment::MoveTo(a) => PathEl::MoveTo(t(a)),
+						PathSegment::LineTo(a) => PathEl::LineTo(t(a)),
+						PathSegment::QuadTo(c, a) => PathEl::QuadTo(t(c), t(a)),
+						PathSegment::CubicTo(c1, c2, a) => PathEl::CubicTo(t(c1), t(c2), t(a)),
+						PathSegment::Close => PathEl::Close,
+					});
+				}
+			}
+		}
+		(out, self.runs.first().map_or([0, 0, 0, 65535], |r| r.color))
+	}
 }
 
 /// The hinting mode an anti-aliasing setting asks for, or `None` for the plain

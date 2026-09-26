@@ -188,6 +188,8 @@ pub enum LayerKind {
 		/// Local → document, `[a, b, c, d, e, f]`; the frame's origin is the
 		/// matrix's translation.
 		transform: [f64; 6],
+		/// Warp Text (M10-T08).
+		warp: Option<crate::text::Warp>,
 		cache: TiledImage,
 	},
 	/// A gradient or pattern fill layer (M8-T03/T06, D-065): its parameters
@@ -273,6 +275,7 @@ impl LayerKind {
 				align,
 				antialias,
 				transform,
+				warp,
 				..
 			} => Some(crate::text::TextContent {
 				text: text.clone(),
@@ -281,6 +284,7 @@ impl LayerKind {
 				align: *align,
 				antialias: *antialias,
 				transform: *transform,
+				warp: *warp,
 			}),
 			_ => None,
 		}

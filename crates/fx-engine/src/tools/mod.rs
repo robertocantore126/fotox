@@ -435,6 +435,13 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"shape-custom" => Some(Box::new(shape::Shape::new("shape-custom", shape::Kind::Custom))),
 		"path-select" => Some(Box::new(path_select::PathSelect::default())),
 		"type" => Some(Box::new(type_tool::TypeTool::default())),
+		// The Type Mask tools (M10-T08). FAST: the vertical one types
+		// horizontally.
+		"type-mask" | "type-mask-vertical" => {
+			let mut tool = type_tool::TypeTool::default();
+			tool.mask = true;
+			Some(Box::new(tool))
+		}
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),

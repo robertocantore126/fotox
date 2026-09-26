@@ -444,6 +444,21 @@ pub enum Command {
 		mask: Option<crate::select_ops::VectorMaskSpec>,
 		label: String,
 	},
+	/// The Type Mask tools' commit (M10-T08): the text's glyphs combined into
+	/// the selection by `mode`; no layer is made.
+	TextToSelection {
+		content: crate::text::TextContent,
+		mode: SelectMode,
+	},
+	/// Type ▸ Convert to Shape (M10-T08): the text layer becomes a shape
+	/// layer of its glyph outlines (id, name, position in the stack kept).
+	TextToShape {
+		layer: LayerRef,
+	},
+	/// Type ▸ Create Work Path (M10-T08).
+	TextToWorkPath {
+		layer: LayerRef,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -777,6 +792,9 @@ impl Command {
 				mode,
 			} => m10::path_to_selection(doc, *target, *feather, *anti_alias, *mode, ctx),
 			Command::SetVectorMask { layer, mask, label } => m10::set_vector_mask(doc, layer, mask.as_ref(), label),
+			Command::TextToSelection { content, mode } => m10::text_to_selection(doc, content, *mode, ctx),
+			Command::TextToShape { layer } => m10::text_to_shape(doc, layer, ctx),
+			Command::TextToWorkPath { layer } => m10::text_to_work_path(doc, layer, ctx),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
 			Command::RedEye {
@@ -903,6 +921,7 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 			align: content.align,
 			antialias: content.antialias,
 			transform: content.transform,
+			warp: content.warp,
 			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
 		},
 		NewLayer::Fill { content } => LayerKind::FillLayer {
@@ -1447,6 +1466,7 @@ fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: 
 		align,
 		antialias,
 		transform,
+		warp,
 		cache,
 	} = &mut target.kind
 	else {
@@ -1463,6 +1483,11 @@ fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: 
 	*align = content.align;
 	*antialias = content.antialias;
 	*transform = content.transform;
+	// A warp moves glyphs outside the old box: everything is redrawn.
+	if *warp != content.warp {
+		cache.mark_all_dirty();
+	}
+	*warp = content.warp;
 	cache.mark_rect_dirty(dirty);
 	Ok(CommandEffect {
 		label: "Type Tool".into(),
@@ -2044,6 +2069,7 @@ fn convert_profile(
 				align,
 				antialias,
 				transform,
+				warp,
 				cache,
 			} => {
 				let mut converted = Vec::with_capacity(runs.len());
@@ -2065,6 +2091,7 @@ fn convert_profile(
 					align: *align,
 					antialias: *antialias,
 					transform: *transform,
+					warp: *warp,
 					cache,
 				})
 			}

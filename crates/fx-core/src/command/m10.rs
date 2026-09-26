@@ -294,3 +294,70 @@ pub(super) fn set_vector_mask(
 		..Default::default()
 	})
 }
+
+fn text_of(doc: &Document, layer: &LayerRef) -> Result<(LayerId, crate::text::TextContent), CommandError> {
+	let id = resolve(doc, layer)?;
+	let content = doc
+		.layer(id)
+		.and_then(|l| l.kind.text_content())
+		.ok_or_else(|| CommandError::NotAllowed("the layer is not a text layer".into()))?;
+	Ok((id, content))
+}
+
+pub(super) fn text_to_selection(
+	doc: &mut Document,
+	content: &crate::text::TextContent,
+	mode: SelectMode,
+	ctx: &mut CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	let (elements, _) = pixel_ops(ctx, "Type Mask")?.text_outline(content, doc.ppi)?;
+	let path = Path::from_elements(&elements);
+	// All the glyph contours as one polygon under the nonzero rule, so the
+	// counters of an "o" stay open: each contour closed on itself and
+	// separated by a non-finite point (the rasteriser drops edges that touch
+	// one, so no bridge edge is drawn).
+	let mut points = Vec::new();
+	for (contour, _, _) in path.flatten(0.25) {
+		if contour.len() < 3 {
+			continue;
+		}
+		points.extend(contour.iter().copied());
+		points.push(contour[0]);
+		points.push((f64::NAN, f64::NAN));
+	}
+	if points.is_empty() {
+		return Err(CommandError::NotAllowed("the text has no glyphs".into()));
+	}
+	let mut work = doc.clone();
+	select(&mut work, &SelectionShape::Polygon { points }, mode, 0.0, true, ctx)?;
+	doc.selection = work.selection;
+	Ok(selection_effect("Type Mask"))
+}
+
+pub(super) fn text_to_shape(doc: &mut Document, layer: &LayerRef, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let (id, content) = text_of(doc, layer)?;
+	let (elements, color) = pixel_ops(ctx, "Convert to Shape")?.text_outline(&content, doc.ppi)?;
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let target = doc.layer_mut(id).expect("resolved id exists");
+	target.kind = LayerKind::Shape {
+		shape: crate::vector::VectorShape::Path { elements },
+		fill: Some(crate::vector::Paint::Solid { rgba: color }),
+		stroke: None,
+		transform: crate::vector::IDENTITY,
+		cache: TiledImage::derived(w, h, format),
+	};
+	Ok(CommandEffect {
+		label: "Convert to Shape".into(),
+		pixels_changed: vec![id],
+		structure_changed: true,
+		..Default::default()
+	})
+}
+
+pub(super) fn text_to_work_path(doc: &mut Document, layer: &LayerRef, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	let (_, content) = text_of(doc, layer)?;
+	let (elements, _) = pixel_ops(ctx, "Create Work Path")?.text_outline(&content, doc.ppi)?;
+	doc.work_path = Some(Path::from_elements(&elements));
+	doc.active_path = Some(PathTarget::Work);
+	Ok(path_effect("Make Work Path"))
+}

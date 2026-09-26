@@ -288,3 +288,12 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: custom shapes are stored in documents as plain path shapes (no link to the library).
 - VERIFY: Photoshop's triangle corner rounding (arcs, not quadratics).
 - Try it: U's flyout ▸ Custom Shape, pick Heart, drag. Draw a path with P, Edit ▸ Define Custom Shape.
+
+## M10-T08 — Type completion  (Claude, 2026-09-26)
+- Done: Warp Text — `TextContent::warp` / `LayerKind::Text.warp` (`Warp { style, bend }`: Arc, Arch, Bulge, Squeeze, Flag, Wave, Fish, Rise), applied to every glyph outline over the glyphs' box at layout time (lossless: the text stays editable), Type ▸ Warp Text… dialog (`type:warp` → `SetText`), `.fxd` via the content; `TextLayout::outline_elements` (glyph outlines in document coordinates) behind `PixelOps::text_outline`; Type ▸ Create Work Path (`TextToWorkPath`), Type ▸ Convert to Shape (`TextToShape`: the layer becomes a path shape of its outlines, first run's colour); the Horizontal / Vertical Type Mask tools ("type-mask", "type-mask-vertical": `TypeTool::mask`, the commit is `TextToSelection` — all contours as one nonzero polygon separated by non-finite points, so counters stay open).
+- Skipped: vertical type (D-075) — the Vertical Type tool stays planned and the vertical mask tool types horizontally; type on a path and area text; live Character / Paragraph panels (tracking, kerning, baseline shift, faux styles, caps, indents, spacing); Warp's Horizontal / Vertical and the distortions; Tests (vertical glyph positions; a type mask's coverage; text on a circle; warp preset hashes; Convert to Shape = the rendered text).
+- FAST: warp moves Bézier control points (no refit); Convert to Shape keeps one colour; Arc and Fish curves are my approximations.
+- VERIFY: the warp shapes against Photoshop's presets.
+- Try it: type some text, Type ▸ Warp Text…, Arc, Bend 50. Type ▸ Convert to Shape. T's flyout ▸ Horizontal Type Mask, type, Ctrl+Enter.
+
+## M10-T09 — Acceptance: deferred to HARDEN (S30–S31, the logo redraw and the vertical Japanese paragraph).

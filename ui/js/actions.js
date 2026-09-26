@@ -51,7 +51,7 @@ export function runAction(item) {
   }
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
   // M8/M9 engine actions (brushes, patterns, measuring tools, Define Pattern).
-  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-", "path:", "vmask:"].some((p) => a.startsWith(p))) return;
+  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-", "path:", "vmask:", "type:work-path", "type:to-shape"].some((p) => a.startsWith(p))) return;
   // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
   // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
   // Layer ▸ Rasterize (M6-T06): the mock's "not implemented" toast must not
@@ -134,6 +134,13 @@ export function runAction(item) {
   if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
+  // Type ▸ Warp Text (M10-T08).
+  if (a === "dlg:warp-text" && bridge.isNative) {
+    openDialog("warp-text", {
+      onOk: (v) => bridge.send({ type: UI.ACTION, id: "type:warp", args: { style: v["Style:"], bend: Number(v["Bend:"]) } }),
+    });
+    return;
+  }
   // Gradients (M8-T03): New Fill Layer ▸ Gradient, the Gradient Editor.
   if (a.startsWith("dlg:") && bridge.isNative && isGradientDialog(a.slice(4))) { openGradientDialog(a.slice(4)); return; }
   if (a.startsWith("dlg:") && bridge.isNative && isPatternDialog(a.slice(4))) { openPatternFillDialog(false); return; }

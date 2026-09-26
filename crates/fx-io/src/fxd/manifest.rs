@@ -477,6 +477,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			align: content.align,
 			antialias: content.antialias,
 			transform: content.transform,
+			warp: content.warp,
 			cache: TiledImage::derived(size.0, size.1, format),
 		},
 	};

@@ -216,6 +216,43 @@ impl Engine {
 	}
 
 	pub(super) fn m10_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
+		if let Some(doc_id) = self.docs.active_id()
+			&& matches!(id, "type:work-path" | "type:to-shape" | "type:warp")
+		{
+			match id {
+				"type:work-path" => self.command(doc_id, Command::TextToWorkPath { layer: LayerRef::Active }),
+				"type:to-shape" => self.command(doc_id, Command::TextToShape { layer: LayerRef::Active }),
+				_ => {
+					// Warp Text (M10-T08): the dialog's style and bend.
+					let Some(content) = self
+						.docs
+						.get(doc_id)
+						.and_then(|o| o.doc.active_layer().and_then(|l| o.doc.layer(l)))
+						.and_then(|l| l.kind.text_content())
+					else {
+						self.to_ui(&EngineToUi::Toast {
+							text: "Warp Text works on a text layer".into(),
+						});
+						return true;
+					};
+					let style = args.get("style").and_then(|v| v.as_str()).unwrap_or("None").to_lowercase();
+					let bend = args.get("bend").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
+					let warp = serde_json::from_value::<fx_core::text::WarpStyle>(serde_json::Value::String(style))
+						.ok()
+						.map(|style| fx_core::text::Warp { style, bend });
+					let (w, h) = self.docs.get(doc_id).map_or((0, 0), |o| (o.doc.width, o.doc.height));
+					self.command(
+						doc_id,
+						Command::SetText {
+							layer: LayerRef::Active,
+							content: fx_core::text::TextContent { warp, ..content },
+							dirty: [0.0, 0.0, f64::from(w), f64::from(h)],
+						},
+					);
+				}
+			}
+			return true;
+		}
 		if id == "misc:define-shape" {
 			if let Some(doc_id) = self.docs.active_id() {
 				let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_owned();

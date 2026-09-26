@@ -229,6 +229,11 @@ impl PixelOps for EngineOps {
 		fx_ops::brush::replay(crate::stroke::setup(&prepared, doc, *tool, *brush, color), samples, store)
 	}
 
+	fn text_outline(&self, content: &fx_core::text::TextContent, ppi: f32) -> Result<(Vec<fx_core::vector::PathEl>, [u16; 4]), CommandError> {
+		let layout = crate::text::layout_uncached(content, ppi);
+		Ok(layout.outline_elements(content.transform))
+	}
+
 	fn select_op(&self, doc: &Document, op: &fx_core::select_ops::SelectOp, store: &TileStore) -> Result<Option<Selection>, CommandError> {
 		self.select(doc, op, store)
 	}

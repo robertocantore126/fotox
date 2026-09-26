@@ -150,7 +150,7 @@ export const menus = [
         it("Flip Horizontal", "", "xf:flip-h"),
         it("Flip Vertical", "", "xf:flip-v"),
       ]),
-      it("Warp Text", "", "misc:warp-text", { dis: true }),
+      it("Warp Text...", "", "dlg:warp-text"),
       sep,
       it("Define Brush Preset...", "", "misc:define-brush", { dis: true }),
       it("Define Pattern...", "", "misc:define-pattern"),
