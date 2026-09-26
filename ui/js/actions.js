@@ -136,7 +136,7 @@ export function runAction(item) {
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
   // Type ▸ Warp Text (M10-T08).
   // M11 warp sessions: the engine puts its bar up.
-  const warps = { "dlg:liquify": "warp:liquify", "misc:puppet-warp": "warp:puppet", "misc:perspective-warp": "warp:perspective" };
+  const warps = { "dlg:liquify": "warp:liquify", "misc:puppet-warp": "warp:puppet", "misc:perspective-warp": "warp:perspective", "warp:straighten": "warp:straighten" };
   if (warps[a] && bridge.isNative) {
     bridge.send({ type: UI.ACTION, id: warps[a] });
     return;

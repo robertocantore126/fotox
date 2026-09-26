@@ -43,6 +43,15 @@ impl Engine {
 				self.start_warp(Box::new(crate::tools::liquify::Liquify::default()));
 				true
 			}
+			// Edit ▸ Perspective Warp (M11-T08) and its Straighten button.
+			"warp:perspective" => {
+				self.start_warp(Box::new(crate::tools::perspective_warp::PerspectiveWarp::default()));
+				true
+			}
+			"warp:straighten" => {
+				self.warp_options(&serde_json::json!({ "_straighten": true }));
+				true
+			}
 			// Edit ▸ Puppet Warp (M11-T07): a mesh over the layer's content.
 			"warp:puppet" => {
 				let density = self.settings.string("_warp-puppet", "Density").unwrap_or_default();

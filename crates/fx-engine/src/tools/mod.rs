@@ -36,6 +36,7 @@ pub mod patch;
 pub mod path_select;
 pub mod pen;
 pub mod perspective_crop;
+pub mod perspective_warp;
 pub mod puppet;
 pub mod quick_select;
 pub mod shape;

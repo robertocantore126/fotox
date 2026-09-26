@@ -351,3 +351,15 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: a new pin's source is found from the nearest mesh vertex; Density / Expansion only apply when the session starts; the mesh overlay draws every triangle.
 - VERIFY: none.
 - Try it: a layer with an object on transparency, Edit ▸ Puppet Warp, click three pins, drag one.
+
+## M11-T08 — Perspective Warp  (Claude, 2026-09-26)
+- Done: `tools/perspective_warp.rs` warp session (Edit ▸ Perspective Warp, Alt+Shift+Ctrl+W). Layout: drag draws a quad, corners drag, a corner dropped near another quad's corner snaps to it and the two stay linked. Warp (the bar's Layout / Warp group): corners drag (linked corners move together); each quad maps its layout shape to its warped shape by homographies from the unit square (`Mapping::from_quad`), subdivided 16 × 16 into one `TriMesh` → `Mapping::Custom`, previewed and committed like Free Transform. Straighten (bar button, `warp:straighten`) snaps warped edges within 20° of vertical / horizontal.
+- Skipped: Shift+click one edge, deleting a quad, snapping along whole edges, Tests (no crack along a shared edge).
+- FAST: shared edges can crack slightly (per-quad homographies); the content outside the quads is dropped by the resample.
+- VERIFY: Photoshop keeps the content outside the planes (it does, via the mesh's extension) — Fotox drops it.
+- Try it: Edit ▸ Perspective Warp, drag two planes sharing a corner, switch the bar to Warp, drag corners, Enter.
+
+## M11-T09 — Vanishing Point  (Claude, 2026-09-26)
+- Skipped: the whole card (a modal workspace with planes, perspective marquee / stamp / brush, paste into a plane). The pieces it needs exist (homographies in `Mapping::from_quad`, `Mapping::Custom` meshes, the Clone Stamp); left for HARDEN or a later milestone after two cards' worth of warp sessions.
+
+## M11-T10 — Acceptance: deferred to HARDEN (S32–S34, Rob's comparison with Photoshop).
