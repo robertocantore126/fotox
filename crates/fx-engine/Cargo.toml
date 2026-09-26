@@ -14,6 +14,7 @@ fx-protocol = { workspace = true }
 fx-render = { workspace = true }
 fx-io = { workspace = true }
 fx-ops = { workspace = true }
+fx-ai = { workspace = true }
 crossbeam-channel = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

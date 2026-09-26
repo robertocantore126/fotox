@@ -8,6 +8,7 @@ members = [
 	"crates/fx-io",
 	"crates/fx-render",
 	"crates/fx-ops",
+	"crates/fx-ai",
 	"crates/fx-engine",
 	"crates/fx-cli",
 	"crates/fx-app",
@@ -27,6 +28,7 @@ default-members = [
 	"crates/fx-io",
 	"crates/fx-render",
 	"crates/fx-ops",
+	"crates/fx-ai",
 	"crates/fx-engine",
 	"crates/fx-cli",
 ]
@@ -54,6 +56,7 @@ fx-io = { path = "crates/fx-io" }
 fx-render = { path = "crates/fx-render" }
 fx-ops = { path = "crates/fx-ops" }
 fx-engine = { path = "crates/fx-engine" }
+fx-ai = { path = "crates/fx-ai" }
 graphite-desktop-ui = { path = "vendor/graphite/desktop-ui" }
 wgpu-sync = { path = "vendor/graphite/wgpu-sync" }
 
@@ -118,6 +121,12 @@ fontique = "0.9"
 
 # dev
 criterion = "0.8"
+
+# M13 (D-088): ONNX Runtime, loaded at run time (no build-time download);
+# HTTP for model downloads and the ComfyUI bridge; checksums.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-22"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+sha2 = "0.10"
 
 [patch.crates-io]
 # Graphite's forks, pinned to the exact revisions its desktop app used at the
