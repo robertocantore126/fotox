@@ -91,6 +91,21 @@ impl History {
 		self.redo.iter().rev().map(|e| e.label.as_str())
 	}
 
+	/// The document of History panel row `row` (M8-T07, D-067): row 0 is the
+	/// oldest state kept, row `labels().count()` the current one (`current`),
+	/// the rows after it the undone states.
+	pub fn state<'a>(&'a self, row: usize, current: &'a Document) -> Option<&'a Document> {
+		let now = self.undo.len();
+		if row < now {
+			return Some(&self.undo[row].before);
+		}
+		if row == now {
+			return Some(current);
+		}
+		let k = row - now;
+		self.redo.len().checked_sub(k).map(|i| &self.redo[i].before)
+	}
+
 	pub fn can_undo(&self) -> bool {
 		!self.undo.is_empty()
 	}

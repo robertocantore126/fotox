@@ -151,3 +151,10 @@ HARDEN reads this file first, so be honest about what is missing.
 - FAST: manifest patterns are JSON number arrays (big for large patterns); library patterns are copied into the document outside History; Define Pattern composites on the engine thread and prepares every dirty shape tile first; the picker keeps a refresh callback per option-bar render.
 - VERIFY: Impressionist (Photoshop's is a painterly blotch, not a jitter).
 - Try it: select an area, Edit ▸ Define Pattern from Selection; S's flyout ▸ Pattern Stamp; Edit ▸ Fill ▸ Use: Pattern; Layer ▸ New Fill Layer ▸ Pattern…
+
+## M8-T07 — History Brush, Art History Brush  (Claude, 2026-09-26)
+- Done: `History::state(row, current)` reads any History panel row's snapshot (D-067); the panel's source column (`hist:source` → `EngineToUi::HistorySource`); `StrokeTool::HistoryBrush { state }` = the same layer in that state as the source window at offset 0 (through Mode / Opacity / Flow), `StrokeTool::ArtHistory { state, style, area, tolerance }` = a `DabSequence` (`brush::ops::history`) that spawns seeded short strokes per dab (ten styles: count, length, curl, looseness) coloured from the state, skipping pixels within the tolerance; Photoshop's refusals when the state has no such layer or another canvas size. Tools "history-brush", "art-history" wired.
+- Skipped: History snapshots (Photoshop's named snapshots); painting a mask with them; Tests (should check: History Brush from the first state after a Levels restores the pixels; the size-mismatch refusal; an Art History stroke is deterministic for a seed).
+- FAST: the source row is an index into the panel, so once History drops its oldest steps (limit 50) the rows shift under it; `Command::Stroke` of these tools cannot be replayed outside the engine (the command context has no History), which only matters for macros.
+- VERIFY: Art History stroke shapes and counts; the refusal wording.
+- Try it: paint, apply a filter, click the brush icon left of "Open" in History, Y and paint.

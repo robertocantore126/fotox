@@ -8,7 +8,7 @@
 //! colour on Alt+click like Photoshop's temporary eyedropper.
 
 use fx_core::BlendMode;
-use fx_core::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool, ToneRange};
+use fx_core::stroke::{ArtStyle, BrushParams, StrokeSample, StrokeTarget, StrokeTool, ToneRange};
 use fx_render::{Overlay, OverlayItem, OverlayStyle};
 
 use crate::tools::{ColorTarget, DocPointer, StrokeEvent, Tool, ToolContext, ToolResult, sample_pixel};
@@ -36,6 +36,9 @@ pub enum Kind {
 	Smudge,
 	/// The Pattern Stamp (M8-T06).
 	PatternStamp,
+	/// The History and Art History Brushes (M8-T07).
+	HistoryBrush,
+	ArtHistory,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -187,6 +190,25 @@ impl Paint {
 					impressionist: s.bool(self.id, "Impressionist").unwrap_or(false),
 				}
 			}
+			// The engine puts the History panel's source row in (M8-T07).
+			Kind::HistoryBrush => StrokeTool::HistoryBrush { state: 0 },
+			Kind::ArtHistory => StrokeTool::ArtHistory {
+				state: 0,
+				style: match s.string(self.id, "Style").as_deref() {
+					Some("Tight Medium") => ArtStyle::TightMedium,
+					Some("Tight Long") => ArtStyle::TightLong,
+					Some("Loose Medium") => ArtStyle::LooseMedium,
+					Some("Loose Long") => ArtStyle::LooseLong,
+					Some("Dab") => ArtStyle::Dab,
+					Some("Tight Curl") => ArtStyle::TightCurl,
+					Some("Tight Curl Long") => ArtStyle::TightCurlLong,
+					Some("Loose Curl") => ArtStyle::LooseCurl,
+					Some("Loose Curl Long") => ArtStyle::LooseCurlLong,
+					_ => ArtStyle::TightShort,
+				},
+				area: s.number(self.id, "Area").unwrap_or(50.0).clamp(0.0, 500.0) as f32,
+				tolerance: (s.number(self.id, "Tolerance").unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32,
+			},
 			Kind::Sponge => StrokeTool::Sponge {
 				saturate: s.string(self.id, "Mode").as_deref() != Some("Desaturate"),
 				vibrance: s.bool(self.id, "Vibrance").unwrap_or(true),

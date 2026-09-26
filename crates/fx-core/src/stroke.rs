@@ -255,6 +255,19 @@ pub enum StrokeTool {
 		#[serde(default)]
 		impressionist: bool,
 	},
+	/// The History Brush (M8-T07): the same layer in History panel row
+	/// `state` (a snapshot, D-067), laid down through the mode.
+	HistoryBrush { state: usize },
+	/// The Art History Brush (M8-T07): stylised strokes coloured from the
+	/// state.
+	ArtHistory {
+		state: usize,
+		style: ArtStyle,
+		/// Area diameter, pixels.
+		area: f32,
+		/// `0..=1`: strokes only where the state differs more than this.
+		tolerance: f32,
+	},
 	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
 	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
 	BgEraser {
@@ -280,11 +293,30 @@ impl StrokeTool {
 			StrokeTool::Sharpen { .. } => "Sharpen Tool",
 			StrokeTool::Smudge { .. } => "Smudge Tool",
 			StrokeTool::PatternStamp { .. } => "Pattern Stamp",
+			StrokeTool::HistoryBrush { .. } => "History Brush",
+			StrokeTool::ArtHistory { .. } => "Art History Brush",
 			StrokeTool::Dodge { .. } => "Dodge Tool",
 			StrokeTool::Burn { .. } => "Burn Tool",
 			StrokeTool::Sponge { .. } => "Sponge Tool",
 		}
 	}
+}
+
+/// The Art History Brush's Style (M8-T07).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtStyle {
+	#[default]
+	TightShort,
+	TightMedium,
+	TightLong,
+	LooseMedium,
+	LooseLong,
+	Dab,
+	TightCurl,
+	TightCurlLong,
+	LooseCurl,
+	LooseCurlLong,
 }
 
 /// Dodge / Burn's Range (M8-T04).

@@ -12,6 +12,8 @@ pub(super) struct Resources {
 	pub patterns: crate::patterns::Library,
 	/// The pattern the tools and fills use (the Patterns panel's pick).
 	pub current_pattern: Option<u64>,
+	/// The History Brush's source row per document (M8-T07); 0 by default.
+	pub history_source: std::collections::HashMap<DocId, usize>,
 }
 
 impl Resources {
@@ -22,6 +24,7 @@ impl Resources {
 			brushes: crate::brushes::Library::load(),
 			patterns,
 			current_pattern,
+			history_source: std::collections::HashMap::new(),
 		}
 	}
 }
@@ -220,6 +223,14 @@ impl Engine {
 					self.resources.patterns.save();
 				}
 			}
+			// The History panel's source column (M8-T07).
+			"hist:source" => {
+				let Some(doc) = self.docs.active_id() else { return true };
+				let row = args.get("row").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+				self.resources.history_source.insert(doc, row);
+				self.to_ui(&EngineToUi::HistorySource { doc, state: Some(row) });
+				return true;
+			}
 			"brush:list" => {}
 			"brush:import-abr" => {
 				let data = upload(args);
@@ -276,6 +287,23 @@ impl Engine {
 		true
 	}
 
+	/// The History / Art History Brush's stroke tool with the document's
+	/// source row (M8-T07).
+	pub(super) fn with_history_row(&self, doc: DocId, tool: fx_core::stroke::StrokeTool) -> fx_core::stroke::StrokeTool {
+		use fx_core::stroke::StrokeTool;
+		let row = self.resources.history_source.get(&doc).copied().unwrap_or(0);
+		match tool {
+			StrokeTool::HistoryBrush { .. } => StrokeTool::HistoryBrush { state: row },
+			StrokeTool::ArtHistory { style, area, tolerance, .. } => StrokeTool::ArtHistory {
+				state: row,
+				style,
+				area,
+				tolerance,
+			},
+			other => other,
+		}
+	}
+
 	/// Edit ▸ Fill with "Use: Pattern" (M8-T06), with the current pattern.
 	pub(super) fn fill_pattern_command(&self, args: &serde_json::Value) -> Option<Command> {
 		let pattern = self.resources.current_pattern?;
@@ -290,5 +318,34 @@ impl Engine {
 				.map_or(1.0, |v| (v / 100.0).clamp(0.0, 1.0)),
 			preserve_transparency: args.get("preserve").and_then(serde_json::Value::as_bool).unwrap_or(false),
 		})
+	}
+}
+
+/// The source of a History / Art History stroke (M8-T07): the same layer in
+/// the chosen state, or Photoshop's refusal.
+pub(super) fn history_source(
+	open: &crate::documents::OpenDoc,
+	layer: fx_core::LayerId,
+	tool: &fx_core::stroke::StrokeTool,
+	store: &fx_tiles::TileStore,
+) -> Result<Option<std::sync::Arc<dyn fx_ops::brush::SourceTiles>>, String> {
+	use fx_core::stroke::StrokeTool;
+	let row = match tool {
+		StrokeTool::HistoryBrush { state } | StrokeTool::ArtHistory { state, .. } => *state,
+		_ => return Ok(None),
+	};
+	let Some(state) = open.history.state(row, &open.doc) else {
+		return Err("Could not use the history brush because the source history state is gone".into());
+	};
+	if (state.width, state.height) != (open.doc.width, open.doc.height) {
+		return Err("Could not use the history brush because the history state does not contain a corresponding layer (the canvas size does not match)".into());
+	}
+	match state.layer(layer).map(|l| &l.kind) {
+		Some(fx_core::LayerKind::Pixel { image, offset }) => Ok(Some(std::sync::Arc::new(fx_ops::brush::LayerSource {
+			image: image.clone(),
+			offset: *offset,
+			store: store.clone(),
+		}))),
+		_ => Err("Could not use the history brush because the history state does not contain a corresponding layer".into()),
 	}
 }

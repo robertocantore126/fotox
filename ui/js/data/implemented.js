@@ -67,6 +67,7 @@ export const IMPLEMENTED = new Set([
   "guide:layout",
   "guides:clear",
   "hist:redo",
+  "hist:source",
   "hist:toggle",
   "hist:undo",
   "img:crop",

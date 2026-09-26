@@ -144,7 +144,7 @@ impl Stroke {
 			&& (matches!(
 				setup.tool,
 				StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::Blur { .. } | StrokeTool::Sharpen { .. }
-			) || super::ops::sequence_for(&setup.tool, [0.0; 3]).is_some())
+			) || super::ops::sequence_for(&setup.tool, [0.0; 3], 0).is_some())
 		{
 			return Err(CommandError::NotAllowed("clone and heal work on pixels, not on a mask".into()));
 		}
@@ -156,6 +156,8 @@ impl Stroke {
 				| StrokeTool::Blur { .. }
 				| StrokeTool::Sharpen { .. }
 				| StrokeTool::PatternStamp { .. }
+				| StrokeTool::HistoryBrush { .. }
+				| StrokeTool::ArtHistory { .. }
 		) && setup.source.is_none()
 		{
 			return Err(CommandError::NotAllowed("the clone source is missing".into()));
@@ -183,7 +185,7 @@ impl Stroke {
 			source: setup.source,
 			source_cache: Mutex::new(HashMap::new()),
 			samples: Vec::new(),
-			sequence: super::ops::sequence_for(&setup.tool, [0, 1, 2].map(|i| f64::from(setup.color[i]) / 65535.0)),
+			sequence: super::ops::sequence_for(&setup.tool, [0, 1, 2].map(|i| f64::from(setup.color[i]) / 65535.0), setup.brush.seed),
 		})
 	}
 

@@ -800,6 +800,7 @@ impl Engine {
 				samples,
 			} => {
 				self.end_stroke();
+				let tool = self.with_history_row(doc_id, tool);
 				if let fx_core::stroke::StrokeTool::PatternStamp { pattern, .. } = tool {
 					self.ensure_pattern(doc_id, pattern);
 				}
@@ -845,13 +846,22 @@ impl Engine {
 					return;
 				}
 				let before = open.doc.clone();
-				let prepared = match crate::stroke::prepare(&before, layer, target, &tool, &store) {
+				let mut prepared = match crate::stroke::prepare(&before, layer, target, &tool, &store) {
 					Ok(prepared) => prepared,
 					Err(error) => {
 						self.to_ui(&EngineToUi::Toast { text: error.to_string() });
 						return;
 					}
 				};
+				// The History Brush reads a history state (M8-T07).
+				match m8::history_source(open, layer, &tool, &store) {
+					Ok(Some(source)) => prepared.source = Some(source),
+					Ok(None) => {}
+					Err(text) => {
+						self.to_ui(&EngineToUi::Toast { text });
+						return;
+					}
+				}
 				let stroke = match fx_ops::brush::Stroke::begin(crate::stroke::setup(&prepared, &before, tool, brush, color), &store) {
 					Ok(stroke) => stroke,
 					Err(error) => {
