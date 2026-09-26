@@ -268,6 +268,14 @@ pub enum StrokeTool {
 		/// `0..=1`: strokes only where the state differs more than this.
 		tolerance: f32,
 	},
+	/// The Color Replacement tool (M8-T08): the stroke colour blended by
+	/// `mode` (Hue / Saturation / Color / Luminosity) where a pixel matches
+	/// `sample` within `tolerance`.
+	ColorReplace {
+		sample: [u16; 3],
+		tolerance: f32,
+		mode: crate::blend::BlendMode,
+	},
 	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
 	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
 	BgEraser {
@@ -293,6 +301,7 @@ impl StrokeTool {
 			StrokeTool::Sharpen { .. } => "Sharpen Tool",
 			StrokeTool::Smudge { .. } => "Smudge Tool",
 			StrokeTool::PatternStamp { .. } => "Pattern Stamp",
+			StrokeTool::ColorReplace { .. } => "Color Replacement Tool",
 			StrokeTool::HistoryBrush { .. } => "History Brush",
 			StrokeTool::ArtHistory { .. } => "Art History Brush",
 			StrokeTool::Dodge { .. } => "Dodge Tool",

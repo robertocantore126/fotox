@@ -8,6 +8,7 @@ pub mod background_eraser;
 pub mod focus;
 pub mod history;
 pub mod pattern;
+pub mod replace;
 pub mod smudge;
 pub mod tone;
 

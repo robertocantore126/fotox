@@ -158,3 +158,10 @@ HARDEN reads this file first, so be honest about what is missing.
 - FAST: the source row is an index into the panel, so once History drops its oldest steps (limit 50) the rows shift under it; `Command::Stroke` of these tools cannot be replayed outside the engine (the command context has no History), which only matters for macros.
 - VERIFY: Art History stroke shapes and counts; the refusal wording.
 - Try it: paint, apply a filter, click the brush icon left of "Open" in History, Y and paint.
+
+## M8-T08 — Color Replacement and Red Eye  (Claude, 2026-09-26)
+- Done: `StrokeTool::ColorReplace` + `brush::ops::replace` (the foreground blended by Hue / Saturation / Color / Luminosity through `blend::composite` with alpha kept, weighted by the sample match); Sampling Once / Background Swatch; tool "color-replace". Red Eye: `Command::RedEye { point, pupil_size, darken }` (written with T03's commands in `command/m8.rs`): reads a ±120 px window, seeds at the reddest pixel within 15 px of the click (`r − max(g, b)`, alpha-weighted), floods the red blob (the pupil size lowers the threshold), feathers with two 3 × 3 box passes, sets red to the green-blue mean and darkens; `RedEye` ClickTool "red-eye".
+- Skipped: Color Replacement Limits Contiguous / Find Edges and continuous sampling; Tests (should check: replacing a red area's hue with blue keeps luminosity; Red Eye turns a synthetic red pupil dark and leaves the iris).
+- FAST: the red-eye window is a fixed ±120 px; it writes back every tile of the window.
+- VERIFY: the red-eye formula and threshold; Color Replacement's match edge.
+- Try it: B's flyout ▸ Color Replacement, paint over a coloured area; J's flyout ▸ Red Eye, click a red pupil.

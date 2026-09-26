@@ -417,6 +417,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"pattern-stamp" => Some(Box::new(paint::Paint::new("pattern-stamp", paint::Kind::PatternStamp))),
 		"history-brush" => Some(Box::new(paint::Paint::new("history-brush", paint::Kind::HistoryBrush))),
 		"art-history" => Some(Box::new(paint::Paint::new("art-history", paint::Kind::ArtHistory))),
+		"color-replace" => Some(Box::new(paint::Paint::new("color-replace", paint::Kind::ColorReplace))),
 		// The shape tools (M6-T06) and the Path Selection tool that moves a
 		// shape by its transform.
 		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),

@@ -156,6 +156,11 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 			saturate: *saturate,
 			vibrance: *vibrance,
 		}),
+		StrokeTool::ColorReplace { sample, tolerance, mode } => Box::new(super::ops::replace::ColorReplace {
+			sample: sample.map(|v| f64::from(v) / 65535.0),
+			tolerance: f64::from(*tolerance),
+			mode: *mode,
+		}),
 		StrokeTool::BgEraser { sample, tolerance, protect } => {
 			let rgb = |c: [u16; 3]| c.map(|v| f64::from(v) / 65535.0);
 			Box::new(super::ops::background_eraser::BackgroundEraser {

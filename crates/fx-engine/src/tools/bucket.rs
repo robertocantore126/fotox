@@ -77,3 +77,25 @@ impl ClickTool for MagicEraser {
 		}))
 	}
 }
+
+/// The Red Eye tool (J, M8-T08).
+pub struct RedEye;
+
+impl ClickTool for RedEye {
+	fn id(&self) -> &'static str {
+		"red-eye"
+	}
+
+	fn click(&mut self, ctx: &mut ToolContext<'_>, p: (f64, f64), _modifiers: Modifiers) -> Result<Option<Command>, String> {
+		if !inside(ctx, p) {
+			return Ok(None);
+		}
+		let s = ctx.settings;
+		Ok(Some(Command::RedEye {
+			layer: LayerRef::Active,
+			point: p,
+			pupil_size: (s.number(self.id(), "Pupil Size").unwrap_or(50.0) / 100.0).clamp(0.0, 1.0),
+			darken: (s.number(self.id(), "Darken Amount").unwrap_or(50.0) / 100.0).clamp(0.0, 1.0),
+		}))
+	}
+}

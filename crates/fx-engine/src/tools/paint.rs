@@ -39,6 +39,8 @@ pub enum Kind {
 	/// The History and Art History Brushes (M8-T07).
 	HistoryBrush,
 	ArtHistory,
+	/// The Color Replacement tool (M8-T08).
+	ColorReplace,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -105,7 +107,7 @@ impl Paint {
 			spacing: percent("Spacing", 25.0).max(0.01),
 			opacity: percent("Opacity", 100.0),
 			flow: percent("Flow", 100.0),
-			mode: if matches!(self.kind, Kind::Eraser | Kind::SpotHeal | Kind::BgEraser) {
+			mode: if matches!(self.kind, Kind::Eraser | Kind::SpotHeal | Kind::BgEraser | Kind::ColorReplace) {
 				BlendMode::Normal
 			} else {
 				mode
@@ -213,6 +215,25 @@ impl Paint {
 				saturate: s.string(self.id, "Mode").as_deref() != Some("Desaturate"),
 				vibrance: s.bool(self.id, "Vibrance").unwrap_or(true),
 			},
+			Kind::ColorReplace => {
+				let sample = if s.string(self.id, "Sampling").as_deref() == Some("Background Swatch") {
+					s.bg
+				} else {
+					// FAST: "Continuous" samples once, at the press.
+					let layer = ctx.doc.active_layer();
+					sample_pixel(ctx.doc, at.0, at.1, 1, layer, ctx.store).map_err(|e| e.to_string())?
+				};
+				StrokeTool::ColorReplace {
+					sample: [sample[0], sample[1], sample[2]],
+					tolerance: (s.number(self.id, "Tolerance").unwrap_or(30.0) / 100.0).clamp(0.0, 1.0) as f32,
+					mode: match s.string(self.id, "Mode").as_deref() {
+						Some("Hue") => BlendMode::Hue,
+						Some("Saturation") => BlendMode::Saturation,
+						Some("Luminosity") => BlendMode::Luminosity,
+						_ => BlendMode::Color,
+					},
+				}
+			}
 			Kind::BgEraser => {
 				let rgb = |c: [u16; 4]| [c[0], c[1], c[2]];
 				let sample = if s.string(self.id, "Sampling").as_deref() == Some("Background Swatch") {
