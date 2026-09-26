@@ -84,8 +84,13 @@ fn a_layout_shapes_the_text_and_reports_where_it_is() {
 	assert!(width > 0.0 && height > 0.0, "a laid-out line has a size: {width} × {height}");
 	let ink = layout.ink_box().expect("the line has a box");
 	assert!(ink.w > 0.0 && ink.h > 0.0, "and it covers the text: {ink:?}");
-	// The frame's origin is the first baseline, so the block sits above it.
-	assert!(ink.y < 50.0 && ink.y + ink.h > 40.0, "the baseline is at y = 50: {ink:?}");
+	// Layouts report frame space (the layer's matrix places it at (100, 50)):
+	// the origin is the first baseline, so the block sits above y = 0 and only
+	// the descenders go below it.
+	assert!(
+		ink.y < 0.0 && ink.y + ink.h > 0.0 && ink.y + ink.h < ink.h / 2.0,
+		"the baseline is at y = 0: {ink:?}"
+	);
 	// A caret is a box at the text's height, and it moves with the index.
 	let first = layout.caret(0);
 	let last = layout.caret(content.text.len());
@@ -161,7 +166,7 @@ fn an_edit_knows_which_lines_it_changed() {
 	content.text = "one\ntwo!\nthree".into();
 	content.runs[0].range = (0, content.text.len());
 	let after = layout_of(&mut fonts, &content, 72.0);
-	let changed = before.box_for_range((4, 4)).zip(after.box_for_range((4, 5))).map(|(old, new)| (old, new));
+	let changed = before.box_for_range((4, 4)).zip(after.box_for_range((4, 5)));
 	let (old, new) = changed.expect("the second line has a box in both layouts");
 	assert!((old.y - new.y).abs() < 1e-9, "the line did not move: {old:?} {new:?}");
 	assert!(old.y > 0.0, "and it is not the first line");

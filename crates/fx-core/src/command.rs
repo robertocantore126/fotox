@@ -1527,6 +1527,16 @@ fn set_shape(
 	else {
 		return Err(CommandError::NotAllowed("only shape layers have shape parameters".into()));
 	};
+	// Validate before changing anything: a refused command leaves the layer
+	// as it was (HARDEN H1).
+	if let Some(transform) = transform
+		&& !transform.iter().all(|v| v.is_finite())
+	{
+		return Err(CommandError::InvalidValue {
+			field: "transform",
+			reason: "the matrix has a non-finite component".into(),
+		});
+	}
 	if let Some(shape) = shape {
 		*current_shape = shape.clone();
 	}
@@ -1537,21 +1547,13 @@ fn set_shape(
 		*current_stroke = stroke.clone();
 	}
 	if let Some(transform) = transform {
-		if !transform.iter().all(|v| v.is_finite()) {
-			return Err(CommandError::InvalidValue {
-				field: "transform",
-				reason: "the matrix has a non-finite component".into(),
-			});
-		}
 		*current_transform = transform;
 	}
+	// Where it was and where it is, separately: the union of a far move would
+	// redraw everything in between.
 	let after = box_of(current_shape, *current_transform, current_stroke.as_ref());
-	cache.mark_rect_dirty([
-		before[0].min(after[0]),
-		before[1].min(after[1]),
-		before[2].max(after[2]),
-		before[3].max(after[3]),
-	]);
+	cache.mark_rect_dirty(before);
+	cache.mark_rect_dirty(after);
 	Ok(CommandEffect {
 		label: label.into(),
 		props_changed: vec![id],
@@ -6000,7 +6002,8 @@ mod tests {
 		});
 		let mut dirty = f.dirty_shape_tiles(id);
 		dirty.sort_unstable();
-		assert_eq!(dirty, vec![(0, 0), (1, 1)], "the old tile and the new one");
+		// y 250..300 crosses the row boundary at 256: two tiles there.
+		assert_eq!(dirty, vec![(0, 0), (1, 0), (1, 1)], "the old tile and the new ones, nothing in between");
 	}
 
 	#[test]
@@ -6074,10 +6077,10 @@ mod tests {
 			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
 		);
 		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
-		// A quarter turn clockwise sends (x, y) to (h − 1 − y, x) in a 400 × 300
-		// canvas, so the shape's origin lands at (279, 10) — and the canvas is
-		// now 300 × 400.
-		assert_eq!(f.matrix(id), [0.0, 1.0, -1.0, 0.0, 279.0, 10.0]);
+		// A quarter turn clockwise sends the point (x, y) to (h − y, x) in a
+		// 400 × 300 canvas (pixel indices go to h − 1 − y: the same pixels), so
+		// the shape's origin lands at (280, 10) — and the canvas is now 300 × 400.
+		assert_eq!(f.matrix(id), [0.0, 1.0, -1.0, 0.0, 280.0, 10.0]);
 		assert_eq!((f.cache(id).width(), f.cache(id).height()), (300, 400), "the cache follows the canvas");
 		assert_eq!(f.dirty_shape_tiles(id).len(), 4, "2 × 2 tiles at the new size");
 	}
@@ -6094,8 +6097,9 @@ mod tests {
 			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
 		);
 		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
-		// A horizontal flip sends x to w − 1 − x: the matrix becomes a mirror.
-		assert_eq!(f.matrix(id), [-1.0, 0.0, 0.0, 1.0, 389.0, 20.0]);
+		// A horizontal flip sends the point x to w − x (pixel i to w − 1 − i):
+		// the matrix becomes a mirror.
+		assert_eq!(f.matrix(id), [-1.0, 0.0, 0.0, 1.0, 390.0, 20.0]);
 		assert_eq!((f.cache(id).width(), f.cache(id).height()), (400, 300), "a flip keeps the size");
 	}
 
@@ -6131,7 +6135,12 @@ mod tests {
 			},
 			[1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
 		);
-		let shape_before = format!("{:?}", f.kind(id));
+		// The geometry and paints only: the placement and the cache must change.
+		let geometry = |f: &Fixture| match f.kind(id) {
+			LayerKind::Shape { shape, fill, stroke, .. } => format!("{shape:?} {fill:?} {stroke:?}"),
+			other => panic!("not a shape: {other:?}"),
+		};
+		let shape_before = geometry(&f);
 		f.ok_with_ops(Command::Crop {
 			rect: (60, 70, 200, 150),
 			angle_deg: 0.0,
@@ -6140,7 +6149,7 @@ mod tests {
 		// The crop box's top-left becomes the origin: the shape moves by it and
 		// its geometry is untouched (a shape is not rasterised by a crop).
 		assert_eq!(f.matrix(id), [1.0, 0.0, 0.0, 1.0, -50.0, -50.0]);
-		assert_eq!(format!("{:?}", f.kind(id)), shape_before, "crop must not change the geometry");
+		assert_eq!(geometry(&f), shape_before, "crop must not change the geometry");
 		assert_eq!((f.cache(id).width(), f.cache(id).height()), (200, 150));
 		f.ok_with_ops(Command::CanvasSize {
 			width: 300,
@@ -6194,7 +6203,7 @@ mod tests {
 	fn a_document_without_shapes_keeps_no_shape_state() {
 		let mut f = Fixture::new();
 		f.add_pixel("Layer 1");
-		f.ok(Command::RotateCanvas { quarter_turns: 2 });
+		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 2 });
 		assert!(shape_layers(&f.doc).is_empty());
 	}
 
@@ -6286,7 +6295,9 @@ mod tests {
 			content: TextContent::default(),
 		});
 		assert_eq!(f.name(hello), "Hello", "Photoshop names the layer after its first line");
-		assert_eq!(f.name(empty), "Type 1", "a layer with no text uses the counter");
+		// The counter counts every type layer made (see `add_layer`): "Hello"
+		// was the first, so the empty one is the second.
+		assert_eq!(f.name(empty), "Type 2", "a layer with no text uses the counter");
 	}
 
 	#[test]
@@ -6301,10 +6312,12 @@ mod tests {
 		assert_eq!(effect.label, "Type Tool", "Photoshop's history name for a committed edit");
 		assert_eq!(f.text(id).text, "Hello, world");
 		assert_eq!(f.dirty_text_tiles(id), vec![(0, 0)], "the box is inside the first tile");
-		// Undo redraws the same box and restores the old text.
+		// Undo restores the old text *and* the cache as it was before the edit
+		// (history is by snapshots, and the snapshot's tiles show "Hello"), so
+		// there is nothing to redraw.
 		assert!(f.history.undo(&mut f.doc));
 		assert_eq!(f.text(id).text, "Hello");
-		assert_eq!(f.dirty_text_tiles(id), vec![(0, 0)]);
+		assert!(f.dirty_text_tiles(id).is_empty());
 	}
 
 	#[test]
@@ -6362,7 +6375,7 @@ mod tests {
 			},
 			[0.0; 4],
 		);
-		f.ok(Command::RotateCanvas { quarter_turns: 1 });
+		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 1 });
 		assert_eq!((f.doc.width, f.doc.height), (300, 400), "the canvas turns");
 		assert_eq!(
 			(f.text_cache(id).width(), f.text_cache(id).height()),
@@ -6375,7 +6388,8 @@ mod tests {
 		assert_eq!(f.text(id).frame, TextFrame::Box { w: 100.0, h: 50.0 });
 		// A point inside the frame lands where the canvas mapping puts it.
 		let (x, y) = (m[0] * 50.0 + m[4], m[1] * 50.0 + m[5]);
-		assert!((x - 330.0).abs() < 1e-9 && (y + 30.0).abs() < 1e-9, "(10 + 50, 20) turns to ({x}, {y})");
+		// 90° clockwise on a 400 × 300 canvas: (x, y) → (300 − y, x).
+		assert!((x - 280.0).abs() < 1e-9 && (y - 60.0).abs() < 1e-9, "(10 + 50, 20) turns to ({x}, {y})");
 	}
 
 	#[test]
@@ -6390,8 +6404,9 @@ mod tests {
 		assert_eq!((f.text_cache(id).width(), f.text_cache(id).height()), (200, 150));
 		assert_eq!(f.text(id).transform[4], 0.0, "a centre canvas resize moves the origin");
 		assert_eq!(f.text(id).transform[5], 25.0, "by the anchor's share of the difference");
+		// A crop starting at x = 100: the text's origin moves left by it.
 		f.ok(Command::Crop {
-			rect: (0, 0, 100, 100),
+			rect: (100, 0, 100, 100),
 			angle_deg: 0.0,
 			delete_cropped: false,
 		});
@@ -6446,7 +6461,7 @@ mod tests {
 	fn a_document_without_text_keeps_no_text_state() {
 		let mut f = Fixture::new();
 		f.add_pixel("Layer 1");
-		f.ok(Command::RotateCanvas { quarter_turns: 2 });
+		f.ok_with_ops(Command::RotateCanvas { quarter_turns: 2 });
 		assert!(text_layers(&f.doc).is_empty());
 	}
 }

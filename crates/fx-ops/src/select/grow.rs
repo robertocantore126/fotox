@@ -165,8 +165,8 @@ pub fn grow_or_similar(
 			}
 			let key = ((nx / i64::from(TILE_SIZE)) as u32, (ny / i64::from(TILE_SIZE)) as u32);
 			let i = ((ny % i64::from(TILE_SIZE)) * i64::from(TILE_SIZE) + nx % i64::from(TILE_SIZE)) as usize;
-			if !matches.contains_key(&key) {
-				matches.insert(key, matches_of(key.0, key.1)?);
+			if let std::collections::hash_map::Entry::Vacant(e) = matches.entry(key) {
+				e.insert(matches_of(key.0, key.1)?);
 			}
 			let r = reached.entry(key).or_insert_with(|| vec![0u64; words]);
 			if bit(r, i) || !bit(&matches[&key], i) {

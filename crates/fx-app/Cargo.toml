@@ -53,3 +53,6 @@ windows = { workspace = true, features = [
 	"Win32_System_Ole",
 	"Win32_UI_Shell",
 ] }
+
+[lints]
+workspace = true

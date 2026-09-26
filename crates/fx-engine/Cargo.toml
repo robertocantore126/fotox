@@ -28,3 +28,6 @@ thiserror = { workspace = true }
 [dev-dependencies]
 pollster = { workspace = true }
 tiff = { workspace = true }
+
+[lints]
+workspace = true

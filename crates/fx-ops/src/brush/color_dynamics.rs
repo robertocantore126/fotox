@@ -14,7 +14,7 @@ pub fn jitter_color(fg: [u16; 4], bg: [u16; 4], d: &Dynamics, seed: u64) -> [u16
 		return fg;
 	}
 	let mut rng = Jitter::new(seed.rotate_left(17) ^ 0x00c0_10c0);
-	let t = f64::from(d.fg_bg_jitter.clamp(0.0, 1.0) * rng.next());
+	let t = f64::from(d.fg_bg_jitter.clamp(0.0, 1.0) * rng.next_unit());
 	let mut rgb = [0usize, 1, 2].map(|i| (f64::from(fg[i]) + (f64::from(bg[i]) - f64::from(fg[i])) * t) / 65535.0);
 	let (mut h, mut s, mut v) = rgb_to_hsv(rgb);
 	h = (h + f64::from(d.hue_jitter.clamp(0.0, 1.0) * rng.signed()) * 0.5).rem_euclid(1.0);

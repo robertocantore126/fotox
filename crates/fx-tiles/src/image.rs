@@ -361,6 +361,12 @@ mod tests {
 	#[test]
 	fn a_rectangle_spanning_tiles_marks_them_all() {
 		let mut img = TiledImage::derived(1024, 768, PixelFormat::Rgba8);
+		// A derived image starts all dirty: clean it first (as the test above).
+		for ty in 0..img.grid(0).rows() {
+			for tx in 0..img.grid(0).cols() {
+				img.set_derived_slot(0, tx, ty, TileSlot::Empty);
+			}
+		}
 		// A tall box one tile wide: x 300..400 is column 1, y 300..700 is rows
 		// 1 and 2 (tile boundaries are at 256, 512 and 768).
 		img.mark_rect_dirty([300.0, 300.0, 400.0, 700.0]);

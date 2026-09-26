@@ -185,9 +185,12 @@ fn a_line_is_a_filled_bar_of_its_weight() {
 #[test]
 fn a_rotated_line_is_drawn_along_its_angle() {
 	let shape = VectorShape::Line { length: 100.0, width: 4.0 };
-	// The Line tool turns the bar about the press point at (10, 10): 45°.
+	// The Line tool turns the bar about the press point at (10, 10): 45°, and
+	// shifts it by half its weight across the angle so the weight is centred on
+	// the drag (the bar's local box is 0..width).
 	let s = std::f64::consts::FRAC_1_SQRT_2;
-	let tile = render_shape_tile(&shape, Some(&RED), None, [s, s, -s, s, 10.0, 10.0], 0, (0, 0), PixelFormat::Rgba8);
+	let (hx, hy) = (-s * 2.0, s * 2.0);
+	let tile = render_shape_tile(&shape, Some(&RED), None, [s, s, -s, s, 10.0 - hx, 10.0 - hy], 0, (0, 0), PixelFormat::Rgba8);
 	assert_eq!(alpha(&tile, 45, 45), 255, "the segment runs through its midpoint");
 	assert_eq!(alpha(&tile, 71, 51), 0, "and nowhere else");
 }

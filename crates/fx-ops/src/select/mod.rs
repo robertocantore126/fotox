@@ -124,8 +124,8 @@ impl<'a> Windows<'a> {
 			for x in 0..w as i64 {
 				let cx = (x0 + x).clamp(0, cw - 1);
 				let key = (cx / tile, cy / tile);
-				if !local.contains_key(&key) {
-					local.insert(key, self.tile(key.0 as u32, key.1 as u32)?);
+				if let std::collections::hash_map::Entry::Vacant(e) = local.entry(key) {
+					e.insert(self.tile(key.0 as u32, key.1 as u32)?);
 				}
 				out[y as usize * w + x as usize] = local[&key][((cy % tile) * tile + cx % tile) as usize];
 			}

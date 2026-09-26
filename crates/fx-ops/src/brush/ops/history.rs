@@ -47,15 +47,15 @@ impl ArtHistory {
 
 impl DabSequence for ArtHistory {
 	fn dab(&mut self, dab: &Dab, rect: [i64; 4], pixels: &mut [[f64; 4]], coverage: &[f32], source: &dyn Fn(i64, i64) -> [f32; 4], _ctx: &DabContext) {
-		let w = (rect[2] - rect[0] + 1) as i64;
-		let h = (rect[3] - rect[1] + 1) as i64;
+		let w = rect[2] - rect[0] + 1;
+		let h = rect[3] - rect[1] + 1;
 		let radius = f64::from(dab.diameter) / 2.0;
 		let pen = (radius / 4.0).max(1.0);
 		let (count, length, curl, spread) = self.shape();
 		let reach = (self.area / 2.0).min(radius).max(1.0);
 		for _ in 0..count {
-			let a = f64::from(self.rng.next()) * std::f64::consts::TAU;
-			let r = f64::from(self.rng.next()).sqrt() * reach;
+			let a = f64::from(self.rng.next_unit()) * std::f64::consts::TAU;
+			let r = f64::from(self.rng.next_unit()).sqrt() * reach;
 			let (mut x, mut y) = (dab.x + a.cos() * r, dab.y + a.sin() * r);
 			let s = source(x.floor() as i64, y.floor() as i64);
 			let sa = f64::from(s[3]);
@@ -73,7 +73,7 @@ impl DabSequence for ArtHistory {
 					continue;
 				}
 			}
-			let mut heading = f64::from(self.rng.next()) * std::f64::consts::TAU;
+			let mut heading = f64::from(self.rng.next_unit()) * std::f64::consts::TAU;
 			let steps = ((length * radius) / pen).ceil().max(1.0) as usize;
 			for _ in 0..steps {
 				let x0 = ((x - pen).floor() as i64 - rect[0]).max(0);

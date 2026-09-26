@@ -181,8 +181,12 @@ impl Shape {
 		}
 		let weight = number(ctx, &self.tool, "Weight").unwrap_or(3.0).max(0.0);
 		let (sin, cos) = angle.sin_cos();
-		// Rotate about the press point, so the segment starts where it was drawn.
-		let at = [cos, sin, -sin, cos, drag.from.0, drag.from.1];
+		// Rotate about the press point, so the segment starts where it was drawn,
+		// and centre the weight on the drag: the bar's local box is 0..weight,
+		// so its middle (0, weight / 2) must land on the press point (HARDEN H1;
+		// Photoshop centres it too).
+		let (hx, hy) = (-sin * weight / 2.0, cos * weight / 2.0);
+		let at = [cos, sin, -sin, cos, drag.from.0 - hx, drag.from.1 - hy];
 		Some((VectorShape::Line { length, width: weight }, at))
 	}
 

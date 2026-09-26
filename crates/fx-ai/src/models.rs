@@ -101,10 +101,10 @@ pub fn models_dir() -> PathBuf {
 	if let Ok(p) = std::env::var("FOTOX_MODELS") {
 		return PathBuf::from(p);
 	}
-	if cfg!(windows) {
-		if let Ok(p) = std::env::var("LOCALAPPDATA") {
-			return PathBuf::from(p).join("Fotox").join("models");
-		}
+	if cfg!(windows)
+		&& let Ok(p) = std::env::var("LOCALAPPDATA")
+	{
+		return PathBuf::from(p).join("Fotox").join("models");
 	}
 	if let Ok(p) = std::env::var("XDG_DATA_HOME") {
 		return PathBuf::from(p).join("fotox").join("models");

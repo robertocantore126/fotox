@@ -294,7 +294,7 @@ pub(super) fn red_eye(
 	let redness = |p: [f32; 4]| -> f32 { (p[0] - p[1].max(p[2])) * p[3] };
 	let red: Vec<f32> = (0..w * h).map(|i| redness(at(&tiles, x0 + (i % w) as i64, y0 + (i / w) as i64))).collect();
 	// The seed: the reddest pixel within 15 px of the click.
-	let (cx, cy) = ((px - x0) as i64, (py - y0) as i64);
+	let (cx, cy) = ((px - x0), (py - y0));
 	let mut seed = None;
 	let mut best = 0.08f32;
 	for dy in -15..=15i64 {

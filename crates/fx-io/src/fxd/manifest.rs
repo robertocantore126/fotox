@@ -129,7 +129,10 @@ pub enum LayerKindEntry {
 	/// `serde(default)` so a manifest written before M6 still loads.
 	Shape {
 		shape: VectorShape,
-		#[serde(default)]
+		/// On the wire `shape_fill`: the entry is flattened next to the layer's
+		/// own `fill` (its Fill opacity), and two `fill` keys made every shape
+		/// layer unreadable (HARDEN H1; old files are repaired on load).
+		#[serde(default, rename = "shape_fill")]
 		fill: Option<Paint>,
 		#[serde(default)]
 		stroke: Option<StrokeStyle>,
@@ -678,7 +681,67 @@ pub fn manifest_from_json(json: &[u8]) -> Result<Manifest, IoError> {
 	if probe.version != MANIFEST_VERSION {
 		return Err(IoError::Unsupported(format!("fxd manifest version {}", probe.version)));
 	}
-	serde_json::from_slice(json).map_err(|e| IoError::Decode(format!("manifest JSON: {e}")))
+	match serde_json::from_slice(json) {
+		Ok(manifest) => Ok(manifest),
+		// Files written before HARDEN stored a shape layer's paint as a second
+		// `fill` key next to the layer's Fill opacity: rename the second one.
+		Err(e) if e.to_string().contains("duplicate field `fill`") => {
+			serde_json::from_slice(&rename_second_fill(json)).map_err(|e| IoError::Decode(format!("manifest JSON: {e}")))
+		}
+		Err(e) => Err(IoError::Decode(format!("manifest JSON: {e}"))),
+	}
+}
+
+/// In every JSON object where the key `"fill"` appears twice, rename the
+/// second occurrence to `"shape_fill"` (the recovery for old shape layers).
+fn rename_second_fill(json: &[u8]) -> Vec<u8> {
+	let mut out = Vec::with_capacity(json.len() + 64);
+	// Per open object: how many `"fill"` keys it has had.
+	let mut fills: Vec<u32> = Vec::new();
+	let mut i = 0;
+	while i < json.len() {
+		let c = json[i];
+		match c {
+			b'{' => {
+				fills.push(0);
+				out.push(c);
+			}
+			b'}' => {
+				fills.pop();
+				out.push(c);
+			}
+			b'"' => {
+				// Copy the string; note whether it is the key "fill".
+				let start = i;
+				i += 1;
+				while i < json.len() && json[i] != b'"' {
+					if json[i] == b'\\' {
+						i += 1;
+					}
+					i += 1;
+				}
+				let s = &json[start..=i.min(json.len() - 1)];
+				// A key is a string followed (after spaces) by a colon.
+				let mut j = i + 1;
+				while j < json.len() && json[j].is_ascii_whitespace() {
+					j += 1;
+				}
+				let is_key = j < json.len() && json[j] == b':';
+				if is_key
+					&& s == b"\"fill\""
+					&& let Some(n) = fills.last_mut()
+				{
+					*n += 1;
+					out.extend_from_slice(if *n == 2 { b"\"shape_fill\"" } else { s });
+				} else {
+					out.extend_from_slice(s);
+				}
+			}
+			_ => out.push(c),
+		}
+		i += 1;
+	}
+	out
 }
 
 /// Encode a manifest as a zstd frame (the payload of a `MANIFEST` chunk).
@@ -693,6 +756,19 @@ pub fn decode_manifest(payload: &[u8]) -> Result<Manifest, IoError> {
 	const LIMIT: usize = 1 << 30;
 	let json = zstd::bulk::decompress(payload, LIMIT).map_err(|e| IoError::Decode(format!("manifest zstd: {e}")))?;
 	manifest_from_json(&json)
+}
+
+fn default_global_light() -> f64 {
+	120.0
+}
+
+/// The bit depth of an RGBA format (vector mask caches are grey of it).
+fn depth_of(format: fx_tiles::PixelFormat) -> fx_core::BitDepth {
+	if format == fx_tiles::PixelFormat::Rgba16 {
+		fx_core::BitDepth::U16
+	} else {
+		fx_core::BitDepth::U8
+	}
 }
 
 #[cfg(test)]
@@ -1304,18 +1380,20 @@ mod tests {
 		assert_eq!((cache.width(), cache.height()), (400, 300), "the cache is the canvas again");
 		assert!(cache.is_derived(), "and it is drawn from the geometry");
 		assert_eq!(cache.dirty_tiles(0).count(), 4, "2 × 2 tiles, all to draw");
+
+		// A file written before the fix had two `fill` keys in the shape's
+		// entry (the layer's Fill, then the paint): it is repaired on load.
+		let json = String::from_utf8(serde_json::to_vec(&manifest).unwrap()).unwrap();
+		let old = json.replace("\"shape_fill\"", "\"fill\"");
+		assert!(serde_json::from_str::<Manifest>(&old).is_err(), "the old form really is unreadable as is");
+		let repaired = manifest_from_json(old.as_bytes()).unwrap();
+		assert_eq!(repaired, manifest);
 	}
-}
 
-fn default_global_light() -> f64 {
-	120.0
-}
-
-/// The bit depth of an RGBA format (vector mask caches are grey of it).
-fn depth_of(format: fx_tiles::PixelFormat) -> fx_core::BitDepth {
-	if format == fx_tiles::PixelFormat::Rgba16 {
-		fx_core::BitDepth::U16
-	} else {
-		fx_core::BitDepth::U8
+	#[test]
+	fn the_second_fill_key_of_an_object_is_renamed_only_there() {
+		let json = br#"{"fill":1.0,"a":[{"fill":2,"x":"fill","fill":{"fill":3}}],"fill_x":"\"fill\""}"#;
+		let out = String::from_utf8(super::rename_second_fill(json)).unwrap();
+		assert_eq!(out, r#"{"fill":1.0,"a":[{"fill":2,"x":"fill","shape_fill":{"fill":3}}],"fill_x":"\"fill\""}"#);
 	}
 }

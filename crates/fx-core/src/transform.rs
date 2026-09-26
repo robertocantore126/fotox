@@ -426,13 +426,14 @@ impl Permutation {
 		}
 	}
 
-	/// The permutation as a [`Mapping`]: source (old) canvas pixels →
-	/// destination (new) canvas pixels, the same relation
-	/// [`source_pixel`](Self::source_pixel) walks backwards. Pixel images
-	/// permute their own tiles; a shape layer's matrix is folded with this, and
-	/// both land in the same place (M6-T06).
+	/// The permutation as a [`Mapping`] of **continuous** canvas coordinates
+	/// (pixel `i` spans `[i, i + 1)`): old canvas → new canvas. Pixel images
+	/// permute their own tiles ([`source_pixel`](Self::source_pixel), indices:
+	/// `h − 1 − y`); a shape or text layer's matrix is folded with this, and
+	/// both land in the same place (M6-T06). The continuous form is `h − y`:
+	/// using the index form here shifted vector layers by one pixel (HARDEN H1).
 	pub fn mapping(self, (width, height): (u32, u32)) -> Mapping {
-		let (w, h) = (f64::from(width - 1), f64::from(height - 1));
+		let (w, h) = (f64::from(width), f64::from(height));
 		let (a, b, c, d, e, f) = match self {
 			Permutation::Rot90Cw => (0.0, 1.0, -1.0, 0.0, h, 0.0),
 			Permutation::Rot90Ccw => (0.0, -1.0, 1.0, 0.0, 0.0, w),

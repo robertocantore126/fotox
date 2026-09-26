@@ -137,7 +137,8 @@ impl TextLayout {
 
 	/// The box of every line, top to bottom: what the text inks.
 	pub fn ink_box(&self) -> Option<TextRect> {
-		self.lines.iter().map(|line| line.rect).reduce(TextRect::union)
+		// An empty line inks nothing (an empty layer has one such line).
+		self.lines.iter().filter(|line| line.rect.w > 0.0).map(|line| line.rect).reduce(TextRect::union)
 	}
 
 	/// The box of the lines covering `range`, in frame space.
@@ -303,7 +304,7 @@ impl Fonts {
 				})
 			})
 			.collect();
-		families.sort_unstable_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+		families.sort_unstable_by_key(|a| a.name.to_lowercase());
 		families
 	}
 
@@ -420,11 +421,14 @@ fn collect_lines(layout: &Layout<TextBrush>, origin: (f64, f64)) -> Vec<TextLine
 		.map(|line| {
 			let metrics = line.metrics();
 			let range = line.text_range();
+			// parley 0.9: `inline_max_coord` is the line's box (the wrap width)
+			// and the alignment is a separate `offset`; the text itself spans
+			// `advance − trailing_whitespace` from there (HARDEN H1).
 			TextLine {
 				rect: TextRect {
-					x: f64::from(metrics.inline_min_coord) + origin.0,
+					x: f64::from(metrics.inline_min_coord + metrics.offset) + origin.0,
 					y: f64::from(metrics.block_min_coord) + origin.1,
-					w: f64::from(metrics.inline_max_coord - metrics.inline_min_coord),
+					w: f64::from((metrics.advance - metrics.trailing_whitespace).max(0.0)),
 					h: f64::from(metrics.block_max_coord - metrics.block_min_coord),
 				},
 				text_range: (range.start, range.end),

@@ -14,3 +14,6 @@ lcms2 = { workspace = true }
 # f16 3D LUTs, uploaded as Rgba16Float (D-039).
 half = { workspace = true }
 bytemuck = { workspace = true }
+
+[lints]
+workspace = true

@@ -549,12 +549,12 @@ impl Engine {
 		};
 		// Snapping (M7-T06): the tools that place things get a snapped point.
 		let mut event = event;
-		if SNAPPING_TOOLS.iter().any(|t| tool_id.starts_with(t)) || self.transform.is_some() {
-			if let Some(open) = self.docs.get(doc_id) {
-				let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
-				event.x = x;
-				event.y = y;
-			}
+		if (SNAPPING_TOOLS.iter().any(|t| tool_id.starts_with(t)) || self.transform.is_some())
+			&& let Some(open) = self.docs.get(doc_id)
+		{
+			let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
+			event.x = x;
+			event.y = y;
 		}
 		// A Free Transform box takes every pointer event while it is up.
 		if let Some((doc, session)) = &mut self.transform

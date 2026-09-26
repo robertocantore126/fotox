@@ -220,24 +220,26 @@ impl Pen {
 
 	fn pen_down(&mut self, ctx: &ToolContext<'_>, p: (f64, f64), modifiers: Modifiers, double: bool) -> ToolResult {
 		// Auto Add/Delete on the target path when not drawing.
-		if self.drawing.is_none() && ctx.settings.bool(self.id, "Auto Add/Delete").unwrap_or(true) && self.kind == Kind::Pen {
-			if let Some((target, mut path)) = Self::target(ctx, false) {
-				if let Some((si, ai)) = path.anchor_at(p, self.reach()) {
-					path.subpaths[si].anchors.remove(ai);
-					return ToolResult {
-						command: Some(Self::store(target, path, "Delete Anchor Point")),
-						redraw: true,
-						..Default::default()
-					};
-				}
-				if let Some((si, seg, t)) = path.segment_at(p, self.reach()) {
-					path.split(si, seg, t);
-					return ToolResult {
-						command: Some(Self::store(target, path, "Add Anchor Point")),
-						redraw: true,
-						..Default::default()
-					};
-				}
+		if self.drawing.is_none()
+			&& ctx.settings.bool(self.id, "Auto Add/Delete").unwrap_or(true)
+			&& self.kind == Kind::Pen
+			&& let Some((target, mut path)) = Self::target(ctx, false)
+		{
+			if let Some((si, ai)) = path.anchor_at(p, self.reach()) {
+				path.subpaths[si].anchors.remove(ai);
+				return ToolResult {
+					command: Some(Self::store(target, path, "Delete Anchor Point")),
+					redraw: true,
+					..Default::default()
+				};
+			}
+			if let Some((si, seg, t)) = path.segment_at(p, self.reach()) {
+				path.split(si, seg, t);
+				return ToolResult {
+					command: Some(Self::store(target, path, "Add Anchor Point")),
+					redraw: true,
+					..Default::default()
+				};
 			}
 		}
 		let reach = self.reach();

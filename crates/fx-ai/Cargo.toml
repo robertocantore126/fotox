@@ -19,3 +19,6 @@ png = { workspace = true }
 # DirectML execution provider on Windows (D-088).
 [target.'cfg(windows)'.dependencies]
 ort = { workspace = true, features = ["directml"] }
+
+[lints]
+workspace = true

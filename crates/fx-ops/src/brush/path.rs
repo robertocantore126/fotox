@@ -37,7 +37,7 @@ impl Jitter {
 	}
 
 	/// A number in `0..1`.
-	pub fn next(&mut self) -> f32 {
+	pub fn next_unit(&mut self) -> f32 {
 		self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
 		let mut z = self.0;
 		z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -48,7 +48,7 @@ impl Jitter {
 
 	/// A number in `-1..1`.
 	pub fn signed(&mut self) -> f32 {
-		self.next() * 2.0 - 1.0
+		self.next_unit() * 2.0 - 1.0
 	}
 }
 
@@ -120,19 +120,20 @@ impl DabPath {
 				Control::PenTilt => 1.0 - tilt,
 			}
 		};
-		let count = ((d.count.clamp(1, 16) as f32) * (1.0 - d.count_jitter.clamp(0.0, 1.0) * self.jitter.next()))
+		let count = ((d.count.clamp(1, 16) as f32) * (1.0 - d.count_jitter.clamp(0.0, 1.0) * self.jitter.next_unit()))
 			.round()
 			.max(1.0) as u32;
 		let (ux, uy) = direction;
 		for _ in 0..count {
 			let mut dab = base;
-			let size = (control(d.size_control) * (1.0 - d.size_jitter.clamp(0.0, 1.0) * self.jitter.next())).max(d.min_diameter.clamp(0.0, 1.0));
+			let size = (control(d.size_control) * (1.0 - d.size_jitter.clamp(0.0, 1.0) * self.jitter.next_unit())).max(d.min_diameter.clamp(0.0, 1.0));
 			dab.diameter = (base.diameter * size).max(1.0);
 			dab.angle = base.angle + d.angle_jitter.clamp(0.0, 1.0) * 180.0 * self.jitter.signed();
 			if d.angle_control == Control::PenTilt {
 				dab.angle += s.tilt_y.atan2(s.tilt_x).to_degrees();
 			}
-			let round = (control(d.roundness_control) * (1.0 - d.roundness_jitter.clamp(0.0, 1.0) * self.jitter.next())).max(d.min_roundness.clamp(0.01, 1.0));
+			let round =
+				(control(d.roundness_control) * (1.0 - d.roundness_jitter.clamp(0.0, 1.0) * self.jitter.next_unit())).max(d.min_roundness.clamp(0.01, 1.0));
 			dab.roundness = (base.roundness * round).clamp(0.01, 1.0);
 			if d.scatter > 0.0 {
 				let reach = f64::from(d.scatter.min(10.0)) * f64::from(dab.diameter);
@@ -145,8 +146,8 @@ impl DabPath {
 					dab.y += uy * along;
 				}
 			}
-			let opacity = control(d.opacity_control) * (1.0 - d.opacity_jitter.clamp(0.0, 1.0) * self.jitter.next());
-			let flow = control(d.flow_control) * (1.0 - d.flow_jitter.clamp(0.0, 1.0) * self.jitter.next());
+			let opacity = control(d.opacity_control) * (1.0 - d.opacity_jitter.clamp(0.0, 1.0) * self.jitter.next_unit());
+			let flow = control(d.flow_control) * (1.0 - d.flow_jitter.clamp(0.0, 1.0) * self.jitter.next_unit());
 			// FAST: opacity jitter scales the dab like flow does (the stroke
 			// model has one opacity ceiling per stroke).
 			dab.strength *= opacity * flow;

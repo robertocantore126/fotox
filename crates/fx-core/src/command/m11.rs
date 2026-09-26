@@ -623,8 +623,8 @@ pub(super) fn content_aware_scale(
 					let x = (i64::from(sx) * scale + xc % scale).min(w - 1);
 					let y = (i64::from(sy) * scale + yc % scale).min(h - 1);
 					let key = (x / tile, y / tile);
-					if !cache.contains_key(&key) {
-						cache.insert(key, layer_tile(&image, key.0, key.1, ctx.tiles)?);
+					if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(key) {
+						e.insert(layer_tile(&image, key.0, key.1, ctx.tiles)?);
 					}
 					if let Some(t) = &cache[&key] {
 						pixels[(py * tile + px) as usize] = t[((y % tile) * tile + x % tile) as usize];

@@ -84,11 +84,10 @@ fn saving_during_a_stroke_commits_it_first() {
 	let path = dir.join("stroke.fxd");
 	harness.engine.send(EngineInput::SaveAs { doc, path: path.clone() });
 	assert_eq!(history_label(&harness, doc), "Brush Tool");
-	let clean = harness.wait("the saved document", |s| match s {
+	harness.wait("the saved document", |s| match s {
 		Seen::Ui(EngineToUi::DocumentChanged { info }) if info.doc == doc && !info.dirty => Some(()),
 		_ => None,
 	});
-	let _ = clean;
 	assert!(path.exists());
 	// The release after the save paints nothing more and adds no step.
 	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 260.0, 220.0, 0)));
