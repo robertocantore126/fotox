@@ -31,6 +31,7 @@ use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
 use crate::tools::transform::{self as free_transform, Mode as TransformMode, Update as TransformUpdate};
 use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
+use crate::trace;
 use crate::transform_preview::{Prepared, PreviewJob as TransformJob, TransformPreview};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
 use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips, vector};
@@ -167,6 +168,40 @@ pub(crate) enum Internal {
 	Ai(Box<m13::AiDone>),
 }
 
+/// The eight handles of a box `[x0, y0, x1, y1]`: corners and edge middles.
+fn control_handles([x0, y0, x1, y1]: [f64; 4]) -> [(f64, f64); 8] {
+	let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+	[(x0, y0), (mx, y0), (x1, y0), (x1, my), (x1, y1), (mx, y1), (x0, y1), (x0, my)]
+}
+
+/// What an internal message is, for the watchdog.
+fn internal_name(message: &Internal) -> &'static str {
+	match message {
+		Internal::Progress { .. } => "internal progress",
+		Internal::Imported { .. } => "internal imported",
+		Internal::Exported { .. } => "internal exported",
+		Internal::OpenedFxd { .. } => "internal opened fxd",
+		Internal::Saved { .. } => "internal saved",
+		Internal::Copied { .. } => "internal copied",
+		Internal::B3Built { .. } => "internal b3 built",
+		Internal::TransformPrepared { .. } => "internal transform prepared",
+		Internal::TransformShown { .. } => "internal transform shown",
+		Internal::PreviewTiles { .. } => "internal preview tiles",
+		Internal::PreviewFailed { .. } => "internal preview failed",
+		Internal::PixelJobDone { .. } => "internal pixel job done",
+		Internal::Thumbnail { .. } => "internal thumbnail",
+		Internal::Ai(_) => "internal ai done",
+	}
+}
+
+pub(super) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+	payload
+		.downcast_ref::<String>()
+		.cloned()
+		.or_else(|| payload.downcast_ref::<&str>().map(|message| (*message).to_owned()))
+		.unwrap_or_else(|| "unknown panic".into())
+}
+
 struct Engine {
 	output: OutputSink,
 	render: Sender<RenderRequest>,
@@ -238,6 +273,11 @@ struct Engine {
 	transform_refine: Option<Instant>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
+	/// Pointer moves since the last traced input (the recorder counts them).
+	trace_moves: u32,
+	/// Move tool ▸ Show Transform Controls: the box of (document, generation,
+	/// layer), cached (finding a layer's content bounds scans its tiles).
+	controls: Option<(DocId, u64, LayerId, Option<[f64; 4]>)>,
 }
 
 /// How long the pointer must rest before a dragged transform is previewed at
@@ -338,6 +378,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		stats,
 		output,
 	} = ctx;
+	crate::text::warm();
 	let mut engine = Engine {
 		output,
 		render,
@@ -376,6 +417,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		transform_latest: Arc::new(AtomicU64::new(0)),
 		transform_refine: None,
 		smart_children: HashMap::new(),
+		trace_moves: 0,
+		controls: None,
 	};
 
 	loop {
@@ -392,10 +435,20 @@ pub(crate) fn run(ctx: EngineContext) {
 		select_biased! {
 			recv(inputs) -> input => match input {
 				Ok(EngineInput::Shutdown) | Err(_) => break,
-				Ok(input) => engine.handle(input),
+				Ok(input) => {
+					let what = crate::trace_input(&input, &mut engine.trace_moves);
+					trace::busy(trace::Thread::Engine, &what);
+					engine.handle(input);
+				}
 			},
-			recv(internal_rx) -> msg => if let Ok(msg) = msg { engine.internal(msg) },
-			recv(mips_rx) -> work => if let Ok(work) = work { engine.compute_mips(work) },
+			recv(internal_rx) -> msg => if let Ok(msg) = msg {
+				trace::busy(trace::Thread::Engine, internal_name(&msg));
+				engine.internal(msg);
+			},
+			recv(mips_rx) -> work => if let Ok(work) = work {
+				trace::busy(trace::Thread::Engine, "compute mips");
+				engine.compute_mips(work);
+			},
 			default(timeout) => {}
 		}
 		engine.flush_view_message();
@@ -403,6 +456,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		engine.cool_hot_layer();
 		engine.render_due_thumbnails();
 		engine.refine_transform_if_due();
+		trace::idle(trace::Thread::Engine);
 	}
 
 	let _ = engine.render.send(RenderRequest::Stop);
@@ -465,8 +519,8 @@ impl Engine {
 				}
 				Changed::default()
 			}
-			EngineInput::Export { path, choice } => {
-				self.export(path, choice);
+			EngineInput::Export { doc, path, choice } => {
+				self.export(doc, path, choice);
 				Changed::default()
 			}
 			EngineInput::Save { doc } => {
@@ -549,11 +603,32 @@ impl Engine {
 		};
 		// Snapping (M7-T06): the tools that place things get a snapped point.
 		let mut event = event;
-		if SNAPPING_TOOLS.iter().any(|t| tool_id.starts_with(t)) || self.transform.is_some() {
-			if let Some(open) = self.docs.get(doc_id) {
-				let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
-				event.x = x;
-				event.y = y;
+		if (SNAPPING_TOOLS.iter().any(|t| tool_id.starts_with(t)) || self.transform.is_some())
+			&& let Some(open) = self.docs.get(doc_id)
+		{
+			let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
+			event.x = x;
+			event.y = y;
+		}
+		// Move tool ▸ Show Transform Controls: a press on one of the box's
+		// handles starts Free Transform and hands it the same press.
+		if event.kind == PointerKind::Down
+			&& event.buttons & crate::view::BUTTON_LEFT != 0
+			&& self.transform.is_none()
+			&& let Some(rect) = self.transform_controls(doc_id)
+		{
+			let zoom = self.docs.get(doc_id).map_or(1.0, |open| open.view.view.zoom);
+			let reach = 8.0 / zoom.max(1e-6);
+			if control_handles(rect)
+				.iter()
+				.any(|(hx, hy)| (hx - event.x).abs() <= reach && (hy - event.y).abs() <= reach)
+			{
+				self.start_transform(doc_id, TransformMode::Free);
+				// Refused (a locked layer: the toast said why): the press was
+				// on a handle, not a move, so it ends here.
+				if self.transform.is_none() {
+					return changed;
+				}
 			}
 		}
 		// A Free Transform box takes every pointer event while it is up.
@@ -699,6 +774,7 @@ impl Engine {
 			doc.view.resize(viewport.width, viewport.height);
 		}
 		let info = doc.info();
+		self.commit_live_edits();
 		self.docs.add(doc);
 		self.to_ui(&EngineToUi::DocumentOpened { info });
 		self.after_active_change();
@@ -1035,6 +1111,36 @@ impl Engine {
 				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
 				// enters it with all the text selected. The UI has switched the
 				// tool to Type first.
+				// The UI's own errors, for the flight recorder only (`trace_input`
+				// has written the message already).
+				if id == "trace:download-result" {
+					if let Some(error) = args.get("error").and_then(serde_json::Value::as_str) {
+						self.to_ui(&EngineToUi::Error {
+							text: format!("Could not export the flight recorder: {error}"),
+						});
+					} else if let Some(path) = args.get("path").and_then(serde_json::Value::as_str) {
+						self.to_ui(&EngineToUi::Toast {
+							text: format!("Flight recorder saved to {path}"),
+						});
+					}
+					return Changed::default();
+				}
+				// Crash drills for the crash reporter, only with
+				// `FOTOX_DEBUG_CRASH` set: a panic on this thread, or a native
+				// access violation.
+				if let Some(kind) = id.strip_prefix("trace:crash-")
+					&& std::env::var_os("FOTOX_DEBUG_CRASH").is_some()
+				{
+					match kind {
+						"engine" => panic!("crash drill: the engine thread panics"),
+						// SAFETY: none — the point is to fault (address 16 is never mapped).
+						"native" => unsafe { std::ptr::without_provenance_mut::<u32>(16).write_volatile(1) },
+						_ => {}
+					}
+				}
+				if id.starts_with("trace:") {
+					return Changed::default();
+				}
 				// Preferences (M7-T09): merge, save, apply.
 				if id == "prefs:set" {
 					self.prefs.merge(&args);
@@ -1085,6 +1191,7 @@ impl Engine {
 				None => Changed::default(),
 			},
 			UiToEngine::ActivateDocument { doc } => {
+				self.commit_live_edits();
 				if self.docs.activate(doc) {
 					self.after_active_change();
 				}
@@ -1103,7 +1210,9 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::RequestThumbnails { doc, layers, size } => {
-				for layer in layers {
+				// Bounded: a thumbnail is `size² × 4` bytes and one job per layer.
+				let size = size.clamp(8, 512);
+				for layer in layers.into_iter().take(4096) {
 					self.thumbs_wanted.insert((doc, layer), size);
 					self.render_thumbnail(doc, layer);
 				}
@@ -1140,9 +1249,14 @@ impl Engine {
 			UiToEngine::ToolOptions { tool, options } => {
 				let transform = tool == "_transform";
 				let active = self.docs.active_mut().is_some_and(|open| open.view.tool == tool);
+				let move_tool = tool == "move";
 				self.settings.options.insert(tool, options);
 				if active {
 					self.with_active_tool(|tool, ctx| tool.options_changed(ctx));
+				}
+				// Show Transform Controls toggled: the box appears or goes.
+				if move_tool && active {
+					self.request_frame();
 				}
 				// The transform bar's Interpolation applies to the box that is up.
 				if transform && self.transform.is_some() {
@@ -1331,6 +1445,7 @@ impl Engine {
 		}
 		// Leaving a tool finishes what it has under way (the Type tool commits).
 		if id.starts_with("tool:") {
+			self.end_stroke();
 			self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 			if id == "tool:type" && !self.fonts_sent {
 				self.fonts_sent = true;
@@ -1439,10 +1554,11 @@ impl Engine {
 	}
 
 	/// Export the active document as a job on a worker thread, with progress.
-	fn export(&mut self, path: PathBuf, choice: Option<crate::ExportChoice>) {
-		let Some(open) = self.docs.active_mut() else {
+	fn export(&mut self, doc: DocId, path: PathBuf, choice: Option<crate::ExportChoice>) {
+		self.commit_live_edits();
+		let Some(open) = self.docs.get_mut(doc) else {
 			self.to_ui(&EngineToUi::Toast {
-				text: "Open a document to export it".into(),
+				text: "The document selected for export is no longer open".into(),
 			});
 			return;
 		};
@@ -1480,10 +1596,13 @@ impl Engine {
 				true
 			};
 			// An opaque document is written without alpha (a quarter smaller for RGB).
-			let opaque = crate::export::opaque_background(&doc, &store);
-			let result = crate::export::options_for(&doc, &path, opaque)
-				.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
-				.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let opaque = crate::export::opaque_background(&doc, &store);
+				crate::export::options_for(&doc, &path, opaque)
+					.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
+					.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report))
+			}))
+			.unwrap_or_else(|panic| Err(IoError::Decode(format!("export worker panicked: {}", panic_text(&*panic)))));
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
@@ -1616,6 +1735,29 @@ impl Engine {
 		self.to_ui(&EngineToUi::TransformBox { up: true, bar });
 		self.to_ui(&EngineToUi::ToolInfo { text: status });
 		self.request_frame();
+	}
+
+	/// The box Move ▸ Show Transform Controls draws (document pixels), when
+	/// that option is on, the Move tool is active and no transform is up.
+	fn transform_controls(&mut self, doc_id: DocId) -> Option<[f64; 4]> {
+		if self.transform.is_some() || self.settings.bool("move", "Show Transform Controls") != Some(true) {
+			return None;
+		}
+		let open = self.docs.get(doc_id)?;
+		if open.view.tool != "move" {
+			return None;
+		}
+		let layer = open.doc.active_layer()?;
+		if let Some((d, g, l, rect)) = self.controls
+			&& d == doc_id
+			&& g == open.generation
+			&& l == layer
+		{
+			return rect;
+		}
+		let rect = crate::transform_preview::start_rect(&open.doc, layer, &self.store).ok().flatten();
+		self.controls = Some((doc_id, open.generation, layer, rect));
+		rect
 	}
 
 	/// The option bar's Interpolation for Free Transform (Bicubic by default,
@@ -1925,7 +2067,9 @@ impl Engine {
 				tiles: &store,
 				ops: Some(&ops),
 			};
-			let result = command.apply(&mut after, &mut ctx).map(|effect| (Box::new(after), effect));
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| command.apply(&mut after, &mut ctx)))
+				.map_err(|panic| fx_core::CommandError::NotAllowed(format!("pixel operation panicked: {}", panic_text(&*panic))))
+				.and_then(|result| result.map(|effect| (Box::new(after), effect)));
 			let _ = internal.send(Internal::PixelJobDone {
 				task,
 				doc: id,
@@ -1991,6 +2135,7 @@ impl Engine {
 				self.request_frame();
 			}
 		}
+		self.continue_window_close();
 	}
 
 	fn internal(&mut self, message: Internal) {
@@ -2077,7 +2222,11 @@ impl Engine {
 					};
 					(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &thumb.pixels)));
 				}
-				Err(error) => tracing::warn!("thumbnail of {layer:?} failed: {error}"),
+				// A failed render is not a fresh one: the next edit may retry at once.
+				Err(error) => {
+					tracing::warn!("thumbnail of {layer:?} failed: {error}");
+					self.thumbs_last.remove(&(doc, layer));
+				}
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
 			Internal::Imported { task, path, result, place } => {
@@ -2090,6 +2239,7 @@ impl Engine {
 				}
 				match result {
 					Ok(imported) => {
+						self.commit_live_edits();
 						let id = self.docs.allocate_id();
 						let mut doc = OpenDoc::from_import(id, &path, imported);
 						if let Some(viewport) = self.virtual_view.viewport {
@@ -2115,6 +2265,7 @@ impl Engine {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(opened) => {
+						self.commit_live_edits();
 						let id = self.docs.allocate_id();
 						let mut doc = OpenDoc::from_fxd(id, &path, *opened);
 						if let Some(viewport) = self.virtual_view.viewport {
@@ -2144,18 +2295,22 @@ impl Engine {
 				result,
 			} => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let Some(open) = self.docs.get_mut(doc) {
+					open.saving = false;
+				}
 				match result {
 					Ok(file) => {
-						let info = self.docs.get_mut(doc).map(|open| {
+						let saved = self.docs.get_mut(doc).map(|open| {
 							open.file = Some(file);
 							open.path = Some(path.clone());
 							open.dirty = open.generation != generation;
 							open.name = path
 								.file_name()
 								.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-							open.info()
+							(open.info(), open.dirty)
 						});
-						if let Some(info) = info {
+						let saved_clean = saved.as_ref().is_some_and(|(_, dirty)| !dirty);
+						if let Some((info, _)) = saved {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
 						tracing::info!("saved {}", path.display());
@@ -2165,8 +2320,13 @@ impl Engine {
 						});
 						if self.pending_close == Some(doc) {
 							self.pending_close = None;
-							self.force_close(doc);
-							self.continue_window_close();
+							if saved_clean {
+								self.force_close(doc);
+							} else if !self.window_close_pending
+								&& let Some(name) = self.docs.get_mut(doc).map(|open| open.name.clone())
+							{
+								self.to_ui(&EngineToUi::CloseDirtyDocument { doc, name });
+							}
 						}
 					}
 					Err(IoError::Cancelled) => {
@@ -2182,13 +2342,38 @@ impl Engine {
 						});
 					}
 				}
+				self.continue_window_close();
 			}
 		}
 	}
 
 	/// Close `id`, asking the UI first when it is dirty (M3-T06).
+	/// Finish what is being edited outside the history — the live brush
+	/// stroke, the Type tool's text — so it becomes a History step and marks
+	/// the document dirty. Saving, exporting or closing must see it: a stroke
+	/// in flight is in the pixels but not yet in `dirty` or the history.
+	fn commit_live_edits(&mut self) {
+		self.end_stroke();
+		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+	}
+
 	fn close(&mut self, id: DocId) {
-		let dirty = self.docs.get_mut(id).is_some_and(|open| open.dirty);
+		self.commit_live_edits();
+		let Some((busy, saving, dirty)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving, open.dirty)) else {
+			return;
+		};
+		if let Some(job) = busy {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Wait until {job} is finished before closing this document"),
+			});
+			return;
+		}
+		if saving {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Wait until the save is finished before closing this document".into(),
+			});
+			return;
+		}
 		if dirty {
 			let name = self.docs.get_mut(id).map_or_else(String::new, |open| open.name.clone());
 			self.to_ui(&EngineToUi::CloseDirtyDocument { doc: id, name });
@@ -2226,7 +2411,24 @@ impl Engine {
 	/// The user asked to close the window: allowed only when nothing is dirty.
 	/// Each dirty document is asked about in turn; Cancel stops the close.
 	fn close_requested(&mut self) {
+		self.commit_live_edits();
 		self.window_close_pending = true;
+		let waiting = self.docs.iter_mut().find_map(|open| {
+			if let Some(job) = &open.busy {
+				Some(format!("{} ({job})", open.name))
+			} else if open.saving {
+				Some(format!("{} (saving)", open.name))
+			} else {
+				None
+			}
+		});
+		if let Some(waiting) = waiting {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Waiting for {waiting} before closing"),
+			});
+			(self.output)(EngineOutput::MayClose(false));
+			return;
+		}
 		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
 		match dirty {
 			Some((id, name)) => {
@@ -2259,10 +2461,23 @@ impl Engine {
 
 	/// Save in place; a document without a file asks the shell for a path.
 	fn save(&mut self, id: DocId) {
-		let (file, name) = match self.docs.get_mut(id) {
-			Some(open) => (open.file.clone(), open.name.clone()),
+		self.commit_live_edits();
+		let (file, name, busy, saving) = match self.docs.get_mut(id) {
+			Some(open) => (open.file.clone(), open.name.clone(), open.busy.clone(), open.saving),
 			None => return,
 		};
+		if let Some(job) = busy {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Wait until {job} is finished before saving"),
+			});
+			return;
+		}
+		if saving {
+			self.to_ui(&EngineToUi::Toast {
+				text: "A save is already in progress for this document".into(),
+			});
+			return;
+		}
 		match file {
 			Some(file) => self.start_save(id, SaveTarget::Incremental(file)),
 			None => self.ask_save_path(id, &name),
@@ -2281,6 +2496,7 @@ impl Engine {
 	/// is an incremental save: Windows refuses to replace a file that is open,
 	/// and the document's backed tiles keep it open (D-027).
 	fn save_as(&mut self, id: DocId, path: PathBuf) {
+		self.commit_live_edits();
 		let own = self.docs.get_mut(id).and_then(|open| {
 			let same = open.path.as_ref().is_some_and(|p| same_file(p, &path));
 			if same { open.file.clone() } else { None }
@@ -2293,7 +2509,23 @@ impl Engine {
 
 	/// Snapshot the document and save it on a worker thread (recipe R2).
 	fn start_save(&mut self, id: DocId, target: SaveTarget) {
+		let Some((busy, saving)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving)) else {
+			return;
+		};
+		if let Some(job) = busy {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Wait until {job} is finished before saving"),
+			});
+			return;
+		}
+		if saving {
+			self.to_ui(&EngineToUi::Toast {
+				text: "A save is already in progress for this document".into(),
+			});
+			return;
+		}
 		let Some(open) = self.docs.get_mut(id) else { return };
+		open.saving = true;
 		let snapshot = open.doc.clone();
 		let generation = open.generation;
 		let path = match &target {
@@ -2324,16 +2556,19 @@ impl Engine {
 			};
 			// The composite preview (D-026) needs the engine's compositor; a
 			// later card can render it and pass it here.
-			let result = fxd::save(
-				SaveRequest {
-					doc: &snapshot,
-					store: &store,
-					preview: None,
-				},
-				target,
-				&mut report,
-			)
-			.map(|saved| saved.file);
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				fxd::save(
+					SaveRequest {
+						doc: &snapshot,
+						store: &store,
+						preview: None,
+					},
+					target,
+					&mut report,
+				)
+				.map(|saved| saved.file)
+			}))
+			.unwrap_or_else(|panic| Err(IoError::Decode(format!("save worker panicked: {}", panic_text(&*panic)))));
 			let _ = internal.send(Internal::Saved {
 				task,
 				doc: id,
@@ -2343,6 +2578,9 @@ impl Engine {
 			});
 		});
 		if let Err(error) = spawned {
+			if let Some(open) = self.docs.get_mut(id) {
+				open.saving = false;
+			}
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.pending_close = None;
 			self.to_ui(&EngineToUi::Error {
@@ -2395,7 +2633,15 @@ impl Engine {
 			tiles: &store,
 			ops: Some(&self.ops),
 		};
+		let traced = trace::enabled().then(|| (format!("{:?}", std::mem::discriminant(&command)), Instant::now()));
+		let cmd_name = trace::enabled().then(|| trace::cut(&serde_json::to_string(&command).unwrap_or_default(), 4000));
 		let result = doc.history.execute(&mut doc.doc, command, &mut ctx);
+		if let Some((kind, at)) = traced {
+			trace::event(
+				"cmd",
+				serde_json::json!({ "doc": id.0, "kind": kind, "cmd": cmd_name, "ok": result.as_ref().map(|e| e.label.clone()).map_err(ToString::to_string), "ms": at.elapsed().as_secs_f64() * 1000.0 }),
+			);
+		}
 		if let (Err(_), Some(before)) = (&result, before_merge) {
 			// The new value was refused: put the merged step back as it was.
 			doc.history.redo(&mut doc.doc);
@@ -2556,7 +2802,10 @@ impl Engine {
 		let Some(doc) = self.docs.get_mut(id) else { return };
 		let Some(layer) = doc.doc.layer(layer_id) else { return };
 		let Some(source) = ThumbSource::of(&layer.kind) else { return };
-		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.doc.revision);
+		// The stamp is the generation, which only grows: `doc.revision` goes back
+		// on undo. The UI drops a render older than the one it shows (renders
+		// finish in any order on the pool).
+		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.generation);
 		self.thumbs_last.insert((id, layer_id), Instant::now());
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		rayon::spawn(move || {
@@ -3479,6 +3728,8 @@ impl Engine {
 	}
 
 	fn after_active_change(&mut self) {
+		self.end_stroke();
+		self.tools.clear();
 		self.to_ui(&EngineToUi::ActiveDocument { doc: self.docs.active_id() });
 		if self.transform.as_ref().is_some_and(|(doc, _)| Some(*doc) != self.docs.active_id()) {
 			self.end_transform(false);
@@ -3527,6 +3778,16 @@ impl Engine {
 							_ => continue,
 						}
 					};
+					// A request from a snapshot the document no longer matches.
+					let grid_has = |image: &fx_tiles::TiledImage| {
+						request.level < image.level_count() && {
+							let grid = image.grid(request.level);
+							request.x < grid.cols() && request.y < grid.rows()
+						}
+					};
+					if !grid_has(image) {
+						continue;
+					}
 					if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
 						tracing::warn!("mip {request:?} failed: {error}");
 					}
@@ -3629,6 +3890,18 @@ impl Engine {
 				items.extend(overlay.items);
 			}
 			nudge = tool.selection_nudge();
+		}
+		// Move tool ▸ Show Transform Controls: the layer's box and handles.
+		if let Some(doc_id) = self.docs.active_id()
+			&& let Some(rect) = self.transform_controls(doc_id)
+		{
+			let [x0, y0, x1, y1] = rect;
+			items.push(fx_render::OverlayItem::Polyline {
+				points: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+				closed: true,
+				style: fx_render::OverlayStyle::Xor,
+			});
+			items.extend(control_handles(rect).into_iter().map(|at| fx_render::OverlayItem::Handle { at, size_px: 7.0 }));
 		}
 		// Guides and grid (M7-T06), under the tool's own overlay items.
 		if let Some(open) = self.docs.active_mut()
@@ -3903,6 +4176,16 @@ impl Engine {
 	}
 
 	fn to_ui(&self, message: &EngineToUi) {
+		match message {
+			EngineToUi::Error { text } => trace::event("ui_error", serde_json::json!({ "text": text })),
+			EngineToUi::Toast { text } => trace::event("toast", serde_json::json!({ "text": text })),
+			EngineToUi::Progress { task, label, fraction } => {
+				let state = if *fraction == 0.0 { "start" } else { "progress" };
+				trace::event("job", serde_json::json!({ "task": task, "label": label, "state": state, "fraction": fraction }))
+			}
+			EngineToUi::ProgressDone { task } => trace::event("job", serde_json::json!({ "task": task, "state": "done" })),
+			_ => {}
+		}
 		(self.output)(EngineOutput::ToUi(fx_protocol::encode_json(message)));
 	}
 }

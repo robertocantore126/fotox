@@ -185,9 +185,12 @@ fn a_line_is_a_filled_bar_of_its_weight() {
 #[test]
 fn a_rotated_line_is_drawn_along_its_angle() {
 	let shape = VectorShape::Line { length: 100.0, width: 4.0 };
-	// The Line tool turns the bar about the press point at (10, 10): 45°.
+	// The Line tool turns the bar about the press point at (10, 10): 45°, and
+	// shifts it by half its weight across the angle so the weight is centred on
+	// the drag (the bar's local box is 0..width).
 	let s = std::f64::consts::FRAC_1_SQRT_2;
-	let tile = render_shape_tile(&shape, Some(&RED), None, [s, s, -s, s, 10.0, 10.0], 0, (0, 0), PixelFormat::Rgba8);
+	let (hx, hy) = (-s * 2.0, s * 2.0);
+	let tile = render_shape_tile(&shape, Some(&RED), None, [s, s, -s, s, 10.0 - hx, 10.0 - hy], 0, (0, 0), PixelFormat::Rgba8);
 	assert_eq!(alpha(&tile, 45, 45), 255, "the segment runs through its midpoint");
 	assert_eq!(alpha(&tile, 71, 51), 0, "and nowhere else");
 }
@@ -225,4 +228,19 @@ fn tile_origins_place_the_shape_in_the_tile_it_belongs_to() {
 	// Tile (1, 1) starts at (256, 256): its pixel (0, 49) is (256, 305).
 	assert_eq!(alpha(&right, 0, 49), 255, "document x = 256 is inside it too");
 	assert_eq!(alpha(&right, 150, 49), 0, "document x = 406 is past its end");
+}
+
+/// HARDEN: a tile other than (0, 0) at a level ≥ 1 was offset by half (the
+/// tile origin was divided by the scale twice), so shapes and text repeated
+/// across tiles below 50 % zoom. A 100 × 50 rect at document (600, 100) is,
+/// at level 1, level pixels 300..350 × 50..75: tile (1, 0), local x 44..94.
+#[test]
+fn a_shape_lands_in_the_right_tile_at_level_one() {
+	let shape = rect(100.0, 50.0, [0.0; 4]);
+	let tile = render_shape_tile(&shape, Some(&RED), None, at(600.0, 100.0), 1, (1, 0), PixelFormat::Rgba8);
+	assert_eq!(alpha(&tile, 60, 60), 255, "inside the rect");
+	assert_eq!(alpha(&tile, 20, 60), 0, "left of it");
+	assert_eq!(alpha(&tile, 180, 60), 0, "where the doubled offset put it");
+	let other = render_shape_tile(&shape, Some(&RED), None, at(600.0, 100.0), 1, (0, 0), PixelFormat::Rgba8);
+	assert!((0..256).all(|x| alpha(&other, x, 60) == 0), "and nothing in the tile to its left");
 }

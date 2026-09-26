@@ -46,6 +46,8 @@ pub(crate) enum ExitReason {
 	Shutdown,
 	/// The accelerated UI never presented a frame; restart with it disabled.
 	UiAccelerationFailure,
+	/// A thread the app needs died: report it and restart (`crate::crash`).
+	Crashed,
 }
 
 /// Everything the app owns while it runs.
@@ -127,7 +129,13 @@ impl App {
 			tracing::error!("the event loop failed: {error}");
 		}
 		let reason = self.exit_reason;
-		self.engine.shutdown();
+		if matches!(reason, ExitReason::Crashed) {
+			// Joining a broken engine could hang before the user is told:
+			// the process exits right after the report anyway.
+			std::mem::forget(self.engine);
+		} else {
+			self.engine.shutdown();
+		}
 		reason
 	}
 
@@ -256,9 +264,10 @@ impl App {
 					match id.as_str() {
 						"dlg:open" => self.open_file_dialog(false),
 						"misc:place-embedded" | "misc:place-linked" => self.open_file_dialog(true),
-						"export:png" => self.export_file_dialog("PNG", "png", None),
-						"export:tiff" => self.export_file_dialog("TIFF", "tif", None),
-						"export:jpg" => self.export_file_dialog("JPEG", "jpg", None),
+						"export:png" => self.export_file_dialog(args, "PNG", "png", None),
+						"export:tiff" => self.export_file_dialog(args, "TIFF", "tif", None),
+						"export:jpg" => self.export_file_dialog(args, "JPEG", "jpg", None),
+						"trace:download" => self.trace_file_dialog(),
 						// Paste what another program copied since Fotox's own last
 						// copy: the image goes to the engine instead of the action.
 						"clip:paste" | "clip:paste-special" if self.clipboard_sequence != Some(Window::clipboard_sequence()) => {
@@ -271,7 +280,7 @@ impl App {
 						// The Export As dialog (M3-T07): its options, then the save dialog.
 						"export:as" => {
 							let (name, extension, choice) = export_choice(args);
-							self.export_file_dialog(name, extension, Some(choice));
+							self.export_file_dialog(args, name, extension, Some(choice));
 						}
 						_ => {}
 					}
@@ -284,7 +293,19 @@ impl App {
 	/// Show the native save dialog for an export (helper thread, like
 	/// [`open_file_dialog`](Self::open_file_dialog)); the chosen file comes
 	/// back as `AppEvent::ExportTo`.
-	fn export_file_dialog(&self, name: &'static str, extension: &'static str, choice: Option<fx_engine::ExportChoice>) {
+	fn export_file_dialog(&self, args: &serde_json::Value, name: &'static str, extension: &'static str, choice: Option<fx_engine::ExportChoice>) {
+		let Some(doc) = args
+			.get("doc")
+			.and_then(serde_json::Value::as_u64)
+			.and_then(|id| u32::try_from(id).ok())
+			.map(fx_protocol::DocId)
+		else {
+			self.engine.send(EngineInput::Ui(UiToEngine::Action {
+				id: "export:invalid-document".into(),
+				args: serde_json::Value::Null,
+			}));
+			return;
+		};
 		let scheduler = self.app_event_scheduler.clone();
 		let spawned = std::thread::Builder::new().name("export-dialog".into()).spawn(move || {
 			let dialog = rfd::AsyncFileDialog::new()
@@ -297,12 +318,56 @@ impl App {
 				if path.extension().is_none() {
 					path.set_extension(extension);
 				}
-				scheduler.schedule(AppEvent::ExportTo(path, choice));
+				scheduler.schedule(AppEvent::ExportTo { doc, path, choice });
 			}
 		});
 		if let Err(error) = spawned {
 			tracing::error!("cannot show the export dialog: {error}");
 		}
+	}
+
+	/// Choose where to write the flushed flight recorder as a JSON document.
+	fn trace_file_dialog(&self) {
+		let scheduler = self.app_event_scheduler.clone();
+		let spawned = std::thread::Builder::new().name("trace-dialog".into()).spawn(move || {
+			let stamp = std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map_or(0, |duration| duration.as_secs());
+			let dialog = rfd::AsyncFileDialog::new()
+				.set_title("Save Flight Recorder JSON")
+				.set_file_name(format!("fotox-trace-{stamp}.json"))
+				.add_filter("JSON", &["json"]);
+			if let Some(file) = futures::executor::block_on(dialog.save_file()) {
+				scheduler.schedule(AppEvent::TraceExportTo(file.path().to_path_buf()));
+			}
+		});
+		if let Err(error) = spawned {
+			tracing::error!("cannot show the flight-recorder save dialog: {error}");
+		}
+	}
+
+	fn export_trace_to(&self, mut path: std::path::PathBuf) {
+		let scheduler = self.app_event_scheduler.clone();
+		let spawned = std::thread::Builder::new().name("trace-export".into()).spawn(move || {
+			let result = fx_engine::trace::export_json().and_then(|(_, json)| {
+				if path.extension().is_none() {
+					path.set_extension("json");
+				}
+				std::fs::write(&path, json).map(|()| path).map_err(|error| error.to_string())
+			});
+			scheduler.schedule(AppEvent::TraceExported(result));
+		});
+		if let Err(error) = spawned {
+			self.trace_exported(Err(format!("Cannot start the export: {error}")));
+		}
+	}
+
+	fn trace_exported(&self, result: Result<std::path::PathBuf, String>) {
+		let (id, args) = match result {
+			Ok(path) => ("trace:download-result", serde_json::json!({ "path": path.display().to_string() })),
+			Err(error) => ("trace:download-result", serde_json::json!({ "error": error })),
+		};
+		self.engine.send(EngineInput::Ui(UiToEngine::Action { id: id.into(), args }));
 	}
 
 	/// Show the native open dialog on a helper thread (it is modal and would
@@ -410,6 +475,7 @@ impl App {
 
 	/// Handle one event that arrived from another thread.
 	fn user_event(&mut self, event_loop: &dyn ActiveEventLoop, event: AppEvent) {
+		let _busy = ui_busy("user event");
 		match event {
 			AppEvent::WebCommunicationInitialized => {
 				tracing::info!("the UI is ready");
@@ -434,14 +500,17 @@ impl App {
 			AppEvent::Engine(output) => self.engine_output(event_loop, output),
 			AppEvent::OpenFiles(paths) => self.engine.send(EngineInput::Open(paths)),
 			AppEvent::PlaceFiles(paths) => self.engine.send(EngineInput::Place(paths)),
-			AppEvent::ExportTo(path, choice) => self.engine.send(EngineInput::Export { path, choice }),
+			AppEvent::ExportTo { doc, path, choice } => self.engine.send(EngineInput::Export { doc, path, choice }),
+			AppEvent::TraceExportTo(path) => self.export_trace_to(path),
+			AppEvent::TraceExported(result) => self.trace_exported(result),
 			AppEvent::SaveAs { doc, path } => self.engine.send(EngineInput::SaveAs { doc, path }),
 			AppEvent::SaveCancelled(doc) => self.engine.send(EngineInput::SaveCancelled { doc }),
 			AppEvent::UiMessage(frame) => self.ui_message(&frame),
 			AppEvent::UiCrashed => {
-				tracing::error!("the UI crashed, exiting");
-				self.exit(ExitReason::Shutdown);
+				fx_engine::trace::crashed("interface", "the UI process (CEF) stopped");
+				self.exit(ExitReason::Crashed);
 			}
+			AppEvent::Crashed => self.exit(ExitReason::Crashed),
 			AppEvent::Exit => {
 				tracing::info!("leaving the event loop");
 				event_loop.exit();
@@ -485,6 +554,7 @@ impl ApplicationHandler for App {
 	}
 
 	fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+		let _busy = ui_busy(&fx_engine::trace::cut(&format!("window {event:?}"), 80));
 		// Pointer input over the viewport goes to the engine, everything else
 		// to the UI (`docs/ARCHITECTURE.md` §2.2, `input.rs`).
 		let was_on_engine = self.input_state.pointer_on_engine();
@@ -549,6 +619,21 @@ impl ApplicationHandler for App {
 	fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
 		event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + IDLE_WAIT));
 	}
+}
+
+/// The shell thread works on something until this is dropped (the flight
+/// recorder's watchdog reports a freeze of the UI thread).
+struct UiBusy;
+
+impl Drop for UiBusy {
+	fn drop(&mut self) {
+		fx_engine::trace::idle(fx_engine::trace::Thread::Ui);
+	}
+}
+
+fn ui_busy(what: &str) -> UiBusy {
+	fx_engine::trace::busy(fx_engine::trace::Thread::Ui, what);
+	UiBusy
 }
 
 /// The OS cursor for an engine cursor shape.

@@ -456,7 +456,8 @@ mod tests {
 		assert!(shape.contains(1.0, 0.01), "just under the top vertex");
 		assert!(!shape.contains(0.05, 0.05), "the box's corner is outside the polygon");
 		assert!(shape.contains(1.0, 1.0), "the centre is inside");
-		assert!(!shape.contains(1.0, 1.99), "a hexagon's bottom edge is above the box's");
+		// A hexagon with a vertex at the top has one at the bottom too.
+		assert!(shape.contains(1.0, 1.99), "just above the bottom vertex");
 	}
 
 	#[test]
@@ -545,7 +546,10 @@ mod tests {
 	fn paints_convert_to_the_units_each_side_needs() {
 		let red = Paint::Solid { rgba: [65_535, 0, 0, 32_768] };
 		assert_eq!(red.rgba(), [65_535, 0, 0, 32_768]);
-		assert_eq!(red.rgba_f32(), [1.0, 0.0, 0.0, 0.5]);
+		// 32 768 / 65 535 is 0.5 within a 16-bit step.
+		let f = red.rgba_f32();
+		assert_eq!(&f[..3], &[1.0, 0.0, 0.0]);
+		assert!((f[3] - 0.5).abs() < 1.0 / 65_535.0, "{f:?}");
 	}
 
 	#[test]

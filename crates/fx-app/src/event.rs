@@ -24,13 +24,24 @@ pub(crate) enum AppEvent {
 	/// File ▸ Place Embedded's choice (M7-T03).
 	PlaceFiles(Vec<std::path::PathBuf>),
 	/// File chosen in the native export dialog, with the Export As options.
-	ExportTo(std::path::PathBuf, Option<fx_engine::ExportChoice>),
+	ExportTo {
+		doc: fx_protocol::DocId,
+		path: std::path::PathBuf,
+		choice: Option<fx_engine::ExportChoice>,
+	},
+	/// Destination chosen for a flight-recorder JSON download.
+	TraceExportTo(std::path::PathBuf),
+	/// The flight-recorder file was written (or failed).
+	TraceExported(Result<std::path::PathBuf, String>),
 	/// File chosen in the native "save as .fxd" dialog (M3-T06).
 	SaveAs { doc: fx_protocol::DocId, path: std::path::PathBuf },
 	/// That dialog was cancelled.
 	SaveCancelled(fx_protocol::DocId),
 	/// The UI failed or crashed; the app cannot continue.
 	UiCrashed,
+	/// The engine or render thread died (`fx_engine::trace::guard`): leave
+	/// the event loop, then report and restart (`crate::crash`).
+	Crashed,
 	/// Leave the event loop and shut down.
 	Exit,
 }

@@ -326,10 +326,9 @@ impl Tool for Lasso {
 		Some(Overlay {
 			items: vec![OverlayItem::Polyline {
 				points,
-				// A freehand path being dragged shows its closing edge, the way
-				// Photoshop's lasso reads while the button is down. The
-				// polygonal path stays open: it is still being clicked out.
-				closed: self.dragging,
+				// Only the path traced so far, open (Rob: the closing edge back to
+				// the start read as clutter); the selection closes it at release.
+				closed: false,
 				style: OverlayStyle::Ants,
 			}],
 		})
@@ -374,7 +373,7 @@ mod tests {
 		}
 		let (points, closed, style) = polyline(tool.overlay().as_ref().expect("a rubber band"));
 		assert_eq!(points.len(), 4);
-		assert!(closed && style == OverlayStyle::Ants, "the lasso shows its closing edge");
+		assert!(!closed && style == OverlayStyle::Ants, "only the traced path shows, open (no closing edge)");
 		let (shape, mode, feather, anti_alias) = selection(f.pointer(&mut tool, PointerKind::Up, 10.0, 60.0, Modifiers::default()));
 		assert_eq!(
 			shape,

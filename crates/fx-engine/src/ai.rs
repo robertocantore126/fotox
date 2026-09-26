@@ -168,6 +168,42 @@ pub fn resize(pixels: &[[f32; 4]], w: usize, h: usize, ow: usize, oh: usize) -> 
 	out
 }
 
+/// Resize the requested canvas rectangle from a mip read whose origin was
+/// rounded outward to whole mip pixels.
+#[allow(clippy::too_many_arguments)]
+fn resize_canvas_rect(
+	pixels: &[[f32; 4]],
+	w: usize,
+	h: usize,
+	read_origin: (i64, i64),
+	step: i64,
+	rect: (i64, i64, i64, i64),
+	ow: usize,
+	oh: usize,
+) -> Vec<[f32; 4]> {
+	let mut out = vec![[0.0; 4]; ow * oh];
+	if w == 0 || h == 0 || ow == 0 || oh == 0 || step <= 0 {
+		return out;
+	}
+	let (rw, rh) = ((rect.2 - rect.0) as f64, (rect.3 - rect.1) as f64);
+	for y in 0..oh {
+		let doc_y = rect.1 as f64 + (y as f64 + 0.5) * rh / oh as f64;
+		let fy = (doc_y / step as f64 - 0.5 - read_origin.1 as f64).clamp(0.0, (h - 1) as f64);
+		let (y0, ty) = (fy.floor() as usize, (fy - fy.floor()) as f32);
+		let y1 = (y0 + 1).min(h - 1);
+		for x in 0..ow {
+			let doc_x = rect.0 as f64 + (x as f64 + 0.5) * rw / ow as f64;
+			let fx = (doc_x / step as f64 - 0.5 - read_origin.0 as f64).clamp(0.0, (w - 1) as f64);
+			let (x0, tx) = (fx.floor() as usize, (fx - fx.floor()) as f32);
+			let x1 = (x0 + 1).min(w - 1);
+			let (a, b, c, d) = (pixels[y0 * w + x0], pixels[y0 * w + x1], pixels[y1 * w + x0], pixels[y1 * w + x1]);
+			out[y * ow + x] =
+				[0, 1, 2, 3].map(|channel| (a[channel] * (1.0 - tx) + b[channel] * tx) * (1.0 - ty) + (c[channel] * (1.0 - tx) + d[channel] * tx) * ty);
+		}
+	}
+	out
+}
+
 /// Reads a selection's coverage at canvas points in increasing rows, keeping
 /// one row of tiles (never the whole selection).
 pub struct CoverageReader<'a> {
@@ -401,7 +437,16 @@ pub fn generative_input(
 		(rect.3 + step - 1).div_euclid(step),
 	);
 	let read = composite_rect(doc, store, level, lr)?;
-	let pixels = resize(&read, (lr.2 - lr.0) as usize, (lr.3 - lr.1) as usize, ow as usize, oh as usize);
+	let pixels = resize_canvas_rect(
+		&read,
+		(lr.2 - lr.0) as usize,
+		(lr.3 - lr.1) as usize,
+		(lr.0, lr.1),
+		step,
+		rect,
+		ow as usize,
+		oh as usize,
+	);
 	let mut rgba = Vec::with_capacity(pixels.len() * 4);
 	let mut values = Vec::with_capacity(pixels.len());
 	for y in 0..oh {
@@ -429,4 +474,17 @@ pub fn generative_input(
 			refine_radius: 0.0,
 		}),
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn generative_fill_resampling_accounts_for_outward_rounded_mip_origin() {
+		let pixels: Vec<[f32; 4]> = [10.0, 20.0, 30.0, 40.0].into_iter().map(|value| [value; 4]).collect();
+		let resized = resize_canvas_rect(&pixels, 4, 1, (1, 0), 4, (5, 0, 13, 4), 2, 1);
+		assert!((resized[0][0] - 12.5).abs() < 0.001);
+		assert!((resized[1][0] - 22.5).abs() < 0.001);
+	}
 }

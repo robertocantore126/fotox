@@ -187,6 +187,24 @@ mod tests {
 		assert!(ensure_mip(&mut image, &store, top, 0, 0).unwrap().is_empty());
 	}
 
+	/// Levels added past the image's own top (a paste smaller than the
+	/// canvas) are derived like any mip: the content shrinks, it does not vanish.
+	#[test]
+	fn levels_added_for_the_canvas_are_derived_from_the_image() {
+		let store = store();
+		let mut image = TiledImage::new(300, 300, PixelFormat::Rgba16);
+		image.put_buffer(&store, 0, 0, noise(7));
+		assert_eq!(image.level_count(), 2);
+		image.ensure_levels(5);
+		for level in 2..5 {
+			assert!(image.is_dirty(level, 0, 0), "level {level} starts dirty");
+		}
+		let top = ensure_mip(&mut image, &store, 4, 0, 0).unwrap();
+		assert!(matches!(top, TileSlot::Data(_)), "the paste shows at level 4: {top:?}");
+		ensure_all_mips(&mut image, &store).unwrap();
+		assert!((1..5).all(|level| !image.is_dirty(level, 0, 0)));
+	}
+
 	#[test]
 	fn solid_level_zero_gives_solid_mips_without_pixel_work() {
 		let store = store();

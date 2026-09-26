@@ -88,9 +88,9 @@ impl SourceTiles for FilteredTiles {
 			for x in 0..side as i64 {
 				let cx = (i64::from(tx) * tile + x - RADIUS).clamp(0, cw - 1);
 				let key = (cx / tile, cy / tile);
-				if !parts.contains_key(&key) {
+				if let std::collections::hash_map::Entry::Vacant(e) = parts.entry(key) {
 					let t = self.inner_tile(key.0, key.1)?;
-					parts.insert(key, t);
+					e.insert(t);
 				}
 				if let Some(t) = &parts[&key] {
 					apron[y as usize * side + x as usize] = t[((cy % tile) * tile + cx % tile) as usize];

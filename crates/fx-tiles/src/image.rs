@@ -103,6 +103,18 @@ pub struct TiledImage {
 	derived: bool,
 }
 
+/// Levels of a `width` × `height` image's own pyramid: down to the first
+/// level that fits in one tile.
+pub fn level_count_for(width: u32, height: u32) -> usize {
+	let (mut w, mut h, mut levels) = (width, height, 1);
+	while w > TILE_SIZE || h > TILE_SIZE {
+		w = w.div_ceil(2);
+		h = h.div_ceil(2);
+		levels += 1;
+	}
+	levels
+}
+
 /// Number of tiles needed to cover `pixels`.
 fn tiles_for(pixels: u32) -> u32 {
 	pixels.div_ceil(TILE_SIZE).max(1)
@@ -198,6 +210,23 @@ impl TiledImage {
 
 	pub fn level_count(&self) -> usize {
 		self.levels.len()
+	}
+
+	/// Grow the pyramid to at least `count` levels. A layer smaller than its
+	/// document (a paste, a placed file) has fewer levels of its own than the
+	/// document, but the compositor reads every layer at the document's level;
+	/// the extra levels are one tile each and start dirty, derived from the
+	/// level below like any mip.
+	pub fn ensure_levels(&mut self, count: usize) {
+		while self.levels.len() < count {
+			self.levels.push(TileGrid::new(1, 1, true));
+		}
+	}
+
+	/// Levels of the image's own pyramid, without any
+	/// [`ensure_levels`](Self::ensure_levels) extension.
+	pub fn natural_level_count(&self) -> usize {
+		level_count_for(self.width, self.height)
 	}
 
 	/// Pixel size of a mip level (rounded up).
@@ -361,6 +390,12 @@ mod tests {
 	#[test]
 	fn a_rectangle_spanning_tiles_marks_them_all() {
 		let mut img = TiledImage::derived(1024, 768, PixelFormat::Rgba8);
+		// A derived image starts all dirty: clean it first (as the test above).
+		for ty in 0..img.grid(0).rows() {
+			for tx in 0..img.grid(0).cols() {
+				img.set_derived_slot(0, tx, ty, TileSlot::Empty);
+			}
+		}
 		// A tall box one tile wide: x 300..400 is column 1, y 300..700 is rows
 		// 1 and 2 (tile boundaries are at 256, 512 and 768).
 		img.mark_rect_dirty([300.0, 300.0, 400.0, 700.0]);

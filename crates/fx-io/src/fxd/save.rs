@@ -18,7 +18,7 @@ use fx_core::{Document, Layer, LayerKind};
 use fx_tiles::{Backed, PixelFormat, TileError, TileHandle, TileSlot, TileStore, TiledImage};
 use rayon::prelude::*;
 
-use super::container::{ChunkRef, Codec, FOOTER_LEN, FxdFile, FxdWriter, HEADER_LEN};
+use super::container::{ChunkRef, Codec, FOOTER_LEN, FxdFile, FxdWriter, HEADER_LEN, PathWriteLock};
 use super::manifest;
 use crate::{IoError, Progress};
 
@@ -72,6 +72,10 @@ pub struct SaveRequest<'a> {
 /// readable.
 pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>) -> Result<SavedFxd, IoError> {
 	let started = Instant::now();
+	let _fresh_path_lock = match &target {
+		SaveTarget::Fresh(path) => Some(PathWriteLock::acquire(path)),
+		SaveTarget::Incremental(_) => None,
+	};
 	let tiles = collect_tiles(request.doc, request.preview);
 	let mut refs: HashMap<u64, ChunkRef> = HashMap::new();
 	let mut written: Vec<(TileHandle, ChunkRef)> = Vec::new();
@@ -237,9 +241,10 @@ fn collect_tiles(doc: &Document, preview: Option<&TiledImage>) -> Vec<CollectedT
 	out
 }
 
-/// Levels a save stores: level 0 and the derived levels ≥ 3 (D-026).
+/// Levels a save stores: level 0 and the derived levels ≥ 3 (D-026), of the
+/// image's own pyramid (levels added to match the canvas are rebuilt on open).
 pub(crate) fn stored_levels(image: &TiledImage) -> impl Iterator<Item = usize> + '_ {
-	(0..image.level_count()).filter(|&level| level == 0 || level >= 3)
+	(0..image.natural_level_count()).filter(|&level| level == 0 || level >= 3)
 }
 
 /// Every `TiledImage` of a document (layer pixels and masks).
@@ -435,6 +440,62 @@ mod tests {
 		assert_eq!(restored.layer(LayerId(1)).unwrap().opacity, 0.25);
 		assert_eq!(store_get(&restored, &store), store_get(&doc, &store));
 		assert!(second.file.footer().end_offset > first.file.footer().end_offset);
+	}
+
+	#[test]
+	fn stale_file_handles_append_after_the_latest_footer() {
+		let store = store();
+		let mut doc = document(&store, 1234);
+		let path = path("stale-footer.fxd");
+		let first = save(
+			SaveRequest {
+				doc: &doc,
+				store: &store,
+				preview: None,
+			},
+			SaveTarget::Fresh(path.clone()),
+			&mut |_| true,
+		)
+		.unwrap();
+		let stale = first.file.clone();
+
+		doc.layer_mut(LayerId(1)).unwrap().opacity = 0.25;
+		save(
+			SaveRequest {
+				doc: &doc,
+				store: &store,
+				preview: None,
+			},
+			SaveTarget::Incremental(stale.clone()),
+			&mut |_| true,
+		)
+		.unwrap();
+
+		// This handle still carries the first footer. The writer must discover
+		// the second save's footer after acquiring the path lease.
+		doc.layer_mut(LayerId(1)).unwrap().opacity = 0.75;
+		save(
+			SaveRequest {
+				doc: &doc,
+				store: &store,
+				preview: None,
+			},
+			SaveTarget::Incremental(stale),
+			&mut |_| true,
+		)
+		.unwrap();
+
+		let (file, _) = FxdFile::open(&path).unwrap();
+		let footer = file.footer();
+		let (_, payload) = file
+			.read_chunk(ChunkRef {
+				offset: footer.manifest_offset,
+				len: footer.manifest_len,
+			})
+			.unwrap();
+		let manifest = manifest::decode_manifest(&payload).unwrap();
+		let restored = manifest::from_manifest(&manifest, &file, &store).unwrap();
+		assert_eq!(restored.layer(LayerId(1)).unwrap().opacity, 0.75);
 	}
 
 	#[test]

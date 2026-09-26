@@ -23,6 +23,9 @@ pub struct OpenDoc {
 	pub history: History,
 	pub view: ViewState,
 	pub dirty: bool,
+	/// A save worker owns a snapshot of this document. A second save must not
+	/// start until its completion is applied, or two snapshots can race.
+	pub saving: bool,
 	/// Bumped by every content change (command, undo, redo). The render
 	/// thread keys its caches on it: `Document::revision` is not unique
 	/// because undo winds it back.
@@ -111,6 +114,7 @@ impl OpenDoc {
 			history: History::default(),
 			view,
 			dirty: false,
+			saving: false,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -140,6 +144,7 @@ impl OpenDoc {
 			history: History::default(),
 			view,
 			dirty: false,
+			saving: false,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -207,6 +212,7 @@ impl OpenDoc {
 			history: History::default(),
 			view,
 			dirty: false,
+			saving: false,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -232,6 +238,9 @@ impl OpenDoc {
 		match &self.snapshot {
 			Some(s) if self.snapshot_key == key && !self.snapshot_stale => s.clone(),
 			_ => {
+				// Every layer at least as many levels as the frame can ask for
+				// (commands and `add` already do it; this catches any other path).
+				self.doc.fit_levels();
 				let mut doc = self.doc.clone();
 				// A filter preview replaces the layer's pixels on screen only.
 				if let Some(preview) = &self.preview
@@ -244,6 +253,7 @@ impl OpenDoc {
 				if let Some(preview) = &self.transform_preview {
 					preview.apply(&mut doc);
 				}
+				doc.fit_levels();
 				let s = Arc::new(doc);
 				self.snapshot = Some(s.clone());
 				self.snapshot_key = key;
@@ -363,7 +373,10 @@ impl Documents {
 		DocId(self.next_id)
 	}
 
-	pub fn add(&mut self, doc: OpenDoc) {
+	pub fn add(&mut self, mut doc: OpenDoc) {
+		// A file's layers can be smaller than its canvas (a PSD's, a pasted
+		// layer saved in an .fxd): give them the canvas's mip levels.
+		doc.doc.fit_levels();
 		self.active = Some(doc.id);
 		self.docs.push(doc);
 	}

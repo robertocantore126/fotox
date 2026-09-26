@@ -10,3 +10,6 @@ publish.workspace = true
 fx-tiles = { workspace = true }
 fx-core = { workspace = true }
 rayon = { workspace = true }
+
+[lints]
+workspace = true

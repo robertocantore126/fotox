@@ -19,9 +19,25 @@ use rayon::prelude::*;
 static FONTS: LazyLock<Mutex<Fonts>> = LazyLock::new(|| Mutex::new(Fonts::new()));
 static LAYOUTS: LazyLock<Mutex<HashMap<LayerId, (TextContent, f32, Arc<TextLayout>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// The system's font families, for the Type option bar.
+static FAMILIES: std::sync::OnceLock<Vec<FontEntry>> = std::sync::OnceLock::new();
+
+/// The system's font families, for the Type option bar. The first call scans
+/// every installed font (seconds on a debug build): [`warm`] does it at start.
 pub fn families() -> Vec<FontEntry> {
-	FONTS.lock().map(|mut fonts| fonts.families()).unwrap_or_default()
+	FAMILIES
+		.get_or_init(|| FONTS.lock().map(|mut fonts| fonts.families()).unwrap_or_default())
+		.clone()
+}
+
+/// Scan the system fonts on a background thread, so choosing the Type tool
+/// does not stall the engine thread (flight recorder: 2 s on `tool:type`).
+pub fn warm() {
+	let spawned = std::thread::Builder::new().name("fonts".into()).spawn(|| {
+		let _ = families();
+	});
+	if let Err(error) = spawned {
+		tracing::warn!("font scan thread: {error}");
+	}
 }
 
 /// The layout of `content` at `ppi`, from the cache when the content is the

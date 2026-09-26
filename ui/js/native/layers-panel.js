@@ -16,6 +16,7 @@ import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
 import { pickFile } from "./brush-settings.js";
+import { openMenuPopup } from "../menu.js";
 
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
@@ -110,6 +111,7 @@ let layers = [];         // LayerInfo[] of the active document, top → bottom
 let tree = [];           // per row: { parent, index (bottom = 0), count }
 const collapsed = new Map(); // "doc:layer" → true when a group is collapsed in the panel
 const thumbs = new Map();    // "doc:layer" → data URL
+const thumbStamps = new Map(); // "doc:layer" → the shown thumbnail's `revision`
 const requested = new Set(); // "doc:layer" thumbnails already asked for
 let anchor = null;       // shift-click range anchor (layer id)
 let history = null;      // last `history` message of the active document
@@ -162,8 +164,19 @@ export function initNativePanels() {
       renderHistory();
     }
   });
-  bridge.on(ENGINE.DOCUMENT_CLOSED, ({ doc: id }) => histories.delete(id));
+  // A closed document's rows go: thumbnails, requests, stamps, folds.
+  bridge.on(ENGINE.DOCUMENT_CLOSED, ({ doc: id }) => {
+    histories.delete(id);
+    historySource.delete(id);
+    const prefix = `${id}:`;
+    for (const map of [thumbs, thumbStamps, collapsed]) for (const key of [...map.keys()]) if (key.startsWith(prefix)) map.delete(key);
+    for (const key of [...requested]) if (key.startsWith(prefix)) requested.delete(key);
+  });
   bridge.on(ENGINE.THUMBNAIL, (msg, payload) => {
+    // Renders finish in any order: keep the newest (`revision` only grows).
+    const key = `${msg.doc}:${msg.layer}`;
+    if ((thumbStamps.get(key) ?? -1) > msg.revision) return;
+    thumbStamps.set(key, msg.revision);
     const canvas = document.createElement("canvas");
     canvas.width = msg.width;
     canvas.height = msg.height;
@@ -469,6 +482,7 @@ function row(i, v) {
     l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
 
   el.addEventListener("click", (e) => select(l, e));
+  el.addEventListener("contextmenu", (e) => layerContextMenu(l, e));
   el.addEventListener("dragstart", (e) => { dragId = l.id; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(l.id)); });
   el.addEventListener("dragend", () => { dragId = null; clearDropMarks(); });
   el.addEventListener("dragover", (e) => {
@@ -487,6 +501,55 @@ function row(i, v) {
     dragId = null;
   });
   return el;
+}
+
+/** A fixed 1 px element at the pointer, for the context menu to open from. */
+let contextAnchor = null;
+
+/**
+ * Right-click on a layer row: Photoshop's layer context menu. The row is
+ * selected first (unless it already is, so a multi-selection survives), then
+ * the menu runs the same actions as the Layer menu; what the engine does not
+ * implement yet is greyed out by the menu itself.
+ */
+function layerContextMenu(l, e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (!l.selected) select(l, { shiftKey: false, ctrlKey: false, metaKey: false });
+  if (!contextAnchor) {
+    contextAnchor = h("div", { style: { position: "fixed", width: "1px", height: "1px", pointerEvents: "none" } });
+    document.body.append(contextAnchor);
+  }
+  contextAnchor.style.left = e.clientX + "px";
+  contextAnchor.style.top = e.clientY + "px";
+  const item = (label, a, o = {}) => ({ label, a, ...o });
+  const sep = { sep: true };
+  const pixel = l.kind === "pixel";
+  const items = [
+    item("Blending Options...", "dlg:blending-options"),
+    sep,
+    item("Duplicate Layer", "layer:duplicate"),
+    item("Delete Layer", "layer:delete"),
+    item("Group from Layers", "layer:group"),
+    sep,
+    item("Convert to Smart Object", "smart:convert", { dis: l.kind === "smart" }),
+    item("Rasterize Layer", "raster:layer", { dis: pixel || l.kind === "group" || l.kind === "adjustment" }),
+    sep,
+    item(l.has_mask ? "Delete Layer Mask" : "Add Layer Mask", l.has_mask ? "mask:delete" : "mask:reveal-all"),
+    item("Apply Layer Mask", "mask:apply", { dis: !l.has_mask || !pixel }),
+    item("Disable / Enable Layer Mask", "mask:disable", { dis: !l.has_mask }),
+    sep,
+    item(l.clipped ? "Release Clipping Mask" : "Create Clipping Mask", "layer:clip"),
+    sep,
+    item("Copy Layer Style", "layer:copy-style"),
+    item("Paste Layer Style", "layer:paste-style"),
+    item("Clear Layer Style", "layer:clear-style"),
+    sep,
+    item("Merge Down", "layer:merge"),
+    item("Merge Visible", "layer:merge-visible"),
+    item("Flatten Image", "layer:flatten"),
+  ];
+  openMenuPopup(contextAnchor, items);
 }
 
 function select(l, e) {

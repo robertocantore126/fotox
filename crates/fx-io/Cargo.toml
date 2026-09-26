@@ -25,3 +25,6 @@ lz4_flex = { workspace = true }
 # .fxd manifest model (M3-T02): versioned serde JSON, zstd-compressed
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -40,6 +40,21 @@ rust-version = "1.88"
 authors = ["Rob"]
 publish = false
 
+# Clippy policy (HARDEN H1): `cargo clippy --all-targets -- -D warnings` is
+# green with these three style lints allowed, for reasons, not to hide bugs:
+# * large_enum_variant — `Command`, `LayerKind` and the protocol messages are
+#   plain data enums moved a few times per edit; boxing variants would churn
+#   every constructor for no measured gain;
+# * type_complexity — tile maps like `HashMap<(u32, u32), Arc<Vec<[f32; 4]>>>`
+#   read clearer spelled out than behind an alias used once;
+# * needless_range_loop — pixel loops index several buffers by the same
+#   coordinate; the index form is the readable one there.
+# The vendored Graphite crates do not opt in (`[lints] workspace = true`).
+[workspace.lints.clippy]
+large_enum_variant = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+
 # ---------------------------------------------------------------------------
 # APPROVED DEPENDENCIES. Crates may only use dependencies listed here
 # (`foo = { workspace = true }`). Adding a new one is a decision: record it in

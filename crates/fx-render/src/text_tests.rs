@@ -84,8 +84,13 @@ fn a_layout_shapes_the_text_and_reports_where_it_is() {
 	assert!(width > 0.0 && height > 0.0, "a laid-out line has a size: {width} × {height}");
 	let ink = layout.ink_box().expect("the line has a box");
 	assert!(ink.w > 0.0 && ink.h > 0.0, "and it covers the text: {ink:?}");
-	// The frame's origin is the first baseline, so the block sits above it.
-	assert!(ink.y < 50.0 && ink.y + ink.h > 40.0, "the baseline is at y = 50: {ink:?}");
+	// Layouts report frame space (the layer's matrix places it at (100, 50)):
+	// the origin is the first baseline, so the block sits above y = 0 and only
+	// the descenders go below it.
+	assert!(
+		ink.y < 0.0 && ink.y + ink.h > 0.0 && ink.y + ink.h < ink.h / 2.0,
+		"the baseline is at y = 0: {ink:?}"
+	);
 	// A caret is a box at the text's height, and it moves with the index.
 	let first = layout.caret(0);
 	let last = layout.caret(content.text.len());
@@ -161,7 +166,7 @@ fn an_edit_knows_which_lines_it_changed() {
 	content.text = "one\ntwo!\nthree".into();
 	content.runs[0].range = (0, content.text.len());
 	let after = layout_of(&mut fonts, &content, 72.0);
-	let changed = before.box_for_range((4, 4)).zip(after.box_for_range((4, 5))).map(|(old, new)| (old, new));
+	let changed = before.box_for_range((4, 4)).zip(after.box_for_range((4, 5)));
 	let (old, new) = changed.expect("the second line has a box in both layouts");
 	assert!((old.y - new.y).abs() < 1e-9, "the line did not move: {old:?} {new:?}");
 	assert!(old.y > 0.0, "and it is not the first line");
@@ -251,4 +256,51 @@ fn a_turning_layer_matrix_turns_the_text() {
 	let turned = render_text_tile(&layout, turned, 0, (0, 0), format, TextAntialias::Smooth);
 	assert!(any_ink(&upright) && any_ink(&turned), "the glyph is drawn in both");
 	assert!(upright.as_u16() != turned.as_u16(), "and not in the same pixels");
+}
+
+/// HARDEN: glyphs were drawn upside down (font outlines are y-up). A "T" set
+/// on a baseline must have its bar at the top: the rows just under the cap
+/// height hold far more ink than the rows just above the baseline (the stem).
+#[test]
+fn glyphs_are_drawn_upright() {
+	let (mut fonts, _) = stack!();
+	// Arial when the machine has it (the fallback otherwise): a plain "T".
+	let content = point_text("T", "Arial", 120.0, 0.0, 0.0);
+	let layout = layout_of(&mut fonts, &content, 72.0);
+	// Baseline at y = 200 in the tile, the T to the right of x = 40.
+	let tile = render_text_tile(
+		&layout,
+		[1.0, 0.0, 0.0, 1.0, 40.0, 200.0],
+		0,
+		(0, 0),
+		PixelFormat::Rgba16,
+		TextAntialias::Smooth,
+	);
+	let words = tile.as_u16();
+	let row_ink = |y: u32| (0..256u32).filter(|x| words[((y * 256 + x) * 4 + 3) as usize] > 32768).count();
+	// The first inked row is the top of the glyph.
+	let top = (0..200).find(|y| row_ink(*y) > 0).expect("the T is drawn above its baseline");
+	let (upper, lower): (usize, usize) = ((top + 4..top + 12).map(row_ink).sum(), (192..200).map(row_ink).sum());
+	assert!(
+		upper > 2 * lower,
+		"the bar is at the top: {upper} ink px under the cap height, {lower} over the baseline"
+	);
+}
+
+/// HARDEN: text in a tile other than (0, 0) at level 1 was drawn at the wrong
+/// place (the same doubled-offset bug as shapes), repeated across tiles.
+#[test]
+fn text_lands_in_the_right_tile_at_level_one() {
+	let (mut fonts, _) = stack!();
+	let content = point_text("H", "Arial", 100.0, 0.0, 0.0);
+	let layout = layout_of(&mut fonts, &content, 72.0);
+	// Baseline at document (700, 300): level-1 pixels (350, 150), tile (1, 0),
+	// local x from about 94.
+	let transform = [1.0, 0.0, 0.0, 1.0, 700.0, 300.0];
+	let right = render_text_tile(&layout, transform, 1, (1, 0), PixelFormat::Rgba16, TextAntialias::Smooth);
+	let left = render_text_tile(&layout, transform, 1, (0, 0), PixelFormat::Rgba16, TextAntialias::Smooth);
+	let inked = |b: &fx_tiles::TileBuffer, x0: u32, x1: u32| (x0..x1).any(|x| (100..150).any(|y| b.as_u16()[((y * 256 + x) * 4 + 3) as usize] > 32768));
+	assert!(inked(&right, 90, 140), "the H is in tile (1, 0) near x = 94");
+	assert!(!inked(&right, 0, 80), "not to its left in that tile");
+	assert!(!any_ink(&left), "and not in tile (0, 0)");
 }

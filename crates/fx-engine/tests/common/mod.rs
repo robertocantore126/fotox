@@ -30,6 +30,8 @@ pub enum Seen {
 	/// The cursor the engine asked the shell for (M5-T04: the marquee tools'
 	/// crosshair, taken over from the view's plain-hover default).
 	Cursor(fx_engine::CursorShape),
+	/// The render thread delivered a viewport frame.
+	Frame,
 }
 
 pub struct Harness {
@@ -58,6 +60,7 @@ impl Harness {
 				EngineOutput::NeedSavePath { doc, .. } => Seen::NeedSavePath(doc),
 				EngineOutput::MayClose(may) => Seen::MayClose(may),
 				EngineOutput::Cursor(shape) => Seen::Cursor(shape),
+				EngineOutput::ViewportFrame(_) => Seen::Frame,
 				_ => return,
 			};
 			sink.lock().unwrap().push(item);

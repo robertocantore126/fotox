@@ -400,6 +400,11 @@ pub struct Tools {
 }
 
 impl Tools {
+	/// Drop transient tool state when the active document changes.
+	pub fn clear(&mut self) {
+		self.active.clear();
+	}
+
 	/// The tool for `id`, created on first use. `None` for a tool id M5 does
 	/// not implement yet: the view still pans and zooms, the pointer is just
 	/// ignored.

@@ -172,8 +172,7 @@ pub(super) fn selection_to_path(doc: &mut Document, tolerance: f64, ctx: &Comman
 	while let Some(&start) = next.keys().next() {
 		let mut loop_pts = vec![start];
 		let mut p = start;
-		loop {
-			let Some(list) = next.get_mut(&p) else { break };
+		while let Some(list) = next.get_mut(&p) {
 			let q = list.pop().expect("lists are never left empty");
 			if list.is_empty() {
 				next.remove(&p);

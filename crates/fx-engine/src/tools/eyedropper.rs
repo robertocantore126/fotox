@@ -21,7 +21,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 /// The options the eyedropper reads from its option bar (M5-T01/T09).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Options {
-	/// 1, 3 or 5: average over an `area × area` square centred on the point.
+	/// 1, 3, 5, 11 or 51: average over an `area × area` square centred on the point.
 	area: u32,
 	/// Sample the active layer alone instead of the composite of all layers.
 	current_layer: bool,
@@ -32,6 +32,8 @@ impl Options {
 		let area = match ctx.settings.string("eyedropper", "Sample Size").as_deref() {
 			Some("3 by 3 Average") => 3,
 			Some("5 by 5 Average") => 5,
+			Some("11 by 11 Average") => 11,
+			Some("51 by 51 Average") => 51,
 			_ => 1,
 		};
 		let current_layer = ctx.settings.string("eyedropper", "Sample").as_deref() == Some("Current Layer");
@@ -263,5 +265,36 @@ mod tests {
 		assert!(sample_pixel(&doc, -1.0, 10.0, 1, None, &store).is_err());
 		assert!(sample_pixel(&doc, 10.0, 300.0, 1, None, &store).is_err());
 		assert!(sample_pixel(&doc, 399.0, 299.0, 1, None, &store).is_ok());
+	}
+
+	/// BUGHUNT B-03: the eyebrow's option bar offers five Sample Sizes
+	/// (`ui/js/data/options.js`, `eyedropper`), Photoshop's set — "Point
+	/// Sample", "3 by 3 Average", "5 by 5 Average", "11 by 11 Average",
+	/// "51 by 51 Average" — but [`Options::from`] only knows the 3 and 5 cases,
+	/// so the two larger choices silently fall through to `_ => 1` and sample a
+	/// single pixel. The sampler tool's reader (`engine/m9.rs`) handles 11 and
+	/// 51; this test guards both readers from drifting apart again.
+	#[test]
+	fn the_samples_sizes_the_option_bar_offers_are_the_ones_the_reader_knows() {
+		use crate::tools::testing::Fixture;
+		for (label, area) in [
+			("Point Sample", 1),
+			("3 by 3 Average", 3),
+			("5 by 5 Average", 5),
+			("11 by 11 Average", 11),
+			("51 by 51 Average", 51),
+		] {
+			let mut f = Fixture::new("eyedropper-bughunt", (64, 64), 1.0);
+			f.options("eyedropper", serde_json::json!({ "Sample Size": label }));
+			let ctx = ToolContext {
+				doc: &mut f.doc,
+				store: &f.store,
+				ops: &f.ops,
+				settings: &f.settings,
+				view: f.view,
+				mask_target: false,
+			};
+			assert_eq!(Options::from(&ctx).area, area, "Sample Size {label:?}");
+		}
 	}
 }

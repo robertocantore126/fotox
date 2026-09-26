@@ -39,6 +39,9 @@ pub struct FramePlan {
 	pub complete: bool,
 	/// Document rectangle on screen (for the transparency checkerboard).
 	pub doc_rect: [f32; 4],
+	/// Visible target tiles drawn with nothing at all (no tile, no fallback):
+	/// the background shows there. A frame after an edit should have none.
+	pub holes: usize,
 }
 
 /// How many levels above the target level are always kept composited as a
@@ -100,6 +103,7 @@ pub fn plan_frame(
 		plan.complete = false;
 		plan.requests.push(key);
 		// Nearest ready ancestor, drawn as the matching sub-rectangle.
+		let mut covered = false;
 		for up in 1..level_count - level {
 			let parent = TileKey {
 				level: level + up,
@@ -115,8 +119,12 @@ pub fn plan_frame(
 					dst,
 					level: parent.level,
 				});
+				covered = true;
 				break;
 			}
+		}
+		if !covered {
+			plan.holes += 1;
 		}
 	}
 	// Coverage level: cheap, keeps something on screen during fast pans/zooms.

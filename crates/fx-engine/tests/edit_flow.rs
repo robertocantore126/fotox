@@ -158,3 +158,36 @@ fn painting_with_the_brush_eraser_and_on_a_mask_records_strokes() {
 	});
 	harness.engine.shutdown();
 }
+
+#[test]
+fn switching_tools_mid_stroke_ends_the_gesture_and_hover_does_not_paint() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-tool-switch-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+	action(&harness, "tool:brush", serde_json::Value::Null);
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Down, 200.0, 200.0, 1)));
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Move, 220.0, 210.0, 1)));
+	action(&harness, "tool:eyedropper", serde_json::Value::Null);
+	let first = harness.wait("the interrupted brush stroke", |s| match s {
+		Seen::Ui(EngineToUi::History { doc: d, labels, current, .. }) if *d == doc && *current == 1 => Some(labels.clone()),
+		_ => None,
+	});
+	assert_eq!(first.last().map(String::as_str), Some("Brush Tool"));
+
+	action(&harness, "tool:brush", serde_json::Value::Null);
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Move, 280.0, 230.0, 0)));
+	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 280.0, 230.0, 0)));
+	harness.ui(UiToEngine::Undo { doc });
+	let (_, current) = harness.wait("one undo to remove the one real gesture", |s| match s {
+		Seen::Ui(EngineToUi::History { doc: d, labels, current, .. }) if *d == doc && !labels.is_empty() => Some((labels.clone(), *current)),
+		_ => None,
+	});
+	assert_eq!(current, 0, "hover after switching back did not create a second stroke");
+	harness.engine.shutdown();
+}

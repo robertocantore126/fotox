@@ -50,23 +50,25 @@ impl PixelOps for EngineOps {
 		let done = AtomicUsize::new(0);
 		let total = tiles.len().max(1);
 		let source = ImageSource { image: &source_image, store };
-		let results: Vec<Result<FilteredTile, TileError>> = tiles
-			.par_iter()
-			.map(|&(tx, ty)| {
-				let tile = filter::filter_tile(&source, &geometry, filter, 0, tx, ty)?;
-				let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-				if let Some(progress) = &self.progress
-					&& (n * 100 / total) != ((n - 1) * 100 / total)
-				{
-					progress(n as f32 / total as f32);
-				}
-				Ok(((tx, ty), tile))
-			})
-			.collect();
 		let mut out = image.clone();
-		for result in results {
-			let ((tx, ty), tile) = result?;
-			out.put_buffer(store, tx, ty, tile);
+		for batch in tiles.chunks(RESAMPLE_BATCH) {
+			let results: Vec<Result<FilteredTile, TileError>> = batch
+				.par_iter()
+				.map(|&(tx, ty)| {
+					let tile = filter::filter_tile(&source, &geometry, filter, 0, tx, ty)?;
+					let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+					if let Some(progress) = &self.progress
+						&& (n * 100 / total) != ((n - 1) * 100 / total)
+					{
+						progress(n as f32 / total as f32);
+					}
+					Ok(((tx, ty), tile))
+				})
+				.collect();
+			for result in results {
+				let ((tx, ty), tile) = result?;
+				out.put_buffer(store, tx, ty, tile);
+			}
 		}
 		Ok(out)
 	}
