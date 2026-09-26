@@ -24,6 +24,13 @@ use rayon::prelude::*;
 
 use super::heal;
 use super::path::{Dab, DabPath};
+
+/// The healing tools solve their blend in blocks of at most this many pixels
+/// per side (plus the overlap), so a long stroke never allocates buffers the
+/// size of its whole bounding box (HARDEN W4).
+const HEAL_BLOCK: i64 = 1024;
+/// Context each block reads around its core, pixels.
+const HEAL_OVERLAP: i64 = 64;
 use super::tip::Tip;
 
 /// A layer tile a batch of dabs changed, and its new pixels.
@@ -371,17 +378,25 @@ impl Stroke {
 				lx1 + i64::from(self.offset.0),
 				ly1 + i64::from(self.offset.1),
 			];
+			// A source tile that cannot be read fails the stroke (HARDEN W3): read
+			// as transparent, it would erase the destination under the clone.
+			let failed: std::cell::RefCell<Option<TileError>> = std::cell::RefCell::new(None);
 			let source = |x: i64, y: i64| -> [f32; 4] {
 				if self.source.is_none() || x < 0 || y < 0 || x >= i64::from(self.canvas.0) || y >= i64::from(self.canvas.1) {
 					return [0.0; 4];
 				}
-				// FAST: a tile read error reads as transparent.
 				match self.source_tile((x / tile) as u32, (y / tile) as u32) {
 					Ok(t) => t[((y % tile) * tile + x % tile) as usize],
-					Err(_) => [0.0; 4],
+					Err(error) => {
+						failed.borrow_mut().get_or_insert(error);
+						[0.0; 4]
+					}
 				}
 			};
 			sequence.dab(dab, rect, &mut pixels, &coverage, &source, &ctx);
+			if let Some(error) = failed.into_inner() {
+				return Err(error);
+			}
 			for y in 0..h {
 				for x in 0..w {
 					let (lx, ly) = (lx0 + x as i64, ly0 + y as i64);
@@ -559,7 +574,49 @@ impl Stroke {
 		let y0 = (b[1] - 2).max(0);
 		let x1 = (b[2] + 2).min(iw - 1);
 		let y1 = (b[3] + 2).min(ih - 1);
+		// A long stroke's bounding box can be most of the document: heal it in
+		// blocks of at most HEAL_BLOCK² with an overlap, each block writing only
+		// its core, so the buffers stay bounded (HARDEN W4, rule 2). Blocks the
+		// stroke does not touch cost nothing.
+		let mut by = y0;
+		while by <= y1 {
+			let cy1 = (by + HEAL_BLOCK - 1).min(y1);
+			let mut bx = x0;
+			while bx <= x1 {
+				let cx1 = (bx + HEAL_BLOCK - 1).min(x1);
+				let window = (
+					(bx - HEAL_OVERLAP).max(x0),
+					(by - HEAL_OVERLAP).max(y0),
+					(cx1 + HEAL_OVERLAP).min(x1),
+					(cy1 + HEAL_OVERLAP).min(y1),
+				);
+				self.heal_window(window, (bx, by, cx1, cy1))?;
+				bx = cx1 + 1;
+			}
+			by = cy1 + 1;
+		}
+		Ok(())
+	}
+
+	/// The healing blend over the layer rectangle `window` (inclusive),
+	/// written back inside `core` only.
+	fn heal_window(&mut self, (x0, y0, x1, y1): (i64, i64, i64, i64), core: (i64, i64, i64, i64)) -> Result<(), TileError> {
+		let tile = i64::from(TILE_SIZE);
 		let (w, h) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+		// Nothing of the stroke in this block's core: skip it.
+		let touched = (core.1.div_euclid(tile)..=core.3.div_euclid(tile)).any(|ty| {
+			(core.0.div_euclid(tile)..=core.2.div_euclid(tile)).any(|tx| {
+				self.tiles.get(&(tx as u32, ty as u32)).is_some_and(|state| {
+					state.coverage.iter().enumerate().any(|(i, s)| {
+						let (x, y) = (tx * tile + i as i64 % tile, ty * tile + i as i64 / tile);
+						*s > 0.0 && x >= core.0 && x <= core.2 && y >= core.1 && y <= core.3
+					})
+				})
+			})
+		});
+		if !touched {
+			return Ok(());
+		}
 		// Gather: coverage, the pixels before (premultiplied).
 		let mut coverage = vec![0.0f32; w * h];
 		let mut before = vec![[0.0f32; 4]; w * h];
@@ -613,6 +670,9 @@ impl Stroke {
 					continue;
 				}
 				let (lx, ly) = (x0 + x as i64, y0 + y as i64);
+				if lx < core.0 || lx > core.2 || ly < core.1 || ly > core.3 {
+					continue;
+				}
 				let key = ((lx / tile) as u32, (ly / tile) as u32);
 				let at = ((ly % tile) * tile + lx % tile) as usize;
 				let mut p = [0.0f64; 4];

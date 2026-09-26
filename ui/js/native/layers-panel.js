@@ -110,6 +110,7 @@ let layers = [];         // LayerInfo[] of the active document, top → bottom
 let tree = [];           // per row: { parent, index (bottom = 0), count }
 const collapsed = new Map(); // "doc:layer" → true when a group is collapsed in the panel
 const thumbs = new Map();    // "doc:layer" → data URL
+const thumbStamps = new Map(); // "doc:layer" → the shown thumbnail's `revision`
 const requested = new Set(); // "doc:layer" thumbnails already asked for
 let anchor = null;       // shift-click range anchor (layer id)
 let history = null;      // last `history` message of the active document
@@ -162,8 +163,19 @@ export function initNativePanels() {
       renderHistory();
     }
   });
-  bridge.on(ENGINE.DOCUMENT_CLOSED, ({ doc: id }) => histories.delete(id));
+  // A closed document's rows go: thumbnails, requests, stamps, folds.
+  bridge.on(ENGINE.DOCUMENT_CLOSED, ({ doc: id }) => {
+    histories.delete(id);
+    historySource.delete(id);
+    const prefix = `${id}:`;
+    for (const map of [thumbs, thumbStamps, collapsed]) for (const key of [...map.keys()]) if (key.startsWith(prefix)) map.delete(key);
+    for (const key of [...requested]) if (key.startsWith(prefix)) requested.delete(key);
+  });
   bridge.on(ENGINE.THUMBNAIL, (msg, payload) => {
+    // Renders finish in any order: keep the newest (`revision` only grows).
+    const key = `${msg.doc}:${msg.layer}`;
+    if ((thumbStamps.get(key) ?? -1) > msg.revision) return;
+    thumbStamps.set(key, msg.revision);
     const canvas = document.createElement("canvas");
     canvas.width = msg.width;
     canvas.height = msg.height;

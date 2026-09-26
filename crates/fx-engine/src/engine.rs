@@ -1103,7 +1103,9 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::RequestThumbnails { doc, layers, size } => {
-				for layer in layers {
+				// Bounded: a thumbnail is `size² × 4` bytes and one job per layer.
+				let size = size.clamp(8, 512);
+				for layer in layers.into_iter().take(4096) {
 					self.thumbs_wanted.insert((doc, layer), size);
 					self.render_thumbnail(doc, layer);
 				}
@@ -1440,6 +1442,7 @@ impl Engine {
 
 	/// Export the active document as a job on a worker thread, with progress.
 	fn export(&mut self, path: PathBuf, choice: Option<crate::ExportChoice>) {
+		self.commit_live_edits();
 		let Some(open) = self.docs.active_mut() else {
 			self.to_ui(&EngineToUi::Toast {
 				text: "Open a document to export it".into(),
@@ -2077,7 +2080,11 @@ impl Engine {
 					};
 					(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &thumb.pixels)));
 				}
-				Err(error) => tracing::warn!("thumbnail of {layer:?} failed: {error}"),
+				// A failed render is not a fresh one: the next edit may retry at once.
+				Err(error) => {
+					tracing::warn!("thumbnail of {layer:?} failed: {error}");
+					self.thumbs_last.remove(&(doc, layer));
+				}
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
 			Internal::Imported { task, path, result, place } => {
@@ -2187,7 +2194,17 @@ impl Engine {
 	}
 
 	/// Close `id`, asking the UI first when it is dirty (M3-T06).
+	/// Finish what is being edited outside the history — the live brush
+	/// stroke, the Type tool's text — so it becomes a History step and marks
+	/// the document dirty. Saving, exporting or closing must see it: a stroke
+	/// in flight is in the pixels but not yet in `dirty` or the history.
+	fn commit_live_edits(&mut self) {
+		self.end_stroke();
+		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+	}
+
 	fn close(&mut self, id: DocId) {
+		self.commit_live_edits();
 		let dirty = self.docs.get_mut(id).is_some_and(|open| open.dirty);
 		if dirty {
 			let name = self.docs.get_mut(id).map_or_else(String::new, |open| open.name.clone());
@@ -2226,6 +2243,7 @@ impl Engine {
 	/// The user asked to close the window: allowed only when nothing is dirty.
 	/// Each dirty document is asked about in turn; Cancel stops the close.
 	fn close_requested(&mut self) {
+		self.commit_live_edits();
 		self.window_close_pending = true;
 		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
 		match dirty {
@@ -2259,6 +2277,7 @@ impl Engine {
 
 	/// Save in place; a document without a file asks the shell for a path.
 	fn save(&mut self, id: DocId) {
+		self.commit_live_edits();
 		let (file, name) = match self.docs.get_mut(id) {
 			Some(open) => (open.file.clone(), open.name.clone()),
 			None => return,
@@ -2281,6 +2300,7 @@ impl Engine {
 	/// is an incremental save: Windows refuses to replace a file that is open,
 	/// and the document's backed tiles keep it open (D-027).
 	fn save_as(&mut self, id: DocId, path: PathBuf) {
+		self.commit_live_edits();
 		let own = self.docs.get_mut(id).and_then(|open| {
 			let same = open.path.as_ref().is_some_and(|p| same_file(p, &path));
 			if same { open.file.clone() } else { None }
@@ -2556,7 +2576,10 @@ impl Engine {
 		let Some(doc) = self.docs.get_mut(id) else { return };
 		let Some(layer) = doc.doc.layer(layer_id) else { return };
 		let Some(source) = ThumbSource::of(&layer.kind) else { return };
-		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.doc.revision);
+		// The stamp is the generation, which only grows: `doc.revision` goes back
+		// on undo. The UI drops a render older than the one it shows (renders
+		// finish in any order on the pool).
+		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.generation);
 		self.thumbs_last.insert((id, layer_id), Instant::now());
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		rayon::spawn(move || {

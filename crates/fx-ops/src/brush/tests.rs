@@ -318,3 +318,49 @@ fn spot_healing_removes_a_dot_on_a_gradient() {
 		.fold(0.0f32, f32::max);
 	assert!(worst < 2.0 / 255.0, "residual {worst}");
 }
+
+/// HARDEN W4: a heal stroke longer than one block is solved block by block
+/// (bounded buffers); both ends still heal, and the seam between blocks does
+/// not show on the gradient.
+#[test]
+fn a_long_spot_heal_stroke_heals_across_blocks() {
+	let store = store();
+	let (w, h) = (1536u32, 64u32);
+	let mut image = TiledImage::new(w, h, PixelFormat::Rgba16);
+	let level = |x: u32| (0.2 + 0.6 * x as f32 / (w - 1) as f32) * 65535.0;
+	let dots = [(100i32, 32i32), (1400, 32)];
+	for tx in 0..w / 256 {
+		let mut buffer = TileBuffer::zeroed(PixelFormat::Rgba16);
+		for y in 0..64u32 {
+			for lx in 0..256u32 {
+				let x = tx * 256 + lx;
+				let dot = dots.iter().any(|(dx, dy)| (x as i32 - dx).pow(2) + (y as i32 - dy).pow(2) <= 16);
+				let v = if dot { 0.0 } else { level(x) };
+				let i = ((y * 256 + lx) * 4) as usize;
+				buffer.as_u16_mut()[i..i + 4].copy_from_slice(&[v as u16, v as u16, v as u16, 65535]);
+			}
+		}
+		image.put_buffer(&store, tx, 0, buffer);
+	}
+	let source: Arc<dyn SourceTiles> = Arc::new(LayerSource {
+		image: image.clone(),
+		offset: (0, 0),
+		store: store.clone(),
+	});
+	let mut s = setup(&image, StrokeTool::SpotHeal, hard(20.0), RED);
+	s.source = Some(source);
+	let samples: Vec<_> = (0..=260).map(|i| sample(100.5 + f64::from(i) * 5.0, 32.5)).collect();
+	let (out, _) = replay(s, &samples, &store).unwrap();
+	for (dx, dy) in dots {
+		let worst = (dy - 6..=dy + 6)
+			.flat_map(|y| (dx - 6..=dx + 6).map(move |x| (x as u32, y as u32)))
+			.map(|(x, y)| (px(&out, &store, x, y)[0] - level(x) / 65535.0).abs())
+			.fold(0.0f32, f32::max);
+		assert!(worst < 4.0 / 255.0, "dot at {dx}: residual {worst}");
+	}
+	// Across the block seam (x = 1124 is inside the second block's core).
+	let seam = (1100..1150u32)
+		.map(|x| (px(&out, &store, x, 32)[0] - level(x) / 65535.0).abs())
+		.fold(0.0f32, f32::max);
+	assert!(seam < 4.0 / 255.0, "seam residual {seam}");
+}

@@ -461,6 +461,17 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	if manifest.version != MANIFEST_VERSION {
 		return Err(IoError::Unsupported(format!("fxd manifest version {}", manifest.version)));
 	}
+	// A zero-sized canvas makes every `clamp(0, side − 1)` in the pixel code
+	// panic (HARDEN W1): refuse it here, at the file boundary.
+	if manifest.width == 0 || manifest.height == 0 {
+		return Err(IoError::Decode(format!("the document is {}×{} px", manifest.width, manifest.height)));
+	}
+	if u64::from(manifest.width) > crate::MAX_SIDE || u64::from(manifest.height) > crate::MAX_SIDE {
+		return Err(IoError::TooLarge {
+			width: manifest.width.into(),
+			height: manifest.height.into(),
+		});
+	}
 	let mut doc = Document::new(manifest.width, manifest.height, manifest.color.clone(), manifest.ppi);
 	let size = (manifest.width, manifest.height);
 	let format = doc.color.depth.rgba_format();
@@ -469,7 +480,21 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 		.iter()
 		.map(|entry| layer_from_entry(entry, file, store, size, format))
 		.collect::<Result<Vec<_>, _>>()?;
-	doc.selected = manifest.selected.clone();
+	// Layer ids must be unique, the id counter past every one of them and the
+	// selection made of layers that exist (HARDEN BUG-3): a wrong counter
+	// would mint an id that is already taken.
+	let mut ids = std::collections::HashSet::new();
+	let mut duplicate = None;
+	doc.walk(|layer, _| {
+		if !ids.insert(layer.id.0) {
+			duplicate = Some(layer.id.0);
+		}
+	});
+	if let Some(id) = duplicate {
+		return Err(IoError::Decode(format!("layer id {id} is used twice")));
+	}
+	doc.selected = manifest.selected.iter().copied().filter(|id| ids.contains(&id.0)).collect();
+	let next_layer_id = manifest.next_layer_id.max(ids.iter().max().map_or(1, |m| m + 1));
 	doc.global_light = manifest.global_light;
 	doc.guides = manifest.guides.clone();
 	doc.patterns = manifest.patterns.clone();
@@ -489,7 +514,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
 		*slot = *value;
 	}
-	Ok(doc.with_id_state(manifest.next_layer_id, counters))
+	Ok(doc.with_id_state(next_layer_id, counters))
 }
 
 fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, size: (u32, u32), format: PixelFormat) -> Result<Arc<Layer>, IoError> {
@@ -984,6 +1009,62 @@ mod tests {
 		let (_, counters) = restored.id_state();
 		assert_eq!(&counters[..9], &[7; 9]);
 		assert!(counters[9..].iter().all(|&c| c == 0));
+	}
+
+	/// A document with two fill layers (ids 1 and 5), as a manifest, and a
+	/// function loading a manifest through an empty `.fxd`.
+	fn two_layer_manifest(tag: &str) -> (Manifest, impl Fn(&Manifest) -> Result<Document, IoError>) {
+		let mut doc = Document::new(
+			8,
+			8,
+			DocumentColor {
+				depth: BitDepth::U8,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		for id in [1, 5] {
+			doc.layers.push(Arc::new(Layer::new(
+				LayerId(id),
+				format!("L{id}"),
+				LayerKind::SolidFill { rgba: [0, 0, 0, 65535] },
+			)));
+		}
+		let manifest = to_manifest(&doc, |_| None);
+		let dir = std::env::temp_dir().join(format!("fx-io-harden-{tag}-{}", std::process::id()));
+		let store = fx_tiles::TileStore::new(fx_tiles::TileStoreConfig::for_tests(dir.clone())).unwrap();
+		let path = dir.with_extension("fxd");
+		let writer = crate::fxd::FxdWriter::create(&path).unwrap();
+		let file = Arc::new(writer.commit(crate::fxd::ChunkRef { offset: 0, len: 0 }, 0).unwrap());
+		(manifest, move |m: &Manifest| from_manifest(m, &file, &store))
+	}
+
+	/// HARDEN BUG-3: a counter below the ids in the file would mint a taken
+	/// id; the selection could name a layer that does not exist.
+	#[test]
+	fn a_wrong_id_counter_and_a_ghost_selection_are_repaired_on_load() {
+		let (mut manifest, load) = two_layer_manifest("ids");
+		manifest.next_layer_id = 2;
+		manifest.selected = vec![LayerId(5), LayerId(99)];
+		let mut doc = load(&manifest).unwrap();
+		assert_eq!(doc.selected, vec![LayerId(5)]);
+		assert_eq!(doc.allocate_layer_id(), LayerId(6));
+	}
+
+	#[test]
+	fn a_layer_id_used_twice_is_refused() {
+		let (mut manifest, load) = two_layer_manifest("dup");
+		let copy = manifest.layers[0].clone();
+		manifest.layers.push(copy);
+		assert!(matches!(load(&manifest), Err(IoError::Decode(m)) if m.contains("used twice")));
+	}
+
+	/// HARDEN W1: a 0-px side used to open and panic later in the pixel code.
+	#[test]
+	fn a_zero_sized_document_is_refused() {
+		let (mut manifest, load) = two_layer_manifest("zero");
+		manifest.width = 0;
+		assert!(matches!(load(&manifest), Err(IoError::Decode(_))));
 	}
 
 	// -----------------------------------------------------------------------

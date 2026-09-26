@@ -362,12 +362,17 @@ impl TilePipeline {
 			programs.push(self.programs[&key].clone());
 			program_keys.push(key);
 		}
-		if !mips.is_empty() {
-			let _ = ctx.mips.send(MipWork {
+		// A request that did not go out is not "sent": it is asked again next
+		// frame (HARDEN W2; the channel only fails while the engine stops).
+		if !mips.is_empty()
+			&& let Err(crossbeam_channel::SendError(work)) = ctx.mips.send(MipWork {
 				doc: id,
 				revision: doc.revision,
 				requests: mips,
-			});
+			}) {
+			for m in &work.requests {
+				self.mips_sent.remove(m);
+			}
 		}
 
 		// Composite. `hot` never blocks: RAM-resident tiles only.
