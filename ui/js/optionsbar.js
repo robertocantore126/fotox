@@ -17,6 +17,12 @@ const wired = new WeakSet();
 const memory = new Map();
 let currentTool = null;
 
+/** Controls a native module supplies (M8): type → `(spec) => { el, read, key }`. */
+const CUSTOM = {};
+export function registerControl(type, factory) {
+  CUSTOM[type] = factory;
+}
+
 export function renderOptionsBar(container, toolId) {
   clear(container);
   fields = [];
@@ -157,8 +163,13 @@ function control(spec, changed) {
     case "select": return select(spec, changed);
     case "btngroup": return buttonGroup(spec);
     case "swatch": return swatch(spec);
-    case "gradient": return gradient("Black to White");
     case "brushpreset": return brushPreset();
+    case "pattern":
+    case "gradient":
+      // Pickers native modules provide (M8-T03/T06): `{ el, read, key }`.
+      if (CUSTOM[spec.type]) return CUSTOM[spec.type](spec);
+      if (spec.type === "gradient") return gradient("Black to White");
+      return { el: h("span", { class: "ob-label", text: "Pattern" }), read: null };
     default: return { el: h("span", { class: "ob-label", text: spec.text || spec.type }), read: null };
   }
 }

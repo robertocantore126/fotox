@@ -8,6 +8,8 @@ import { state, emit, on, setColors } from "./state.js";
 import { getDocCanvas } from "./canvas.js";
 import * as bridge from "./native/bridge.js";
 import * as nativePanels from "./native/layers-panel.js";
+import * as nativeBrushes from "./native/brush-settings.js";
+import * as nativePatterns from "./native/patterns.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -422,6 +424,7 @@ const renderers = {
   },
 
   brush() {
+    if (bridge.isNative) return nativeBrushes.brushPanel();
     const wrap = h("div", { class: "pbrush" });
     const sizeOut = h("span", { class: "pf-value", text: "22 px" });
     const size = h("input", { class: "pminirange", type: "range", min: 1, max: 200, value: 22 });
@@ -446,6 +449,7 @@ const renderers = {
   },
 
   "brush-settings"() {
+    if (bridge.isNative) return nativeBrushes.brushSettingsPanel();
     const wrap = h("div", { class: "pbrush-set" });
     const items = ["Shape Dynamics", "Scattering", "Texture", "Dual Brush", "Colour Dynamics", "Transfer", "Brush Pose", "Noise", "Wet Edges", "Build-up", "Smoothing", "Protect Texture"];
     for (const [i, name] of items.entries()) {
@@ -488,6 +492,11 @@ const renderers = {
 
   notes() {
     return h("div", { class: "pnotes" }, listRow({ label: "Review note — check the headline kerning", thumb: h("span", { class: "pthumb note" }, icon("i-note", "ic sm")) }), bar([barBtn("i-plus", "New note"), barBtn("i-trash", "Delete note")]));
+  },
+
+  patterns(def) {
+    if (bridge.isNative) return nativePatterns.patternsPanel();
+    return renderers.simple({ ...def, note: "Patterns live in the app's library." });
   },
 
   simple(def) {

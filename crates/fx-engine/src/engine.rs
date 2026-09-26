@@ -202,6 +202,8 @@ struct Engine {
 	untitled: u32,
 	/// The preferences file (M7-T09).
 	prefs: crate::prefs::Prefs,
+	/// Brush presets and patterns (M8-T01/T06).
+	resources: m8::Resources,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -351,6 +353,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		style_clipboard: None,
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
+		resources: m8::Resources::load(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -797,6 +800,32 @@ impl Engine {
 				samples,
 			} => {
 				self.end_stroke();
+				let tool = self.with_history_row(doc_id, tool);
+				if let fx_core::stroke::StrokeTool::PatternStamp { pattern, .. } = tool {
+					self.ensure_pattern(doc_id, pattern);
+				}
+				// The Background Eraser turns the Background into a layer first
+				// (M8-T02, Photoshop): its own History step.
+				if matches!(tool, fx_core::stroke::StrokeTool::BgEraser { .. }) {
+					let is_bg = self
+						.docs
+						.get(doc_id)
+						.and_then(|open| open.doc.active_layer().and_then(|l| open.doc.layer(l)))
+						.is_some_and(|l| l.name == "Background" && l.locked_position);
+					if is_bg {
+						self.command(
+							doc_id,
+							Command::SetLayerProps {
+								layer: LayerRef::Active,
+								props: LayerPropsPatch {
+									name: Some("Layer 0".into()),
+									locked_position: Some(false),
+									..Default::default()
+								},
+							},
+						);
+					}
+				}
 				let store = self.store.clone();
 				let Some(open) = self.docs.get_mut(doc_id) else { return };
 				if let Some(job) = &open.busy {
@@ -817,13 +846,22 @@ impl Engine {
 					return;
 				}
 				let before = open.doc.clone();
-				let prepared = match crate::stroke::prepare(&before, layer, target, &tool, &store) {
+				let mut prepared = match crate::stroke::prepare(&before, layer, target, &tool, &store) {
 					Ok(prepared) => prepared,
 					Err(error) => {
 						self.to_ui(&EngineToUi::Toast { text: error.to_string() });
 						return;
 					}
 				};
+				// The History Brush reads a history state (M8-T07).
+				match m8::history_source(open, layer, &tool, &store) {
+					Ok(Some(source)) => prepared.source = Some(source),
+					Ok(None) => {}
+					Err(text) => {
+						self.to_ui(&EngineToUi::Toast { text });
+						return;
+					}
+				}
 				let stroke = match fx_ops::brush::Stroke::begin(crate::stroke::setup(&prepared, &before, tool, brush, color), &store) {
 					Ok(stroke) => stroke,
 					Err(error) => {
@@ -958,6 +996,7 @@ impl Engine {
 				self.to_ui(&EngineToUi::CmykProfiles { profiles });
 				self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
 				self.send_prefs();
+				self.send_resources();
 				self.to_ui(&EngineToUi::Toast {
 					text: "Engine connected".into(),
 				});
@@ -985,6 +1024,10 @@ impl Engine {
 					self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
 					self.send_prefs();
 					self.request_frame();
+					return Changed::default();
+				}
+				// M8: brushes, patterns, the History Brush source, gradients.
+				if self.m8_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -1301,6 +1344,10 @@ impl Engine {
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
 	fn open(&mut self, path: PathBuf, place: Option<DocId>) {
+		// Brush and pattern files go to their libraries (M8-T01/T06).
+		if self.open_resource(&path) {
+			return;
+		}
 		self.next_task += 1;
 		let task = self.next_task;
 		let (store, internal) = (self.store.clone(), self.internal.clone());
@@ -2259,6 +2306,7 @@ impl Engine {
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
 		self.end_stroke();
+		self.before_command(id, &command);
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 		// Any other edit while a transform box is up drops the box (Photoshop
 		// greys everything else out; here the edit wins).
@@ -2744,7 +2792,10 @@ impl Engine {
 		let mut layers: Vec<LayerId> = Vec::new();
 		if id == "raster:all" {
 			doc.doc.walk(|layer, _| {
-				if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. }) {
+				if matches!(
+					layer.kind,
+					LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. }
+				) {
 					layers.push(layer.id);
 				}
 			});
@@ -2755,6 +2806,7 @@ impl Engine {
 			let wanted = match kind {
 				Some(LayerKind::Shape { .. }) => id == "raster:shape" || id == "raster:layer",
 				Some(LayerKind::SolidFill { .. }) => id == "raster:layer",
+				Some(LayerKind::FillLayer { .. }) => id == "raster:layer" || id == "raster:fill",
 				Some(LayerKind::Text { .. }) => id == "raster:type" || id == "raster:layer",
 				_ => false,
 			};
@@ -2942,6 +2994,16 @@ impl Engine {
 			// Alt+Backspace foreground, Ctrl+Backspace background, Shift keeps
 			// transparency.
 			"edit:fill" | "edit:fill-fg" | "edit:fill-bg" | "edit:fill-fg-preserve" | "edit:fill-bg-preserve" => {
+				// Use: Pattern (M8-T06).
+				if args.get("use").and_then(serde_json::Value::as_str) == Some("Pattern") {
+					match self.fill_pattern_command(args) {
+						Some(command) => self.command(doc_id, command),
+						None => self.to_ui(&EngineToUi::Toast {
+							text: "Pick a pattern in the Patterns panel first".into(),
+						}),
+					}
+					return true;
+				}
 				let command = self.fill_command(id, args);
 				self.command(doc_id, command);
 			}
@@ -3913,6 +3975,12 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::ConvertProfile { .. }
 			| Command::ModifySelection { .. }
 			| Command::MagicWand { .. }
+			// The Paint Bucket and Magic Eraser flood like the wand (M8-T02).
+			| Command::BucketFill { .. }
+			| Command::MagicErase { .. }
+			// A gradient or pattern fill touches every selected tile (M8-T03/T06).
+			| Command::FillGradient { .. }
+			| Command::FillPattern { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
 			| Command::RotateCanvas { .. }
@@ -3935,6 +4003,10 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
 		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
 		Command::MagicWand { .. } => "Magic Wand".to_owned(),
+		Command::BucketFill { .. } => "Paint Bucket".to_owned(),
+		Command::MagicErase { .. } => "Magic Eraser".to_owned(),
+		Command::FillGradient { .. } => "Gradient".to_owned(),
+		Command::FillPattern { .. } => "Fill".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
 		}
@@ -3945,6 +4017,8 @@ fn pixel_job_label(command: &Command) -> String {
 		_ => "Working".to_owned(),
 	}
 }
+
+mod m8;
 
 #[cfg(test)]
 mod tests {

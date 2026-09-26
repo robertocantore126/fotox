@@ -523,6 +523,24 @@ impl Builder<'_> {
 					clip,
 				}
 			}
+			// A gradient / pattern fill layer (M8-T03/T06): drawn from its
+			// parameters at this level, like a shape.
+			LayerKind::FillLayer { cache, .. } => {
+				let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Vector) else {
+					return Vec::new();
+				};
+				if quad.all_empty() {
+					return Vec::new();
+				}
+				Op::Layer {
+					layer: layer.id,
+					source: Source::Tiles(quad),
+					blend,
+					alpha,
+					mask,
+					clip,
+				}
+			}
 			LayerKind::Adjustment(adjustment) => {
 				let adjust = match adjustment {
 					Adjustment::HueSaturation {

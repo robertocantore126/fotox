@@ -20,8 +20,10 @@ use fx_tiles::TileStore;
 use crate::ops::EngineOps;
 use crate::{CursorShape, Modifiers, PointerKind};
 
+pub mod bucket;
 pub mod crop;
 pub mod eyedropper;
+pub mod gradient;
 pub mod kinds;
 pub mod lasso;
 pub mod marquee;
@@ -405,6 +407,18 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"clone" => Some(Box::new(paint::Paint::new("clone", paint::Kind::Clone))),
 		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
+		"eraser-bg" => Some(Box::new(paint::Paint::new("eraser-bg", paint::Kind::BgEraser))),
+		"dodge" => Some(Box::new(paint::Paint::new("dodge", paint::Kind::Dodge))),
+		"burn" => Some(Box::new(paint::Paint::new("burn", paint::Kind::Burn))),
+		"sponge" => Some(Box::new(paint::Paint::new("sponge", paint::Kind::Sponge))),
+		"blur" => Some(Box::new(paint::Paint::new("blur", paint::Kind::Blur))),
+		"sharpen" => Some(Box::new(paint::Paint::new("sharpen", paint::Kind::Sharpen))),
+		"smudge" => Some(Box::new(paint::Paint::new("smudge", paint::Kind::Smudge))),
+		"pattern-stamp" => Some(Box::new(paint::Paint::new("pattern-stamp", paint::Kind::PatternStamp))),
+		"history-brush" => Some(Box::new(paint::Paint::new("history-brush", paint::Kind::HistoryBrush))),
+		"art-history" => Some(Box::new(paint::Paint::new("art-history", paint::Kind::ArtHistory))),
+		"color-replace" => Some(Box::new(paint::Paint::new("color-replace", paint::Kind::ColorReplace))),
+		"mixer-brush" => Some(Box::new(paint::Paint::new("mixer-brush", paint::Kind::Mixer))),
 		// The shape tools (M6-T06) and the Path Selection tool that moves a
 		// shape by its transform.
 		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),
@@ -621,7 +635,8 @@ mod tests {
 	#[test]
 	fn unknown_tools_have_no_implementation() {
 		let mut tools = Tools::default();
-		assert!(tools.get("mixer-brush").is_none(), "not implemented");
+		assert!(tools.get("no-such-tool").is_none(), "not a tool");
+		assert!(tools.get("mixer-brush").is_some(), "M8-T09");
 		assert!(tools.get("brush").is_some());
 		assert!(tools.get("eyedropper").is_some());
 		for id in [

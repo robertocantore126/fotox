@@ -6,7 +6,7 @@
 //! stroke gives the same dabs however the samples were batched. Pressure, tilt
 //! and time are interpolated linearly between samples.
 
-use fx_core::stroke::{BrushParams, StrokeSample};
+use fx_core::stroke::{BrushParams, Control, StrokeSample};
 
 /// One stamp of the tip.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,6 +20,36 @@ pub struct Dab {
 	pub strength: f32,
 	/// The input time it came from (latency statistics, M5-T11).
 	pub time_us: u64,
+	/// The tip's angle (degrees) and roundness for this dab, after the shape
+	/// dynamics (M8-T01).
+	pub angle: f32,
+	pub roundness: f32,
+}
+
+/// The stroke's jitter source (splitmix64): seeded from the stroke, advanced
+/// once per random draw in dab order, so a replay draws the same numbers.
+#[derive(Clone, Debug)]
+pub struct Jitter(u64);
+
+impl Jitter {
+	pub fn new(seed: u64) -> Self {
+		Self(seed ^ 0x9e37_79b9_7f4a_7c15)
+	}
+
+	/// A number in `0..1`.
+	pub fn next(&mut self) -> f32 {
+		self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+		let mut z = self.0;
+		z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+		z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+		z ^= z >> 31;
+		(z >> 40) as f32 / (1u64 << 24) as f32
+	}
+
+	/// A number in `-1..1`.
+	pub fn signed(&mut self) -> f32 {
+		self.next() * 2.0 - 1.0
+	}
 }
 
 /// The dab placer of one stroke.
@@ -29,6 +59,9 @@ pub struct DabPath {
 	last: Option<StrokeSample>,
 	/// Distance travelled since the last dab.
 	carry: f64,
+	/// The dynamics' random numbers and the number of dabs placed (M8-T01).
+	jitter: Jitter,
+	placed: u32,
 }
 
 /// Smallest distance between dabs, in pixels (a 1 px brush at 1 % spacing
@@ -42,6 +75,8 @@ impl DabPath {
 			params,
 			last: None,
 			carry: 0.0,
+			jitter: Jitter::new(params.seed),
+			placed: 0,
 		}
 	}
 
@@ -59,7 +94,65 @@ impl DabPath {
 			diameter,
 			strength: if self.params.pressure_opacity { pressure } else { 1.0 },
 			time_us: s.time_us,
+			angle: self.params.angle,
+			roundness: self.params.roundness,
 		}
+	}
+
+	/// The dabs one placement stamps after the dynamics (M8-T01): count,
+	/// scatter across (and along) `direction`, size / angle / roundness and
+	/// opacity / flow jitter with their controls.
+	fn emit(&mut self, s: &StrokeSample, direction: (f64, f64), out: &mut Vec<Dab>) {
+		let base = self.dab(s);
+		let d = self.params.dynamics;
+		if d.is_static() {
+			out.push(base);
+			self.placed += 1;
+			return;
+		}
+		let fade = 1.0 - (self.placed as f32 / d.fade_steps.max(1) as f32).min(1.0);
+		let tilt = (s.tilt_x.hypot(s.tilt_y) / 90.0).clamp(0.0, 1.0);
+		let control = |c: Control| -> f32 {
+			match c {
+				Control::Off => 1.0,
+				Control::Fade => fade,
+				Control::PenPressure => s.pressure.clamp(0.0, 1.0),
+				Control::PenTilt => 1.0 - tilt,
+			}
+		};
+		let count = ((d.count.clamp(1, 16) as f32) * (1.0 - d.count_jitter.clamp(0.0, 1.0) * self.jitter.next()))
+			.round()
+			.max(1.0) as u32;
+		let (ux, uy) = direction;
+		for _ in 0..count {
+			let mut dab = base;
+			let size = (control(d.size_control) * (1.0 - d.size_jitter.clamp(0.0, 1.0) * self.jitter.next())).max(d.min_diameter.clamp(0.0, 1.0));
+			dab.diameter = (base.diameter * size).max(1.0);
+			dab.angle = base.angle + d.angle_jitter.clamp(0.0, 1.0) * 180.0 * self.jitter.signed();
+			if d.angle_control == Control::PenTilt {
+				dab.angle += s.tilt_y.atan2(s.tilt_x).to_degrees();
+			}
+			let round = (control(d.roundness_control) * (1.0 - d.roundness_jitter.clamp(0.0, 1.0) * self.jitter.next())).max(d.min_roundness.clamp(0.01, 1.0));
+			dab.roundness = (base.roundness * round).clamp(0.01, 1.0);
+			if d.scatter > 0.0 {
+				let reach = f64::from(d.scatter.min(10.0)) * f64::from(dab.diameter);
+				let across = reach * f64::from(self.jitter.signed());
+				dab.x += -uy * across;
+				dab.y += ux * across;
+				if d.scatter_both_axes {
+					let along = reach * f64::from(self.jitter.signed());
+					dab.x += ux * along;
+					dab.y += uy * along;
+				}
+			}
+			let opacity = control(d.opacity_control) * (1.0 - d.opacity_jitter.clamp(0.0, 1.0) * self.jitter.next());
+			let flow = control(d.flow_control) * (1.0 - d.flow_jitter.clamp(0.0, 1.0) * self.jitter.next());
+			// FAST: opacity jitter scales the dab like flow does (the stroke
+			// model has one opacity ceiling per stroke).
+			dab.strength *= opacity * flow;
+			out.push(dab);
+		}
+		self.placed += 1;
 	}
 
 	/// The distance to the next dab at a sample.
@@ -73,7 +166,7 @@ impl DabPath {
 		for s in samples {
 			let Some(last) = self.last else {
 				// The first sample always stamps.
-				dabs.push(self.dab(s));
+				self.emit(s, (1.0, 0.0), &mut dabs);
 				self.last = Some(*s);
 				self.carry = 0.0;
 				continue;
@@ -95,7 +188,7 @@ impl DabPath {
 				}
 				t += needed;
 				self.carry = 0.0;
-				dabs.push(self.dab(&lerp_sample(&last, s, t / length)));
+				self.emit(&lerp_sample(&last, s, t / length), (dx / length, dy / length), &mut dabs);
 			}
 			self.last = Some(*s);
 		}

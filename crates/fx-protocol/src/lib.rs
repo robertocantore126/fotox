@@ -189,6 +189,8 @@ pub enum LayerInfoKind {
 	Shape,
 	/// A text layer (M6-T07).
 	Text,
+	/// A gradient or pattern fill layer (M8-T03/T06).
+	FillLayer,
 }
 
 /// Flat, UI-friendly description of one layer. The tree is expressed with
@@ -229,6 +231,9 @@ pub struct LayerInfo {
 	/// Layer styles (M6-T08), for the style dialogs and the fx marker.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub styles: Option<fx_core::styles::LayerStyles>,
+	/// A gradient / pattern fill layer's parameters (M8-T03/T06).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fill_layer: Option<fx_core::fill::FillLayer>,
 }
 
 /// A font family and its styles (M6-T07).
@@ -353,6 +358,24 @@ pub enum EngineToUi {
 	/// change (Open Recent is built from `recent`).
 	Preferences {
 		prefs: serde_json::Value,
+	},
+	/// The brush presets (M8-T01): name, size, hardness, spacing, roundness,
+	/// angle, dynamics, `tip` (a sampled tip's id, 0 = round) and `thumb`
+	/// (base64 8-bit coverage, 96 × 32).
+	Brushes {
+		presets: Vec<serde_json::Value>,
+	},
+	/// The pattern library (M8-T06): id, name, width, height, `thumb`
+	/// (base64 RGBA8, 48 × 48); `current` is the pattern the tools use.
+	Patterns {
+		patterns: Vec<serde_json::Value>,
+		current: Option<u64>,
+	},
+	/// The History Brush's source state (M8-T07): an index into the History
+	/// panel's rows (0 = the opened state), `None` = the first state.
+	HistorySource {
+		doc: DocId,
+		state: Option<usize>,
 	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {

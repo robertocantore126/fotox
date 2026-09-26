@@ -75,6 +75,10 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 			_ => None,
 		},
 		styles: layer.styles.clone(),
+		fill_layer: match &layer.kind {
+			LayerKind::FillLayer { content, .. } => Some(content.clone()),
+			_ => None,
+		},
 	}
 }
 
@@ -86,6 +90,7 @@ fn layer_kind(kind: &LayerKind) -> LayerInfoKind {
 		LayerKind::SolidFill { .. } => LayerInfoKind::SolidFill,
 		LayerKind::Shape { .. } => LayerInfoKind::Shape,
 		LayerKind::Text { .. } => LayerInfoKind::Text,
+		LayerKind::FillLayer { .. } => LayerInfoKind::FillLayer,
 	}
 }
 

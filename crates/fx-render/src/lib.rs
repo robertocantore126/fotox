@@ -31,6 +31,7 @@ pub mod adjust;
 pub mod blend;
 pub mod frame;
 pub mod gpu;
+pub mod gradient;
 pub mod overlay;
 pub mod program;
 pub mod reference;

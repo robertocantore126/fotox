@@ -190,24 +190,33 @@ pub enum LayerKind {
 		transform: [f64; 6],
 		cache: TiledImage,
 	},
+	/// A gradient or pattern fill layer (M8-T03/T06, D-065): its parameters
+	/// are the truth, `cache` the tiles drawn from them at the level on show.
+	FillLayer {
+		content: crate::fill::FillLayer,
+		cache: TiledImage,
+	},
 }
 
 impl LayerKind {
 	/// Whether the layer draws itself from parameters instead of storing
 	/// pixels: both kinds have a derived tile cache (M6-T06/T07).
 	pub fn is_derived(&self) -> bool {
-		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. })
+		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::FillLayer { .. })
 	}
 
 	/// Whether a rasterizer can turn it into pixels (Layer ▸ Rasterize).
 	pub fn is_rasterizable(&self) -> bool {
-		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. })
+		matches!(
+			self,
+			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. }
+		)
 	}
 
 	/// The derived cache of a shape or text layer, when it has one.
 	pub fn derived_cache(&self) -> Option<&TiledImage> {
 		match self {
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Some(cache),
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => Some(cache),
 			_ => None,
 		}
 	}
@@ -215,7 +224,7 @@ impl LayerKind {
 	/// The derived cache, to rebuild it.
 	pub fn derived_cache_mut(&mut self) -> Option<&mut TiledImage> {
 		match self {
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Some(cache),
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => Some(cache),
 			_ => None,
 		}
 	}

@@ -38,12 +38,39 @@ pub trait DabOp: Send + Sync {
 	/// `source` (the source window's premultiplied pixel, when asked for) and
 	/// `k` = opacity × coverage.
 	fn pixel(&self, backdrop: [f64; 4], source: Option<[f32; 4]>, k: f64, ctx: &DabContext) -> [f64; 4];
+
+	/// The new value of a grey target (a mask) from `v` (`0..=1`) (M8-T04);
+	/// by default the paint colour's grey, `v + (grey − v)·k`.
+	fn gray(&self, v: f64, k: f64, ctx: &DabContext) -> f64 {
+		v + (ctx.color[0] - v) * k
+	}
 }
 
 /// A `DabOp` that carries a buffer along the path (Smudge, Mixer Brush in
 /// M8). The engine calls `pick_up` at every dab before painting it.
 pub trait StatefulDabOp: DabOp {
 	fn pick_up(&mut self, under: [f64; 4]);
+}
+
+/// A tool whose dabs read what the earlier dabs of the same stroke painted
+/// (M8: Smudge, Mixer Brush, Art History): the stroke engine hands it the
+/// dab's rectangle of the *current* pixels, one dab at a time in order, and
+/// writes back what it returns. Live = replay because the dabs and their
+/// order are the same. FAST: sequential, one dab after the other.
+pub trait DabSequence: Send + Sync {
+	/// `pixels` are premultiplied RGBA of the rectangle `rect` (canvas pixels
+	/// `[x0, y0, x1, y1]`, inclusive), row-major; `coverage` is the tip × the
+	/// selection there. `source(x, y)` reads the stroke's source window
+	/// (premultiplied) at a canvas pixel, when the tool has one.
+	fn dab(
+		&mut self,
+		dab: &super::path::Dab,
+		rect: [i64; 4],
+		pixels: &mut [[f64; 4]],
+		coverage: &[f32],
+		source: &dyn Fn(i64, i64) -> [f32; 4],
+		ctx: &DabContext,
+	);
 }
 
 /// Brush and Pencil: the colour through the blend mode.
@@ -112,5 +139,36 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 		StrokeTool::Eraser => Box::new(Erase),
 		StrokeTool::Clone { dx, dy, .. } | StrokeTool::Heal { dx, dy, .. } => Box::new(CloneSource { offset: (*dx, *dy) }),
 		StrokeTool::SpotHeal => Box::new(Veil),
+		// The filtered source is the source window (M8-T05); Smudge paints
+		// through its `DabSequence`, this op is never asked.
+		StrokeTool::Blur { .. }
+		| StrokeTool::Sharpen { .. }
+		| StrokeTool::Smudge { .. }
+		| StrokeTool::PatternStamp { .. }
+		| StrokeTool::HistoryBrush { .. }
+		| StrokeTool::ArtHistory { .. }
+		| StrokeTool::Mixer { .. } => Box::new(CloneSource { offset: (0.0, 0.0) }),
+		StrokeTool::Dodge { range, protect_tones } | StrokeTool::Burn { range, protect_tones } => Box::new(super::ops::tone::Tone {
+			lighten: matches!(tool, StrokeTool::Dodge { .. }),
+			range: *range,
+			protect_tones: *protect_tones,
+		}),
+		StrokeTool::Sponge { saturate, vibrance } => Box::new(super::ops::tone::Sponge {
+			saturate: *saturate,
+			vibrance: *vibrance,
+		}),
+		StrokeTool::ColorReplace { sample, tolerance, mode } => Box::new(super::ops::replace::ColorReplace {
+			sample: sample.map(|v| f64::from(v) / 65535.0),
+			tolerance: f64::from(*tolerance),
+			mode: *mode,
+		}),
+		StrokeTool::BgEraser { sample, tolerance, protect } => {
+			let rgb = |c: [u16; 3]| c.map(|v| f64::from(v) / 65535.0);
+			Box::new(super::ops::background_eraser::BackgroundEraser {
+				sample: rgb(*sample),
+				tolerance: f64::from(*tolerance),
+				protect: protect.map(rgb),
+			})
+		}
 	}
 }

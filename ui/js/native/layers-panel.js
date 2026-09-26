@@ -11,7 +11,7 @@
 import { h, icon, clear, add } from "../el.js";
 import { openDropdown } from "../popup.js";
 import { openDialog } from "../dialogs.js";
-import { state, setTool } from "../state.js";
+import { state, setTool, emit } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
@@ -90,6 +90,7 @@ const thumbs = new Map();    // "doc:layer" → data URL
 const requested = new Set(); // "doc:layer" thumbnails already asked for
 let anchor = null;       // shift-click range anchor (layer id)
 let history = null;      // last `history` message of the active document
+const historySource = new Map(); // doc → the History Brush's source row (M8-T07)
 const histories = new Map(); // doc → history message
 
 let layersRoot = null;
@@ -126,6 +127,10 @@ export function initNativePanels() {
       editNew = null;
       if (added.adjustment.kind !== "invert") editAdjustment(added);
     }
+  });
+  bridge.on(ENGINE.HISTORY_SOURCE, (msg) => {
+    historySource.set(msg.doc, msg.state ?? 0);
+    renderHistory();
   });
   bridge.on(ENGINE.HISTORY, (msg) => {
     histories.set(msg.doc, msg);
@@ -366,6 +371,13 @@ function row(i, v) {
       // Double-click: the Type tool, all the text selected (M6-T09).
       ondblclick: (e) => { e.stopPropagation(); setTool("type"); bridge.send({ type: UI.ACTION, id: "type:edit-layer", args: { layer: l.id } }); },
     });
+  }
+  // A gradient / pattern fill layer (M8-T03/T06): double-click edits it.
+  else if (l.kind === "fill_layer") {
+    thumb = h("span", {
+      class: "pthumb adj", "data-tip": "Double-click to edit the fill",
+      ondblclick: (e) => { e.stopPropagation(); emit("action", "layer:content-options"); },
+    }, icon(l.fill_layer?.fill === "pattern" ? "i-pattern-stamp" : "i-gradient", "ic sm"));
   }
   else if (l.kind === "adjustment") {
     thumb = h("span", {
@@ -742,6 +754,13 @@ function renderHistory() {
         class: "plist-row" + (i === current ? " sel" : "") + (i > current ? " undone" : ""),
         onclick: () => jump(i - current),
       },
+      // Photoshop's source column: the state the History Brush paints from.
+      h("button", {
+        class: "hist-source" + ((historySource.get(doc) ?? 0) === i ? " on" : ""), type: "button",
+        "data-tip": "Set the source for the History Brush",
+        style: { opacity: (historySource.get(doc) ?? 0) === i ? "1" : "0.25", background: "none", border: "0", padding: "0 2px" },
+        onclick: (e) => { e.stopPropagation(); bridge.send({ type: UI.ACTION, id: "hist:source", args: { row: i } }); },
+      }, icon("i-history-brush", "ic sm")),
       h("span", { class: "pthumb hist" }, icon(i === 0 ? "i-image" : "i-brush", "ic sm")),
       h("span", { class: "plist-label", text: label }));
       list.append(r);

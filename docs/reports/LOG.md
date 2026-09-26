@@ -104,3 +104,82 @@ HARDEN reads this file first, so be honest about what is missing.
 - Try it: open a file, then File ▸ Open Recent; hover a greyed item.
 
 ## M7-T10 — Acceptance: deferred to HARDEN (S21–S23, the working-day checklist).
+
+## M8-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the card's five recommendations recorded as fast defaults D-063..D-067.
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
+
+## M8-T01 — Brush tips, dynamics and presets  (Claude, 2026-09-26)
+- Done: sampled tips (`fx_ops::brush::tip::SampledTip`, one master + box pyramid, registry by 52-bit hash id, `BrushParams.tip`); `Dynamics` in `BrushParams` (shape: size/angle/roundness jitter + Fade/Pressure/Tilt controls and minimums; scattering with count; transfer; colour dynamics) applied by `DabPath::emit`, seeded by `BrushParams.seed` set at pen-down, so live = replay; colour dynamics (`brush::color_dynamics`) jitter the stroke colour once; `.abr` v6+ sampled-tip import (`fx-io/src/abr.rs`, raw + PackBits); brush library `%APPDATA%\Fotox\brushes.json` (`fx-engine/src/brushes.rs`) with defaults, thumbnail strokes drawn by the dab placer + tips, `EngineToUi::Brushes`; `brush:*` actions (import-abr / save / rename / delete) in `engine/m8.rs`; File ▸ Open or drop of an `.abr` imports it; Brushes and Brush Settings panels live (`ui/js/native/brush-settings.js`), sent to the engine as `_brush` in every tool's options.
+- Skipped: Photoshop's Smoothing modes other than the pulled string (Catch-up / Adjust for Zoom); the ABR `desc` section (names, spacing, dynamics of the file); computed tips' Flip X/Y; texture / dual brush / wet edges / noise; Tests (should check: a sampled tip stamps its image; live = replay with jitter; smoothing keeps a straight line straight; an ABR fixture imports).
+- FAST: sampled tips live in a process-wide registry, a macro replayed in another session paints round; colour dynamics per stroke even with "Apply Per Tip"; opacity jitter acts like flow; one Brush Settings state shared by every painting tool; `BrushParams::clamped` does not clamp the dynamics; ABR reading and brushes.json writing happen on the engine thread.
+- VERIFY: jitter distributions (uniform), hue jitter range (±180° at 100 %), the ABR skip sizes (47/301 bytes, from GIMP).
+- Try it: Window ▸ Brush Settings, raise Size Jitter and Scatter, paint with B. Drop an `.abr` on the window, pick a tip in the Brushes panel.
+
+## M8-T02 — Paint Bucket, Magic Eraser, Background Eraser  (Claude, 2026-09-26)
+- Done: `Command::BucketFill` (wand flood ∩ selection, then `pixels::fill` of the colour or `pixels::fill_with` of a document pattern; mode, opacity, lock transparency) and `Command::MagicErase` (flood ∩ selection → `pixels::clear`; a Background layer becomes "Layer 0" in the same step), both run as jobs like the wand; `tools/bucket.rs` ClickTools registered in `kinds::registered` ("paint-bucket", "eraser-magic"); `kinds::blend_mode` parses a Mode drop-down. Background Eraser: `StrokeTool::BgEraser` + `brush::ops::background_eraser` DabOp (`alpha × (1 − k × match)`, soft 4-level edge, Protect Foreground Color), sampling Once / Background Swatch, Background → layer before the stroke. Groundwork for T06: `fx_core::pattern::Pattern`, `Document::patterns`, `fx_core::fill::FillSource`, `pixels::fill_with` (positional fill); option-bar `registerControl` hook for the pattern / gradient pickers.
+- Skipped: Background Eraser limits Contiguous / Find Edges (all act as Discontiguous); continuous sampling (samples once at the press); Magic Eraser opacity; Tests (should check: a bucket fill on a two-colour image stops at the edge; non-contiguous fills both regions; the magic eraser leaves transparency and un-Backgrounds; the background eraser keeps the protected colour).
+- FAST: the flood reads the *active* layer (the tools always send `LayerRef::Active`); magic erase on a transparency-locked layer is refused instead of painting the background colour; Background → layer for the background eraser is a separate History step.
+- VERIFY: the match edge softness; Photoshop's bucket anti-alias on the flood edge.
+- Try it: G's flyout ▸ Paint Bucket, click a flat area. E's flyout ▸ Magic Eraser / Background Eraser.
+
+## M8-T03 — Gradient tool and Gradient Fill layers  (Claude, 2026-09-26)
+- Done: `fx_core::gradient` (colour + opacity stops with midpoints, Perceptual = Oklab / Linear = linear light / Classic = sRGB, five geometries, Reverse, Transparency, 4 × 4 Bayer dither of ±½ level); `Command::FillGradient` through the selection with mode / opacity / lock transparency, as a job (`pixels::fill_with`); Gradient tool = `DragTool` (`tools/gradient.rs`, option bar Type / Method / Mode / Opacity / Reverse / Dither / Transparency, "fg"/"bg" stops resolved at release). Fill layers: `LayerKind::FillLayer { content: fill::FillLayer, cache }` (one variant for gradient and pattern), `NewLayer::Fill`, `Command::SetFillLayer`, derived tiles drawn per level by `fx_render::gradient::render_fill_tile` through the shape request path, compositor op, `.fxd` save/load, `LayerInfo.fill_layer`, Rasterize ▸ Fill Content / Layer. UI `ui/js/native/gradients.js`: gradient picker in the option bar (presets + Edit…), Gradient Editor (stops, midpoints, opacity stops, method), New Fill Layer ▸ Gradient and Layer Content Options / double-click on the fill thumbnail to edit.
+- Skipped: live preview of the drag (line overlay only); the Properties panel for fill layers (the dialog is used instead); gradient presets saved by the user; noise gradients; "Align with layer"; Tests (should check: linear endpoints exact; radial symmetric; dithered 8-bit has no bands wider than the period; fill layer at level 2 ≈ level 0 downsampled within 2/255; undo).
+- FAST: coarse levels of a fill layer sample one point per pixel (no averaging); the gradient editor is lists of numbers, not Photoshop's draggable stops; a fill layer bakes "fg"/"bg" colours when created.
+- VERIFY: midpoint curve, Perceptual space, dither pattern, Angle direction, the fill layer's Scale meaning (fraction of the canvas extent along the angle).
+- Try it: G, drag on a pixel layer; Layer ▸ New Fill Layer ▸ Gradient…, then double-click its thumbnail.
+
+## M8-T04 — Dodge, Burn, Sponge  (Claude, 2026-09-26)
+- Done: `StrokeTool::{Dodge, Burn, Sponge}` + `brush::ops::tone` (`Tone`, `Sponge` DabOps): Range weights (Shadows `(1−v)²`, Midtones `4v(1−v)`, Highlights `v²`), dodge/burn by half the weighted strength, Protect Tones on luminance with a saturation clamp, Sponge saturate/desaturate about the grey with Vibrance weighting by unsaturation; Exposure / Flow are the stroke's flow at 100 % opacity; `DabOp::gray` so a mask target dodges/burns its grey and the sponge leaves it alone; tools "dodge", "burn", "sponge" wired with Photoshop's option bars (+ Hardness).
+- Skipped: Sponge's skin-tone protection; Tests (should check: midtone dodge lifts 50 % grey more than black/white; Protect Tones keeps hue; desaturate reaches grey; vibrance protects a saturated pixel).
+- FAST: none beyond the `// FAST:` marks.
+- VERIFY: every formula (D-064), Photoshop's default Protect Tones (on), Exposure as flow.
+- Try it: O, paint over a photo's midtones; Shift+O cycles to Burn / Sponge.
+
+## M8-T05 — Blur, Sharpen, Smudge  (Claude, 2026-09-26)
+- Done: `StrokeTool::{Blur, Sharpen, Smudge}`. Blur / Sharpen lay down a filtered source through the source window: `brush::ops::focus::FilteredTiles` filters the layer (or the composite with Sample All Layers) per canvas tile with a kernel apron (Gaussian σ 2, unsharp ×1.2 or ×0.6 with Protect Detail), cached per stroke; Strength = flow at 100 % opacity; the Mode drop-down is the blend mode. Smudge: a new sequential path in the stroke engine, `brush::op::DabSequence` (the dab's rectangle of the *current* pixels, dab by dab; lock transparency kept) — `ops::smudge` carries the previous dab's result to the new position (Finger Painting starts with the foreground). Tools "blur", "sharpen", "smudge" wired.
+- Skipped: accumulation of Blur/Sharpen within one stroke (one pass per stroke), Smudge's Sample All Layers, Tests (should check: blur flattens a step monotonically with strength; sharpen raises edge contrast, flat stays flat; smudge drags a colour and fades with strength < 1; live = replay for the three).
+- FAST: `DabSequence` runs on one thread; M7's `StatefulDabOp` is left unused (the sequence trait replaces it); the smudge offset is rounded to whole pixels.
+- VERIFY: kernel size, sharpen amount, smudge strength curve.
+- Try it: R, scrub over an edge; Shift+R to Sharpen / Smudge.
+
+## M8-T06 — Patterns and the Pattern Stamp  (Claude, 2026-09-26)
+- Done: `fx_core::pattern::Pattern` (≤ 2048² RGBA16, id = hash) in `Document::patterns`, saved in the `.fxd` manifest; the user library `%APPDATA%\Fotox\patterns.json` (`fx-engine/src/patterns.rs`, generated defaults, PNG import) sent as `EngineToUi::Patterns`; Edit ▸ Define Pattern (canvas or selection bounds, composite of the visible layers) → library + `Command::DefinePattern` (history, not dirty); `Command::FillPattern` and Edit ▸ Fill "Use: Pattern"; Paint Bucket's pattern source; `StrokeTool::PatternStamp` (source window of `brush::ops::pattern::PatternTiles`, Aligned = anchored at the canvas origin, else at the stroke start; Impressionist jitter); pattern fill layers (`FillLayer::Pattern { pattern, scale, angle }`, bilinear per level); a library pattern is copied into the document before a command or stroke reads it. UI `ui/js/native/patterns.js`: Patterns panel (Window ▸ Patterns: pick, rename by double-click, define from selection, import PNG, delete), the option bars' pattern picker, New Fill Layer ▸ Pattern and its Content Options.
+- Skipped: `.pat` import, pattern export, Tests (should check: a pattern tiles seamlessly across tiles; aligned stamping continues between strokes; the fill layer round-trips through `.fxd`).
+- FAST: manifest patterns are JSON number arrays (big for large patterns); library patterns are copied into the document outside History; Define Pattern composites on the engine thread and prepares every dirty shape tile first; the picker keeps a refresh callback per option-bar render.
+- VERIFY: Impressionist (Photoshop's is a painterly blotch, not a jitter).
+- Try it: select an area, Edit ▸ Define Pattern from Selection; S's flyout ▸ Pattern Stamp; Edit ▸ Fill ▸ Use: Pattern; Layer ▸ New Fill Layer ▸ Pattern…
+
+## M8-T07 — History Brush, Art History Brush  (Claude, 2026-09-26)
+- Done: `History::state(row, current)` reads any History panel row's snapshot (D-067); the panel's source column (`hist:source` → `EngineToUi::HistorySource`); `StrokeTool::HistoryBrush { state }` = the same layer in that state as the source window at offset 0 (through Mode / Opacity / Flow), `StrokeTool::ArtHistory { state, style, area, tolerance }` = a `DabSequence` (`brush::ops::history`) that spawns seeded short strokes per dab (ten styles: count, length, curl, looseness) coloured from the state, skipping pixels within the tolerance; Photoshop's refusals when the state has no such layer or another canvas size. Tools "history-brush", "art-history" wired.
+- Skipped: History snapshots (Photoshop's named snapshots); painting a mask with them; Tests (should check: History Brush from the first state after a Levels restores the pixels; the size-mismatch refusal; an Art History stroke is deterministic for a seed).
+- FAST: the source row is an index into the panel, so once History drops its oldest steps (limit 50) the rows shift under it; `Command::Stroke` of these tools cannot be replayed outside the engine (the command context has no History), which only matters for macros.
+- VERIFY: Art History stroke shapes and counts; the refusal wording.
+- Try it: paint, apply a filter, click the brush icon left of "Open" in History, Y and paint.
+
+## M8-T08 — Color Replacement and Red Eye  (Claude, 2026-09-26)
+- Done: `StrokeTool::ColorReplace` + `brush::ops::replace` (the foreground blended by Hue / Saturation / Color / Luminosity through `blend::composite` with alpha kept, weighted by the sample match); Sampling Once / Background Swatch; tool "color-replace". Red Eye: `Command::RedEye { point, pupil_size, darken }` (written with T03's commands in `command/m8.rs`): reads a ±120 px window, seeds at the reddest pixel within 15 px of the click (`r − max(g, b)`, alpha-weighted), floods the red blob (the pupil size lowers the threshold), feathers with two 3 × 3 box passes, sets red to the green-blue mean and darkens; `RedEye` ClickTool "red-eye".
+- Skipped: Color Replacement Limits Contiguous / Find Edges and continuous sampling; Tests (should check: replacing a red area's hue with blue keeps luminosity; Red Eye turns a synthetic red pupil dark and leaves the iris).
+- FAST: the red-eye window is a fixed ±120 px; it writes back every tile of the window.
+- VERIFY: the red-eye formula and threshold; Color Replacement's match edge.
+- Try it: B's flyout ▸ Color Replacement, paint over a coloured area; J's flyout ▸ Red Eye, click a red pupil.
+
+## M8-T09 — Mixer Brush  (Claude, 2026-09-26)
+- Done: `StrokeTool::Mixer { wet, load, mix }` + `brush::ops::mixer` (a `DabSequence`, D-066 **approximation**): the reservoir (foreground, an amount Load spends dab by dab), the pickup (the previous dab's paint moved to the brush, mixed with the canvas by Wet), each dab lays `mix(reservoir, pickup, Mix)` by the dab coverage (Flow); Photoshop's preset combinations (Dry … Very Wet, Heavy Mix) and Custom Wet / Load / Mix in the option bar; tool "mixer-brush" (the old "not implemented" test now expects it).
+- Skipped: Load / Clean Brush menus and the "after each stroke" toggles (always load + clean per stroke), Sample All Layers, the current-brush-load swatch, Tests (should check: Dry with a loaded reservoir paints the reservoir colour; Very Wet mixes a two-colour field along the path; clean after each stroke resets).
+- FAST: the reservoir depletion rate is a guess (2 % × (1 − Load) per dab).
+- VERIFY: the whole model and the preset values (D-066).
+- Try it: B's flyout ▸ Mixer Brush, Preset "Very Wet", drag across two colours.
+
+## M8-T10 — UI  (Claude, 2026-09-26)
+- Done: option bars of every M8 tool (Photoshop's fields: Gradient Type / Method, bucket Anti-alias / Contiguous / pattern, Background Eraser and Color Replacement Sampling, Dodge/Burn Protect Tones, Sharpen Protect Detail, Pattern Stamp pattern, Art History Style / Area / Tolerance, Mixer presets + Wet / Load / Mix, Hardness where missing); the option bar's `registerControl` pickers (gradient, pattern); Brushes and Brush Settings panels, Gradient Editor, Patterns panel, the History panel's source column (T01–T07); `gen-implemented.mjs` now also lists the engine's tools as `tool:<id>`, and in the app the flyouts dim the tools the engine does not build yet ("planned for a later milestone").
+- Skipped: a Properties panel for fill layers (their dialog instead); the Tool Presets panel stays a mock.
+- FAST: the UI-only tools (hand, zoom, rotate view, quick mask, screen) are a hand-written list in `main.js`.
+- VERIFY: none.
+- Try it: open the toolbar flyouts in the app — only Quick Selection, Object Selection, Magnetic Lasso, Custom Shape and the rest of M9+ are dimmed.
+
+## M8-T11 — Acceptance: deferred to HARDEN (S24–S26, the tool-by-tool comparison with Photoshop feeding M14's VERIFY list).
+
+M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures that are already on `main` (M6 shape/text/rotate tests: rotate needs the engine's ops in fx-core tests, shape crop/dirty-tile expectations, "Type 1" naming, two vector tests); `cargo test -p fx-engine --lib` aborts (SIGABRT) in a GPU-less Linux container on `main` too. `fx-ops` (78) passes. M8 changed one test: `every_name_kind_has_a_counter` (two name kinds appended).

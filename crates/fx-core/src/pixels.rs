@@ -336,6 +336,63 @@ pub fn fill(
 	Ok((map_layer(placed, &tiles, selection, canvas, store, &op)?, offset))
 }
 
+/// A fill whose colour depends on the canvas pixel (M8: gradients, patterns):
+/// `paint(x, y)` is straight RGBA `0..=1`, composited through `mode` with
+/// `opacity × paint alpha × coverage`. The layer is grown to the canvas like
+/// [`fill`]; every selected tile is computed pixel by pixel.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_with(
+	layer: Placed<'_>,
+	selection: Option<&Selection>,
+	canvas: (u32, u32),
+	mode: BlendMode,
+	opacity: f64,
+	preserve_transparency: bool,
+	paint: &(dyn Fn(i64, i64) -> [f64; 4] + Sync),
+	store: &TileStore,
+) -> Result<(TiledImage, (i32, i32)), TileError> {
+	let (grown, offset) = grow_to_canvas(layer.image, layer.offset, canvas, store)?;
+	let placed = Placed { image: &grown, offset };
+	let tiles = layer_tiles(placed, selection, canvas);
+	let format = grown.format();
+	let tile = i64::from(TILE_SIZE);
+	let opacity = opacity.clamp(0.0, 1.0);
+	let results: Result<Vec<Option<((u32, u32), TileBuffer)>>, TileError> = tiles
+		.par_iter()
+		.map(|&(lx, ly)| {
+			let x0 = i64::from(offset.0) + i64::from(lx) * tile;
+			let y0 = i64::from(offset.1) + i64::from(ly) * tile;
+			let coverage = block_coverage(selection, store, canvas, x0, y0)?;
+			if matches!(coverage, TileCoverage::Uniform(v) if v <= 0.0) {
+				return Ok(None);
+			}
+			let pixels = read_tile(grown.slot(0, lx, ly), format, store)?;
+			let out: Vec<[f32; 4]> = (0..TILE_PIXELS)
+				.map(|i| {
+					let (px, py) = (i as u32 % TILE_SIZE, i as u32 / TILE_SIZE);
+					let p = pixels.at(i);
+					let s = coverage.at(px, py);
+					if s <= 0.0 {
+						return p;
+					}
+					let c = paint(x0 + i64::from(px), y0 + i64::from(py));
+					let a = f64::from(p[3]);
+					let backdrop = [f64::from(p[0]) * a, f64::from(p[1]) * a, f64::from(p[2]) * a, a];
+					let out = composite(mode, backdrop, [c[0], c[1], c[2]], opacity * c[3] * f64::from(s), preserve_transparency);
+					let rgb = unpremultiply(out);
+					[rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, out[3] as f32]
+				})
+				.collect();
+			Ok(Some(((lx, ly), encode(&out, format))))
+		})
+		.collect();
+	let mut image = grown.clone();
+	for ((lx, ly), buffer) in results?.into_iter().flatten() {
+		image.put_buffer(store, lx, ly, buffer);
+	}
+	Ok((image, offset))
+}
+
 /// Edit ▸ Clear (M5-T05): each pixel's alpha × (1 − coverage).
 pub fn clear(layer: Placed<'_>, selection: &Selection, canvas: (u32, u32), store: &TileStore) -> Result<TiledImage, TileError> {
 	let tiles = layer_tiles(layer, Some(selection), canvas);

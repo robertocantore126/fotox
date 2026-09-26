@@ -16,7 +16,9 @@ fx-io = { workspace = true }
 fx-ops = { workspace = true }
 crossbeam-channel = { workspace = true }
 rayon = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+png = { workspace = true }
 wgpu = { workspace = true }
 wgpu-sync = { workspace = true }
 tracing = { workspace = true }

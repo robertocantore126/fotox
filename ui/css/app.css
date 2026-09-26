@@ -286,6 +286,9 @@
 .flyout-label { flex: 1; font-size: 12px; white-space: nowrap; }
 .flyout-key { color: var(--text-off); font-size: 11px; }
 .flyout-item:hover .flyout-key { color: #dfe6ff; }
+.flyout-item.planned { opacity: 0.45; }
+.brush-stroke-thumb { width: 96px; height: 32px; flex: none; }
+.bset-section summary { cursor: pointer; }
 
 .toolswatches { margin-top: 6px; }
 .swatch-pair { position: relative; width: 38px; height: 38px; }

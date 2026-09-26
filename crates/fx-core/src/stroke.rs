@@ -32,6 +32,114 @@ pub struct BrushParams {
 	/// Pen pressure scales each dab's strength (the opacity pen button).
 	#[serde(default)]
 	pub pressure_opacity: bool,
+	/// The sampled tip (M8-T01): the id of a tip registered with
+	/// `fx_ops::brush::tip::register`, 0 = the round computed tip.
+	#[serde(default)]
+	pub tip: u64,
+	/// Brush Settings' dynamics (M8-T01).
+	#[serde(default)]
+	pub dynamics: Dynamics,
+	/// The seed of every jitter of this stroke (set at pen-down and stored
+	/// with the stroke, so live = replay).
+	#[serde(default)]
+	pub seed: u64,
+}
+
+/// What drives a dynamic (Photoshop's "Control" drop-downs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Control {
+	#[default]
+	Off,
+	/// Fades from full to the minimum over `Dynamics::fade_steps` dabs.
+	Fade,
+	PenPressure,
+	PenTilt,
+}
+
+/// The Brush Settings sections of M8-T01: Shape Dynamics, Scattering,
+/// Transfer and Color Dynamics. Jitters are `0..=1` (Photoshop's percent).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dynamics {
+	pub size_jitter: f32,
+	pub size_control: Control,
+	/// `0..=1` of the diameter: the smallest a control shrinks the tip to.
+	pub min_diameter: f32,
+	/// `0..=1` of 360°.
+	pub angle_jitter: f32,
+	pub angle_control: Control,
+	pub roundness_jitter: f32,
+	pub roundness_control: Control,
+	pub min_roundness: f32,
+	/// Dabs a fade control lasts.
+	pub fade_steps: u32,
+	/// Scatter distance as a fraction of the diameter (`0..=10`).
+	pub scatter: f32,
+	pub scatter_both_axes: bool,
+	/// Dabs per spacing interval, `1..=16`.
+	pub count: u32,
+	pub count_jitter: f32,
+	pub opacity_jitter: f32,
+	pub opacity_control: Control,
+	pub flow_jitter: f32,
+	pub flow_control: Control,
+	/// Foreground/background jitter; the stroke's colour moves toward the
+	/// background by a random amount.
+	pub fg_bg_jitter: f32,
+	pub hue_jitter: f32,
+	pub saturation_jitter: f32,
+	pub brightness_jitter: f32,
+	/// Colour jitter per tip (Photoshop's "Apply Per Tip"). FAST: the stroke
+	/// model paints one colour per stroke, so this is read as per stroke.
+	pub per_tip: bool,
+}
+
+impl Default for Dynamics {
+	fn default() -> Self {
+		Self {
+			size_jitter: 0.0,
+			size_control: Control::Off,
+			min_diameter: 0.0,
+			angle_jitter: 0.0,
+			angle_control: Control::Off,
+			roundness_jitter: 0.0,
+			roundness_control: Control::Off,
+			min_roundness: 0.25,
+			fade_steps: 25,
+			scatter: 0.0,
+			scatter_both_axes: false,
+			count: 1,
+			count_jitter: 0.0,
+			opacity_jitter: 0.0,
+			opacity_control: Control::Off,
+			flow_jitter: 0.0,
+			flow_control: Control::Off,
+			fg_bg_jitter: 0.0,
+			hue_jitter: 0.0,
+			saturation_jitter: 0.0,
+			brightness_jitter: 0.0,
+			per_tip: false,
+		}
+	}
+}
+
+impl Dynamics {
+	/// Whether anything varies from dab to dab.
+	pub fn is_static(&self) -> bool {
+		self.size_jitter == 0.0
+			&& self.size_control == Control::Off
+			&& self.angle_jitter == 0.0
+			&& self.angle_control == Control::Off
+			&& self.roundness_jitter == 0.0
+			&& self.roundness_control == Control::Off
+			&& self.scatter == 0.0
+			&& self.count <= 1
+			&& self.opacity_jitter == 0.0
+			&& self.opacity_control == Control::Off
+			&& self.flow_jitter == 0.0
+			&& self.flow_control == Control::Off
+	}
 }
 
 impl Default for BrushParams {
@@ -47,6 +155,9 @@ impl Default for BrushParams {
 			mode: BlendMode::Normal,
 			pressure_size: false,
 			pressure_opacity: false,
+			tip: 0,
+			dynamics: Dynamics::default(),
+			seed: 0,
 		}
 	}
 }
@@ -100,6 +211,88 @@ pub enum StrokeTool {
 	Heal { dx: f64, dy: f64, sample_all: bool },
 	/// The Spot Healing Brush (J): the source is chosen near the stroke.
 	SpotHeal,
+	/// Dodge (M8-T04): lighten the `range`; the brush's flow is the Exposure.
+	Dodge {
+		range: ToneRange,
+		#[serde(default)]
+		protect_tones: bool,
+	},
+	/// Burn (M8-T04): darken the `range`.
+	Burn {
+		range: ToneRange,
+		#[serde(default)]
+		protect_tones: bool,
+	},
+	/// Sponge (M8-T04): saturate or desaturate; the brush's flow is the Flow.
+	Sponge {
+		saturate: bool,
+		#[serde(default)]
+		vibrance: bool,
+	},
+	/// Blur (M8-T05): the layer (or composite) blurred, laid down by Strength.
+	Blur {
+		#[serde(default)]
+		sample_all: bool,
+	},
+	/// Sharpen (M8-T05): an unsharp step.
+	Sharpen {
+		#[serde(default)]
+		sample_all: bool,
+		#[serde(default)]
+		protect_detail: bool,
+	},
+	/// Smudge (M8-T05): drags the colour under the brush along the path.
+	Smudge {
+		#[serde(default)]
+		finger_painting: bool,
+		#[serde(default)]
+		sample_all: bool,
+	},
+	/// The Pattern Stamp (M8-T06): a document pattern, tiled from `origin`.
+	PatternStamp {
+		pattern: u64,
+		origin: (i64, i64),
+		#[serde(default)]
+		impressionist: bool,
+	},
+	/// The History Brush (M8-T07): the same layer in History panel row
+	/// `state` (a snapshot, D-067), laid down through the mode.
+	HistoryBrush { state: usize },
+	/// The Art History Brush (M8-T07): stylised strokes coloured from the
+	/// state.
+	ArtHistory {
+		state: usize,
+		style: ArtStyle,
+		/// Area diameter, pixels.
+		area: f32,
+		/// `0..=1`: strokes only where the state differs more than this.
+		tolerance: f32,
+	},
+	/// The Color Replacement tool (M8-T08): the stroke colour blended by
+	/// `mode` (Hue / Saturation / Color / Luminosity) where a pixel matches
+	/// `sample` within `tolerance`.
+	ColorReplace {
+		sample: [u16; 3],
+		tolerance: f32,
+		mode: crate::blend::BlendMode,
+	},
+	/// The Mixer Brush (M8-T09, D-066): Wet, Load and Mix `0..=1`; the
+	/// stroke colour is the reservoir's.
+	Mixer {
+		wet: f32,
+		load: f32,
+		mix: f32,
+		#[serde(default)]
+		sample_all: bool,
+	},
+	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
+	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
+	BgEraser {
+		sample: [u16; 3],
+		tolerance: f32,
+		#[serde(default)]
+		protect: Option<[u16; 3]>,
+	},
 }
 
 impl StrokeTool {
@@ -112,8 +305,47 @@ impl StrokeTool {
 			StrokeTool::Clone { .. } => "Clone Stamp",
 			StrokeTool::Heal { .. } => "Healing Brush",
 			StrokeTool::SpotHeal => "Spot Healing Brush",
+			StrokeTool::BgEraser { .. } => "Background Eraser",
+			StrokeTool::Blur { .. } => "Blur Tool",
+			StrokeTool::Sharpen { .. } => "Sharpen Tool",
+			StrokeTool::Smudge { .. } => "Smudge Tool",
+			StrokeTool::PatternStamp { .. } => "Pattern Stamp",
+			StrokeTool::Mixer { .. } => "Mixer Brush",
+			StrokeTool::ColorReplace { .. } => "Color Replacement Tool",
+			StrokeTool::HistoryBrush { .. } => "History Brush",
+			StrokeTool::ArtHistory { .. } => "Art History Brush",
+			StrokeTool::Dodge { .. } => "Dodge Tool",
+			StrokeTool::Burn { .. } => "Burn Tool",
+			StrokeTool::Sponge { .. } => "Sponge Tool",
 		}
 	}
+}
+
+/// The Art History Brush's Style (M8-T07).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtStyle {
+	#[default]
+	TightShort,
+	TightMedium,
+	TightLong,
+	LooseMedium,
+	LooseLong,
+	Dab,
+	TightCurl,
+	TightCurlLong,
+	LooseCurl,
+	LooseCurlLong,
+}
+
+/// Dodge / Burn's Range (M8-T04).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneRange {
+	Shadows,
+	#[default]
+	Midtones,
+	Highlights,
 }
 
 /// What a stroke paints on: the layer's pixels or its mask.

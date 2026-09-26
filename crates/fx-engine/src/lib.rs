@@ -15,6 +15,8 @@
 //! most engine features are tested and benchmarked.
 
 pub mod b3;
+pub mod b64;
+pub mod brushes;
 pub mod clipboard;
 pub mod documents;
 pub mod effects;
@@ -23,6 +25,7 @@ pub mod filters;
 pub mod layers;
 pub mod mips;
 pub mod ops;
+pub mod patterns;
 pub mod prefs;
 pub mod selection;
 pub mod snap;

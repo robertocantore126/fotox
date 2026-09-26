@@ -22,6 +22,10 @@ import { UI, ENGINE } from "./native/protocol.js";
 import { initNativePanels } from "./native/layers-panel.js";
 import { initColor } from "./native/color.js";
 import { initTools, sendColors } from "./native/tools.js";
+import { initBrushes, brushExtras } from "./native/brush-settings.js";
+import { initGradients } from "./native/gradients.js";
+import { initPatterns } from "./native/patterns.js";
+import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -125,7 +129,8 @@ function buildToolbar(container) {
 function sendToolOptions(options) {
   if (!bridge.isNative) return;
   // The bar on show: the active tool's, or Free Transform's (M6-T04).
-  bridge.send({ type: UI.TOOL_OPTIONS, tool: currentBar() || state.tool, options });
+  // The Brush Settings panel's part of the brush (M8-T01).
+  bridge.send({ type: UI.TOOL_OPTIONS, tool: currentBar() || state.tool, options: { ...options, _brush: brushExtras() } });
 }
 
 function pickTool(toolId, slotId) {
@@ -143,14 +148,19 @@ function pickTool(toolId, slotId) {
   refreshSwatches();
 }
 
+/** Tools the UI or the view handles without an engine tool (M8-T10). */
+const UI_TOOLS = new Set(["hand", "zoom", "rotate-view", "quick-mask", "screen"]);
+
 function openFlyout(slot, anchor) {
   if (!slot.flyout.length) return null;
   const items = [slot, ...slot.flyout];
   const content = h("div", { class: "flyout" });
   for (const tool of items) {
+    // In the app, a tool the engine does not build yet is dimmed (M8-T10).
+    const planned = bridge.isNative && !IMPLEMENTED.has("tool:" + tool.id) && !UI_TOOLS.has(tool.id);
     content.append(h("button", {
-      class: "flyout-item" + (state.tool === tool.id ? " sel" : ""), type: "button",
-      dataset: { tip: `${tool.name} (${tool.key})` },
+      class: "flyout-item" + (state.tool === tool.id ? " sel" : "") + (planned ? " planned" : ""), type: "button",
+      dataset: { tip: `${tool.name} (${tool.key})` + (planned ? " — planned for a later milestone" : "") },
       onclick: () => { pickTool(tool.id, slot.id); closeAll(); },
     }, icon(tool.icon, "ic"), h("span", { class: "flyout-label", text: tool.name }), h("span", { class: "flyout-key", text: tool.key })));
   }
@@ -201,6 +211,9 @@ async function boot() {
   // First, so `body.native` is set before any part of the chrome is built.
   bridge.init();
   await loadSprite();
+  // Option-bar pickers of native modules (M8).
+  initGradients();
+  initPatterns();
 
   const shell = buildShell();
   buildMenubar(shell.menubar, menus);
@@ -260,6 +273,8 @@ async function boot() {
     initColor();
     initTools();
     initPrefs();
+    initBrushes();
+    on("brush:changed", () => sendToolOptions(readOptions()));
     initType(() => { if (state.tool === "type") { renderOptionsBar(shell.optionsbar, "type"); sendToolOptions(readOptions()); } });
   }
   bridge.on(ENGINE.TOAST, (m) => toast(m.text));

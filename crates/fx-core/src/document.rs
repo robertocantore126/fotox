@@ -28,6 +28,9 @@ pub struct Document {
 	pub global_light: f64,
 	/// Ruler guides (M7-T06), document pixels.
 	pub guides: Vec<Guide>,
+	/// The patterns the document uses (M8-T06): Pattern Stamp, bucket and
+	/// pattern fills, saved with it.
+	pub patterns: Vec<crate::pattern::Pattern>,
 	next_id: u64,
 	/// How many layers of each kind this document has created, for the
 	/// Photoshop-style default names (`"Layer 1"`, `"Group 2"`, `"Curves 1"`).
@@ -80,6 +83,9 @@ pub(crate) enum NameKind {
 	// M6-T07. A text layer is named after its own first line ("Hello"), so the
 	// counter is only used for a layer with no text yet ("Type 1").
 	Type,
+	// M8-T03/T06: fill layers.
+	GradientFill,
+	PatternFill,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -87,7 +93,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 25;
+	const COUNT: usize = 27;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -118,6 +124,8 @@ impl NameKind {
 			NameKind::Star => "Star",
 			NameKind::Line => "Line",
 			NameKind::Type => "Type",
+			NameKind::GradientFill => "Gradient Fill",
+			NameKind::PatternFill => "Pattern Fill",
 		}
 	}
 
@@ -173,6 +181,7 @@ impl Document {
 			revision: 0,
 			global_light: 120.0,
 			guides: Vec::new(),
+			patterns: Vec::new(),
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
 		}
@@ -394,8 +403,9 @@ mod tests {
 		// appended, and COUNT follows the last one.
 		assert_eq!(NameKind::Invert as usize, 8, "the M2 kinds keep their indices");
 		assert_eq!(NameKind::BlackWhite as usize, 16, "the M4 kinds follow them");
+		assert_eq!(NameKind::Type as usize, 24, "the M6 kinds follow them");
 		assert_eq!(
-			NameKind::Type as usize,
+			NameKind::PatternFill as usize,
 			NameKind::COUNT - 1,
 			"a new NameKind goes at the end, and COUNT must grow"
 		);

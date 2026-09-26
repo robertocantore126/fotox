@@ -50,6 +50,9 @@ pub struct Manifest {
 	/// Ruler guides (M7-T06).
 	#[serde(default)]
 	pub guides: Vec<fx_core::Guide>,
+	/// The document's patterns (M8-T06). FAST: pixels as JSON numbers.
+	#[serde(default)]
+	pub patterns: Vec<fx_core::pattern::Pattern>,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -109,6 +112,10 @@ pub enum LayerKindEntry {
 		transform: [f64; 6],
 	},
 	/// A text layer (M6-T07): its content; the cache is rebuilt after opening.
+	/// A gradient or pattern fill layer (M8-T03/T06): parameters only.
+	Fill {
+		content: fx_core::fill::FillLayer,
+	},
 	Text {
 		content: fx_core::TextContent,
 	},
@@ -239,6 +246,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
 		global_light: doc.global_light,
 		guides: doc.guides.clone(),
+		patterns: doc.patterns.clone(),
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -291,6 +299,7 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 			LayerKind::Text { .. } => LayerKindEntry::Text {
 				content: layer.kind.text_content().unwrap_or_default(),
 			},
+			LayerKind::FillLayer { content, .. } => LayerKindEntry::Fill { content: content.clone() },
 		},
 	}
 }
@@ -369,6 +378,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.selected = manifest.selected.clone();
 	doc.global_light = manifest.global_light;
 	doc.guides = manifest.guides.clone();
+	doc.patterns = manifest.patterns.clone();
 	let mut counters = [0u32; fx_core::NAME_KINDS];
 	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
 		*slot = *value;
@@ -403,6 +413,10 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			fill: *fill,
 			stroke: stroke.clone(),
 			transform: *transform,
+			cache: TiledImage::derived(size.0, size.1, format),
+		},
+		LayerKindEntry::Fill { content } => LayerKind::FillLayer {
+			content: content.clone(),
 			cache: TiledImage::derived(size.0, size.1, format),
 		},
 		LayerKindEntry::Text { content } => LayerKind::Text {
