@@ -302,3 +302,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Done: the five recommendations recorded as fast defaults D-077..D-081 (D-079 notes the fast-mode MLS solver).
 - Skipped: none. FAST: none. VERIFY: none.
 - Try it: `docs/DECISIONS.md`.
+
+## M11-T01 — PatchMatch core  (Claude, 2026-09-26)
+- Done: `fx_ops::patchmatch::fill(pixels, w, h, hole, sampling, params)` — a pyramid down to where the hole is a few patches wide, NNF upsampled from the coarser level (random at the coarsest, which starts from the mean sample colour), PatchMatch propagation + random search with alternating scan order, EM voting (rayon) per scale; seeded splitmix RNG, so a seed gives the same result. Patch 7 by default.
+- Skipped: the card's file split (one file `patchmatch.rs`), colour adaptation, rows-parallel NNF search, Tests (periodic texture fill, same seed ⇒ same result, memory budget on a 20 000² image).
+- FAST: search is single-threaded; votes are unweighted (no distance / distance-to-boundary weights); the caller owns the ROI budget (buffer passed in).
+- VERIFY: none.
+- Try it: through M11-T02 (Edit ▸ Content-Aware Fill).

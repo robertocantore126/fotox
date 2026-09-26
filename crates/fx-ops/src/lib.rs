@@ -25,6 +25,7 @@ pub mod flood;
 pub mod gaussian;
 pub mod morph;
 pub mod neighbourhood;
+pub mod patchmatch;
 pub mod permute;
 pub mod raster;
 pub mod resample;
