@@ -158,7 +158,13 @@ impl Paint {
 			Kind::Pencil => StrokeTool::Pencil,
 			// The eraser's Pencil/Block modes use a hard tip (see `brush`).
 			Kind::Eraser => StrokeTool::Eraser,
-			Kind::SpotHeal => StrokeTool::SpotHeal,
+			Kind::SpotHeal => {
+				if s.string(self.id, "Type").as_deref() != Some("Proximity Match") {
+					StrokeTool::SpotHealContentAware
+				} else {
+					StrokeTool::SpotHeal
+				}
+			}
 			Kind::Dodge | Kind::Burn => {
 				let range = match s.string(self.id, "Range").as_deref() {
 					Some("Shadows") => ToneRange::Shadows,

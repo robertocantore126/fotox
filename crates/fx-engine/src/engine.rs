@@ -1030,7 +1030,7 @@ impl Engine {
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
-				if self.m8_action(&id, &args) || self.m9_action(&id, &args) || self.m10_action(&id, &args) {
+				if self.m8_action(&id, &args) || self.m9_action(&id, &args) || self.m10_action(&id, &args) || self.m11_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -1108,6 +1108,12 @@ impl Engine {
 				// The View flags and the grid preferences (M7-T06).
 				self.settings.options.insert(tool, options);
 				self.request_frame();
+				Changed::default()
+			}
+			UiToEngine::ToolOptions { tool, options } if tool.starts_with("_warp") => {
+				// A warp session's bar (M11).
+				self.settings.options.insert(tool, options.clone());
+				self.warp_options(&options);
 				Changed::default()
 			}
 			UiToEngine::ToolOptions { tool, options } => {
@@ -1518,6 +1524,12 @@ impl Engine {
 
 	/// Put a Free Transform box over the active layer (or the selection).
 	fn start_transform(&mut self, doc_id: DocId, mode: TransformMode) {
+		self.start_transform_with(doc_id, mode, None);
+	}
+
+	/// The same session driven by a warp tool instead of the box (M11).
+	fn start_transform_with(&mut self, doc_id: DocId, mode: TransformMode, custom: Option<Box<dyn crate::tools::transform::CustomWarp>>) {
+		let bar = custom.as_ref().map(|c| c.bar().to_owned());
 		let filter = self.transform_filter();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		if let Some(job) = &open.busy {
@@ -1550,7 +1562,8 @@ impl Engine {
 			}
 		};
 		self.end_stroke();
-		let session = free_transform::Session::new(layer_id, rect, mode, filter);
+		let mut session = free_transform::Session::new(layer_id, rect, mode, filter);
+		session.custom = custom;
 		let status = session.status();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		open.transform_preview = Some(TransformPreview {
@@ -1571,7 +1584,7 @@ impl Engine {
 			});
 		});
 		self.transform = Some((doc_id, session));
-		self.to_ui(&EngineToUi::TransformBox { up: true });
+		self.to_ui(&EngineToUi::TransformBox { up: true, bar });
 		self.to_ui(&EngineToUi::ToolInfo { text: status });
 		self.request_frame();
 	}
@@ -1633,7 +1646,7 @@ impl Engine {
 		{
 			open.preview_rev += 1;
 		}
-		self.to_ui(&EngineToUi::TransformBox { up: false });
+		self.to_ui(&EngineToUi::TransformBox { up: false, bar: None });
 		self.to_ui(&EngineToUi::ToolInfo { text: String::new() });
 		self.request_frame();
 	}
@@ -3998,6 +4011,10 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::SelectBy { .. }
 			| Command::TransformSelection { .. }
 			| Command::PerspectiveCrop { .. }
+			| Command::ContentAwareFill { .. }
+			| Command::Patch { .. }
+			| Command::ContentAwareMove { .. }
+			| Command::ContentAwareScale { .. }
 			| Command::SaveSelection { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
@@ -4028,6 +4045,10 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::SelectBy { select, .. } => select.label().to_owned(),
 		Command::TransformSelection { .. } => "Transform Selection".to_owned(),
 		Command::PerspectiveCrop { .. } => "Perspective Crop".to_owned(),
+		Command::ContentAwareFill { .. } => "Content-Aware Fill".to_owned(),
+		Command::Patch { .. } => "Patch Tool".to_owned(),
+		Command::ContentAwareMove { .. } => "Content-Aware Move".to_owned(),
+		Command::ContentAwareScale { .. } => "Content-Aware Scale".to_owned(),
 		Command::SaveSelection { .. } => "Save Selection".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
@@ -4041,6 +4062,7 @@ fn pixel_job_label(command: &Command) -> String {
 }
 
 mod m10;
+mod m11;
 mod m8;
 mod m9;
 

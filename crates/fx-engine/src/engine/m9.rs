@@ -262,7 +262,7 @@ impl Engine {
 		session.selection = true;
 		let status = session.status();
 		self.transform = Some((doc_id, session));
-		self.to_ui(&EngineToUi::TransformBox { up: true });
+		self.to_ui(&EngineToUi::TransformBox { up: true, bar: None });
 		self.to_ui(&EngineToUi::ToolInfo { text: status });
 		self.request_frame();
 	}

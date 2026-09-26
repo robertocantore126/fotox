@@ -238,6 +238,27 @@ impl PixelOps for EngineOps {
 		self.select(doc, op, store)
 	}
 
+	fn patch_fill(&self, pixels: &[[f32; 4]], w: usize, h: usize, hole: &[bool], sampling: &[bool], seed: u64) -> Result<Vec<[f32; 4]>, CommandError> {
+		let params = fx_ops::patchmatch::Params { seed, ..Default::default() };
+		Ok(fx_ops::patchmatch::fill(pixels, w, h, hole, sampling, &params))
+	}
+
+	fn seam_carve(
+		&self,
+		pixels: &[[f32; 4]],
+		w: usize,
+		h: usize,
+		protect: &[f32],
+		tw: usize,
+		th: usize,
+	) -> Result<(usize, usize, Vec<(u32, u32)>), CommandError> {
+		Ok(fx_ops::seam::carve(pixels, w, h, protect, tw, th))
+	}
+
+	fn heal_blend(&self, coverage: &[f32], before: &[[f32; 4]], source: &[[f32; 4]], w: usize, h: usize) -> Result<Vec<[f32; 4]>, CommandError> {
+		Ok(fx_ops::brush::heal::poisson(coverage, before, source, w, h))
+	}
+
 	fn clipboard(&self) -> Option<fx_core::pixels::ClipboardImage> {
 		self.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 	}

@@ -297,3 +297,69 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Try it: type some text, Type ▸ Warp Text…, Arc, Bend 50. Type ▸ Convert to Shape. T's flyout ▸ Horizontal Type Mask, type, Ctrl+Enter.
 
 ## M10-T09 — Acceptance: deferred to HARDEN (S30–S31, the logo redraw and the vertical Japanese paragraph).
+
+## M11-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the five recommendations recorded as fast defaults D-077..D-081 (D-079 notes the fast-mode MLS solver).
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
+
+## M11-T01 — PatchMatch core  (Claude, 2026-09-26)
+- Done: `fx_ops::patchmatch::fill(pixels, w, h, hole, sampling, params)` — a pyramid down to where the hole is a few patches wide, NNF upsampled from the coarser level (random at the coarsest, which starts from the mean sample colour), PatchMatch propagation + random search with alternating scan order, EM voting (rayon) per scale; seeded splitmix RNG, so a seed gives the same result. Patch 7 by default.
+- Skipped: the card's file split (one file `patchmatch.rs`), colour adaptation, rows-parallel NNF search, Tests (periodic texture fill, same seed ⇒ same result, memory budget on a 20 000² image).
+- FAST: search is single-threaded; votes are unweighted (no distance / distance-to-boundary weights); the caller owns the ROI budget (buffer passed in).
+- VERIFY: none.
+- Try it: through M11-T02 (Edit ▸ Content-Aware Fill).
+
+## M11-T02 — Content-Aware Fill, Spot Healing Content-Aware  (Claude, 2026-09-26)
+- Done: `Command::ContentAwareFill { layer, output: Current | NewLayer | Duplicate, seed }` (`fx-core/src/command/m11.rs`): the hole is the selection, the ROI is its tight bounds plus an Auto band (¾ of the hole's size, ≥ 48 px), read tile by tile and box-averaged onto a working grid of ≤ 768² pixels, filled through `PixelOps::patch_fill` (→ `fx_ops::patchmatch`), written back only where the selection covers (mixed by coverage, bilinear from the grid when it was reduced). Edit ▸ Content-Aware Fill… (dialog: Output To, Seed) and Edit ▸ Fill ▸ Use: Content-Aware (engine `engine/m11.rs`). The Spot Healing Brush's Type option (Content-Aware, the default, or Proximity Match): `StrokeTool::SpotHealContentAware` fills the stroke's window from a 1.5-diameter band by PatchMatch, then the D-045 healing blend. The Patch and Content-Aware Move commits (T03, T04) are in the same file.
+- Skipped: the workspace (painted sampling area, live preview, Colour / Rotation / Scale adaptation, Mirror), Sample All Layers, grey layers, Tests.
+- FAST: a hole larger than the budget is filled at a coarser scale and upsampled (soft); transparent pixels are never sampled; spot heal's window grows with a long stroke.
+- VERIFY: Photoshop's Auto sampling area; its default seedless behaviour (Fotox is deterministic per seed).
+- Try it: select an object with the Lasso, Edit ▸ Content-Aware Fill… ▸ OK; or Shift+F5 ▸ Use: Content-Aware. J (Spot Healing) over a blemish.
+
+## M11-T03 — Patch tool  (Claude, 2026-09-26)
+- Done: `tools/patch.rs` ("patch"): a freehand lasso draws the selection (or use the current one); a drag started inside it moves the ants and commits `Command::Patch { dx, dy, destination, content_aware }` on release. Normal = the D-045 healing blend of the content `(dx, dy)` away into the selection (through `PixelOps::heal_blend`); Content-Aware = PatchMatch sampling only the source box. Destination mode patches the dragged-to place from the selection. Option bar: Patch (Normal / Content-Aware), Source / Destination.
+- Skipped: live preview while dragging, Transparent, Structure / Color (Content-Aware), Diffusion, Tests.
+- FAST: a Normal patch over 4 × 768² pixels is refused; after a Destination patch the selection stays at the source.
+- VERIFY: Photoshop's selection after a patch.
+- Try it: J's flyout ▸ Patch Tool, lasso around a blemish, drag it onto clean skin.
+
+## M11-T04 — Content-Aware Move  (Claude, 2026-09-26)
+- Done: the same tool as "content-move": the drag commits `Command::ContentAwareMove { dx, dy, extend }` — Move fills the old place by PatchMatch (Auto band) and composites the content at the new place through the moved selection; Extend keeps the old place. The selection follows the content.
+- Skipped: Transform on Drop, Structure / Color (edge blending), Sample All Layers, Duplicate mode, Tests.
+- FAST: the moved content's edge is not blended (coverage only).
+- VERIFY: none.
+- Try it: J's flyout ▸ Content-Aware Move Tool, lasso an object, drag it.
+
+## M11-T05 — Content-Aware Scale  (Claude, 2026-09-26)
+- Done: `fx_ops::seam::carve` (Avidan–Shamir: gradient energy + 1000 × protection, DP seams, columns then rows on the carved image; enlargement duplicates the first k removal seams, k ≤ half) behind `PixelOps::seam_carve`; `Command::ContentAwareScale { layer, width, height, amount, protect, protect_skin }` reads the layer onto a ≤ 640² working grid, carves to the amount's share of the change, then maps every output pixel (tile by tile, rayon) through the plain scale → carved full-res pixel → working cell → source pixel. Edit ▸ Content-Aware Scale… (dialog: Width / Height %, Amount, Protect channel, Protect Skin Tones).
+- Skipped: the transform box UI and its view-level preview, scaling a selection only, Tests.
+- FAST: seams are `scale` px wide at full resolution (blocky steps on big images); nearest neighbour for the plain-scale part; the layer mask is not scaled; skin tones by a crude RGB rule; energy recomputed per seam.
+- VERIFY: Photoshop's skin detector and how Amount mixes the two.
+- Try it: Edit ▸ Content-Aware Scale…, Width 60 %.
+
+## M11-T06 — Liquify  (Claude, 2026-09-26)
+- Done: `Mapping::Custom { id, src, dst }` (still `Copy`) naming a geometry in `fx_core::warp_map` (a registry of `TriMesh` / sparse `DispField`, the last 48 kept), supported by `dest_rect`, the sampler's `Transform` (`fx-ops/resample/mapping.rs`: mesh → warp triangles with source points as `uv`; field → `p + d(p)`) and so by `Command::Transform` and the Free Transform live preview. The transform `Session` takes a `CustomWarp` (pointer, keys, options, overlay, status) in place of the box (`start_transform_with`), with its own option bar (`TransformBox.bar`). `fx_ops::liquify::dab`: Forward Warp, Reconstruct, Smooth, Twirl (Alt: counter-clockwise), Pucker / Bloat (Alt swaps), Push Left on a backward field with 4-px nodes in 64² chunks (only touched chunks exist). Filter ▸ Liquify… (Shift+Ctrl+X) starts the session (`tools/liquify.rs`): bar with Tool, Size, Pressure, Rate, ✓ / ✗; `[` `]` size, Delete = Restore All, Enter applies as one resample job.
+- Skipped: the modal workspace, Freeze / Thaw Mask, Hand / Zoom inside, Show Mesh / Backdrop, Reconstruct All (partial), stylus pressure, mesh load / save, Face-Aware (D-078), Tests.
+- FAST: the history step is "Free Transform"; the output layer grows by the largest displacement all round; source bounds use the field's global maximum; the registry forgets old ids (a stale id maps nothing).
+- VERIFY: brush falloff and twirl / pucker speeds against Photoshop.
+- Try it: Filter ▸ Liquify…, drag over a face, Enter.
+
+## M11-T07 — Puppet Warp  (Claude, 2026-09-26)
+- Done: `fx_ops::puppet` (grid mesh over the content box keeping cells the alpha — dilated by Expansion — covers; Density sets 20 / 36 / 60 cells; MLS deformation, D-079: Rigid, Normal = similarity, Distort = affine); `tools/puppet.rs` session: click adds a pin, drag moves it, Alt+click removes it; Mode and Show Mesh live from the bar; the deformed mesh is registered as `Mapping::Custom` and previewed / committed like Free Transform. Edit ▸ Puppet Warp.
+- Skipped: ARAP (D-079 fast default), pin rotation, Pin Depth, Tests.
+- FAST: a new pin's source is found from the nearest mesh vertex; Density / Expansion only apply when the session starts; the mesh overlay draws every triangle.
+- VERIFY: none.
+- Try it: a layer with an object on transparency, Edit ▸ Puppet Warp, click three pins, drag one.
+
+## M11-T08 — Perspective Warp  (Claude, 2026-09-26)
+- Done: `tools/perspective_warp.rs` warp session (Edit ▸ Perspective Warp, Alt+Shift+Ctrl+W). Layout: drag draws a quad, corners drag, a corner dropped near another quad's corner snaps to it and the two stay linked. Warp (the bar's Layout / Warp group): corners drag (linked corners move together); each quad maps its layout shape to its warped shape by homographies from the unit square (`Mapping::from_quad`), subdivided 16 × 16 into one `TriMesh` → `Mapping::Custom`, previewed and committed like Free Transform. Straighten (bar button, `warp:straighten`) snaps warped edges within 20° of vertical / horizontal.
+- Skipped: Shift+click one edge, deleting a quad, snapping along whole edges, Tests (no crack along a shared edge).
+- FAST: shared edges can crack slightly (per-quad homographies); the content outside the quads is dropped by the resample.
+- VERIFY: Photoshop keeps the content outside the planes (it does, via the mesh's extension) — Fotox drops it.
+- Try it: Edit ▸ Perspective Warp, drag two planes sharing a corner, switch the bar to Warp, drag corners, Enter.
+
+## M11-T09 — Vanishing Point  (Claude, 2026-09-26)
+- Skipped: the whole card (a modal workspace with planes, perspective marquee / stamp / brush, paste into a plane). The pieces it needs exist (homographies in `Mapping::from_quad`, `Mapping::Custom` meshes, the Clone Stamp); left for HARDEN or a later milestone after two cards' worth of warp sessions.
+
+## M11-T10 — Acceptance: deferred to HARDEN (S32–S34, Rob's comparison with Photoshop).

@@ -138,7 +138,7 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 		StrokeTool::Brush | StrokeTool::Pencil => Box::new(Paint),
 		StrokeTool::Eraser => Box::new(Erase),
 		StrokeTool::Clone { dx, dy, .. } | StrokeTool::Heal { dx, dy, .. } => Box::new(CloneSource { offset: (*dx, *dy) }),
-		StrokeTool::SpotHeal => Box::new(Veil),
+		StrokeTool::SpotHeal | StrokeTool::SpotHealContentAware => Box::new(Veil),
 		// The filtered source is the source window (M8-T05); Smudge paints
 		// through its `DabSequence`, this op is never asked.
 		StrokeTool::Blur { .. }

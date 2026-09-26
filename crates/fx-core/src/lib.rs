@@ -30,6 +30,7 @@ pub mod styles;
 pub mod text;
 pub mod transform;
 pub mod vector;
+pub mod warp_map;
 
 pub use blend::BlendMode;
 pub use color::{BitDepth, ColorProfile, DocumentColor, RenderingIntent};

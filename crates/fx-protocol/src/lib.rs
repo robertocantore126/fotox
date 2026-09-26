@@ -349,6 +349,10 @@ pub enum EngineToUi {
 	/// transform option bar (interpolation, ✓, ✗) while it is up.
 	TransformBox {
 		up: bool,
+		/// M11: the option bar of a warp session (`"_warp-liquify"` …)
+		/// instead of the transform bar.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		bar: Option<String>,
 	},
 	/// The Type tool's session (M6-T07): `open` shows the hidden textarea with
 	/// `text` and `selection` (UTF-8 byte offsets); `false` removes it.

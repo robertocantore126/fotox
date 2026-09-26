@@ -97,6 +97,10 @@ pub enum Mapping {
 	Projective([f64; 9]),
 	/// A bicubic Bézier patch (Free Transform's Warp mode).
 	Warp(BezierPatch),
+	/// A mesh or displacement field from `crate::warp_map` (M11: Liquify,
+	/// Puppet Warp, Perspective Warp): `M(s) = G(s + src) + dst`, where `G` is
+	/// the registered geometry `id`.
+	Custom { id: u64, src: [f64; 2], dst: [f64; 2] },
 }
 
 impl Mapping {
@@ -134,6 +138,7 @@ impl Mapping {
 			Mapping::Affine(m) => m.iter().all(|v| v.is_finite()),
 			Mapping::Projective(m) => m.iter().all(|v| v.is_finite()),
 			Mapping::Warp(patch) => patch.points.iter().flatten().all(|v| v.is_finite()) && patch.src_rect.iter().all(|v| v.is_finite()),
+			Mapping::Custom { src, dst, .. } => src.iter().chain(dst).all(|v| v.is_finite()),
 		}
 	}
 
@@ -152,6 +157,11 @@ impl Mapping {
 				patch.src_rect[1] += dy;
 				Mapping::Warp(patch)
 			}
+			Mapping::Custom { id, src, dst } => Mapping::Custom {
+				id,
+				src: [src[0] + dx, src[1] + dy],
+				dst,
+			},
 		}
 	}
 
@@ -171,6 +181,11 @@ impl Mapping {
 				}
 				Mapping::Warp(patch)
 			}
+			Mapping::Custom { id, src, dst } => Mapping::Custom {
+				id,
+				src,
+				dst: [dst[0] + dx, dst[1] + dy],
+			},
 		}
 	}
 
@@ -215,7 +230,7 @@ impl Mapping {
 				let point = ((m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w);
 				(point.0.is_finite() && point.1.is_finite()).then_some(point)
 			}
-			Mapping::Warp(_) => None,
+			Mapping::Warp(_) | Mapping::Custom { .. } => None,
 		}
 	}
 
@@ -297,6 +312,20 @@ pub fn dest_rect(mapping: &Mapping, rect: [f64; 4]) -> Option<((i32, i32), (u32,
 		// (M6-T04's Warp): their box holds every mapped pixel. The source
 		// outside the patch's rectangle maps nowhere.
 		Mapping::Warp(patch) => patch.points.iter().for_each(|p| add((p[0], p[1]))),
+		// A mesh covers its destination vertices; a field moves the source
+		// rectangle by at most its largest displacement.
+		Mapping::Custom { id, src, dst } => match crate::warp_map::get(*id)?.as_ref() {
+			crate::warp_map::WarpData::Mesh(mesh) => {
+				let b = mesh.dst_bounds()?;
+				add((b[0] + dst[0], b[1] + dst[1]));
+				add((b[2] + dst[0], b[3] + dst[1]));
+			}
+			crate::warp_map::WarpData::Field(field) => {
+				let m = field.max().ceil() + 1.0;
+				add((rect[0] + src[0] + dst[0] - m, rect[1] + src[1] + dst[1] - m));
+				add((rect[2] + src[0] + dst[0] + m, rect[3] + src[1] + dst[1] + m));
+			}
+		},
 		_ => {
 			for (x, y) in corners {
 				add(mapping.forward_point(x, y)?);

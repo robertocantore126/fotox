@@ -211,6 +211,9 @@ pub enum StrokeTool {
 	Heal { dx: f64, dy: f64, sample_all: bool },
 	/// The Spot Healing Brush (J): the source is chosen near the stroke.
 	SpotHeal,
+	/// The Spot Healing Brush's Type: Content-Aware (M11-T02): the stroke's
+	/// area is filled by PatchMatch from around it, then healed.
+	SpotHealContentAware,
 	/// Dodge (M8-T04): lighten the `range`; the brush's flow is the Exposure.
 	Dodge {
 		range: ToneRange,
@@ -304,7 +307,7 @@ impl StrokeTool {
 			StrokeTool::Eraser => "Eraser",
 			StrokeTool::Clone { .. } => "Clone Stamp",
 			StrokeTool::Heal { .. } => "Healing Brush",
-			StrokeTool::SpotHeal => "Spot Healing Brush",
+			StrokeTool::SpotHeal | StrokeTool::SpotHealContentAware => "Spot Healing Brush",
 			StrokeTool::BgEraser { .. } => "Background Eraser",
 			StrokeTool::Blur { .. } => "Blur Tool",
 			StrokeTool::Sharpen { .. } => "Sharpen Tool",

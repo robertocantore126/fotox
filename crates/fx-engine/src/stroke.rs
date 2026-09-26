@@ -45,7 +45,7 @@ pub fn prepare(doc: &Document, layer: LayerId, target: StrokeTarget, tool: &Stro
 		StrokeTool::Clone { sample_all: true, .. } | StrokeTool::Heal { sample_all: true, .. } => {
 			Some(Arc::new(CompositeTiles::new(doc.clone(), store.clone())))
 		}
-		StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal => Some(Arc::new(LayerSource {
+		StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::SpotHealContentAware => Some(Arc::new(LayerSource {
 			image: image.clone(),
 			offset,
 			store: store.clone(),

@@ -166,6 +166,34 @@ pub trait PixelOps: Send + Sync {
 		Err(CommandError::NotAllowed("text outlines need the engine's text layout".into()))
 	}
 
+	/// PatchMatch hole filling (M11-T01) over a `w × h` buffer: the `hole`
+	/// pixels rebuilt from patches of the `sampling` pixels.
+	#[allow(clippy::too_many_arguments)]
+	fn patch_fill(&self, _pixels: &[[f32; 4]], _w: usize, _h: usize, _hole: &[bool], _sampling: &[bool], _seed: u64) -> Result<Vec<[f32; 4]>, CommandError> {
+		Err(CommandError::NotAllowed("content-aware filling needs the engine".into()))
+	}
+
+	/// Seam carving (M11-T05) of a `w × h` buffer towards `tw × th`: the
+	/// achieved size and each carved pixel's source.
+	#[allow(clippy::type_complexity)]
+	fn seam_carve(
+		&self,
+		_pixels: &[[f32; 4]],
+		_w: usize,
+		_h: usize,
+		_protect: &[f32],
+		_tw: usize,
+		_th: usize,
+	) -> Result<(usize, usize, Vec<(u32, u32)>), CommandError> {
+		Err(CommandError::NotAllowed("seam carving needs the engine".into()))
+	}
+
+	/// The healing blend (D-045) of premultiplied `source` into `before` over
+	/// the covered pixels.
+	fn heal_blend(&self, _coverage: &[f32], _before: &[[f32; 4]], _source: &[[f32; 4]], _w: usize, _h: usize) -> Result<Vec<[f32; 4]>, CommandError> {
+		Err(CommandError::NotAllowed("the healing blend needs the engine".into()))
+	}
+
 	/// What Edit ▸ Paste pastes (M5-T05): the engine's clipboard. `None` =
 	/// empty.
 	fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {
