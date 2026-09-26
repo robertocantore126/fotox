@@ -56,6 +56,7 @@ export const IMPLEMENTED = new Set([
   "dlg:trim",
   "dlg:unsharp-mask",
   "dlg:warp-text",
+  "dlg:content-aware-fill",
   "doc:new",
   "doc:open-recent:*",
   "doc:revert",

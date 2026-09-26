@@ -459,6 +459,33 @@ pub enum Command {
 	TextToWorkPath {
 		layer: LayerRef,
 	},
+	/// Edit ▸ Content-Aware Fill (M11-T02): the selection filled by PatchMatch
+	/// from the area around it.
+	ContentAwareFill {
+		layer: LayerRef,
+		#[serde(default)]
+		output: m11::FillOutput,
+		#[serde(default)]
+		seed: u64,
+	},
+	/// The Patch tool's commit (M11-T03).
+	Patch {
+		layer: LayerRef,
+		dx: i64,
+		dy: i64,
+		#[serde(default)]
+		destination: bool,
+		#[serde(default)]
+		content_aware: bool,
+	},
+	/// The Content-Aware Move tool's commit (M11-T04).
+	ContentAwareMove {
+		layer: LayerRef,
+		dx: i64,
+		dy: i64,
+		#[serde(default)]
+		extend: bool,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -795,6 +822,15 @@ impl Command {
 			Command::TextToSelection { content, mode } => m10::text_to_selection(doc, content, *mode, ctx),
 			Command::TextToShape { layer } => m10::text_to_shape(doc, layer, ctx),
 			Command::TextToWorkPath { layer } => m10::text_to_work_path(doc, layer, ctx),
+			Command::ContentAwareFill { layer, output, seed } => m11::content_aware_fill(doc, layer, *output, *seed, ctx),
+			Command::Patch {
+				layer,
+				dx,
+				dy,
+				destination,
+				content_aware,
+			} => m11::patch(doc, layer, *dx, *dy, *destination, *content_aware, ctx),
+			Command::ContentAwareMove { layer, dx, dy, extend } => m11::content_aware_move(doc, layer, *dx, *dy, *extend, ctx),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
 			Command::RedEye {
@@ -853,6 +889,7 @@ impl Command {
 // ---------------------------------------------------------------------------
 
 mod m10;
+pub mod m11;
 mod m8;
 pub mod m9;
 

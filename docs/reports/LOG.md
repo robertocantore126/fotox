@@ -309,3 +309,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: search is single-threaded; votes are unweighted (no distance / distance-to-boundary weights); the caller owns the ROI budget (buffer passed in).
 - VERIFY: none.
 - Try it: through M11-T02 (Edit ▸ Content-Aware Fill).
+
+## M11-T02 — Content-Aware Fill, Spot Healing Content-Aware  (Claude, 2026-09-26)
+- Done: `Command::ContentAwareFill { layer, output: Current | NewLayer | Duplicate, seed }` (`fx-core/src/command/m11.rs`): the hole is the selection, the ROI is its tight bounds plus an Auto band (¾ of the hole's size, ≥ 48 px), read tile by tile and box-averaged onto a working grid of ≤ 768² pixels, filled through `PixelOps::patch_fill` (→ `fx_ops::patchmatch`), written back only where the selection covers (mixed by coverage, bilinear from the grid when it was reduced). Edit ▸ Content-Aware Fill… (dialog: Output To, Seed) and Edit ▸ Fill ▸ Use: Content-Aware (engine `engine/m11.rs`). The Spot Healing Brush's Type option (Content-Aware, the default, or Proximity Match): `StrokeTool::SpotHealContentAware` fills the stroke's window from a 1.5-diameter band by PatchMatch, then the D-045 healing blend. The Patch and Content-Aware Move commits (T03, T04) are in the same file.
+- Skipped: the workspace (painted sampling area, live preview, Colour / Rotation / Scale adaptation, Mirror), Sample All Layers, grey layers, Tests.
+- FAST: a hole larger than the budget is filled at a coarser scale and upsampled (soft); transparent pixels are never sampled; spot heal's window grows with a long stroke.
+- VERIFY: Photoshop's Auto sampling area; its default seedless behaviour (Fotox is deterministic per seed).
+- Try it: select an object with the Lasso, Edit ▸ Content-Aware Fill… ▸ OK; or Shift+F5 ▸ Use: Content-Aware. J (Spot Healing) over a blemish.

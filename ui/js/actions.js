@@ -135,6 +135,12 @@ export function runAction(item) {
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
   // Type ▸ Warp Text (M10-T08).
+  if (a === "dlg:content-aware-fill" && bridge.isNative) {
+    openDialog("content-aware-fill", {
+      onOk: (v) => bridge.send({ type: UI.ACTION, id: "edit:content-aware-fill", args: { output: v["Output To:"], seed: Number(v["Seed:"]) || 1 } }),
+    });
+    return;
+  }
   if (a === "dlg:warp-text" && bridge.isNative) {
     openDialog("warp-text", {
       onOk: (v) => bridge.send({ type: UI.ACTION, id: "type:warp", args: { style: v["Style:"], bend: Number(v["Bend:"]) } }),

@@ -143,7 +143,12 @@ impl Stroke {
 		if gray
 			&& (matches!(
 				setup.tool,
-				StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::Blur { .. } | StrokeTool::Sharpen { .. }
+				StrokeTool::Clone { .. }
+					| StrokeTool::Heal { .. }
+					| StrokeTool::SpotHeal
+					| StrokeTool::SpotHealContentAware
+					| StrokeTool::Blur { .. }
+					| StrokeTool::Sharpen { .. }
 			) || super::ops::sequence_for(&setup.tool, [0.0; 3], 0).is_some())
 		{
 			return Err(CommandError::NotAllowed("clone and heal work on pixels, not on a mask".into()));
@@ -153,6 +158,7 @@ impl Stroke {
 			StrokeTool::Clone { .. }
 				| StrokeTool::Heal { .. }
 				| StrokeTool::SpotHeal
+				| StrokeTool::SpotHealContentAware
 				| StrokeTool::Blur { .. }
 				| StrokeTool::Sharpen { .. }
 				| StrokeTool::PatternStamp { .. }
@@ -522,7 +528,7 @@ impl Stroke {
 	/// End the stroke: the healing tools solve their blend now. Returns the
 	/// layer's final image and offset.
 	pub fn finish(mut self) -> Result<(TiledImage, (i32, i32)), TileError> {
-		if matches!(self.tool, StrokeTool::Heal { .. } | StrokeTool::SpotHeal) {
+		if matches!(self.tool, StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::SpotHealContentAware) {
 			self.heal()?;
 		}
 		let mut image = self.before.clone();
@@ -591,7 +597,11 @@ impl Stroke {
 				best.0
 			}
 		};
-		let source = self.gather_source(canvas_origin, (w, h), offset)?;
+		let source = if matches!(self.tool, StrokeTool::SpotHealContentAware) {
+			self.content_aware_source(canvas_origin, (w, h), &coverage)?
+		} else {
+			self.gather_source(canvas_origin, (w, h), offset)?
+		};
 		let healed = heal::poisson(&coverage, &before, &source, w, h);
 		// Write back: before + (healed − before) · opacity · S, premultiplied.
 		let opacity = self.brush.opacity;
@@ -615,6 +625,32 @@ impl Stroke {
 			}
 		}
 		Ok(())
+	}
+
+	/// The Content-Aware type's source over the window (M11-T02): the window
+	/// plus a band around it read from the source, the covered pixels filled
+	/// by PatchMatch from the band.
+	fn content_aware_source(&self, origin: (i64, i64), (w, h): (usize, usize), coverage: &[f32]) -> Result<Vec<[f32; 4]>, TileError> {
+		// FAST: the band is 1.5 brush diameters; a long stroke makes a big window.
+		let band = ((1.5 * f64::from(self.brush.diameter)) as usize).max(24);
+		let (ew, eh) = (w + 2 * band, h + 2 * band);
+		let ext = self.gather_source((origin.0 - band as i64, origin.1 - band as i64), (ew, eh), (0, 0))?;
+		let mut hole = vec![false; ew * eh];
+		for y in 0..h {
+			for x in 0..w {
+				hole[(y + band) * ew + x + band] = coverage[y * w + x] > 0.0;
+			}
+		}
+		let sampling: Vec<bool> = ext.iter().zip(&hole).map(|(p, h)| !*h && p[3] > 0.99).collect();
+		if !sampling.iter().any(|s| *s) {
+			return self.gather_source(origin, (w, h), (0, 0));
+		}
+		let params = crate::patchmatch::Params {
+			seed: self.brush.seed,
+			..Default::default()
+		};
+		let filled = crate::patchmatch::fill(&ext, ew, eh, &hole, &sampling, &params);
+		Ok((0..w * h).map(|i| filled[(i / w + band) * ew + i % w + band]).collect())
 	}
 
 	/// The source's premultiplied pixels over a canvas rectangle, shifted so
