@@ -4,7 +4,7 @@ Target: match Photoshop's results in its **default** configuration (8/16-bit
 RGB, blending on encoded values, "Blend clipped layers as group" on).
 Implemented in `fx-render/src/gpu/composite.wgsl` with an f64 CPU twin
 (`fx-render::reference`). Items marked **VERIFY** must be checked against
-Photoshop renders in M7 (PSD import gives us test files); until then this
+Photoshop renders in M14 (PSD import gives us test files); until then this
 document is the spec.
 
 ## 1. Notation

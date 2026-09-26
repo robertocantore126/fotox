@@ -242,7 +242,7 @@ checkerboard, tiles (nearest sampling ≥ 100 %, linear below).
   tiles stay alive. Limit: 50 states (like Photoshop).
 * **Automation comes for free:** a macro ("action") is the list of commands
   in the history; batch processing is `fotox-cli batch` replaying it on files
-  (M8). Custom workflows = new commands + new UI panels.
+  (M15). Custom workflows = new commands + new UI panels.
 * **Brush strokes** (M5) are commands too: they carry input samples
   (position, pressure, tilt, time) and brush parameters, not pixels. The
   engine renders the stroke live into preview tiles and commits at pen-up.
@@ -269,7 +269,7 @@ checkerboard, tiles (nearest sampling ≥ 100 %, linear below).
 * Native format `.fxd` (M3, `FILE_FORMAT.md`): tile-addressable, compressed
   per tile, opened lazily (instant open at any size), saved incrementally
   (only changed tiles are appended).
-* PSD/PSB import in M7 (layers, masks, blend modes, groups, adjustment
+* PSD/PSB import in M14 (layers, masks, blend modes, groups, adjustment
   layers where representable); PSD export later.
 
 ---
