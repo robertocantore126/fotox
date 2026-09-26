@@ -244,3 +244,12 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: annotations are drawn only while their tool is active, as crosshairs / handles without numbers; the samplers are re-read from the composite on the engine thread at every edit.
 - VERIFY: Straighten's sign convention against Photoshop.
 - Try it: I's flyout ▸ Color Sampler, click the image, open Window ▸ Info; the Ruler along a tilted horizon, Straighten Layer.
+
+## M9-T09 — Perspective Crop  (Claude, 2026-09-26)
+- Done: `Command::PerspectiveCrop { quad, width, height }` (in `command/m9.rs`: the inverse of M6-T01's rectangle→quad homography resamples every pixel layer and mask through `resample_document`, clipped to the new canvas, selection dropped, "Perspective Crop", run as a job); tool `tools/perspective_crop.rs` ("crop-persp"): drag a box, move each corner (convex only), drag inside to move it, 3 × 3 grid, Enter / ✓ commits with the bar's W × H or the quad's average sides, Escape / ✗ cancels.
+- Skipped: Resolution, Front Image, Show Grid toggle; Tests (should check: a synthetic rectangle in perspective comes out axis-aligned within a pixel).
+- FAST: Bicubic Automatic always; shape and text layers keep their geometry (only pixel layers and masks are resampled, like Crop's straighten).
+- VERIFY: none.
+- Try it: C's flyout ▸ Perspective Crop, drag over a photographed document, move the corners onto its edges, Enter.
+
+## M9-T10 — Acceptance: deferred to HARDEN (S27–S29, Rob's photo comparisons of Color Range, Select and Mask and Quick Selection).

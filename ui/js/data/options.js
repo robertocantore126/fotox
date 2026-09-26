@@ -67,7 +67,7 @@ export const optionBars = {
     { type: "gap" },
     { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Commit Transform (Enter)", "Cancel Transform (Esc)"], actions: ["tool:commit", "tool:cancel"] },
   ],
-  "crop-persp": [{ type: "label", text: "Drag the corner handles to define the perspective plane" }],
+  "crop-persp": [{ type: "num", text: "W:", value: "", unit: "px", width: 60 }, { type: "num", text: "H:", value: "", unit: "px", width: 60 }, { type: "btn", text: "✓", action: "tool:commit" }, { type: "btn", text: "✗", action: "tool:cancel" }, { type: "label", text: "Drag a box, move its corners onto the plane, Enter" }],
   slice: [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
   "slice-select": [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice select"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
 

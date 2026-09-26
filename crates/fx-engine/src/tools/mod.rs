@@ -32,6 +32,7 @@ pub mod measure;
 pub mod move_tool;
 pub mod paint;
 pub mod path_select;
+pub mod perspective_crop;
 pub mod quick_select;
 pub mod shape;
 pub mod transform;
@@ -434,6 +435,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
+		// Perspective Crop (M9-T09).
+		"crop-persp" => Some(Box::new(perspective_crop::PerspectiveCrop::default())),
 		// The measuring tools (M9-T08).
 		"sampler" => Some(Box::new(measure::ColorSampler::default())),
 		"ruler-tool" => Some(Box::new(measure::Ruler::default())),

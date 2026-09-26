@@ -162,6 +162,7 @@ export const IMPLEMENTED = new Set([
   "tool:commit",
   "tool:counting",
   "tool:crop",
+  "tool:crop-persp",
   "tool:dodge",
   "tool:eraser",
   "tool:eraser-bg",
