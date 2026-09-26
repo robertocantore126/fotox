@@ -2920,6 +2920,75 @@ impl Engine {
 				};
 				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
 			}
+			// The rest of Layer ▸ Layer Mask (M7-T05).
+			"mask:reveal-all" | "mask:hide-all" => {
+				let fill = if id == "mask:hide-all" { MaskFill::HideAll } else { MaskFill::RevealAll };
+				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
+			}
+			"mask:delete" | "mask:apply" => self.command(
+				doc_id,
+				Command::DeleteMask {
+					layer: LayerRef::Active,
+					apply: id == "mask:apply",
+				},
+			),
+			"mask:disable" | "mask:link" => {
+				let mask = self
+					.docs
+					.get(doc_id)
+					.and_then(|open| open.doc.active_layer().and_then(|l| open.doc.layer(l)))
+					.and_then(|l| l.mask.as_ref().map(|m| (m.enabled, m.linked)));
+				let Some((enabled, linked)) = mask else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "The layer has no mask".into(),
+					});
+					return true;
+				};
+				let (enabled, linked) = if id == "mask:disable" {
+					(Some(!enabled), None)
+				} else {
+					(None, Some(!linked))
+				};
+				self.command(
+					doc_id,
+					Command::SetMaskFlags {
+						layer: LayerRef::Active,
+						enabled,
+						linked,
+					},
+				);
+			}
+			// Layer ▸ New ▸ Layer from Background (M7-T05).
+			"layer:new-from-bg" => {
+				let is_bg = self
+					.docs
+					.get(doc_id)
+					.and_then(|open| open.doc.active_layer().and_then(|l| open.doc.layer(l)))
+					.is_some_and(|l| l.name == "Background" && l.locked_position);
+				if is_bg {
+					self.command(
+						doc_id,
+						Command::SetLayerProps {
+							layer: LayerRef::Active,
+							props: LayerPropsPatch {
+								name: Some("Layer 0".into()),
+								locked_position: Some(false),
+								..Default::default()
+							},
+						},
+					);
+				}
+			}
+			// File ▸ Revert (M7-T05). FAST: every history step is undone, which is
+			// the opened state as long as the history kept every step.
+			"doc:revert" => {
+				if let Some(open) = self.docs.get_mut(doc_id) {
+					while open.history.undo(&mut open.doc) {}
+					open.dirty = false;
+					open.changed();
+				}
+				self.after_edit(doc_id, true);
+			}
 			"mask:reveal-sel" | "mask:hide-sel" => {
 				let fill = if id == "mask:hide-sel" {
 					MaskFill::HideSelection

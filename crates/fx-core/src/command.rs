@@ -144,6 +144,12 @@ pub enum Command {
 	AddMask { layer: LayerRef, fill: MaskFill },
 	/// M2
 	DeleteMask { layer: LayerRef, apply: bool },
+	/// Layer ▸ Layer Mask ▸ Disable / Enable, and the link toggle (M7-T05).
+	SetMaskFlags {
+		layer: LayerRef,
+		enabled: Option<bool>,
+		linked: Option<bool>,
+	},
 	/// Change the parameters of an adjustment layer. M2
 	SetAdjustment { layer: LayerRef, adjustment: Adjustment },
 	/// Merge the given layers into one pixel layer (rasterises). The result
@@ -378,6 +384,30 @@ impl Command {
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
 			Command::OffsetLayers { layers, dx, dy } => offset_layers(doc, layers, *dx, *dy),
+			Command::SetMaskFlags { layer, enabled, linked } => {
+				let id = resolve(doc, layer)?;
+				let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+				let Some(mask) = target.mask.as_mut() else {
+					return Err(CommandError::NotAllowed("the layer has no mask".into()));
+				};
+				if let Some(e) = enabled {
+					mask.enabled = *e;
+				}
+				if let Some(l) = linked {
+					mask.linked = *l;
+				}
+				let label = match (enabled, linked) {
+					(Some(true), _) => "Enable Layer Mask",
+					(Some(false), _) => "Disable Layer Mask",
+					(None, Some(true)) => "Link Layer Mask",
+					_ => "Unlink Layer Mask",
+				};
+				Ok(CommandEffect {
+					label: label.into(),
+					props_changed: vec![id],
+					..Default::default()
+				})
+			}
 			Command::MoveEach { moves, label } => {
 				let mut changed = Vec::new();
 				for (layer, dx, dy) in moves {
