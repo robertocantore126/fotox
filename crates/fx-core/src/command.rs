@@ -213,6 +213,21 @@ pub enum Command {
 		opacity: f64,
 		preserve_transparency: bool,
 	},
+	/// The Paint Bucket (M8-T02): the Magic Wand's region at a point (limited
+	/// by the selection), filled with the colour or a pattern through the
+	/// mode and opacity.
+	BucketFill {
+		layer: LayerRef,
+		params: WandParams,
+		source: crate::fill::FillSource,
+		mode: BlendMode,
+		/// `0..=1`.
+		opacity: f64,
+		preserve_transparency: bool,
+	},
+	/// The Magic Eraser (M8-T02): the Magic Wand's region goes transparent;
+	/// a Background layer becomes a normal layer first (Photoshop).
+	MagicErase { layer: LayerRef, params: WandParams, opacity: f64 },
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -470,6 +485,15 @@ impl Command {
 				preserve_transparency,
 			} => fill(doc, layer, *color, *mode, *opacity, *preserve_transparency, ctx),
 			Command::Clear { layer, cut } => clear(doc, layer, *cut, ctx),
+			Command::BucketFill {
+				layer,
+				params,
+				source,
+				mode,
+				opacity,
+				preserve_transparency,
+			} => m8::bucket_fill(doc, layer, params, source, *mode, *opacity, *preserve_transparency, ctx),
+			Command::MagicErase { layer, params, opacity } => m8::magic_erase(doc, layer, params, *opacity, ctx),
 			Command::LayerViaCopy { cut } => layer_via_copy(doc, *cut, ctx),
 			Command::Paste { in_place, center } => paste(doc, *in_place, *center, ctx),
 			Command::Stroke {
@@ -518,6 +542,8 @@ impl Command {
 // ---------------------------------------------------------------------------
 // The commands
 // ---------------------------------------------------------------------------
+
+mod m8;
 
 fn select_layers(doc: &mut Document, layers: &[LayerRef]) -> Result<CommandEffect, CommandError> {
 	let mut selected = Vec::with_capacity(layers.len());

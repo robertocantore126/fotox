@@ -112,5 +112,13 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 		StrokeTool::Eraser => Box::new(Erase),
 		StrokeTool::Clone { dx, dy, .. } | StrokeTool::Heal { dx, dy, .. } => Box::new(CloneSource { offset: (*dx, *dy) }),
 		StrokeTool::SpotHeal => Box::new(Veil),
+		StrokeTool::BgEraser { sample, tolerance, protect } => {
+			let rgb = |c: [u16; 3]| c.map(|v| f64::from(v) / 65535.0);
+			Box::new(super::ops::background_eraser::BackgroundEraser {
+				sample: rgb(*sample),
+				tolerance: f64::from(*tolerance),
+				protect: protect.map(rgb),
+			})
+		}
 	}
 }

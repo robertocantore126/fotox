@@ -800,6 +800,28 @@ impl Engine {
 				samples,
 			} => {
 				self.end_stroke();
+				// The Background Eraser turns the Background into a layer first
+				// (M8-T02, Photoshop): its own History step.
+				if matches!(tool, fx_core::stroke::StrokeTool::BgEraser { .. }) {
+					let is_bg = self
+						.docs
+						.get(doc_id)
+						.and_then(|open| open.doc.active_layer().and_then(|l| open.doc.layer(l)))
+						.is_some_and(|l| l.name == "Background" && l.locked_position);
+					if is_bg {
+						self.command(
+							doc_id,
+							Command::SetLayerProps {
+								layer: LayerRef::Active,
+								props: LayerPropsPatch {
+									name: Some("Layer 0".into()),
+									locked_position: Some(false),
+									..Default::default()
+								},
+							},
+						);
+					}
+				}
 				let store = self.store.clone();
 				let Some(open) = self.docs.get_mut(doc_id) else { return };
 				if let Some(job) = &open.busy {
@@ -3925,6 +3947,9 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::ConvertProfile { .. }
 			| Command::ModifySelection { .. }
 			| Command::MagicWand { .. }
+			// The Paint Bucket and Magic Eraser flood like the wand (M8-T02).
+			| Command::BucketFill { .. }
+			| Command::MagicErase { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
 			| Command::RotateCanvas { .. }
@@ -3947,6 +3972,8 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::ConvertProfile { .. } => "Convert to Profile".to_owned(),
 		Command::ModifySelection { .. } => "Modify Selection".to_owned(),
 		Command::MagicWand { .. } => "Magic Wand".to_owned(),
+		Command::BucketFill { .. } => "Paint Bucket".to_owned(),
+		Command::MagicErase { .. } => "Magic Eraser".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
 		}

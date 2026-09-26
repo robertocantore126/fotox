@@ -28,6 +28,9 @@ pub struct Document {
 	pub global_light: f64,
 	/// Ruler guides (M7-T06), document pixels.
 	pub guides: Vec<Guide>,
+	/// The patterns the document uses (M8-T06): Pattern Stamp, bucket and
+	/// pattern fills, saved with it.
+	pub patterns: Vec<crate::pattern::Pattern>,
 	next_id: u64,
 	/// How many layers of each kind this document has created, for the
 	/// Photoshop-style default names (`"Layer 1"`, `"Group 2"`, `"Curves 1"`).
@@ -173,6 +176,7 @@ impl Document {
 			revision: 0,
 			global_light: 120.0,
 			guides: Vec::new(),
+			patterns: Vec::new(),
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
 		}

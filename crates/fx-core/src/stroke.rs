@@ -211,6 +211,14 @@ pub enum StrokeTool {
 	Heal { dx: f64, dy: f64, sample_all: bool },
 	/// The Spot Healing Brush (J): the source is chosen near the stroke.
 	SpotHeal,
+	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
+	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
+	BgEraser {
+		sample: [u16; 3],
+		tolerance: f32,
+		#[serde(default)]
+		protect: Option<[u16; 3]>,
+	},
 }
 
 impl StrokeTool {
@@ -223,6 +231,7 @@ impl StrokeTool {
 			StrokeTool::Clone { .. } => "Clone Stamp",
 			StrokeTool::Heal { .. } => "Healing Brush",
 			StrokeTool::SpotHeal => "Spot Healing Brush",
+			StrokeTool::BgEraser { .. } => "Background Eraser",
 		}
 	}
 }

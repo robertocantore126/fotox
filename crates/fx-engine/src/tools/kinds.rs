@@ -129,15 +129,21 @@ impl<T: DragTool> Tool for Drag<T> {
 	}
 }
 
+/// A Mode drop-down's blend mode ("Linear Dodge (Add)" → `linear_dodge`);
+/// Normal for anything unknown.
+pub fn blend_mode(mode: Option<String>) -> fx_core::BlendMode {
+	mode.and_then(|m| {
+		let m = m.split(" (").next().unwrap_or(&m).to_lowercase().replace([' ', '-'], "_");
+		serde_json::from_value::<fx_core::BlendMode>(serde_json::Value::String(m)).ok()
+	})
+	.unwrap_or_default()
+}
+
 /// The tools built from a kind, by UI tool id. `None` for any other id.
 pub fn registered(id: &str) -> Option<Box<dyn Tool>> {
 	match id {
-		// M8 adds its tools here, e.g.:
-		// "bucket" => Some(Box::new(Click(bucket::Bucket))),
-		// "gradient" => Some(Box::new(Drag::new(gradient::Gradient))),
-		_ => {
-			let _ = id;
-			None
-		}
+		"paint-bucket" => Some(Box::new(Click(super::bucket::Bucket))),
+		"eraser-magic" => Some(Box::new(Click(super::bucket::MagicEraser))),
+		_ => None,
 	}
 }

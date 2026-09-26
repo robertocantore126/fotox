@@ -5,6 +5,7 @@
 pub mod color_dynamics;
 pub mod heal;
 pub mod op;
+pub mod ops;
 pub mod path;
 pub mod stroke;
 pub mod tip;

@@ -20,6 +20,7 @@ use fx_tiles::TileStore;
 use crate::ops::EngineOps;
 use crate::{CursorShape, Modifiers, PointerKind};
 
+pub mod bucket;
 pub mod crop;
 pub mod eyedropper;
 pub mod kinds;
@@ -405,6 +406,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"clone" => Some(Box::new(paint::Paint::new("clone", paint::Kind::Clone))),
 		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
+		"eraser-bg" => Some(Box::new(paint::Paint::new("eraser-bg", paint::Kind::BgEraser))),
 		// The shape tools (M6-T06) and the Path Selection tool that moves a
 		// shape by its transform.
 		"shape" => Some(Box::new(shape::Shape::new("shape", shape::Kind::Rect))),

@@ -24,6 +24,8 @@ pub enum Kind {
 	Clone,
 	Heal,
 	SpotHeal,
+	/// The Background Eraser (M8-T02).
+	BgEraser,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -90,7 +92,7 @@ impl Paint {
 			spacing: percent("Spacing", 25.0).max(0.01),
 			opacity: percent("Opacity", 100.0),
 			flow: percent("Flow", 100.0),
-			mode: if matches!(self.kind, Kind::Eraser | Kind::SpotHeal) {
+			mode: if matches!(self.kind, Kind::Eraser | Kind::SpotHeal | Kind::BgEraser) {
 				BlendMode::Normal
 			} else {
 				mode
@@ -113,6 +115,21 @@ impl Paint {
 			// The eraser's Pencil/Block modes use a hard tip (see `brush`).
 			Kind::Eraser => StrokeTool::Eraser,
 			Kind::SpotHeal => StrokeTool::SpotHeal,
+			Kind::BgEraser => {
+				let rgb = |c: [u16; 4]| [c[0], c[1], c[2]];
+				let sample = if s.string(self.id, "Sampling").as_deref() == Some("Background Swatch") {
+					s.bg
+				} else {
+					// FAST: "Continuous" samples once, at the press, like "Once".
+					let layer = ctx.doc.active_layer();
+					sample_pixel(ctx.doc, at.0, at.1, 1, layer, ctx.store).map_err(|e| e.to_string())?
+				};
+				StrokeTool::BgEraser {
+					sample: rgb(sample),
+					tolerance: (s.number(self.id, "Tolerance").unwrap_or(50.0) / 100.0).clamp(0.0, 1.0) as f32,
+					protect: s.bool(self.id, "Protect Foreground Color").unwrap_or(false).then(|| rgb(s.fg)),
+				}
+			}
 			Kind::Clone | Kind::Heal => {
 				let Some(source) = self.source else {
 					return Err("Alt-click to define a source point".into());
