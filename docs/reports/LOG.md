@@ -209,3 +209,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: samples come from the foreground / background swatches.
 - VERIFY: every curve (D-064).
 - Try it: set the foreground to a colour in the image, Select ▸ Color Range…, Fuzziness 60.
+
+## M9-T04 — Focus Area  (Claude, 2026-09-26)
+- Done: `SelectOp::FocusArea` + `fx_ops::select::focus` (per tile with a 16 px apron: luminance detail at σ 1 and 2 as a DoG stand-in for the LoG, 9 × 9 energy, noise floor, `e / (e + 0.02)` normalisation, soft threshold at `1 − In-Focus Range`, Soften Edge = σ 2 blur), on the composite, as a job; dialog with In-Focus Range, Image Noise Level, Soften Edge. Shared helpers `focus::blur` / `box_mean`.
+- Skipped: the dialog's add / subtract brushes, preview and view modes, output to mask / new layer (use Select and Mask's output or Layer ▸ Layer Mask afterwards); Tests (should check: sharp-left / blurred-right synthetic selects the left half within a few pixels; the noise floor keeps a noisy flat area out).
+- FAST: each tile reads a 288² window (apron) through a small tile cache.
+- VERIFY: normalisation constant, threshold curve, Photoshop's slider meaning.
+- Try it: a photo with a shallow depth of field, Select ▸ Focus Area…
