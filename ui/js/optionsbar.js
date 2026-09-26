@@ -189,6 +189,10 @@ function toggle(spec) {
       clear(box);
       if (on) box.append(icon("i-check", "ic xs"));
       wrap.setAttribute("aria-pressed", on ? "true" : "false");
+      // The click is stopped here, so tell the bar explicitly: without this
+      // no toggle ever reached the engine (Show Transform Controls, Auto-Select,
+      // Anti-alias, Contiguous, Sample All Layers… all did nothing).
+      wrap.dispatchEvent(new Event("change", { bubbles: true }));
     },
   }, box, h("span", { class: "ob-text", text: spec.text }));
   const write = (on) => {

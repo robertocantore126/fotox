@@ -168,6 +168,12 @@ pub(crate) enum Internal {
 	Ai(Box<m13::AiDone>),
 }
 
+/// The eight handles of a box `[x0, y0, x1, y1]`: corners and edge middles.
+fn control_handles([x0, y0, x1, y1]: [f64; 4]) -> [(f64, f64); 8] {
+	let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+	[(x0, y0), (mx, y0), (x1, y0), (x1, my), (x1, y1), (mx, y1), (x0, y1), (x0, my)]
+}
+
 /// What an internal message is, for the watchdog.
 fn internal_name(message: &Internal) -> &'static str {
 	match message {
@@ -261,6 +267,9 @@ struct Engine {
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
 	/// Pointer moves since the last traced input (the recorder counts them).
 	trace_moves: u32,
+	/// Move tool ▸ Show Transform Controls: the box of (document, generation,
+	/// layer), cached (finding a layer's content bounds scans its tiles).
+	controls: Option<(DocId, u64, LayerId, Option<[f64; 4]>)>,
 }
 
 /// How long the pointer must rest before a dragged transform is previewed at
@@ -400,6 +409,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		transform_refine: None,
 		smart_children: HashMap::new(),
 		trace_moves: 0,
+		controls: None,
 	};
 
 	loop {
@@ -590,6 +600,27 @@ impl Engine {
 			let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
 			event.x = x;
 			event.y = y;
+		}
+		// Move tool ▸ Show Transform Controls: a press on one of the box's
+		// handles starts Free Transform and hands it the same press.
+		if event.kind == PointerKind::Down
+			&& event.buttons & crate::view::BUTTON_LEFT != 0
+			&& self.transform.is_none()
+			&& let Some(rect) = self.transform_controls(doc_id)
+		{
+			let zoom = self.docs.get(doc_id).map_or(1.0, |open| open.view.view.zoom);
+			let reach = 8.0 / zoom.max(1e-6);
+			if control_handles(rect)
+				.iter()
+				.any(|(hx, hy)| (hx - event.x).abs() <= reach && (hy - event.y).abs() <= reach)
+			{
+				self.start_transform(doc_id, TransformMode::Free);
+				// Refused (a locked layer: the toast said why): the press was
+				// on a handle, not a move, so it ends here.
+				if self.transform.is_none() {
+					return changed;
+				}
+			}
 		}
 		// A Free Transform box takes every pointer event while it is up.
 		if let Some((doc, session)) = &mut self.transform
@@ -1182,9 +1213,14 @@ impl Engine {
 			UiToEngine::ToolOptions { tool, options } => {
 				let transform = tool == "_transform";
 				let active = self.docs.active_mut().is_some_and(|open| open.view.tool == tool);
+				let move_tool = tool == "move";
 				self.settings.options.insert(tool, options);
 				if active {
 					self.with_active_tool(|tool, ctx| tool.options_changed(ctx));
+				}
+				// Show Transform Controls toggled: the box appears or goes.
+				if move_tool && active {
+					self.request_frame();
 				}
 				// The transform bar's Interpolation applies to the box that is up.
 				if transform && self.transform.is_some() {
@@ -1659,6 +1695,29 @@ impl Engine {
 		self.to_ui(&EngineToUi::TransformBox { up: true, bar });
 		self.to_ui(&EngineToUi::ToolInfo { text: status });
 		self.request_frame();
+	}
+
+	/// The box Move ▸ Show Transform Controls draws (document pixels), when
+	/// that option is on, the Move tool is active and no transform is up.
+	fn transform_controls(&mut self, doc_id: DocId) -> Option<[f64; 4]> {
+		if self.transform.is_some() || self.settings.bool("move", "Show Transform Controls") != Some(true) {
+			return None;
+		}
+		let open = self.docs.get(doc_id)?;
+		if open.view.tool != "move" {
+			return None;
+		}
+		let layer = open.doc.active_layer()?;
+		if let Some((d, g, l, rect)) = self.controls
+			&& d == doc_id
+			&& g == open.generation
+			&& l == layer
+		{
+			return rect;
+		}
+		let rect = crate::transform_preview::start_rect(&open.doc, layer, &self.store).ok().flatten();
+		self.controls = Some((doc_id, open.generation, layer, rect));
+		rect
 	}
 
 	/// The option bar's Interpolation for Free Transform (Bicubic by default,
@@ -3700,6 +3759,18 @@ impl Engine {
 				items.extend(overlay.items);
 			}
 			nudge = tool.selection_nudge();
+		}
+		// Move tool ▸ Show Transform Controls: the layer's box and handles.
+		if let Some(doc_id) = self.docs.active_id()
+			&& let Some(rect) = self.transform_controls(doc_id)
+		{
+			let [x0, y0, x1, y1] = rect;
+			items.push(fx_render::OverlayItem::Polyline {
+				points: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+				closed: true,
+				style: fx_render::OverlayStyle::Xor,
+			});
+			items.extend(control_handles(rect).into_iter().map(|at| fx_render::OverlayItem::Handle { at, size_px: 7.0 }));
 		}
 		// Guides and grid (M7-T06), under the tool's own overlay items.
 		if let Some(open) = self.docs.active_mut()
