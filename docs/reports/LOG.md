@@ -223,3 +223,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: a dialog without preview instead of the workspace; Radius ≤ 64, Feather ≤ 50; Shift Edge only moves partially-selected pixels.
 - VERIFY: guided-filter ε and window, the global refinements' curves.
 - Try it: a rough lasso around hair, Select ▸ Select and Mask…, Radius 20, Output To Layer Mask.
+
+## M9-T06 — Quick Selection tool  (Claude, 2026-09-26)
+- Done: `SelectOp::QuickSelect { dabs, sample_all, enhance_edge }` + `fx_ops::select::quick` (D-069): the stroke's window (dabs' bounds + 4 radii, ≤ 1536²) read once; the seeds' mean and spread give a colour tolerance; a 4-connected flood from the pixels under the dabs stops where the luminance gradient exceeds an edge threshold; Auto-Enhance softens the border. Tool `tools/quick_select.rs` ("quick-select", W): dabs every half radius, brush circle + path overlay, one "Quick Selection" step at release — Replace for the first stroke, then Add, Alt (or the Subtract mode) subtracts; Size from the option bar (`[`/`]` as for brushes).
+- Skipped: the live outline during the stroke (it updates at release); the coarse-level pass + boundary refinement of D-069; Select Subject (M13); Tests (should check: a stroke in a flat region bounded by a strong edge stops at the edge; Alt subtracts; live = replay).
+- FAST: level-0 window capped at 1536²; the tolerance and edge threshold are constants.
+- VERIFY: constants against Photoshop on Rob's photos (M9-T10).
+- Try it: W, drag inside an object with clear edges; Alt+drag to remove.

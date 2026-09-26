@@ -30,6 +30,7 @@ pub mod marquee;
 pub mod move_tool;
 pub mod paint;
 pub mod path_select;
+pub mod quick_select;
 pub mod shape;
 pub mod transform;
 pub mod type_tool;
@@ -429,7 +430,9 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"path-select" => Some(Box::new(path_select::PathSelect::default())),
 		"type" => Some(Box::new(type_tool::TypeTool::default())),
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
-		"quick-select" | "object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		// Quick Selection (M9-T06).
+		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
+		"object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		// Tools built from a kind (M7-T08, HOWTO R11).
 		other => kinds::registered(other),
 	}
@@ -657,9 +660,9 @@ mod tests {
 	fn a_tool_that_is_not_implemented_says_so_once_per_click() {
 		let mut tools = Tools::default();
 		let mut fixture = Fixture::new("tools", (10, 10), 1.0);
-		let tool = tools.get("quick-select").expect("quick selection has a placeholder");
+		let tool = tools.get("object-select").expect("object selection has a placeholder");
 		let result = fixture.pointer(&mut **tool, PointerKind::Down, 0.0, 0.0, Modifiers::default());
-		assert!(result.info.unwrap().contains("Quick Selection"));
+		assert!(result.info.unwrap().contains("Object Selection"));
 		assert!(result.command.is_none(), "nothing to undo");
 		// A move after the click stays quiet, so a drag does not spam toasts.
 		assert!(fixture.pointer(&mut **tool, PointerKind::Move, 5.0, 5.0, Modifiers::default()).info.is_none());

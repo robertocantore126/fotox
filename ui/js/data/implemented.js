@@ -176,6 +176,7 @@ export const IMPLEMENTED = new Set([
   "tool:path-select",
   "tool:pattern-stamp",
   "tool:pencil",
+  "tool:quick-select",
   "tool:red-eye",
   "tool:rotate-view",
   "tool:shape",
