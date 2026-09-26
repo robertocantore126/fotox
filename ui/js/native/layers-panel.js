@@ -156,6 +156,16 @@ function send(command) {
 const ref = (id) => ({ id });
 const setProps = (id, props) => send({ op: "set_layer_props", layer: ref(id), props });
 const selectedIds = () => layers.filter((l) => l.selected).map((l) => l.id);
+/** The active layer's full info (M6-T08 style dialogs), or null. */
+export function activeLayerInfo() {
+  return active();
+}
+
+/** Send a document command for the active document (M6-T08). */
+export function sendCommand(command) {
+  send(command);
+}
+
 /** The id of the active layer of the active document, or null (M4 filters). */
 export function activeLayerId() {
   const a = active();
@@ -367,6 +377,8 @@ function row(i, v) {
   name.addEventListener("dblclick", (e) => { e.stopPropagation(); rename(l, name); });
 
   const meta = [];
+  // Layer styles (M6-T08): Photoshop's fx marker.
+  if (l.styles && Object.keys(l.styles).length) meta.push("fx");
   if (l.blend !== "normal" && l.blend !== "pass_through") meta.push(blendName(l.blend));
   if (l.opacity < 1) meta.push(Math.round(l.opacity * 100) + "%");
   // The DOM's own append() would print a null child as "null": use add().

@@ -298,6 +298,12 @@ pub enum Command {
 	/// again — the engine knows the layout, so it measures what the old and the
 	/// new text ink and hands the box over, and undo redraws the same one.
 	SetText { layer: LayerRef, content: TextContent, dirty: [f64; 4] },
+	/// Layer ▸ Layer Style (M6-T08): replace a layer's styles (`None` clears
+	/// them). The effect caches are rebuilt, all dirty.
+	SetLayerStyle {
+		layer: LayerRef,
+		styles: Option<crate::styles::LayerStyles>,
+	},
 	/// Layer ▸ Rasterize ▸ Shape / Layer / Type (M6-T06/T07): every named layer
 	/// becomes a pixel layer holding what it drew, keeping its id, position in
 	/// the stack, name, opacity, blend mode and mask (Photoshop keeps those
@@ -430,6 +436,7 @@ impl Command {
 				transform,
 			} => set_shape(doc, layer, shape.as_ref(), fill.as_ref(), stroke.as_ref(), *transform),
 			Command::SetText { layer, content, dirty } => set_text(doc, layer, content, *dirty),
+			Command::SetLayerStyle { layer, styles } => set_layer_style(doc, layer, styles.clone()),
 			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
 		doc.revision += 1;
@@ -958,6 +965,26 @@ fn box_of(shape: &VectorShape, transform: [f64; 6], stroke: Option<&StrokeStyle>
 /// the text inks; the engine computes `dirty` from the old and the new layout
 /// and the command carries it, which also makes undo redraw exactly the same
 /// tiles. An empty text layer draws nothing, and its tiles go Empty.
+fn set_layer_style(doc: &mut Document, layer: &LayerRef, styles: Option<crate::styles::LayerStyles>) -> Result<CommandEffect, CommandError> {
+	let id = resolve(doc, layer)?;
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	if matches!(target.kind, LayerKind::Group { .. } | LayerKind::Adjustment(_)) {
+		// FAST: Photoshop allows styles on groups; not here yet.
+		return Err(CommandError::NotAllowed("layer styles need a pixel, shape, text or fill layer".into()));
+	}
+	target.effects = match &styles {
+		Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
+		None => Vec::new(),
+	};
+	target.styles = styles;
+	Ok(CommandEffect {
+		label: "Layer Style".into(),
+		props_changed: vec![id],
+		..Default::default()
+	})
+}
+
 fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: [f64; 4]) -> Result<CommandEffect, CommandError> {
 	if !content.transform.iter().all(|v| v.is_finite()) {
 		return Err(CommandError::InvalidValue {

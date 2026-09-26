@@ -297,6 +297,11 @@ pub struct Layer {
 	pub locked_position: bool,
 	pub mask: Option<Mask>,
 	pub kind: LayerKind,
+	/// Layer styles (M6-T08); `None` = no effects.
+	pub styles: Option<crate::styles::LayerStyles>,
+	/// Derived tile caches of the effects, indexed by
+	/// [`crate::styles::EffectKind::index`]; empty without styles.
+	pub effects: Vec<TiledImage>,
 }
 
 impl Layer {
@@ -319,6 +324,8 @@ impl Layer {
 			locked_position: false,
 			mask: None,
 			kind,
+			styles: None,
+			effects: Vec::new(),
 		}
 	}
 

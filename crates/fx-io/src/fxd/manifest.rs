@@ -44,6 +44,9 @@ pub struct Manifest {
 	pub selected: Vec<LayerId>,
 	/// Root layers, bottom → top.
 	pub layers: Vec<LayerEntry>,
+	/// Global Light angle (M6-T08).
+	#[serde(default = "default_global_light")]
+	pub global_light: f64,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -65,6 +68,9 @@ pub struct LayerEntry {
 	pub locked_transparency: bool,
 	pub locked_position: bool,
 	pub mask: Option<MaskEntry>,
+	/// Layer styles (M6-T08); absent in older files.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub styles: Option<fx_core::styles::LayerStyles>,
 	#[serde(flatten)]
 	pub kind: LayerKindEntry,
 }
@@ -228,6 +234,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		name_counters: name_counters.to_vec(),
 		selected: doc.selected.clone(),
 		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
+		global_light: doc.global_light,
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -245,6 +252,7 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 		locked_pixels: layer.locked_pixels,
 		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
+		styles: layer.styles.clone(),
 		mask: layer.mask.as_ref().map(|mask| MaskEntry {
 			enabled: mask.enabled,
 			linked: mask.linked,
@@ -355,6 +363,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 		.map(|entry| layer_from_entry(entry, file, store, size, format))
 		.collect::<Result<Vec<_>, _>>()?;
 	doc.selected = manifest.selected.clone();
+	doc.global_light = manifest.global_light;
 	let mut counters = [0u32; fx_core::NAME_KINDS];
 	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
 		*slot = *value;
@@ -410,6 +419,13 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 	layer.locked_pixels = entry.locked_pixels;
 	layer.locked_transparency = entry.locked_transparency;
 	layer.locked_position = entry.locked_position;
+	if let Some(styles) = &entry.styles {
+		layer.styles = Some(styles.clone());
+		layer.effects = fx_core::styles::EffectKind::ALL
+			.iter()
+			.map(|_| TiledImage::derived(size.0, size.1, format))
+			.collect();
+	}
 	layer.mask = match &entry.mask {
 		Some(mask) => Some(Mask {
 			image: image_from_entry(&mask.image, file, store)?,
@@ -1048,4 +1064,8 @@ mod tests {
 		assert!(cache.is_derived(), "and it is drawn from the geometry");
 		assert_eq!(cache.dirty_tiles(0).count(), 4, "2 × 2 tiles, all to draw");
 	}
+}
+
+fn default_global_light() -> f64 {
+	120.0
 }

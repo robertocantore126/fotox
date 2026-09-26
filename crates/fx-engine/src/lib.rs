@@ -17,6 +17,7 @@
 pub mod b3;
 pub mod clipboard;
 pub mod documents;
+pub mod effects;
 pub mod export;
 pub mod filters;
 pub mod layers;

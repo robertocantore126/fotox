@@ -191,6 +191,8 @@ struct Engine {
 	last_filter: Option<FilterParams>,
 	/// The font list went to the UI (M6-T07), the first time Type was picked.
 	fonts_sent: bool,
+	/// Layer ▸ Layer Style ▸ Copy Layer Style (M6-T08).
+	style_clipboard: Option<fx_core::styles::LayerStyles>,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -238,6 +240,8 @@ enum EditKey {
 	/// (M6-T06). The fields touched are part of the key, so a fill drag and a
 	/// move do not merge into each other.
 	Shape(LayerRef, [bool; 4]),
+	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
+	Style(LayerRef),
 }
 
 impl EditKey {
@@ -271,6 +275,7 @@ impl EditKey {
 				))
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
+			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
 			Command::SetShape {
 				layer,
 				shape,
@@ -331,6 +336,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		preview_latest: HashMap::new(),
 		last_filter: None,
 		fonts_sent: false,
+		style_clipboard: None,
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -2417,6 +2423,34 @@ impl Engine {
 			"layer:merge-visible" if visible_roots.len() > 1 => vec![Command::MergeLayers { layers: visible_roots }],
 			"layer:flatten" => vec![Command::Flatten],
 			"layer:stamp-visible" => vec![Command::StampVisible],
+			// Layer Style ▸ Copy / Paste / Clear (M6-T08).
+			"layer:copy-style" => {
+				let styles = active.and_then(|l| doc.doc.layer(l)).and_then(|l| l.styles.clone());
+				if styles.is_none() {
+					self.to_ui(&EngineToUi::Toast {
+						text: "The layer has no layer style".into(),
+					});
+				}
+				self.style_clipboard = styles;
+				return true;
+			}
+			"layer:paste-style" => match &self.style_clipboard {
+				Some(styles) => selected
+					.iter()
+					.map(|l| Command::SetLayerStyle {
+						layer: l.clone(),
+						styles: Some(styles.clone()),
+					})
+					.collect(),
+				None => return true,
+			},
+			"layer:clear-style" => selected
+				.iter()
+				.map(|l| Command::SetLayerStyle {
+					layer: l.clone(),
+					styles: None,
+				})
+				.collect(),
 			"layer:merge-visible" => return true,
 			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
 				// Nothing selected / nothing hidden: nothing to do, and no toast.
@@ -2909,6 +2943,7 @@ impl Engine {
 			return;
 		}
 		let mut shape_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
+		let mut effect_tiles: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
 		for request in &work.requests {
 			match request {
 				TileRequest::Mip(request) => {
@@ -2931,10 +2966,14 @@ impl Engine {
 				// Shape tiles are drawn from the geometry, all levels alike
 				// (M6-T06); collect them and draw one parallel batch per layer.
 				TileRequest::Vector(request) => shape_tiles.push((request.layer, request.level, request.x, request.y)),
+				TileRequest::Effect(request) => effect_tiles.push((request.layer, request.effect, request.level, request.x, request.y)),
 			}
 		}
 		if !shape_tiles.is_empty() {
 			vector::draw_requests(&mut doc.doc, &store, &shape_tiles);
+		}
+		if !effect_tiles.is_empty() {
+			crate::effects::draw_effect_requests(&mut doc.doc, &store, &effect_tiles);
 		}
 		doc.invalidate_snapshot();
 		if self.docs.active_id() == Some(work.doc) {

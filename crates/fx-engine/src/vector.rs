@@ -73,10 +73,21 @@ pub fn prepare_level0(doc: &mut fx_core::Document, store: &TileStore, layers: Op
 			requests.extend(cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, 0, tx, ty)));
 		}
 	});
-	if requests.is_empty() {
-		return 0;
+	let mut drawn = if requests.is_empty() { 0 } else { draw_requests(doc, store, &requests) };
+	// Layer-style effects (M6-T08) are derived tiles too.
+	let mut effects: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
+	doc.walk(|layer, _| {
+		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
+			return;
+		}
+		for (i, cache) in layer.effects.iter().enumerate() {
+			effects.extend(cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, i as u8, 0, tx, ty)));
+		}
+	});
+	if !effects.is_empty() {
+		drawn += crate::effects::draw_effect_requests(doc, store, &effects);
 	}
-	draw_requests(doc, store, &requests)
+	drawn
 }
 
 /// Every shape tile of `requests`, grouped by the layer it belongs to: one

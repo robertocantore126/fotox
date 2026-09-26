@@ -24,6 +24,8 @@ pub struct Document {
 	pub reselect: Option<Selection>,
 	/// Incremented by every applied command. Used for cache keys and UI sync.
 	pub revision: u64,
+	/// Photoshop's Global Light angle in degrees (M6-T08), for the shadows.
+	pub global_light: f64,
 	next_id: u64,
 	/// How many layers of each kind this document has created, for the
 	/// Photoshop-style default names (`"Layer 1"`, `"Group 2"`, `"Curves 1"`).
@@ -159,6 +161,7 @@ impl Document {
 			selection: None,
 			reselect: None,
 			revision: 0,
+			global_light: 120.0,
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
 		}

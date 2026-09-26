@@ -42,7 +42,7 @@ pub mod viewport;
 pub use frame::{FramePlan, TileDraw, TileKey, plan_frame};
 
 pub use overlay::{Overlay, OverlayItem, OverlayStyle, OverlayVertex};
-pub use program::{MipRequest, TileProgram, TileRequest, VectorRequest, build_program};
+pub use program::{EffectRequest, MipRequest, TileProgram, TileRequest, VectorRequest, build_program};
 pub use test_pattern::{TestPatternRenderer, VIEWPORT_FORMAT};
 pub use text::{FontEntry, Fonts, TextLayout, TextLine, TextRect, render_text_tile};
 pub use vector::render_shape_tile;

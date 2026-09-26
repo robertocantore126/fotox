@@ -74,6 +74,7 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 			LayerKind::Shape { fill, .. } => fill.map(|paint| paint.rgba()),
 			_ => None,
 		},
+		styles: layer.styles.clone(),
 	}
 }
 

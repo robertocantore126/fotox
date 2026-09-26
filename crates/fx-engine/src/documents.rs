@@ -212,6 +212,8 @@ impl OpenDoc {
 	/// The document content changed (command, undo, redo).
 	pub fn changed(&mut self) {
 		self.generation += 1;
+		// Layer-style effects follow the content (M6-T08).
+		crate::effects::invalidate(&mut self.doc);
 		// Undo can bring back an earlier revision number: never trust it alone.
 		self.snapshot_stale = true;
 	}

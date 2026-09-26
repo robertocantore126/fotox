@@ -37,6 +37,7 @@ export function openDialog(id, overrides = {}) {
     grid.querySelectorAll(".dlg-select, .curve-canvas").forEach((c) => c.addEventListener("change", changed));
     // Plain number boxes (not a slider's box): every edit counts.
     grid.querySelectorAll(".dlg-line.inline > .dlg-input.num").forEach((c) => c.addEventListener("input", changed));
+    grid.querySelectorAll(".dlg-color + .dlg-input").forEach((c) => c.addEventListener("input", changed));
   }
 
   const titleBar = h("div", { class: "dlg-title" },
@@ -103,6 +104,7 @@ function withValues(fields, values) {
   return fields.map((f) => {
     if (f.fields) return { ...f, fields: withValues(f.fields, values) };
     if (f.type === "curve" && values.curve) return { ...f, points: values.curve };
+    if (f.type === "blend" && values["Blend Mode:"]) return { ...f, mode: values["Blend Mode:"] };
     if (f.label && Object.prototype.hasOwnProperty.call(values, f.label)) {
       return f.type === "check" ? { ...f, on: !!values[f.label] } : { ...f, value: values[f.label] };
     }
@@ -132,6 +134,9 @@ function readValues(grid) {
     // A plain number field (`num()`): its box is the value.
     const box = line.classList.contains("inline") && !range ? line.querySelector(":scope > .dlg-input.num") : null;
     if (box) set(key, Number(box.value));
+    // A colour field (M6-T08 style dialogs): its hex box.
+    const chip = line.querySelector(".dlg-color");
+    if (chip) set(key, line.querySelector("input.dlg-input").value);
   });
   grid.querySelectorAll(".dlg-checkline").forEach((line) => {
     const box = line.querySelector(".dlg-check");

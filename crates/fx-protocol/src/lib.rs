@@ -226,6 +226,9 @@ pub struct LayerInfo {
 	/// Colour of a solid fill layer, 16-bit RGBA.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fill_color: Option<[u16; 4]>,
+	/// Layer styles (M6-T08), for the style dialogs and the fx marker.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub styles: Option<fx_core::styles::LayerStyles>,
 }
 
 /// A font family and its styles (M6-T07).

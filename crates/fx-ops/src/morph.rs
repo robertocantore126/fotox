@@ -242,7 +242,7 @@ fn expand_contract(selection: &Selection, delta: f64, size: (u32, u32), depth: B
 
 /// Exact Euclidean distance transform of the `true` pixels (Felzenszwalb–
 /// Huttenlocher, separable). `mask` is row-major `w × h`.
-fn edt_2d(mask: &[bool], w: usize, h: usize) -> Vec<f64> {
+pub fn edt_2d(mask: &[bool], w: usize, h: usize) -> Vec<f64> {
 	// Wrong: `f64::INFINITY` → ∞ − ∞ = NaN in `s`.
 	const FAR: f64 = 1e20;
 	let mut buf: Vec<f64> = mask.iter().map(|&feature| if feature { 0.0 } else { FAR }).collect();

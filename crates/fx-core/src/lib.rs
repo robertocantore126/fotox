@@ -19,6 +19,7 @@ pub mod ops;
 pub mod pixels;
 pub mod selection;
 pub mod stroke;
+pub mod styles;
 pub mod text;
 pub mod transform;
 pub mod vector;

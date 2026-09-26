@@ -13,6 +13,7 @@ import { UI } from "./native/protocol.js";
 import { isEngineFilter, openFilterDialog } from "./native/filters.js";
 import { cmykProfiles, isColorDialog, openColorDialog } from "./native/color.js";
 import { isImageDialog, openImageDialog } from "./native/image.js";
+import { isStyleDialog, openStyleDialog } from "./native/styles.js";
 import { activeDocument } from "./native/documents.js";
 import { dialogDef } from "./data/dialogs.js";
 
@@ -114,6 +115,8 @@ export function runAction(item) {
   // In the app, Gaussian Blur and Unsharp Mask preview live and apply as a
   // job in the engine (M4-T05).
   if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
+  // In the app, the five layer styles and Blending Options are live (M6-T08).
+  if (a.startsWith("dlg:") && bridge.isNative && isStyleDialog(a.slice(4))) { openStyleDialog(a.slice(4)); return; }
   // In the app, Open is the native file dialog (the shell shows it).
   if (a === "dlg:open" && bridge.isNative) { status(label); return; }
   if (a.startsWith("dlg:")) { openDialog(a.slice(4)); status(label); return; }

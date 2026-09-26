@@ -206,6 +206,19 @@ pub struct VectorRequest {
 pub enum TileRequest {
 	Mip(MipRequest),
 	Vector(VectorRequest),
+	/// A layer-style effect tile (M6-T08), drawn from the layer's alpha.
+	Effect(EffectRequest),
+}
+
+/// A tile of one of a layer's effect caches (M6-T08).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EffectRequest {
+	pub layer: LayerId,
+	/// [`fx_core::styles::EffectKind::index`].
+	pub effect: u8,
+	pub level: usize,
+	pub x: u32,
+	pub y: u32,
 }
 
 impl TileRequest {
@@ -214,6 +227,7 @@ impl TileRequest {
 		match self {
 			TileRequest::Mip(r) => r.layer,
 			TileRequest::Vector(r) => r.layer,
+			TileRequest::Effect(r) => r.layer,
 		}
 	}
 }
@@ -230,6 +244,7 @@ pub fn build_program(doc: &Document, level: usize, tx: u32, ty: u32, luts: &mut 
 		origin: (tx as i64 * TILE_SIZE as i64, ty as i64 * TILE_SIZE as i64),
 		missing: Vec::new(),
 		luts,
+		global_light: doc.global_light,
 	};
 	let ops = builder.list(&doc.layers);
 	if !builder.missing.is_empty() {
@@ -255,6 +270,7 @@ struct Builder<'a> {
 	origin: (i64, i64),
 	missing: Vec<TileRequest>,
 	luts: &'a mut dyn FnMut(&Adjustment) -> Arc<Lut>,
+	global_light: f64,
 }
 
 /// What a source tile is: the program asks the engine for it in a different
@@ -265,6 +281,8 @@ enum SourceTile {
 	Mip { mask: bool },
 	/// A shape layer's cache, drawn from the geometry at this level.
 	Vector,
+	/// A layer-style effect cache (M6-T08).
+	Effect(u8),
 }
 
 enum MaskEval {
@@ -362,8 +380,67 @@ impl Builder<'_> {
 				}
 				wrap_isolated(inner, normal_if_pass(layer.blend), alpha, mask, clip)
 			}
-			_ => self.content(layer, layer.blend, layer.opacity * layer.fill, clip),
+			_ => {
+				let content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
+				// Layer styles (M6-T08): shadows and glows under the content,
+				// the interior effects and the stroke over it, each with its own
+				// mode and opacity × the layer's (fill does not reach them).
+				// FAST: ignored on clipped layers; the mask shapes the effects
+				// like the content (VERIFY "Layer Mask Hides Effects").
+				let Some(styles) = layer
+					.styles
+					.as_ref()
+					.filter(|_| !clip && layer.effects.len() == fx_core::styles::EffectKind::ALL.len())
+				else {
+					return content;
+				};
+				let mut below = Vec::new();
+				let mut above = Vec::new();
+				for kind in fx_core::styles::EffectKind::ALL {
+					let Some(params) = styles.effect(kind, self.global_light) else { continue };
+					let ops = self.effect(layer, kind, &params);
+					if kind.below_content() {
+						below.extend(ops);
+					} else {
+						above.extend(ops);
+					}
+				}
+				below.extend(content);
+				below.extend(above);
+				below
+			}
 		}
+	}
+
+	/// The op of one layer-style effect: its cache, composited like a layer.
+	fn effect(&mut self, layer: &Layer, kind: fx_core::styles::EffectKind, params: &fx_core::styles::EffectParams) -> Vec<Op> {
+		let alpha = layer.opacity * params.opacity;
+		if alpha <= 0.0 {
+			return Vec::new();
+		}
+		let (alpha, mask) = match self.mask(layer) {
+			MaskEval::Hidden => return Vec::new(),
+			MaskEval::Constant(m) if m <= 0.0 => return Vec::new(),
+			MaskEval::Constant(m) => (alpha * m, None),
+			MaskEval::Varying(mask) => (alpha, Some(mask)),
+		};
+		let Some(cache) = layer.effects.get(kind.index()) else {
+			return Vec::new();
+		};
+		let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Effect(kind.index() as u8)) else {
+			return Vec::new();
+		};
+		if quad.all_empty() {
+			return Vec::new();
+		}
+		vec![Op::Layer {
+			layer: layer.id,
+			source: Source::Tiles(quad),
+			blend: params.blend,
+			alpha,
+			mask,
+			clip: false,
+		}]
 	}
 
 	/// A non-group layer's own op, with its mask.
@@ -603,6 +680,13 @@ impl Builder<'_> {
 						y: gy,
 					}),
 					SourceTile::Vector => TileRequest::Vector(VectorRequest { layer, level, x: gx, y: gy }),
+					SourceTile::Effect(effect) => TileRequest::Effect(EffectRequest {
+						layer,
+						effect,
+						level,
+						x: gx,
+						y: gy,
+					}),
 				});
 				return QuadSlot::Outside;
 			}
