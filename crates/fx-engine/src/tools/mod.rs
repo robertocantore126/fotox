@@ -32,6 +32,7 @@ pub mod measure;
 pub mod move_tool;
 pub mod paint;
 pub mod path_select;
+pub mod pen;
 pub mod perspective_crop;
 pub mod quick_select;
 pub mod shape;
@@ -435,6 +436,14 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
+		// The pen tools and Direct Selection (M10-T02..T05).
+		"pen" => Some(Box::new(pen::Pen::new("pen", pen::Kind::Pen))),
+		"pen-freeform" => Some(Box::new(pen::Pen::new("pen-freeform", pen::Kind::Freeform))),
+		"pen-curvature" => Some(Box::new(pen::Pen::new("pen-curvature", pen::Kind::Curvature))),
+		"anchor-add" => Some(Box::new(pen::Pen::new("anchor-add", pen::Kind::AnchorAdd))),
+		"anchor-del" => Some(Box::new(pen::Pen::new("anchor-del", pen::Kind::AnchorDelete))),
+		"anchor-convert" => Some(Box::new(pen::Pen::new("anchor-convert", pen::Kind::AnchorConvert))),
+		"direct-select" => Some(Box::new(pen::Pen::new("direct-select", pen::Kind::Direct))),
 		// Perspective Crop (M9-T09).
 		"crop-persp" => Some(Box::new(perspective_crop::PerspectiveCrop::default())),
 		// The measuring tools (M9-T08).
