@@ -264,4 +264,36 @@ mod tests {
 		assert!(sample_pixel(&doc, 10.0, 300.0, 1, None, &store).is_err());
 		assert!(sample_pixel(&doc, 399.0, 299.0, 1, None, &store).is_ok());
 	}
+
+	/// BUGHUNT B-03: the eyebrow's option bar offers five Sample Sizes
+	/// (`ui/js/data/options.js`, `eyedropper`), Photoshop's set — "Point
+	/// Sample", "3 by 3 Average", "5 by 5 Average", "11 by 11 Average",
+	/// "51 by 51 Average" — but [`Options::from`] only knows the 3 and 5 cases,
+	/// so the two larger choices silently fall through to `_ => 1` and sample a
+	/// single pixel. The sampler tool's reader (`engine/m9.rs`) handles 11 and
+	/// 51; the eyedropper's was never widened.
+	#[test]
+	#[ignore = "bughunt: B-03"]
+	fn the_samples_sizes_the_option_bar_offers_are_the_ones_the_reader_knows() {
+		use crate::tools::testing::Fixture;
+		for (label, area) in [
+			("Point Sample", 1),
+			("3 by 3 Average", 3),
+			("5 by 5 Average", 5),
+			("11 by 11 Average", 11),
+			("51 by 51 Average", 51),
+		] {
+			let mut f = Fixture::new("eyedropper-bughunt", (64, 64), 1.0);
+			f.options("eyedropper", serde_json::json!({ "Sample Size": label }));
+			let ctx = ToolContext {
+				doc: &mut f.doc,
+				store: &f.store,
+				ops: &f.ops,
+				settings: &f.settings,
+				view: f.view,
+				mask_target: false,
+			};
+			assert_eq!(Options::from(&ctx).area, area, "Sample Size {label:?}");
+		}
+	}
 }
