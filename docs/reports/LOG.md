@@ -216,3 +216,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: each tile reads a 288² window (apron) through a small tile cache.
 - VERIFY: normalisation constant, threshold curve, Photoshop's slider meaning.
 - Try it: a photo with a shallow depth of field, Select ▸ Focus Area…
+
+## M9-T05 — Select and Mask  (Claude, 2026-09-26)
+- Done: `SelectOp::Refine(Refine)` + `fx_ops::select::refine` (D-070): only tiles whose apron is not uniformly 0 or 1 are worked (a big document costs its boundary); in the band a grey guided filter (He et al.) of the coverage guided by the luminance, window = Radius, Smart Radius keeps more of the input on strong guide edges; then Smooth, Feather, Contrast, Shift Edge. Select ▸ Select and Mask… (Alt+Ctrl+R) dialog: Radius, Smart Radius, Smooth, Feather, Contrast, Shift Edge, Output To Selection / Layer Mask / New Layer with Layer Mask (the output is queued and made once the job is done: `select-mask:output`, `after_job_m9`).
+- Skipped: Photoshop's modal workspace (view modes, Show Edge / Original, its Quick Selection / Refine Edge / Brush / Lasso tools), Decontaminate Colors, output to New Layer / New Document; Tests (should check: a soft-haired synthetic's band error halves; Shift Edge +50 % grows the selection).
+- FAST: a dialog without preview instead of the workspace; Radius ≤ 64, Feather ≤ 50; Shift Edge only moves partially-selected pixels.
+- VERIFY: guided-filter ε and window, the global refinements' curves.
+- Try it: a rough lasso around hair, Select ▸ Select and Mask…, Radius 20, Output To Layer Mask.
