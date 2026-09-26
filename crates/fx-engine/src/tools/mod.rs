@@ -22,6 +22,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 
 pub mod crop;
 pub mod eyedropper;
+pub mod kinds;
 pub mod lasso;
 pub mod marquee;
 pub mod move_tool;
@@ -415,7 +416,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"type" => Some(Box::new(type_tool::TypeTool::default())),
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		"quick-select" | "object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
-		_ => None,
+		// Tools built from a kind (M7-T08, HOWTO R11).
+		other => kinds::registered(other),
 	}
 }
 

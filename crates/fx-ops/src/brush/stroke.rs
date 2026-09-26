@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use fx_core::blend::composite;
 use fx_core::pixels::{block_coverage, decode, grow_to_canvas};
 use fx_core::selection::TileCoverage;
 use fx_core::stroke::{BrushParams, StrokeSample, StrokeTool};
@@ -298,10 +297,18 @@ impl Stroke {
 		let tile = i64::from(TILE_SIZE);
 		let opacity = f64::from(self.brush.opacity);
 		let gray = matches!(self.format, PixelFormat::Gray8 | PixelFormat::Gray16);
-		// The clone source under this tile (canvas tiles, prefetched).
-		let source = match self.tool {
-			StrokeTool::Clone { dx, dy, .. } | StrokeTool::Heal { dx, dy, .. } => Some(self.source_window(tx, ty, dirty, (dx, dy))?),
-			_ => None,
+		// The per-pixel op (M7-T08) and the source under this tile when it
+		// asks for one (canvas tiles, prefetched).
+		let op = super::op::op_for(&self.tool);
+		let ctx = super::op::DabContext {
+			mode: self.brush.mode,
+			color: self.color,
+			color_alpha: self.color_alpha,
+			lock_alpha: self.lock_alpha,
+		};
+		let source = match op.needs().source {
+			Some(offset) => Some(self.source_window(tx, ty, dirty, offset)?),
+			None => None,
 		};
 		let width = (dirty[2] - dirty[0] + 1) as usize;
 		for ly in dirty[1]..=dirty[3] {
@@ -317,23 +324,10 @@ impl Stroke {
 				let p = pixel_at(&before, self.format, at);
 				let a = f64::from(p[3]);
 				let backdrop = [f64::from(p[0]) * a, f64::from(p[1]) * a, f64::from(p[2]) * a, a];
-				let out = match self.tool {
-					StrokeTool::Eraser if !self.lock_alpha => [backdrop[0] * (1.0 - k), backdrop[1] * (1.0 - k), backdrop[2] * (1.0 - k), a * (1.0 - k)],
-					StrokeTool::Clone { .. } | StrokeTool::Heal { .. } => {
-						let window = source.as_ref().expect("clone tools have a source window");
-						let s = window.at((lx - dirty[0]) as usize + (ly - dirty[1]) as usize * width);
-						let sa = f64::from(s[3]);
-						let rgb = if sa > 0.0 {
-							[f64::from(s[0]) / sa, f64::from(s[1]) / sa, f64::from(s[2]) / sa]
-						} else {
-							[0.0; 3]
-						};
-						composite(self.brush.mode, backdrop, rgb, k * sa, self.lock_alpha)
-					}
-					// The live look of a spot heal: a dark veil where it will heal.
-					StrokeTool::SpotHeal => composite(fx_core::BlendMode::Normal, backdrop, [0.0; 3], 0.35 * k, self.lock_alpha),
-					_ => composite(self.brush.mode, backdrop, self.color, k * self.color_alpha, self.lock_alpha),
-				};
+				let s = source
+					.as_ref()
+					.map(|window| window.at((lx - dirty[0]) as usize + (ly - dirty[1]) as usize * width));
+				let out = op.pixel(backdrop, s, k, &ctx);
 				set_pixel(&mut state.working, self.format, at, out);
 			}
 		}
