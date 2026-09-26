@@ -36,6 +36,34 @@ impl Engine {
 				);
 				true
 			}
+			// Filters without a dialog (M12-T03b).
+			"filter:despeckle" | "filter:sharpen" | "filter:sharpen-edges" | "filter:find-edges" | "filter:clouds" => {
+				use fx_core::FilterParams;
+				let filter = match id {
+					"filter:despeckle" => FilterParams::Despeckle,
+					"filter:sharpen" => FilterParams::Sharpen { edges: false },
+					"filter:sharpen-edges" => FilterParams::Sharpen { edges: true },
+					"filter:find-edges" => FilterParams::FindEdges,
+					_ => FilterParams::Clouds {
+						fg: self.settings.fg,
+						bg: self.settings.bg,
+						seed: (std::time::SystemTime::now()
+							.duration_since(std::time::UNIX_EPOCH)
+							.map_or(1, |d| d.subsec_nanos())),
+					},
+				};
+				let Some(layer) = self.docs.get(doc_id).and_then(|o| o.doc.active_layer()) else {
+					return true;
+				};
+				self.command(
+					doc_id,
+					Command::ApplyFilter {
+						layer: LayerRef::Id(layer),
+						filter,
+					},
+				);
+				true
+			}
 			// Filter ▸ Convert for Smart Filters.
 			"filter:smart" => {
 				let ids = self.docs.get(doc_id).map(|o| o.doc.selected.clone()).unwrap_or_default();

@@ -19,6 +19,7 @@
 
 pub mod brush;
 pub mod filter;
+pub mod filter_more;
 #[cfg(test)]
 mod filter_tests;
 pub mod flood;

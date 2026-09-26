@@ -389,3 +389,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: no live preview while the filter dialog is open on a Smart Object (OK applies); aprons are re-resampled on every draw; the mode is ignored (Normal).
 - VERIFY: none.
 - Try it: convert a layer, Filter ▸ Blur ▸ Gaussian Blur…, OK; click the "⧉" text in its row.
+
+## M12-T03b — More filters  (Claude, 2026-09-26, D-084)
+- Done: `FilterParams` Box Blur, Motion Blur, Radial Blur (Spin / Zoom about the canvas centre), Surface Blur, Add Noise (uniform / Gaussian, monochromatic), Median, Dust & Scratches, Despeckle, Sharpen, Sharpen Edges, Emboss, Find Edges, High Pass, Minimum, Maximum, Offset (transparent / repeat / wrap), Clouds (foreground → background) in `fx-ops/src/filter_more.rs` on the M4 tile driver (any level, distances × 2⁻ᴸ, live preview and Smart Filters for free); dialogs wired in `ui/js/native/filters.js`, the dialog-less ones as engine actions (`filter:despeckle` …).
+- Skipped: Lens Blur, Average, Smart Sharpen, the Distort / Pixelate / other Render / Stylize / Video entries, Custom, Difference Clouds, Tests.
+- FAST: square windows; Radial Blur's window is capped at 1024 px of the level (streaks clipped far from the centre); Median over a big radius is slow (a sort per pixel); Wrap Around repeats the edge beyond the window; noise and clouds are hashed per level-0 pixel.
+- VERIFY: every formula against Photoshop (Radial Blur's amounts, Sharpen's strength, Surface Blur's weights, Emboss grey level, Despeckle's edge test).
+- Try it: Filter ▸ Noise ▸ Add Noise…, Filter ▸ Other ▸ High Pass…, Filter ▸ Render ▸ Clouds.

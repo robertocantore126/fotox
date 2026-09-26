@@ -79,6 +79,8 @@ impl Geometry {
 fn sigma_at(params: &FilterParams, level: usize) -> f32 {
 	let radius = match params {
 		FilterParams::GaussianBlur { radius } | FilterParams::UnsharpMask { radius, .. } => *radius,
+		// The M12 families blur within their own window (`filter_more`).
+		_ => 0.0,
 	};
 	radius / (1u32 << level) as f32
 }
@@ -105,6 +107,16 @@ pub fn spread_tiles(params: &FilterParams, level: usize) -> u32 {
 		// Unsharp Mask keeps the original alpha: nothing appears where the
 		// layer is empty.
 		FilterParams::UnsharpMask { .. } => 0,
+		// FAST: the canvas-dependent aprons use a unit geometry here.
+		other => crate::filter_more::spread(
+			other,
+			level,
+			&Geometry {
+				offset: (0, 0),
+				canvas: (1, 1),
+				image: (1, 1),
+			},
+		),
 	}
 }
 
@@ -113,7 +125,19 @@ pub fn spread_tiles(params: &FilterParams, level: usize) -> u32 {
 pub fn output_tiles(image: &TiledImage, geometry: &Geometry, params: &FilterParams, level: usize) -> Vec<(u32, u32)> {
 	let grid = image.grid(level);
 	let (cols, rows) = (grid.cols() as i64, grid.rows() as i64);
-	let grow = i64::from(spread_tiles(params, level));
+	let spread = match params {
+		// Radial Blur reaches across the canvas; Clouds cover everything.
+		FilterParams::RadialBlur { .. } | FilterParams::Clouds { .. } => u32::MAX,
+		_ => spread_tiles(params, level),
+	};
+	if spread == u32::MAX {
+		let canvas = geometry.canvas_at(level);
+		let t = i64::from(TILE_SIZE);
+		let (cx0, cy0) = (canvas.x0.div_euclid(t).max(0), canvas.y0.div_euclid(t).max(0));
+		let (cx1, cy1) = ((canvas.x1 - 1).div_euclid(t).min(cols - 1), (canvas.y1 - 1).div_euclid(t).min(rows - 1));
+		return (cy0..=cy1).flat_map(|y| (cx0..=cx1).map(move |x| (x as u32, y as u32))).collect();
+	}
+	let grow = i64::from(spread);
 	let canvas = geometry.canvas_at(level);
 	let t = i64::from(TILE_SIZE);
 	let (cx0, cy0) = (canvas.x0.div_euclid(t), canvas.y0.div_euclid(t));
@@ -144,6 +168,17 @@ pub fn filter_tile(src: &dyn LevelSource, geometry: &Geometry, params: &FilterPa
 		x1: i64::from(tx) * t + t,
 		y1: i64::from(ty) * t + t,
 	};
+	if !matches!(params, FilterParams::GaussianBlur { .. } | FilterParams::UnsharpMask { .. }) {
+		let mut out = crate::filter_more::tile(src, geometry, params, level, tile)?;
+		let image = geometry.image_at(level);
+		for (i, p) in out.iter_mut().enumerate() {
+			let (x, y) = (tile.x0 + (i as i64 % t), tile.y0 + (i as i64 / t));
+			if x >= image.x1 || y >= image.y1 {
+				*p = [0.0; 4];
+			}
+		}
+		return Ok(to_tile(&out, format));
+	}
 	let blurred = blurred_tile(src, geometry, params, level, tile)?;
 	let mut out: Vec<Px> = match params {
 		FilterParams::GaussianBlur { .. } => blurred.into_iter().map(unpremul).collect(),
@@ -167,6 +202,7 @@ pub fn filter_tile(src: &dyn LevelSource, geometry: &Geometry, params: &FilterPa
 				})
 				.collect()
 		}
+		_ => unreachable!("handled by filter_more above"),
 	};
 	// Only the layer's own pixels: outside its image the tile stays empty.
 	let image = geometry.image_at(level);
