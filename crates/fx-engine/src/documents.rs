@@ -130,6 +130,69 @@ impl OpenDoc {
 		}
 	}
 
+	/// A document built in memory (File ▸ New, M7-T01): clean, no file.
+	pub fn from_document(id: DocId, name: String, doc: Document) -> Self {
+		let view = ViewState::new((doc.width, doc.height));
+		Self {
+			id,
+			name,
+			doc,
+			history: History::default(),
+			view,
+			dirty: false,
+			generation: 0,
+			last_edit: None,
+			hot: None,
+			snapshot: None,
+			snapshot_stale: false,
+			file: None,
+			path: None,
+			preview: None,
+			preview_rev: 0,
+			transform_preview: None,
+			busy: None,
+			snapshot_key: (0, 0),
+			proof: None,
+			proof_colors: false,
+			gamut_warning: false,
+			mask_target: None,
+		}
+	}
+
+	/// A blank document (File ▸ New, M7-T01): one layer whose tiles are all
+	/// `Solid` (or `Empty` for Transparent), so no pixel memory at any size.
+	/// `background` is straight 16-bit RGBA; `None` = Transparent, which makes
+	/// a normal "Layer 1" instead of a Background (Photoshop).
+	pub fn blank(id: DocId, name: String, width: u32, height: u32, depth: fx_core::BitDepth, ppi: f32, background: Option<[u16; 4]>) -> Self {
+		let mut doc = Document::new(
+			width,
+			height,
+			DocumentColor {
+				depth,
+				profile: fx_core::ColorProfile::Srgb,
+			},
+			ppi,
+		);
+		let format = depth.rgba_format();
+		let mut image = fx_tiles::TiledImage::new(width, height, format);
+		if let Some(rgba) = background {
+			let grid = image.grid(0);
+			let (cols, rows) = (grid.cols(), grid.rows());
+			for ty in 0..rows {
+				for tx in 0..cols {
+					image.set_slot(tx, ty, fx_tiles::TileSlot::Solid(fx_tiles::PixelValue(rgba)));
+				}
+			}
+		}
+		let layer_id = doc.allocate_layer_id();
+		let name_of_layer = if background.is_some() { "Background" } else { "Layer 1" };
+		let mut layer = Layer::new(layer_id, name_of_layer, LayerKind::Pixel { image, offset: (0, 0) });
+		layer.locked_position = background.is_some();
+		doc.layers.push(Arc::new(layer));
+		doc.selected = vec![layer_id];
+		Self::from_document(id, name, doc)
+	}
+
 	/// A document loaded lazily from a `.fxd` (M3-T05): opened clean, with the
 	/// file kept for incremental saves.
 	pub fn from_fxd(id: DocId, path: &Path, opened: OpenedFxd) -> Self {

@@ -35,7 +35,7 @@ export function initWorkspace(host) {
     icon("i-image", "ic sm"),
     h("span", { class: "doctab-label", text: `${state.doc.name} @ ${state.zoom}% (${state.doc.mode}/${state.doc.bits})` }),
     h("button", { class: "doctab-x", type: "button", "data-tip": "Close document", onclick: () => emit("mock", "Close document") }, icon("i-close", "ic xs")));
-  const newTab = h("button", { class: "doctab-add", type: "button", "data-tip": "Create a new document", onclick: () => emit("ask-dialog", "new-doc") }, icon("i-plus", "ic sm"));
+  const newTab = h("button", { class: "doctab-add", type: "button", "data-tip": "Create a new document", onclick: () => emit("action", "dlg:new-doc") }, icon("i-plus", "ic sm"));
   tabs.append(tab, newTab);
 
   const rulerCorner = h("div", { class: "ruler-corner", text: "px" });

@@ -193,6 +193,8 @@ struct Engine {
 	fonts_sent: bool,
 	/// Layer ▸ Layer Style ▸ Copy Layer Style (M6-T08).
 	style_clipboard: Option<fx_core::styles::LayerStyles>,
+	/// File ▸ New's "Untitled-N" counter (M7-T01).
+	untitled: u32,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -337,6 +339,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		last_filter: None,
 		fonts_sent: false,
 		style_clipboard: None,
+		untitled: 0,
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -602,6 +605,43 @@ impl Engine {
 		}
 		self.apply_tool_result(doc_id, result, &mut changed);
 		changed
+	}
+
+	/// File ▸ New (M7-T01): `{name?, width, height, ppi, depth: 8|16,
+	/// background: "white"|"black"|"background"|"transparent"|[r,g,b]}`.
+	fn new_document(&mut self, args: &serde_json::Value) {
+		let width = args.get("width").and_then(|v| v.as_f64()).unwrap_or(1920.0).round().clamp(1.0, 300_000.0) as u32;
+		let height = args.get("height").and_then(|v| v.as_f64()).unwrap_or(1080.0).round().clamp(1.0, 300_000.0) as u32;
+		let ppi = args.get("ppi").and_then(|v| v.as_f64()).unwrap_or(72.0).clamp(1.0, 10_000.0) as f32;
+		let depth = match args.get("depth").and_then(|v| v.as_u64()) {
+			Some(16) => fx_core::BitDepth::U16,
+			_ => fx_core::BitDepth::U8,
+		};
+		let background = match args.get("background") {
+			Some(serde_json::Value::String(s)) if s == "transparent" => None,
+			Some(serde_json::Value::String(s)) if s == "black" => Some([0, 0, 0, u16::MAX]),
+			Some(serde_json::Value::String(s)) if s == "background" => Some(self.settings.bg),
+			Some(serde_json::Value::Array(rgb)) if rgb.len() >= 3 => {
+				let c = |i: usize| (rgb[i].as_f64().unwrap_or(1.0).clamp(0.0, 1.0) * 65535.0).round() as u16;
+				Some([c(0), c(1), c(2), u16::MAX])
+			}
+			_ => Some([u16::MAX; 4]),
+		};
+		self.untitled += 1;
+		let name = args
+			.get("name")
+			.and_then(|v| v.as_str())
+			.filter(|s| !s.trim().is_empty())
+			.map_or_else(|| format!("Untitled-{}", self.untitled), str::to_owned);
+		let id = self.docs.allocate_id();
+		let mut doc = OpenDoc::blank(id, name, width, height, depth, ppi, background);
+		if let Some(viewport) = self.virtual_view.viewport {
+			doc.view.resize(viewport.width, viewport.height);
+		}
+		let info = doc.info();
+		self.docs.add(doc);
+		self.to_ui(&EngineToUi::DocumentOpened { info });
+		self.after_active_change();
 	}
 
 	/// Run `f` on the active document's active tool and apply its answer.
@@ -890,6 +930,11 @@ impl Engine {
 				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
 				// enters it with all the text selected. The UI has switched the
 				// tool to Type first.
+				// File ▸ New (M7-T01): the dialog's values.
+				if id == "doc:new" {
+					self.new_document(&args);
+					return Changed::default();
+				}
 				if id == "type:edit-layer" {
 					if let Some(layer) = args.get("layer").and_then(|v| v.as_u64()) {
 						self.with_active_tool(|tool, ctx| tool.edit_layer(ctx, fx_core::LayerId(layer)));
