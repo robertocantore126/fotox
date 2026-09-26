@@ -17,6 +17,80 @@ fn history(harness: &Harness, doc: fx_protocol::DocId) -> (Vec<String>, usize) {
 }
 
 #[test]
+fn closing_a_clean_document_waits_for_its_pixel_job() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-filter-close-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 700, 400)]));
+	let doc = opened(&harness);
+	let layer = harness.wait("the layer list", |s| match s {
+		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == doc => layers.first().map(|l| l.id),
+		_ => None,
+	});
+	harness.ui(UiToEngine::Command {
+		doc,
+		command: Command::ApplyFilter {
+			layer: LayerRef::Id(layer),
+			filter: FilterParams::GaussianBlur { radius: 8.0 },
+		},
+	});
+	harness.wait("the filter job to start", |s| match s {
+		Seen::Ui(EngineToUi::Progress { label, fraction, .. }) if label == "Gaussian Blur" && *fraction == 0.0 => Some(()),
+		_ => None,
+	});
+	harness.ui(UiToEngine::CloseDocument { doc });
+	harness.wait("close to wait for the filter", |s| match s {
+		Seen::Ui(EngineToUi::Toast { text }) if text.contains("finished before closing") => Some(()),
+		_ => None,
+	});
+	history(&harness, doc);
+	harness.ui(UiToEngine::CloseDocument { doc });
+	harness.wait("dirty prompt after filter completion", |s| match s {
+		Seen::Ui(EngineToUi::CloseDirtyDocument { doc: d, .. }) if *d == doc => Some(()),
+		_ => None,
+	});
+	harness.engine.shutdown();
+}
+
+#[test]
+fn export_uses_the_document_that_opened_the_dialog() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-export-doc-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "first.tif", 320, 200)]));
+	let first = opened(&harness);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "second.tif", 80, 60)]));
+	harness.wait("the second document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentOpened { info }) if info.doc != first => Some(info.doc),
+		_ => None,
+	});
+
+	let path = dir.join("first.png");
+	harness.engine.send(EngineInput::Export {
+		doc: first,
+		path: path.clone(),
+		choice: None,
+	});
+	harness.wait("export of the captured document", |s| match s {
+		Seen::Ui(EngineToUi::Toast { text }) if text.starts_with("Exported") => Some(()),
+		Seen::Ui(EngineToUi::Error { text }) => panic!("export failed: {text}"),
+		_ => None,
+	});
+	let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+	let reader = decoder.read_info().unwrap();
+	assert_eq!((reader.info().width, reader.info().height), (320, 200));
+	harness.engine.shutdown();
+}
+
+#[test]
 fn preview_apply_undo_and_last_filter() {
 	let Some((device, queue)) = gpu() else {
 		eprintln!("no GPU adapter: test skipped");
@@ -183,6 +257,7 @@ fn convert_profile_proof_and_cmyk_export() {
 	// CMYK TIFF export with RSWOP.
 	let out = dir.join("press.tif");
 	harness.engine.send(EngineInput::Export {
+		doc,
 		path: out.clone(),
 		choice: Some(fx_engine::ExportChoice {
 			eight_bit: true,

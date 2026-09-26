@@ -361,6 +361,43 @@ impl Document {
 		}
 		go(&self.layers, 0, &mut visit);
 	}
+
+	/// Give every layer image and mask at least the document's number of mip
+	/// levels. The compositor reads each layer at the level of the zoom, which
+	/// the document's size bounds; a pasted or placed image smaller than the
+	/// canvas has a shorter pyramid of its own, and zooming out past its top
+	/// level read the wrong tiles (and panicked in debug builds).
+	pub fn fit_levels(&mut self) {
+		fn short(image: &fx_tiles::TiledImage, levels: usize) -> bool {
+			image.level_count() < levels
+		}
+		fn needs(layer: &Layer, levels: usize) -> bool {
+			layer.mask.as_ref().is_some_and(|mask| short(&mask.image, levels))
+				|| match &layer.kind {
+					LayerKind::Pixel { image, .. } => short(image, levels),
+					LayerKind::Group { children, .. } => children.iter().any(|child| needs(child, levels)),
+					_ => false,
+				}
+		}
+		fn go(layers: &mut [Arc<Layer>], levels: usize) {
+			for layer in layers {
+				if !needs(layer, levels) {
+					continue;
+				}
+				let layer = Arc::make_mut(layer);
+				if let Some(mask) = &mut layer.mask {
+					mask.image.ensure_levels(levels);
+				}
+				match &mut layer.kind {
+					LayerKind::Pixel { image, .. } => image.ensure_levels(levels),
+					LayerKind::Group { children, .. } => go(children, levels),
+					_ => {}
+				}
+			}
+		}
+		let levels = fx_tiles::level_count_for(self.width, self.height);
+		go(&mut self.layers, levels);
+	}
 }
 
 #[cfg(test)]

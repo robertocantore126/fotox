@@ -6744,6 +6744,23 @@ mod using_the_selection_tests {
 		assert_eq!(f.px(centred, 172, 72), [100, 200, 300, 65535]);
 		assert_eq!(f.px(centred, 171, 72)[3], 0);
 	}
+
+	/// The render thread panicked zooming out after a paste: a 300² paste has
+	/// two levels of its own, the 600 × 400 canvas three, and the compositor
+	/// reads every layer at the canvas's level.
+	#[test]
+	fn a_pasted_layer_has_the_canvas_levels() {
+		let mut f = F::new();
+		f.layer();
+		f.ok(Command::Paste { in_place: false, center: None });
+		let pasted = f.doc.active_layer().unwrap();
+		let LayerKind::Pixel { image, .. } = &f.doc.layer(pasted).unwrap().kind else {
+			panic!()
+		};
+		assert_eq!(image.natural_level_count(), 2);
+		assert_eq!(image.level_count(), fx_tiles::level_count_for(600, 400));
+		assert_eq!(image.level_count(), 3);
+	}
 }
 
 fn default_true() -> bool {

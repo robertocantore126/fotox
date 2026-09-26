@@ -244,6 +244,7 @@ function select(spec, changed) {
         onPick: (v) => {
           valueEl.textContent = v;
           if (changed) changed();
+          btn.dispatchEvent(new Event("change", { bubbles: true }));
           emit("mock", `${spec.label || "Value"}: ${v}`);
         },
       });

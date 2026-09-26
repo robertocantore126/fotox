@@ -251,7 +251,8 @@ impl Engine {
 				}
 				!cancel.load(Ordering::Relaxed)
 			};
-			let result = work(&progress);
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&progress)))
+				.unwrap_or_else(|panic| Err(format!("AI operation panicked: {}", super::panic_text(&*panic))));
 			let _ = internal.send(Internal::Ai(Box::new(AiDone { task, doc, result })));
 		});
 		if let Err(error) = spawned {
@@ -314,23 +315,16 @@ impl Engine {
 		}
 		self.end_stroke();
 		let store = self.store.clone();
-		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		if open.busy.is_some() {
-			self.to_ui(&EngineToUi::Toast {
-				text: "Wait until the running job is finished".into(),
-			});
+		let Some(mut document) = self.docs.get_mut(doc_id).map(|open| open.doc.clone()) else {
 			return;
-		}
-		// FAST: read on the engine thread (bounded by 1024², mips served inline).
-		let work = match ai::working_composite(&mut open.doc, &store, WORKING) {
-			Ok(w) => w,
-			Err(text) => {
-				self.to_ui(&EngineToUi::Error { text });
-				return;
-			}
 		};
 		self.start_ai(Some(doc_id), "Select Subject".into(), move |progress| {
-			progress(0.1);
+			// Work on a cheap document snapshot: preparation can load cold tiles,
+			// but it must not block the engine's input/close loop.
+			let work = ai::working_composite(&mut document, &store, WORKING)?;
+			if !progress(0.1) {
+				return Err(fx_ai::AiError::Cancelled.to_string());
+			}
 			let mask = ai::subject_mask(&work).map_err(|e| e.to_string())?;
 			if !progress(1.0) {
 				return Err(fx_ai::AiError::Cancelled.to_string());
@@ -370,15 +364,12 @@ impl Engine {
 				Ok(AiResult::Command(make(mask)))
 			}),
 			None => {
-				let work = match ai::working_composite(&mut open.doc, &store, WORKING) {
-					Ok(w) => w,
-					Err(text) => {
-						self.to_ui(&EngineToUi::Error { text });
-						return;
-					}
-				};
+				let mut document = open.doc.clone();
 				self.start_ai(Some(doc_id), "Object Selection".into(), move |progress| {
-					progress(0.1);
+					let work = ai::working_composite(&mut document, &store, WORKING)?;
+					if !progress(0.1) {
+						return Err(fx_ai::AiError::Cancelled.to_string());
+					}
 					let embedding = Arc::new(ai::sam_embedding(&work).map_err(|e| e.to_string())?);
 					if !progress(0.8) {
 						return Err(fx_ai::AiError::Cancelled.to_string());

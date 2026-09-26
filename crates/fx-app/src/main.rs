@@ -10,6 +10,7 @@ mod app;
 mod bridge;
 mod cli;
 mod consts;
+mod crash;
 mod dirs;
 mod event;
 mod gpu;
@@ -69,6 +70,7 @@ fn init_logging() {
 fn run(ui_context: UiContext<Setup>) -> ExitCode {
 	let cli = Cli::parse();
 	let mut preferences = preferences::read();
+	crash::started(cli.after_crash.is_some());
 
 	// One instance only: two would fight over the CEF instance directory, and the
 	// second window would be indistinguishable from the first.
@@ -79,6 +81,9 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 	// the lock) the moment the helper returned, and the second instance would then
 	// sail straight through.
 	let lock_path = dirs::lock_file_path();
+	if cli.after_crash.is_some() {
+		crash::wait_for_instance_lock(&lock_path, std::time::Duration::from_secs(15));
+	}
 	let lock_file = match std::fs::OpenOptions::new()
 		.read(true)
 		.write(true)
@@ -137,6 +142,16 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 	let (app_event_sender, app_event_receiver) = std::sync::mpsc::channel();
 	let app_event_scheduler = event_loop.create_app_event_scheduler(app_event_sender);
 
+	// A thread the app needs died: leave the event loop, then say so and
+	// restart (`crate::crash`).
+	let crash_scheduler = std::sync::Mutex::new(app_event_scheduler.clone());
+	fx_engine::trace::on_crash(move || {
+		if let Ok(scheduler) = crash_scheduler.lock() {
+			scheduler.schedule(AppEvent::Crashed);
+		}
+	});
+	crash::install_native_handler();
+
 	if cli.disable_ui_acceleration {
 		preferences.disable_ui_acceleration = true;
 	}
@@ -185,11 +200,23 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 	}
 
 	let app = app::App::new(ui.clone(), engine, gpu, app_event_receiver, app_event_scheduler, preferences);
-	let exit_reason = app.run(event_loop);
+	// A panic on the main thread is a crash like the engine's.
+	let exit_reason = fx_engine::trace::guard("main", || app.run(event_loop)).unwrap_or(ExitReason::Crashed);
+
+	// Tell the user before the (possibly slow) UI shutdown.
+	let restart_after_crash = matches!(exit_reason, ExitReason::Crashed)
+		&& fx_engine::trace::last_crash().is_some_and(|crash| crash::report(&crash));
 
 	// The UI has to be shut down before a restart, or the next process cannot
 	// take the CEF instance directory.
 	ui.shutdown();
+
+	if restart_after_crash {
+		crash::restart();
+	}
+	if matches!(exit_reason, ExitReason::Crashed) {
+		return ExitCode::FAILURE;
+	}
 
 	if matches!(exit_reason, ExitReason::UiAccelerationFailure) {
 		tracing::error!("recording that UI acceleration does not work on this machine");

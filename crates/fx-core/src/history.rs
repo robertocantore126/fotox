@@ -50,6 +50,7 @@ impl History {
 				return Err(error);
 			}
 		};
+		doc.fit_levels();
 		if !effect.selection_only {
 			self.redo.clear();
 			self.undo.push(HistoryEntry {

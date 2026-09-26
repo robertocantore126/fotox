@@ -185,6 +185,9 @@ impl PreviewJob {
 		};
 		let local = placed.after_destination_translation(-f64::from(at.0), -f64::from(at.1));
 		let mut image = TiledImage::new(size.0, size.1, source.format());
+		// The frame reads the preview at the canvas's level, which a small
+		// preview's own pyramid may not reach.
+		image.ensure_levels(fx_tiles::level_count_for(self.canvas.0, self.canvas.1));
 		let top = image.level_count() - 1;
 		let level = (self.view.mip_level(image.level_count()) + usize::from(self.coarser)).min(top);
 		let Some((_, tiles)) = crate::filters::visible_tiles(&self.view, self.viewport, self.canvas, &image, at, level) else {

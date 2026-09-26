@@ -33,7 +33,30 @@ export function runAction(item) {
 
   // Every action also goes to the engine, which ignores the ones it does not
   // own (docs/PROTOCOL.md §4). The local behaviour below stays as it is.
-  if (a) bridge.send({ type: UI.ACTION, id: a });
+  if (a) {
+    let args = item && item.args ? item.args : {};
+    if (bridge.isNative && ["export:png", "export:tiff", "export:jpg"].includes(a)) {
+      args = { ...args, doc: activeDocument() };
+    }
+    bridge.send({ type: UI.ACTION, id: a, args });
+  }
+
+  if (a === "dlg:diagnostics") {
+    openDialog("diagnostics", {
+      buttons: [
+        {
+          text: "Download JSON",
+          primary: true,
+          onClick: () => {
+            if (bridge.isNative) bridge.send({ type: UI.ACTION, id: "trace:download" });
+            else toast("The flight recorder is available in the Fotox app");
+          },
+        },
+        { text: "Close" },
+      ],
+    });
+    return;
+  }
 
   // dialoghi -------------------------------------------------------------
   // Frame-time overlay (Ctrl+Alt+F): only the app has a render thread to measure.
@@ -104,6 +127,7 @@ export function runAction(item) {
         args: {
           // CMYK is written as TIFF.
           format: (cmyk.find((p) => p.name === v["CMYK:"]) ? "tif" : { JPG: "jpg", TIFF: "tif" }[v["Format:"]]) || "png",
+          doc: activeDocument(),
           cmyk: (cmyk.find((p) => p.name === v["CMYK:"]) || {}).path || "",
           eight_bit: v["Bit Depth:"] === "8 bits/channel",
           transparency: { On: "on", Off: "off" }[v["Transparency:"]] || "auto",

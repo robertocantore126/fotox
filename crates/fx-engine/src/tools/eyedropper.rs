@@ -21,7 +21,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 /// The options the eyedropper reads from its option bar (M5-T01/T09).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Options {
-	/// 1, 3 or 5: average over an `area × area` square centred on the point.
+	/// 1, 3, 5, 11 or 51: average over an `area × area` square centred on the point.
 	area: u32,
 	/// Sample the active layer alone instead of the composite of all layers.
 	current_layer: bool,
@@ -32,6 +32,8 @@ impl Options {
 		let area = match ctx.settings.string("eyedropper", "Sample Size").as_deref() {
 			Some("3 by 3 Average") => 3,
 			Some("5 by 5 Average") => 5,
+			Some("11 by 11 Average") => 11,
+			Some("51 by 51 Average") => 51,
 			_ => 1,
 		};
 		let current_layer = ctx.settings.string("eyedropper", "Sample").as_deref() == Some("Current Layer");
@@ -271,9 +273,8 @@ mod tests {
 	/// "51 by 51 Average" — but [`Options::from`] only knows the 3 and 5 cases,
 	/// so the two larger choices silently fall through to `_ => 1` and sample a
 	/// single pixel. The sampler tool's reader (`engine/m9.rs`) handles 11 and
-	/// 51; the eyedropper's was never widened.
+	/// 51; this test guards both readers from drifting apart again.
 	#[test]
-	#[ignore = "bughunt: B-03"]
 	fn the_samples_sizes_the_option_bar_offers_are_the_ones_the_reader_knows() {
 		use crate::tools::testing::Fixture;
 		for (label, area) in [

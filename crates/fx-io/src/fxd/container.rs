@@ -19,8 +19,8 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use fx_tiles::{PixelFormat, TileBuffer, TileError, TileSource};
 
@@ -41,6 +41,45 @@ const FOOTER_MAGIC: &[u8; 8] = b"FXDEND01";
 /// Process-wide source id, one per opened [`FxdFile`]. Used by backed tiles to
 /// recognise which file a tile came from (`TileSource::id`, M3-T03).
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
+static WRITER_PATHS: OnceLock<(Mutex<std::collections::HashSet<PathBuf>>, Condvar)> = OnceLock::new();
+
+/// Process-wide exclusive lease for writing a file path.
+pub(super) struct PathWriteLock(PathBuf);
+
+impl PathWriteLock {
+	pub(super) fn acquire(path: &Path) -> Self {
+		let absolute = if path.is_absolute() {
+			path.to_path_buf()
+		} else {
+			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+		};
+		let key = absolute.canonicalize().unwrap_or_else(|_| {
+			let parent = absolute.parent().and_then(|parent| parent.canonicalize().ok());
+			match (parent, absolute.file_name()) {
+				(Some(parent), Some(name)) => parent.join(name),
+				_ => absolute,
+			}
+		});
+		#[cfg(windows)]
+		let key = PathBuf::from(key.to_string_lossy().to_lowercase());
+
+		let (paths, available) = WRITER_PATHS.get_or_init(|| (Mutex::new(std::collections::HashSet::new()), Condvar::new()));
+		let mut held = paths.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		while held.contains(&key) {
+			held = available.wait(held).unwrap_or_else(std::sync::PoisonError::into_inner);
+		}
+		held.insert(key.clone());
+		Self(key)
+	}
+}
+
+impl Drop for PathWriteLock {
+	fn drop(&mut self) {
+		let (paths, available) = WRITER_PATHS.get().expect("writer path lock initialized");
+		paths.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.0);
+		available.notify_all();
+	}
+}
 
 /// What a chunk holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +483,7 @@ pub struct FxdWriter {
 	file: Arc<File>,
 	id: u64,
 	path: PathBuf,
+	_lease: PathWriteLock,
 	/// Offset of the next chunk / the footer.
 	pos: u64,
 }
@@ -451,6 +491,7 @@ pub struct FxdWriter {
 impl FxdWriter {
 	/// Create a new file (truncating any existing one) and write its header.
 	pub fn create(path: &Path) -> Result<Self, IoError> {
+		let lease = PathWriteLock::acquire(path);
 		let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
 		let arc = Arc::new(file);
 		write_all_at(&arc, &build_header(), 0)?;
@@ -458,6 +499,7 @@ impl FxdWriter {
 			file: arc,
 			id: NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed),
 			path: path.to_path_buf(),
+			_lease: lease,
 			pos: HEADER_LEN,
 		})
 	}
@@ -465,11 +507,15 @@ impl FxdWriter {
 	/// Continue an open file after its current footer. Any torn bytes past
 	/// that footer are overwritten by the next save.
 	pub fn append_to(file: FxdFile) -> Result<Self, IoError> {
+		let lease = PathWriteLock::acquire(&file.path);
+		let len = file.file.metadata()?.len();
+		let (_, footer) = find_footer(&file.file, len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
 		Ok(FxdWriter {
 			file: file.file,
 			id: file.id,
 			path: file.path,
-			pos: file.footer.end_offset,
+			_lease: lease,
+			pos: footer.end_offset,
 		})
 	}
 

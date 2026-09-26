@@ -366,6 +366,12 @@ impl Paint {
 }
 
 impl Tool for Paint {
+	fn deactivate(&mut self, _ctx: &mut ToolContext<'_>) -> ToolResult {
+		self.stroking = false;
+		self.pen = None;
+		ToolResult::default()
+	}
+
 	fn pointer(&mut self, ctx: &mut ToolContext<'_>, event: &DocPointer) -> ToolResult {
 		self.hover = Some((event.x, event.y));
 		self.zoom = ctx.view.zoom;

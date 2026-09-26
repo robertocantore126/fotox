@@ -411,7 +411,9 @@ fn layer_entry(layer: &Layer, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>
 pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> ImageEntry {
 	let tile_ref = &tile_ref;
 	let mut levels = Vec::new();
-	for level in 0..image.level_count() {
+	// The image's own levels: those added to match the canvas are one tile
+	// each and rebuilt on open (`Document::fit_levels`).
+	for level in 0..image.natural_level_count() {
 		// Level 0 is authoritative; levels ≥ 3 are stored derived (D-026);
 		// levels 1–2 are rebuilt lazily and never stored.
 		if level != 0 && level < 3 {

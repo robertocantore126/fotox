@@ -294,6 +294,7 @@ impl Engine {
 		};
 		// An already open tab for it comes to the front.
 		if let Some((&child, _)) = self.smart_children.iter().find(|(_, v)| **v == (doc_id, layer_id)) {
+			self.commit_live_edits();
 			self.docs.activate(child);
 			self.after_active_change();
 			return;
@@ -306,6 +307,7 @@ impl Engine {
 			doc.view.resize(viewport.width, viewport.height);
 		}
 		let info = doc.info();
+		self.commit_live_edits();
 		self.docs.add(doc);
 		self.smart_children.insert(child, (doc_id, layer_id));
 		self.to_ui(&EngineToUi::DocumentOpened { info });

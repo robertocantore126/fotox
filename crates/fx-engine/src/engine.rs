@@ -194,6 +194,14 @@ fn internal_name(message: &Internal) -> &'static str {
 	}
 }
 
+pub(super) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+	payload
+		.downcast_ref::<String>()
+		.cloned()
+		.or_else(|| payload.downcast_ref::<&str>().map(|message| (*message).to_owned()))
+		.unwrap_or_else(|| "unknown panic".into())
+}
+
 struct Engine {
 	output: OutputSink,
 	render: Sender<RenderRequest>,
@@ -370,6 +378,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		stats,
 		output,
 	} = ctx;
+	crate::text::warm();
 	let mut engine = Engine {
 		output,
 		render,
@@ -510,8 +519,8 @@ impl Engine {
 				}
 				Changed::default()
 			}
-			EngineInput::Export { path, choice } => {
-				self.export(path, choice);
+			EngineInput::Export { doc, path, choice } => {
+				self.export(doc, path, choice);
 				Changed::default()
 			}
 			EngineInput::Save { doc } => {
@@ -765,6 +774,7 @@ impl Engine {
 			doc.view.resize(viewport.width, viewport.height);
 		}
 		let info = doc.info();
+		self.commit_live_edits();
 		self.docs.add(doc);
 		self.to_ui(&EngineToUi::DocumentOpened { info });
 		self.after_active_change();
@@ -1103,6 +1113,31 @@ impl Engine {
 				// tool to Type first.
 				// The UI's own errors, for the flight recorder only (`trace_input`
 				// has written the message already).
+				if id == "trace:download-result" {
+					if let Some(error) = args.get("error").and_then(serde_json::Value::as_str) {
+						self.to_ui(&EngineToUi::Error {
+							text: format!("Could not export the flight recorder: {error}"),
+						});
+					} else if let Some(path) = args.get("path").and_then(serde_json::Value::as_str) {
+						self.to_ui(&EngineToUi::Toast {
+							text: format!("Flight recorder saved to {path}"),
+						});
+					}
+					return Changed::default();
+				}
+				// Crash drills for the crash reporter, only with
+				// `FOTOX_DEBUG_CRASH` set: a panic on this thread, or a native
+				// access violation.
+				if let Some(kind) = id.strip_prefix("trace:crash-")
+					&& std::env::var_os("FOTOX_DEBUG_CRASH").is_some()
+				{
+					match kind {
+						"engine" => panic!("crash drill: the engine thread panics"),
+						// SAFETY: none — the point is to fault (address 16 is never mapped).
+						"native" => unsafe { std::ptr::without_provenance_mut::<u32>(16).write_volatile(1) },
+						_ => {}
+					}
+				}
 				if id.starts_with("trace:") {
 					return Changed::default();
 				}
@@ -1156,6 +1191,7 @@ impl Engine {
 				None => Changed::default(),
 			},
 			UiToEngine::ActivateDocument { doc } => {
+				self.commit_live_edits();
 				if self.docs.activate(doc) {
 					self.after_active_change();
 				}
@@ -1409,6 +1445,7 @@ impl Engine {
 		}
 		// Leaving a tool finishes what it has under way (the Type tool commits).
 		if id.starts_with("tool:") {
+			self.end_stroke();
 			self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 			if id == "tool:type" && !self.fonts_sent {
 				self.fonts_sent = true;
@@ -1517,11 +1554,11 @@ impl Engine {
 	}
 
 	/// Export the active document as a job on a worker thread, with progress.
-	fn export(&mut self, path: PathBuf, choice: Option<crate::ExportChoice>) {
+	fn export(&mut self, doc: DocId, path: PathBuf, choice: Option<crate::ExportChoice>) {
 		self.commit_live_edits();
-		let Some(open) = self.docs.active_mut() else {
+		let Some(open) = self.docs.get_mut(doc) else {
 			self.to_ui(&EngineToUi::Toast {
-				text: "Open a document to export it".into(),
+				text: "The document selected for export is no longer open".into(),
 			});
 			return;
 		};
@@ -1559,10 +1596,13 @@ impl Engine {
 				true
 			};
 			// An opaque document is written without alpha (a quarter smaller for RGB).
-			let opaque = crate::export::opaque_background(&doc, &store);
-			let result = crate::export::options_for(&doc, &path, opaque)
-				.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
-				.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report));
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let opaque = crate::export::opaque_background(&doc, &store);
+				crate::export::options_for(&doc, &path, opaque)
+					.and_then(|options| crate::export::apply_choice(options, choice, opaque, &doc.color.profile))
+					.and_then(|options| crate::export::export_document(&doc, &store, &path, options, &mut report))
+			}))
+			.unwrap_or_else(|panic| Err(IoError::Decode(format!("export worker panicked: {}", panic_text(&*panic)))));
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
@@ -2027,7 +2067,9 @@ impl Engine {
 				tiles: &store,
 				ops: Some(&ops),
 			};
-			let result = command.apply(&mut after, &mut ctx).map(|effect| (Box::new(after), effect));
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| command.apply(&mut after, &mut ctx)))
+				.map_err(|panic| fx_core::CommandError::NotAllowed(format!("pixel operation panicked: {}", panic_text(&*panic))))
+				.and_then(|result| result.map(|effect| (Box::new(after), effect)));
 			let _ = internal.send(Internal::PixelJobDone {
 				task,
 				doc: id,
@@ -2093,6 +2135,7 @@ impl Engine {
 				self.request_frame();
 			}
 		}
+		self.continue_window_close();
 	}
 
 	fn internal(&mut self, message: Internal) {
@@ -2196,6 +2239,7 @@ impl Engine {
 				}
 				match result {
 					Ok(imported) => {
+						self.commit_live_edits();
 						let id = self.docs.allocate_id();
 						let mut doc = OpenDoc::from_import(id, &path, imported);
 						if let Some(viewport) = self.virtual_view.viewport {
@@ -2221,6 +2265,7 @@ impl Engine {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(opened) => {
+						self.commit_live_edits();
 						let id = self.docs.allocate_id();
 						let mut doc = OpenDoc::from_fxd(id, &path, *opened);
 						if let Some(viewport) = self.virtual_view.viewport {
@@ -2250,18 +2295,22 @@ impl Engine {
 				result,
 			} => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let Some(open) = self.docs.get_mut(doc) {
+					open.saving = false;
+				}
 				match result {
 					Ok(file) => {
-						let info = self.docs.get_mut(doc).map(|open| {
+						let saved = self.docs.get_mut(doc).map(|open| {
 							open.file = Some(file);
 							open.path = Some(path.clone());
 							open.dirty = open.generation != generation;
 							open.name = path
 								.file_name()
 								.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-							open.info()
+							(open.info(), open.dirty)
 						});
-						if let Some(info) = info {
+						let saved_clean = saved.as_ref().is_some_and(|(_, dirty)| !dirty);
+						if let Some((info, _)) = saved {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
 						tracing::info!("saved {}", path.display());
@@ -2271,8 +2320,13 @@ impl Engine {
 						});
 						if self.pending_close == Some(doc) {
 							self.pending_close = None;
-							self.force_close(doc);
-							self.continue_window_close();
+							if saved_clean {
+								self.force_close(doc);
+							} else if !self.window_close_pending
+								&& let Some(name) = self.docs.get_mut(doc).map(|open| open.name.clone())
+							{
+								self.to_ui(&EngineToUi::CloseDirtyDocument { doc, name });
+							}
 						}
 					}
 					Err(IoError::Cancelled) => {
@@ -2288,6 +2342,7 @@ impl Engine {
 						});
 					}
 				}
+				self.continue_window_close();
 			}
 		}
 	}
@@ -2304,7 +2359,21 @@ impl Engine {
 
 	fn close(&mut self, id: DocId) {
 		self.commit_live_edits();
-		let dirty = self.docs.get_mut(id).is_some_and(|open| open.dirty);
+		let Some((busy, saving, dirty)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving, open.dirty)) else {
+			return;
+		};
+		if let Some(job) = busy {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Wait until {job} is finished before closing this document"),
+			});
+			return;
+		}
+		if saving {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Wait until the save is finished before closing this document".into(),
+			});
+			return;
+		}
 		if dirty {
 			let name = self.docs.get_mut(id).map_or_else(String::new, |open| open.name.clone());
 			self.to_ui(&EngineToUi::CloseDirtyDocument { doc: id, name });
@@ -2344,6 +2413,22 @@ impl Engine {
 	fn close_requested(&mut self) {
 		self.commit_live_edits();
 		self.window_close_pending = true;
+		let waiting = self.docs.iter_mut().find_map(|open| {
+			if let Some(job) = &open.busy {
+				Some(format!("{} ({job})", open.name))
+			} else if open.saving {
+				Some(format!("{} (saving)", open.name))
+			} else {
+				None
+			}
+		});
+		if let Some(waiting) = waiting {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Waiting for {waiting} before closing"),
+			});
+			(self.output)(EngineOutput::MayClose(false));
+			return;
+		}
 		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
 		match dirty {
 			Some((id, name)) => {
@@ -2377,10 +2462,22 @@ impl Engine {
 	/// Save in place; a document without a file asks the shell for a path.
 	fn save(&mut self, id: DocId) {
 		self.commit_live_edits();
-		let (file, name) = match self.docs.get_mut(id) {
-			Some(open) => (open.file.clone(), open.name.clone()),
+		let (file, name, busy, saving) = match self.docs.get_mut(id) {
+			Some(open) => (open.file.clone(), open.name.clone(), open.busy.clone(), open.saving),
 			None => return,
 		};
+		if let Some(job) = busy {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Wait until {job} is finished before saving"),
+			});
+			return;
+		}
+		if saving {
+			self.to_ui(&EngineToUi::Toast {
+				text: "A save is already in progress for this document".into(),
+			});
+			return;
+		}
 		match file {
 			Some(file) => self.start_save(id, SaveTarget::Incremental(file)),
 			None => self.ask_save_path(id, &name),
@@ -2412,7 +2509,23 @@ impl Engine {
 
 	/// Snapshot the document and save it on a worker thread (recipe R2).
 	fn start_save(&mut self, id: DocId, target: SaveTarget) {
+		let Some((busy, saving)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving)) else {
+			return;
+		};
+		if let Some(job) = busy {
+			self.to_ui(&EngineToUi::Toast {
+				text: format!("Wait until {job} is finished before saving"),
+			});
+			return;
+		}
+		if saving {
+			self.to_ui(&EngineToUi::Toast {
+				text: "A save is already in progress for this document".into(),
+			});
+			return;
+		}
 		let Some(open) = self.docs.get_mut(id) else { return };
+		open.saving = true;
 		let snapshot = open.doc.clone();
 		let generation = open.generation;
 		let path = match &target {
@@ -2443,16 +2556,19 @@ impl Engine {
 			};
 			// The composite preview (D-026) needs the engine's compositor; a
 			// later card can render it and pass it here.
-			let result = fxd::save(
-				SaveRequest {
-					doc: &snapshot,
-					store: &store,
-					preview: None,
-				},
-				target,
-				&mut report,
-			)
-			.map(|saved| saved.file);
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				fxd::save(
+					SaveRequest {
+						doc: &snapshot,
+						store: &store,
+						preview: None,
+					},
+					target,
+					&mut report,
+				)
+				.map(|saved| saved.file)
+			}))
+			.unwrap_or_else(|panic| Err(IoError::Decode(format!("save worker panicked: {}", panic_text(&*panic)))));
 			let _ = internal.send(Internal::Saved {
 				task,
 				doc: id,
@@ -2462,6 +2578,9 @@ impl Engine {
 			});
 		});
 		if let Err(error) = spawned {
+			if let Some(open) = self.docs.get_mut(id) {
+				open.saving = false;
+			}
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.pending_close = None;
 			self.to_ui(&EngineToUi::Error {
@@ -2515,12 +2634,12 @@ impl Engine {
 			ops: Some(&self.ops),
 		};
 		let traced = trace::enabled().then(|| (format!("{:?}", std::mem::discriminant(&command)), Instant::now()));
-		let cmd_name = trace::enabled().then(|| trace::cut(&serde_json::to_string(&command).unwrap_or_default(), 400));
+		let cmd_name = trace::enabled().then(|| trace::cut(&serde_json::to_string(&command).unwrap_or_default(), 4000));
 		let result = doc.history.execute(&mut doc.doc, command, &mut ctx);
-		if let Some((_, at)) = traced {
+		if let Some((kind, at)) = traced {
 			trace::event(
 				"cmd",
-				serde_json::json!({ "cmd": cmd_name, "ok": result.as_ref().map(|e| e.label.clone()).map_err(ToString::to_string), "ms": at.elapsed().as_secs_f64() * 1000.0 }),
+				serde_json::json!({ "doc": id.0, "kind": kind, "cmd": cmd_name, "ok": result.as_ref().map(|e| e.label.clone()).map_err(ToString::to_string), "ms": at.elapsed().as_secs_f64() * 1000.0 }),
 			);
 		}
 		if let (Err(_), Some(before)) = (&result, before_merge) {
@@ -3609,6 +3728,8 @@ impl Engine {
 	}
 
 	fn after_active_change(&mut self) {
+		self.end_stroke();
+		self.tools.clear();
 		self.to_ui(&EngineToUi::ActiveDocument { doc: self.docs.active_id() });
 		if self.transform.as_ref().is_some_and(|(doc, _)| Some(*doc) != self.docs.active_id()) {
 			self.end_transform(false);
@@ -3657,6 +3778,16 @@ impl Engine {
 							_ => continue,
 						}
 					};
+					// A request from a snapshot the document no longer matches.
+					let grid_has = |image: &fx_tiles::TiledImage| {
+						request.level < image.level_count() && {
+							let grid = image.grid(request.level);
+							request.x < grid.cols() && request.y < grid.rows()
+						}
+					};
+					if !grid_has(image) {
+						continue;
+					}
 					if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
 						tracing::warn!("mip {request:?} failed: {error}");
 					}
@@ -4048,8 +4179,9 @@ impl Engine {
 		match message {
 			EngineToUi::Error { text } => trace::event("ui_error", serde_json::json!({ "text": text })),
 			EngineToUi::Toast { text } => trace::event("toast", serde_json::json!({ "text": text })),
-			EngineToUi::Progress { task, label, fraction } if *fraction == 0.0 => {
-				trace::event("job", serde_json::json!({ "task": task, "label": label, "state": "start" }))
+			EngineToUi::Progress { task, label, fraction } => {
+				let state = if *fraction == 0.0 { "start" } else { "progress" };
+				trace::event("job", serde_json::json!({ "task": task, "label": label, "state": state, "fraction": fraction }))
 			}
 			EngineToUi::ProgressDone { task } => trace::event("job", serde_json::json!({ "task": task, "state": "done" })),
 			_ => {}

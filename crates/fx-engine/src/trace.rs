@@ -3,12 +3,15 @@
 //! app can be read back afterwards — what was done, in what order, how long
 //! each step took, and where a freeze happened.
 //!
-//! Each line is `{"t": ms since start, "k": kind, ...}`. Kinds:
+//! Each JSONL line is `{"t": ms since start, "k": kind, ...}`. The
+//! downloadable JSON wraps the complete flushed session as a versioned `events`
+//! array. Kinds:
 //! * `start` — version, file, command line;
-//! * `in` — an input to the engine (UI message, open, paste…; pointer moves
-//!   are counted, not written);
+//! * `in` — every input to the engine, including each viewport pointer move;
 //! * `cmd` / `job` — a command or a background job, with its duration;
 //! * `ui_error`, `toast`, `warn`, `error`, `panic` — what went wrong;
+//! * `crash` — a thread the app needs died ([`guard`]); the shell then shows
+//!   an error and restarts;
 //! * `frame_slow` — a render frame over [`SLOW_FRAME_MS`];
 //! * `freeze` / `unfreeze` — a thread busy with one thing for longer than
 //!   [`FREEZE_MS`] (the watchdog), and when it came back.
@@ -51,9 +54,14 @@ struct Beat {
 	reported: AtomicBool,
 }
 
+enum WriterMessage {
+	Event(String),
+	Snapshot(crossbeam_channel::Sender<Result<Vec<u8>, String>>),
+}
+
 struct Recorder {
 	start: Instant,
-	tx: crossbeam_channel::Sender<String>,
+	tx: crossbeam_channel::Sender<WriterMessage>,
 	beats: [Beat; 3],
 	path: PathBuf,
 }
@@ -84,7 +92,7 @@ pub fn init() -> Option<PathBuf> {
 	let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
 	let path = dir.join(format!("fotox-{stamp}-{}.jsonl", std::process::id()));
 	let file = std::fs::File::create(&path).ok()?;
-	let (tx, rx) = crossbeam_channel::unbounded::<String>();
+	let (tx, rx) = crossbeam_channel::unbounded::<WriterMessage>();
 	let beat = || Beat {
 		since: AtomicU64::new(0),
 		what: Mutex::new(String::new()),
@@ -100,16 +108,15 @@ pub fn init() -> Option<PathBuf> {
 		return RECORDER.get().map(|r| r.path.clone());
 	}
 	// The writer: lines as they come, flushed at least every 200 ms.
+	let writer_path = path.clone();
 	let _ = std::thread::Builder::new().name("trace-writer".into()).spawn(move || {
 		let mut out = std::io::BufWriter::new(file);
 		loop {
 			match rx.recv_timeout(Duration::from_millis(200)) {
-				Ok(line) => {
-					let _ = out.write_all(line.as_bytes());
-					let _ = out.write_all(b"\n");
-					for line in rx.try_iter() {
-						let _ = out.write_all(line.as_bytes());
-						let _ = out.write_all(b"\n");
+				Ok(message) => {
+					write_message(&mut out, &writer_path, message);
+					for message in rx.try_iter() {
+						write_message(&mut out, &writer_path, message);
 					}
 					let _ = out.flush();
 				}
@@ -140,6 +147,7 @@ pub fn init() -> Option<PathBuf> {
 	});
 	std::panic::set_hook(Box::new(|info| {
 		let thread = std::thread::current().name().unwrap_or("?").to_owned();
+		LAST_PANIC.with(|last| *last.borrow_mut() = Some(info.to_string()));
 		let backtrace = std::backtrace::Backtrace::force_capture().to_string();
 		event("panic", json!({ "thread": thread, "message": info.to_string(), "backtrace": backtrace }));
 		// Give the writer a moment: the process may be about to die.
@@ -158,6 +166,22 @@ pub fn init() -> Option<PathBuf> {
 	Some(path)
 }
 
+fn write_message(out: &mut std::io::BufWriter<std::fs::File>, path: &std::path::Path, message: WriterMessage) {
+	match message {
+		WriterMessage::Event(line) => {
+			let _ = out.write_all(line.as_bytes());
+			let _ = out.write_all(b"\n");
+		}
+		WriterMessage::Snapshot(reply) => {
+			let snapshot = out
+				.flush()
+				.map_err(|error| error.to_string())
+				.and_then(|()| std::fs::read(path).map_err(|error| error.to_string()));
+			let _ = reply.send(snapshot);
+		}
+	}
+}
+
 /// Keep the newest [`KEEP_FILES`] session files.
 fn prune(dir: &std::path::Path) {
 	let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -170,6 +194,82 @@ fn prune(dir: &std::path::Path) {
 	let excess = files.len().saturating_sub(KEEP_FILES - 1);
 	for (_, path) in files.into_iter().take(excess) {
 		let _ = std::fs::remove_file(path);
+	}
+}
+
+// ---------------------------------------------------------------- crashes
+
+/// What stopped the app: the thread that died and why.
+#[derive(Clone, Debug)]
+pub struct Crash {
+	pub thread: String,
+	pub message: String,
+}
+
+static LAST_CRASH: Mutex<Option<Crash>> = Mutex::new(None);
+type CrashHandler = Box<dyn Fn() + Send + Sync>;
+static CRASH_HANDLER: OnceLock<CrashHandler> = OnceLock::new();
+
+thread_local! {
+	/// The message of this thread's last panic, as the hook formatted it
+	/// (with its location), for [`guard`].
+	static LAST_PANIC: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Call `handler` when a thread the app cannot run without dies (once: the
+/// first crash is the one reported). The shell uses it to show an error and
+/// restart.
+pub fn on_crash(handler: impl Fn() + Send + Sync + 'static) {
+	let _ = CRASH_HANDLER.set(Box::new(handler));
+}
+
+/// Record that `thread` died of `message` and tell the crash handler.
+pub fn crashed(thread: &str, message: &str) {
+	event("crash", json!({ "thread": thread, "message": message }));
+	let first = {
+		let mut last = LAST_CRASH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let first = last.is_none();
+		if first {
+			*last = Some(Crash {
+				thread: thread.to_owned(),
+				message: message.to_owned(),
+			});
+		}
+		first
+	};
+	tracing::error!("{thread} crashed: {message}");
+	if first && let Some(handler) = CRASH_HANDLER.get() {
+		handler();
+	}
+}
+
+/// The first crash of this process, if any.
+pub fn last_crash() -> Option<Crash> {
+	LAST_CRASH.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// This session's recorder file.
+pub fn session_file() -> Option<PathBuf> {
+	RECORDER.get().map(|r| r.path.clone())
+}
+
+/// Run a thread's body; a panic that escapes it is a crash of `thread`
+/// ([`crashed`]) instead of a thread that silently stops (the render thread
+/// dying left a frozen view, flight recorder 2026-09-26).
+pub fn guard<T>(thread: &str, body: impl FnOnce() -> T) -> Option<T> {
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+		Ok(value) => Some(value),
+		Err(payload) => {
+			let message = LAST_PANIC.with(|last| last.borrow_mut().take()).unwrap_or_else(|| {
+				payload
+					.downcast_ref::<&str>()
+					.map(|s| (*s).to_owned())
+					.or_else(|| payload.downcast_ref::<String>().cloned())
+					.unwrap_or_else(|| "unknown panic".into())
+			});
+			crashed(thread, &message);
+			None
+		}
 	}
 }
 
@@ -187,7 +287,40 @@ pub fn event(kind: &str, fields: Value) {
 	line.insert("t".into(), json!(now_ms(r)));
 	line.insert("k".into(), json!(kind));
 	let text = Value::Object(line).to_string();
-	let _ = r.tx.send(text);
+	let _ = r.tx.send(WriterMessage::Event(text));
+}
+
+/// Return the flushed session as a versioned JSON document and a download name.
+pub fn export_json() -> Result<(String, String), String> {
+	let Some(r) = RECORDER.get() else {
+		return Err("The flight recorder is not available".into());
+	};
+	let (reply, result) = crossbeam_channel::bounded(1);
+	r.tx.send(WriterMessage::Snapshot(reply)).map_err(|error| error.to_string())?;
+	let bytes = result
+		.recv_timeout(Duration::from_secs(15))
+		.map_err(|error| format!("The flight recorder did not flush: {error}"))??;
+	let json = json_document(&bytes)?;
+	let stem = r.path.file_stem().and_then(|name| name.to_str()).unwrap_or("fotox-trace");
+	Ok((format!("{stem}.json"), json))
+}
+
+fn json_document(bytes: &[u8]) -> Result<String, String> {
+	let mut events = Vec::new();
+	for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+		let line = line.strip_suffix(b"\r").unwrap_or(line);
+		if line.is_empty() {
+			continue;
+		}
+		let event: Value = serde_json::from_slice(line).map_err(|error| format!("Invalid trace event on line {}: {error}", index + 1))?;
+		events.push(event);
+	}
+	serde_json::to_string_pretty(&json!({
+		"format": "fotox-flight-recorder",
+		"schema_version": 1,
+		"events": events,
+	}))
+	.map_err(|error| error.to_string())
 }
 
 /// Whether recording is on (skip building expensive fields otherwise).
@@ -256,5 +389,39 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TraceLayer {
 		event.record(&mut message);
 		let kind = if level == tracing::Level::ERROR { "error" } else { "warn" };
 		self::event(kind, json!({ "target": event.metadata().target(), "msg": cut(&message.0, 2000) }));
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn export_wraps_every_jsonl_event_in_a_versioned_document() {
+		let json = json_document(b"{\"t\":1,\"k\":\"start\"}\n{\"t\":2,\"k\":\"in\",\"action\":\"doc:save\"}\n").unwrap();
+		let value: Value = serde_json::from_str(&json).unwrap();
+		assert_eq!(value["format"], "fotox-flight-recorder");
+		assert_eq!(value["schema_version"], 1);
+		assert_eq!(value["events"].as_array().unwrap().len(), 2);
+		assert_eq!(value["events"][1]["action"], "doc:save");
+	}
+
+	#[test]
+	fn export_rejects_a_malformed_event_instead_of_silently_dropping_it() {
+		assert!(json_document(b"{not json}\n").unwrap_err().contains("line 1"));
+	}
+
+	#[test]
+	fn snapshot_flushes_queued_events_before_reading_the_session_file() {
+		let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+		let path = std::env::temp_dir().join(format!("fotox-trace-snapshot-{}-{stamp}.jsonl", std::process::id()));
+		let mut out = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+		write_message(&mut out, &path, WriterMessage::Event(r#"{"k":"in","action":"doc:save"}"#.into()));
+		let (reply, result) = crossbeam_channel::bounded(1);
+		write_message(&mut out, &path, WriterMessage::Snapshot(reply));
+		let snapshot = result.recv().unwrap().unwrap();
+		assert!(String::from_utf8(snapshot).unwrap().contains("doc:save"));
+		drop(out);
+		std::fs::remove_file(path).unwrap();
 	}
 }
