@@ -160,6 +160,12 @@ pub trait PixelOps: Send + Sync {
 		Err(CommandError::NotAllowed("this selection needs the engine".into()))
 	}
 
+	/// A text's glyph outlines in document coordinates and its first colour
+	/// (M10-T08: type masks, Convert to Shape, Create Work Path).
+	fn text_outline(&self, _content: &crate::text::TextContent, _ppi: f32) -> Result<(Vec<crate::vector::PathEl>, [u16; 4]), CommandError> {
+		Err(CommandError::NotAllowed("text outlines need the engine's text layout".into()))
+	}
+
 	/// What Edit ▸ Paste pastes (M5-T05): the engine's clipboard. `None` =
 	/// empty.
 	fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {

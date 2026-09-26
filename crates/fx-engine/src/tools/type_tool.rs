@@ -42,6 +42,8 @@ struct Edit {
 
 #[derive(Default)]
 pub struct TypeTool {
+	/// The Type Mask tools (M10-T08): the commit is a selection, not a layer.
+	pub mask: bool,
 	edit: Option<Edit>,
 	press: Option<(f64, f64)>,
 	drag: Option<(f64, f64)>,
@@ -73,6 +75,15 @@ impl TypeTool {
 			return result;
 		}
 		let content = edit.content.clone().covering();
+		if self.mask {
+			if !content.text.trim().is_empty() {
+				result.command = Some(Command::TextToSelection {
+					content,
+					mode: fx_core::SelectMode::Replace,
+				});
+			}
+			return result;
+		}
 		if edit.created {
 			if !content.text.trim().is_empty() {
 				result.command = Some(Command::AddLayer {

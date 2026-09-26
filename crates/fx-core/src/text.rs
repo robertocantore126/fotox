@@ -213,6 +213,53 @@ pub struct TextContent {
 	/// Local → document, `[a, b, c, d, e, f]` (see `crate::vector`). The
 	/// frame's origin sits at the transform's translation.
 	pub transform: [f64; 6],
+	/// Warp Text (M10-T08): applied to the glyph outlines, losslessly.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub warp: Option<Warp>,
+}
+
+/// Warp Text's styles (M10-T08).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarpStyle {
+	Arc,
+	Arch,
+	Bulge,
+	Flag,
+	Wave,
+	Fish,
+	Rise,
+	Squeeze,
+}
+
+/// A text warp: the style and its Bend (`-1..=1`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Warp {
+	pub style: WarpStyle,
+	pub bend: f64,
+}
+
+impl Warp {
+	/// Where a frame-space point moves, the text's box being `[x0, y0, x1, y1]`
+	/// (VERIFY: Photoshop's curves; these are the familiar shapes).
+	pub fn apply(&self, p: (f64, f64), b: [f64; 4]) -> (f64, f64) {
+		let (w, h) = ((b[2] - b[0]).max(1e-9), (b[3] - b[1]).max(1e-9));
+		let u = (p.0 - b[0]) / w * 2.0 - 1.0; // -1..1 across
+		let v = (p.1 - b[1]) / h * 2.0 - 1.0; // -1 top .. 1 bottom
+		let k = self.bend.clamp(-1.0, 1.0);
+		let pi = std::f64::consts::PI;
+		let dy = match self.style {
+			WarpStyle::Arc => -k * (1.0 - u * u) * h * 0.5 * (1.0 - v) / 2.0 * 2.0,
+			WarpStyle::Arch => -k * (1.0 - u * u) * h * 0.5,
+			WarpStyle::Bulge => -k * (1.0 - u * u) * h * 0.4 * -v,
+			WarpStyle::Squeeze => k * (1.0 - u * u) * h * 0.4 * -v,
+			WarpStyle::Flag => k * (pi * u).sin() * h * 0.25,
+			WarpStyle::Wave => k * (pi * u).sin() * h * 0.25 * v,
+			WarpStyle::Fish => -k * (pi * u * 0.5 + pi * 0.5).sin() * h * 0.3 * -v,
+			WarpStyle::Rise => -k * u * h * 0.5,
+		};
+		(p.0, p.1 + dy)
+	}
 }
 
 impl Default for TextContent {
@@ -224,6 +271,7 @@ impl Default for TextContent {
 			align: TextAlign::Left,
 			antialias: TextAntialias::Smooth,
 			transform: crate::vector::IDENTITY,
+			warp: None,
 		}
 	}
 }
@@ -439,6 +487,7 @@ mod tests {
 			align: TextAlign::Center,
 			antialias: TextAntialias::Strong,
 			transform: [1.0, 0.0, 0.0, 1.0, 20.0, 30.0],
+			warp: None,
 		};
 		let json = serde_json::to_string(&content).expect("serialises");
 		let back: TextContent = serde_json::from_str(&json).expect("parses");

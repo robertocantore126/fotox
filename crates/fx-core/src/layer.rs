@@ -188,6 +188,8 @@ pub enum LayerKind {
 		/// Local → document, `[a, b, c, d, e, f]`; the frame's origin is the
 		/// matrix's translation.
 		transform: [f64; 6],
+		/// Warp Text (M10-T08).
+		warp: Option<crate::text::Warp>,
 		cache: TiledImage,
 	},
 	/// A gradient or pattern fill layer (M8-T03/T06, D-065): its parameters
@@ -273,6 +275,7 @@ impl LayerKind {
 				align,
 				antialias,
 				transform,
+				warp,
 				..
 			} => Some(crate::text::TextContent {
 				text: text.clone(),
@@ -281,6 +284,7 @@ impl LayerKind {
 				align: *align,
 				antialias: *antialias,
 				transform: *transform,
+				warp: *warp,
 			}),
 			_ => None,
 		}
@@ -311,6 +315,21 @@ pub struct Layer {
 	/// Derived tile caches of the effects, indexed by
 	/// [`crate::styles::EffectKind::index`]; empty without styles.
 	pub effects: Vec<TiledImage>,
+	/// The vector mask (M10-T06), multiplied with the pixel mask.
+	pub vector_mask: Option<VectorMask>,
+}
+
+/// A layer's vector mask (M10-T06): a path in document coordinates, drawn
+/// into `cache` (grey coverage, derived tiles) at the level being composited.
+#[derive(Clone, Debug)]
+pub struct VectorMask {
+	pub path: crate::path::Path,
+	pub enabled: bool,
+	/// Pixels (Properties ▸ Feather).
+	pub feather: f64,
+	/// `0..=1` (Properties ▸ Density): outside the path the mask is `1 − density`.
+	pub density: f32,
+	pub cache: TiledImage,
 }
 
 impl Layer {
@@ -335,6 +354,7 @@ impl Layer {
 			kind,
 			styles: None,
 			effects: Vec::new(),
+			vector_mask: None,
 		}
 	}
 

@@ -201,3 +201,22 @@ fn build_path(elements: &[PathEl]) -> Option<Path> {
 
 /// The identity transform, for callers that place the shape themselves.
 pub const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// One tile of a vector mask's coverage (M10-T06): the path (document
+/// coordinates) filled at `level`, `1 − density` outside it, as grey
+/// `format`. FAST: Feather is not applied (Photoshop blurs the coverage).
+pub fn render_vector_mask_tile(elements: &[fx_core::vector::PathEl], density: f32, level: usize, tile: (u32, u32), format: PixelFormat) -> TileBuffer {
+	let shape = VectorShape::Path { elements: elements.to_vec() };
+	let white = Paint::Solid { rgba: [65535; 4] };
+	let rgba = render_shape_tile(&shape, Some(&white), None, fx_core::vector::IDENTITY, level, tile, PixelFormat::Rgba8);
+	let mut out = TileBuffer::zeroed(format);
+	let alpha = rgba.bytes();
+	let outside = 1.0 - density.clamp(0.0, 1.0);
+	for y in 0..TILE_SIZE {
+		for x in 0..TILE_SIZE {
+			let a = f32::from(alpha[((y * TILE_SIZE + x) * 4 + 3) as usize]) / 255.0;
+			fx_core::selection::set_gray(&mut out, format, x, y, outside + (1.0 - outside) * a);
+		}
+	}
+	out
+}

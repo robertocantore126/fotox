@@ -142,6 +142,43 @@ pub fn draw_requests(doc: &mut fx_core::Document, store: &TileStore, requests: &
 	drawn
 }
 
+/// Draw requested tiles of layers' vector masks (M10-T06), in parallel.
+pub fn draw_vector_mask_requests(doc: &mut fx_core::Document, store: &TileStore, requests: &[(fx_core::LayerId, usize, u32, u32)]) -> usize {
+	let mut by_layer: HashMap<fx_core::LayerId, Vec<(usize, u32, u32)>> = HashMap::new();
+	for &(layer, level, tx, ty) in requests {
+		by_layer.entry(layer).or_default().push((level, tx, ty));
+	}
+	let mut drawn = 0;
+	for (id, tiles) in by_layer {
+		let Some(layer) = doc.layer(id) else { continue };
+		let Some(vm) = &layer.vector_mask else { continue };
+		let elements = vm.path.to_elements();
+		let (density, format) = (vm.density, vm.cache.format());
+		let buffers: Vec<((usize, u32, u32), TileBuffer)> = tiles
+			.par_iter()
+			.map(|&(level, tx, ty)| {
+				(
+					(level, tx, ty),
+					fx_render::vector::render_vector_mask_tile(&elements, density, level, (tx, ty), format),
+				)
+			})
+			.collect();
+		let Some(layer) = doc.layer_mut(id) else { continue };
+		let Some(vm) = &mut layer.vector_mask else { continue };
+		for ((level, tx, ty), buffer) in buffers {
+			// Grey tiles: a uniform one is a solid slot (0 = Empty).
+			let slot = match buffer.uniform_value() {
+				Some(v) if v.0[0] == 0 => TileSlot::Empty,
+				Some(v) => TileSlot::Solid(v),
+				None => TileSlot::Data(store.insert(buffer, fx_tiles::TileClass::Derived)),
+			};
+			vm.cache.set_derived_slot(level, tx, ty, slot);
+		}
+		drawn += tiles.len();
+	}
+	drawn
+}
+
 /// Draw tiles of a gradient / pattern fill layer (M8-T03/T06), in parallel.
 fn draw_fill_tiles(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, tiles: &[(usize, u32, u32)]) -> usize {
 	let size = (doc.width, doc.height);

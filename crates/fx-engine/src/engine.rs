@@ -1030,7 +1030,7 @@ impl Engine {
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
-				if self.m8_action(&id, &args) || self.m9_action(&id, &args) {
+				if self.m8_action(&id, &args) || self.m9_action(&id, &args) || self.m10_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -3459,6 +3459,7 @@ impl Engine {
 			return;
 		}
 		let mut shape_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
+		let mut mask_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
 		let mut effect_tiles: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
 		for request in &work.requests {
 			match request {
@@ -3481,12 +3482,17 @@ impl Engine {
 				}
 				// Shape tiles are drawn from the geometry, all levels alike
 				// (M6-T06); collect them and draw one parallel batch per layer.
+				TileRequest::Vector(request) if request.vector_mask => mask_tiles.push((request.layer, request.level, request.x, request.y)),
 				TileRequest::Vector(request) => shape_tiles.push((request.layer, request.level, request.x, request.y)),
 				TileRequest::Effect(request) => effect_tiles.push((request.layer, request.effect, request.level, request.x, request.y)),
 			}
 		}
 		if !shape_tiles.is_empty() {
 			vector::draw_requests(&mut doc.doc, &store, &shape_tiles);
+		}
+		// Vector masks (M10-T06).
+		if !mask_tiles.is_empty() {
+			vector::draw_vector_mask_requests(&mut doc.doc, &store, &mask_tiles);
 		}
 		if !effect_tiles.is_empty() {
 			crate::effects::draw_effect_requests(&mut doc.doc, &store, &effect_tiles);
@@ -4034,6 +4040,7 @@ fn pixel_job_label(command: &Command) -> String {
 	}
 }
 
+mod m10;
 mod m8;
 mod m9;
 

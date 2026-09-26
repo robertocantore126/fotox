@@ -32,6 +32,7 @@ pub mod measure;
 pub mod move_tool;
 pub mod paint;
 pub mod path_select;
+pub mod pen;
 pub mod perspective_crop;
 pub mod quick_select;
 pub mod shape;
@@ -430,11 +431,28 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"shape-ellipse" => Some(Box::new(shape::Shape::new("shape-ellipse", shape::Kind::Ellipse))),
 		"shape-polygon" => Some(Box::new(shape::Shape::new("shape-polygon", shape::Kind::Polygon))),
 		"shape-line" => Some(Box::new(shape::Shape::new("shape-line", shape::Kind::Line))),
+		"shape-triangle" => Some(Box::new(shape::Shape::new("shape-triangle", shape::Kind::Triangle))),
+		"shape-custom" => Some(Box::new(shape::Shape::new("shape-custom", shape::Kind::Custom))),
 		"path-select" => Some(Box::new(path_select::PathSelect::default())),
 		"type" => Some(Box::new(type_tool::TypeTool::default())),
+		// The Type Mask tools (M10-T08). FAST: the vertical one types
+		// horizontally.
+		"type-mask" | "type-mask-vertical" => {
+			let mut tool = type_tool::TypeTool::default();
+			tool.mask = true;
+			Some(Box::new(tool))
+		}
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
+		// The pen tools and Direct Selection (M10-T02..T05).
+		"pen" => Some(Box::new(pen::Pen::new("pen", pen::Kind::Pen))),
+		"pen-freeform" => Some(Box::new(pen::Pen::new("pen-freeform", pen::Kind::Freeform))),
+		"pen-curvature" => Some(Box::new(pen::Pen::new("pen-curvature", pen::Kind::Curvature))),
+		"anchor-add" => Some(Box::new(pen::Pen::new("anchor-add", pen::Kind::AnchorAdd))),
+		"anchor-del" => Some(Box::new(pen::Pen::new("anchor-del", pen::Kind::AnchorDelete))),
+		"anchor-convert" => Some(Box::new(pen::Pen::new("anchor-convert", pen::Kind::AnchorConvert))),
+		"direct-select" => Some(Box::new(pen::Pen::new("direct-select", pen::Kind::Direct))),
 		// Perspective Crop (M9-T09).
 		"crop-persp" => Some(Box::new(perspective_crop::PerspectiveCrop::default())),
 		// The measuring tools (M9-T08).
@@ -444,7 +462,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"counting" => Some(Box::new(measure::CountTool::default())),
 		// The Magnetic Lasso (M9-T07).
 		"lasso-magnet" => Some(Box::new(magnetic::MagneticLasso::default())),
-		"object-select" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		"object-select" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		// Tools built from a kind (M7-T08, HOWTO R11).
 		other => kinds::registered(other),
 	}

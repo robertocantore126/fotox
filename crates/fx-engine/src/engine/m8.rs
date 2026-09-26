@@ -83,11 +83,12 @@ impl Engine {
 	}
 
 	/// Send the libraries to the UI (after `hello` and on every change).
-	pub(super) fn send_resources(&self) {
+	pub(super) fn send_resources(&mut self) {
 		self.to_ui(&EngineToUi::Brushes {
 			presets: self.resources.brushes.infos(),
 		});
 		self.send_patterns();
+		self.send_shapes();
 	}
 
 	fn send_patterns(&self) {

@@ -122,6 +122,7 @@ export const toolSlots = [
       { id: "shape-rounded", name: "Rounded Rectangle Tool", key: "U", icon: "i-shape-rounded" },
       { id: "shape-ellipse", name: "Ellipse Tool", key: "U", icon: "i-shape-ellipse" },
       { id: "shape-polygon", name: "Polygon Tool", key: "U", icon: "i-shape-polygon" },
+      { id: "shape-triangle", name: "Triangle Tool", key: "U", icon: "i-shape-polygon" },
       { id: "shape-line", name: "Line Tool", key: "U", icon: "i-shape-line" },
       { id: "shape-custom", name: "Custom Shape Tool", key: "U", icon: "i-shape-custom" },
       { id: "shape-3d", name: "3D Object Tool", key: "U", icon: "i-3d" },

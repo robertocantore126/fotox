@@ -65,6 +65,9 @@ pub enum VectorShape {
 	Line { length: f64, width: f64 },
 	/// A free path (PSD import, the Pen tool later).
 	Path { elements: Vec<PathEl> },
+	/// An isosceles triangle pointing up in its `w × h` box, corners rounded
+	/// by `radius` local pixels (the Triangle tool, M10-T07).
+	Triangle { w: f64, h: f64, radius: f64 },
 }
 
 /// How a shape's paint is applied. Gradients and patterns follow.
@@ -122,6 +125,7 @@ impl VectorShape {
 			VectorShape::Rect { w, h, .. } | VectorShape::Ellipse { w, h } => (w.abs(), h.abs()),
 			VectorShape::Polygon { .. } => (2.0, 2.0),
 			VectorShape::Line { length, width } => (length.abs(), width.abs()),
+			VectorShape::Triangle { w, h, .. } => (w.abs(), h.abs()),
 			VectorShape::Path { elements } => path_bounds(elements),
 		}
 	}
@@ -135,6 +139,7 @@ impl VectorShape {
 			VectorShape::Ellipse { w, h } => ellipse(w.abs(), h.abs()),
 			VectorShape::Polygon { sides, star_inset } => polygon(*sides, *star_inset),
 			VectorShape::Line { length, width } => rounded_rect(length.abs(), width.abs(), [0.0; 4]),
+			VectorShape::Triangle { w, h, radius } => triangle(w.abs(), h.abs(), *radius),
 			VectorShape::Path { elements } => elements.clone(),
 		}
 	}
@@ -207,6 +212,7 @@ impl VectorShape {
 			}
 			VectorShape::Line { .. } => "Line",
 			VectorShape::Path { .. } => "Shape",
+			VectorShape::Triangle { .. } => "Triangle",
 		}
 	}
 }
@@ -331,6 +337,37 @@ fn rounded_rect(w: f64, h: f64, radii: [f64; 4]) -> Vec<PathEl> {
 }
 
 /// Four cubic arcs around the ellipse that fills `w × h`.
+/// A triangle pointing up with corners rounded by `radius` (M10-T07): each
+/// corner is cut back along both edges and joined with a quadratic through
+/// the corner.
+fn triangle(w: f64, h: f64, radius: f64) -> Vec<PathEl> {
+	let pts = [(w / 2.0, 0.0), (w, h), (0.0, h)];
+	let r = radius.max(0.0);
+	if r <= 0.0 {
+		return vec![
+			PathEl::MoveTo([pts[0].0, pts[0].1]),
+			PathEl::LineTo([pts[1].0, pts[1].1]),
+			PathEl::LineTo([pts[2].0, pts[2].1]),
+			PathEl::Close,
+		];
+	}
+	let toward = |a: (f64, f64), b: (f64, f64)| {
+		let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+		let len = dx.hypot(dy).max(1e-9);
+		let t = (r / len).min(0.5);
+		[a.0 + dx * t, a.1 + dy * t]
+	};
+	let mut out = Vec::new();
+	for i in 0..3 {
+		let (prev, cur, next) = (pts[(i + 2) % 3], pts[i], pts[(i + 1) % 3]);
+		let (a, b) = (toward(cur, prev), toward(cur, next));
+		out.push(if i == 0 { PathEl::MoveTo(a) } else { PathEl::LineTo(a) });
+		out.push(PathEl::QuadTo([cur.0, cur.1], b));
+	}
+	out.push(PathEl::Close);
+	out
+}
+
 fn ellipse(w: f64, h: f64) -> Vec<PathEl> {
 	let (rx, ry) = (w / 2.0, h / 2.0);
 	let (cx, cy) = (rx, ry);

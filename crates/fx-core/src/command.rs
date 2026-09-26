@@ -393,6 +393,72 @@ pub enum Command {
 		width: u32,
 		height: u32,
 	},
+	/// Replace a document path (M10-T01); `Saved(len)` adds a new one named
+	/// `name`. The path becomes the active one.
+	SetPath {
+		target: crate::path::PathTarget,
+		path: crate::path::Path,
+		#[serde(default)]
+		name: Option<String>,
+		label: String,
+	},
+	/// Delete a path; `RenamePath` renames a saved one; `SaveWorkPath` turns
+	/// the Work Path into a saved path (M10-T01).
+	DeletePath {
+		target: crate::path::PathTarget,
+	},
+	RenamePath {
+		index: usize,
+		name: String,
+	},
+	SaveWorkPath {
+		name: String,
+	},
+	/// The Paths panel's selection (not a History step).
+	SelectPath {
+		target: Option<crate::path::PathTarget>,
+	},
+	/// Load a path as a selection (M10-T01).
+	PathToSelection {
+		target: crate::path::PathTarget,
+		feather: f64,
+		anti_alias: bool,
+		mode: SelectMode,
+	},
+	/// Make a Work Path from the selection's outline (M10-T01): `tolerance`
+	/// in pixels.
+	SelectionToPath {
+		tolerance: f64,
+	},
+	/// Fill Path (M10-T01): the active pixel layer inside the path.
+	FillPath {
+		target: crate::path::PathTarget,
+		source: crate::fill::FillSource,
+		mode: BlendMode,
+		opacity: f64,
+	},
+	/// Layer ▸ Vector Mask (M10-T06): set, change or (`None`) delete a layer's
+	/// vector mask. The coverage cache is rebuilt, all dirty.
+	SetVectorMask {
+		layer: LayerRef,
+		mask: Option<crate::select_ops::VectorMaskSpec>,
+		label: String,
+	},
+	/// The Type Mask tools' commit (M10-T08): the text's glyphs combined into
+	/// the selection by `mode`; no layer is made.
+	TextToSelection {
+		content: crate::text::TextContent,
+		mode: SelectMode,
+	},
+	/// Type ▸ Convert to Shape (M10-T08): the text layer becomes a shape
+	/// layer of its glyph outlines (id, name, position in the stack kept).
+	TextToShape {
+		layer: LayerRef,
+	},
+	/// Type ▸ Create Work Path (M10-T08).
+	TextToWorkPath {
+		layer: LayerRef,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -707,6 +773,30 @@ impl Command {
 				})
 			}
 			Command::PerspectiveCrop { quad, width, height } => m9::perspective_crop(doc, *quad, *width, *height, ctx),
+			Command::SetPath { target, path, name, label } => m10::set_path(doc, *target, path, name.as_deref(), label),
+			Command::DeletePath { target } => m10::delete_path(doc, *target),
+			Command::RenamePath { index, name } => m10::rename_path(doc, *index, name),
+			Command::SaveWorkPath { name } => m10::save_work_path(doc, name),
+			Command::SelectPath { target } => {
+				doc.active_path = *target;
+				Ok(CommandEffect {
+					label: "Select Path".into(),
+					selection_only: true,
+					..Default::default()
+				})
+			}
+			Command::PathToSelection {
+				target,
+				feather,
+				anti_alias,
+				mode,
+			} => m10::path_to_selection(doc, *target, *feather, *anti_alias, *mode, ctx),
+			Command::SetVectorMask { layer, mask, label } => m10::set_vector_mask(doc, layer, mask.as_ref(), label),
+			Command::TextToSelection { content, mode } => m10::text_to_selection(doc, content, *mode, ctx),
+			Command::TextToShape { layer } => m10::text_to_shape(doc, layer, ctx),
+			Command::TextToWorkPath { layer } => m10::text_to_work_path(doc, layer, ctx),
+			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
+			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
 			Command::RedEye {
 				layer,
 				point,
@@ -762,6 +852,7 @@ impl Command {
 // The commands
 // ---------------------------------------------------------------------------
 
+mod m10;
 mod m8;
 pub mod m9;
 
@@ -830,6 +921,7 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 			align: content.align,
 			antialias: content.antialias,
 			transform: content.transform,
+			warp: content.warp,
 			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
 		},
 		NewLayer::Fill { content } => LayerKind::FillLayer {
@@ -1374,6 +1466,7 @@ fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: 
 		align,
 		antialias,
 		transform,
+		warp,
 		cache,
 	} = &mut target.kind
 	else {
@@ -1390,6 +1483,11 @@ fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: 
 	*align = content.align;
 	*antialias = content.antialias;
 	*transform = content.transform;
+	// A warp moves glyphs outside the old box: everything is redrawn.
+	if *warp != content.warp {
+		cache.mark_all_dirty();
+	}
+	*warp = content.warp;
 	cache.mark_rect_dirty(dirty);
 	Ok(CommandEffect {
 		label: "Type Tool".into(),
@@ -1971,6 +2069,7 @@ fn convert_profile(
 				align,
 				antialias,
 				transform,
+				warp,
 				cache,
 			} => {
 				let mut converted = Vec::with_capacity(runs.len());
@@ -1992,6 +2091,7 @@ fn convert_profile(
 					align: *align,
 					antialias: *antialias,
 					transform: *transform,
+					warp: *warp,
 					cache,
 				})
 			}

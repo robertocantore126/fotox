@@ -113,9 +113,9 @@ export const optionBars = {
   burn: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "0", unit: "%", width: 40 }, { type: "select", text: "Range:", options: ["Midtones", "Shadows", "Highlights"], value: "Midtones" }, { type: "range", text: "Exposure:", value: 50 }, { type: "toggle", text: "Protect Tones", on: true }],
   sponge: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "0", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Saturate", "Desaturate"], value: "Desaturate" }, { type: "range", text: "Flow:", value: 50 }, { type: "toggle", text: "Vibrance", on: true }],
 
-  pen: [{ type: "btngroup", icons: ["i-pen", "i-shape-rect"], titles: ["Path", "Shape"], active: 0 }, { type: "btngroup", icons: ["i-plus", "i-minus", "i-check", "i-object-select"], titles: ["Add to shape area", "Subtract from shape area", "Intersect shape areas", "Exclude overlapping shape areas"], active: 0 }, { type: "select", text: "Width:", options: ["1 px", "2 px", "3 px", "4 px", "5 px"], value: "1 px" }, { type: "toggle", text: "Rubber Band", on: true }, { type: "toggle", text: "Auto Add/Delete", on: false }],
-  "pen-freeform": [{ type: "toggle", text: "Magnetic", on: false }, { type: "num", text: "Width:", value: "5", unit: "px", width: 40 }, { type: "num", text: "Contrast:", value: "20", unit: "%", width: 40 }],
-  "pen-curvature": [{ type: "label", text: "Click to add smooth points, double-click to close the path" }],
+  pen: [{ type: "btngroup", key: "Tool Mode", icons: ["i-pen", "i-shape-rect", "i-brush"], titles: ["Path", "Shape", "Pixels"], active: 0 }, { type: "btngroup", key: "Path Operations", icons: ["i-plus", "i-minus", "i-check", "i-object-select"], titles: ["Combine Shapes", "Subtract Front Shape", "Intersect Shape Areas", "Exclude Overlapping Shapes"], active: 0 }, { type: "toggle", text: "Rubber Band", on: true }, { type: "toggle", text: "Auto Add/Delete", on: true }],
+  "pen-freeform": [{ type: "btngroup", key: "Tool Mode", icons: ["i-pen", "i-shape-rect", "i-brush"], titles: ["Path", "Shape", "Pixels"], active: 0 }, { type: "num", text: "Curve Fit:", value: "2", unit: "px", width: 40 }, { type: "toggle", text: "Magnetic", on: false, disabled: true }],
+  "pen-curvature": [{ type: "btngroup", key: "Tool Mode", icons: ["i-pen", "i-shape-rect", "i-brush"], titles: ["Path", "Shape", "Pixels"], active: 0 }, { type: "label", text: "Click to add points, double-click toggles a corner, Enter finishes" }],
   "anchor-add": [{ type: "label", text: "Click a path segment to add an anchor point" }],
   "anchor-del": [{ type: "label", text: "Click an anchor point to remove it" }],
   "anchor-convert": [{ type: "label", text: "Drag a direction handle to convert a point" }],
@@ -139,7 +139,8 @@ export const optionBars = {
   "shape-ellipse": [{ type: "select", text: "", options: ["Pixels", "Path", "Shape"], value: "Shape" }],
   "shape-polygon": [{ type: "num", text: "Sides:", value: "5", width: 36 }, { type: "select", text: "Kind:", options: ["Smooth", "Star"], value: "Smooth" }],
   "shape-line": [{ type: "num", text: "Weight:", value: "3", unit: "px", width: 40 }],
-  "shape-custom": [{ type: "select", text: "Shape:", options: ["Chirp", "Cloud", "Dog", "Flower", "Leaf", "Moon", "Shield", "Star", "Sun", "Zap"], value: "Star" }],
+  "shape-custom": [{ type: "customshape", key: "Shape" }, { type: "label", text: "Drag to draw; Shift keeps the proportions" }],
+  "shape-triangle": [{ type: "num", text: "Radius:", value: "0", unit: "px", width: 40 }],
   "shape-3d": [{ type: "label", text: "Drag to draw a 3D object, then use the 3D panel to rotate it" }],
 
   hand: [{ type: "toggle", text: "Scroll All Windows", on: false }, { type: "toggle", text: "Zoom to Fit on Resize", on: false }],

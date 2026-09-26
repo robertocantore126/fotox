@@ -99,3 +99,22 @@ impl SelectOp {
 		}
 	}
 }
+
+/// A vector mask as plain data (M10-T06).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VectorMaskSpec {
+	pub path: crate::path::Path,
+	#[serde(default = "yes")]
+	pub enabled: bool,
+	#[serde(default)]
+	pub feather: f64,
+	#[serde(default = "one")]
+	pub density: f32,
+}
+
+fn yes() -> bool {
+	true
+}
+fn one() -> f32 {
+	1.0
+}

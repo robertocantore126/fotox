@@ -234,6 +234,9 @@ pub struct LayerInfo {
 	/// A gradient / pattern fill layer's parameters (M8-T03/T06).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fill_layer: Option<fx_core::fill::FillLayer>,
+	/// The layer has a vector mask (M10-T06); `Some(enabled)`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub vector_mask: Option<bool>,
 }
 
 /// A font family and its styles (M6-T07).
@@ -390,6 +393,19 @@ pub enum EngineToUi {
 		doc: DocId,
 		annotations: serde_json::Value,
 		samples: Vec<[u16; 4]>,
+	},
+	/// The document's paths (M10-T01): `work` = there is a Work Path,
+	/// `paths` the saved paths' names, `active` the selected one
+	/// (`"work"` / `{"saved": i}` / null).
+	Paths {
+		doc: DocId,
+		work: bool,
+		paths: Vec<String>,
+		active: serde_json::Value,
+	},
+	/// The custom shapes' names (M10-T07), built-in first.
+	Shapes {
+		names: Vec<String>,
 	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {

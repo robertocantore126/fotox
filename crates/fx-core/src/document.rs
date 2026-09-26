@@ -33,6 +33,12 @@ pub struct Document {
 	pub patterns: Vec<crate::pattern::Pattern>,
 	/// Alpha channels (M9-T01, D-068), saved with the document.
 	pub channels: Vec<crate::channel::Channel>,
+	/// The Work Path and the saved paths (M10-T01), saved with it.
+	pub work_path: Option<crate::path::Path>,
+	pub paths: Vec<crate::path::NamedPath>,
+	/// The path the Paths panel has selected (transient, not saved): the one
+	/// the pen tools edit and the path commands default to.
+	pub active_path: Option<crate::path::PathTarget>,
 	/// Notes, counts and colour samplers (M9-T08, D-072), saved with it.
 	pub annotations: crate::annotations::Annotations,
 	next_id: u64,
@@ -90,6 +96,8 @@ pub(crate) enum NameKind {
 	// M8-T03/T06: fill layers.
 	GradientFill,
 	PatternFill,
+	// M10-T07.
+	Triangle,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -97,7 +105,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 27;
+	const COUNT: usize = 28;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -130,6 +138,7 @@ impl NameKind {
 			NameKind::Type => "Type",
 			NameKind::GradientFill => "Gradient Fill",
 			NameKind::PatternFill => "Pattern Fill",
+			NameKind::Triangle => "Triangle",
 		}
 	}
 
@@ -142,6 +151,7 @@ impl NameKind {
 			"Polygon" => NameKind::Polygon,
 			"Star" => NameKind::Star,
 			"Line" => NameKind::Line,
+			"Triangle" => NameKind::Triangle,
 			_ => NameKind::Shape,
 		}
 	}
@@ -188,8 +198,19 @@ impl Document {
 			patterns: Vec::new(),
 			channels: Vec::new(),
 			annotations: Default::default(),
+			work_path: None,
+			paths: Vec::new(),
+			active_path: None,
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
+		}
+	}
+
+	/// A document path (M10-T01).
+	pub fn path(&self, target: crate::path::PathTarget) -> Option<&crate::path::Path> {
+		match target {
+			crate::path::PathTarget::Work => self.work_path.as_ref(),
+			crate::path::PathTarget::Saved(i) => self.paths.get(i).map(|p| &p.path),
 		}
 	}
 
@@ -411,7 +432,7 @@ mod tests {
 		assert_eq!(NameKind::BlackWhite as usize, 16, "the M4 kinds follow them");
 		assert_eq!(NameKind::Type as usize, 24, "the M6 kinds follow them");
 		assert_eq!(
-			NameKind::PatternFill as usize,
+			NameKind::Triangle as usize,
 			NameKind::COUNT - 1,
 			"a new NameKind goes at the end, and COUNT must grow"
 		);

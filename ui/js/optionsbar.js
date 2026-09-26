@@ -165,6 +165,7 @@ function control(spec, changed) {
     case "swatch": return swatch(spec);
     case "brushpreset": return brushPreset();
     case "pattern":
+    case "customshape":
     case "gradient":
       // Pickers native modules provide (M8-T03/T06): `{ el, read, key }`.
       if (CUSTOM[spec.type]) return CUSTOM[spec.type](spec);
