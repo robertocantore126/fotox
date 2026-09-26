@@ -202,3 +202,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: the colour test is quantised to 32 levels per channel; Grow's flood runs on one thread with a bitset per reached tile.
 - VERIFY: Photoshop's Grow / Similar distance.
 - Try it: magic-wand a sky patch, Select ▸ Grow, Select ▸ Similar; Select ▸ Transform Selection, rotate, Enter.
+
+## M9-T03 — Color Range  (Claude, 2026-09-26)
+- Done: `SelectOp::ColorRange` + `fx_ops::select::range` (soft coverage per pixel, per tile, row by row): Sampled Colors (`1 − d / fuzziness`, nearest sample, optional localized fade), Reds … Magentas (±30° hue windows × saturation), Highlights / Midtones / Shadows (luminance against split points with 20-level ramps), Skin Tones (a hue / saturation / luminance box), Invert; runs on the composite as a job ("Color Range"). Native dialog in `ui/js/native/selections.js` (with Focus Area and Select and Mask).
+- Skipped: the dialog's live preview modes (Selection / Grayscale / Black / White Matte / Quick Mask — the result shows after OK), the image eyedropper with +/− samples (the swatches are the samples), Localized Color Clusters' centre, Out of Gamut, Detect Faces (M13); Tests (should check: sampled red on a hue ramp selects a band growing with fuzziness; Highlights pick the bright end; localized clusters drop the far region).
+- FAST: samples come from the foreground / background swatches.
+- VERIFY: every curve (D-064).
+- Try it: set the foreground to a colour in the image, Select ▸ Color Range…, Fuzziness 60.

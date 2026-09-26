@@ -1939,6 +1939,8 @@ impl Engine {
 				for layer in effect.pixels_changed {
 					self.refresh_thumbnail(id, layer);
 				}
+				// Work queued behind a job (M9-T05: Select and Mask's output).
+				self.after_job_m9(id);
 			}
 			Err(error) => {
 				self.to_ui(&EngineToUi::Error { text: error.to_string() });

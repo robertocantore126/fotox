@@ -14,6 +14,8 @@ pub(super) struct State {
 	/// A cheap signature of each document's channel list, so thumbnails are
 	/// rebuilt only when it changes.
 	channels: HashMap<DocId, String>,
+	/// Select and Mask's output, made once its job is done (M9-T05).
+	output: Option<String>,
 }
 
 /// The channel list's signature: names, colours and the first slots.
@@ -123,6 +125,9 @@ impl Engine {
 				);
 			}
 			"sel:transform" => self.start_selection_transform(doc_id),
+			"select-mask:output" => {
+				self.m9.output = _args.get("output").and_then(|v| v.as_str()).map(str::to_owned);
+			}
 			_ => return false,
 		}
 		true
@@ -130,6 +135,31 @@ impl Engine {
 }
 
 impl Engine {
+	/// After a pixel job: Select and Mask's queued output (M9-T05).
+	pub(super) fn after_job_m9(&mut self, doc_id: DocId) {
+		let Some(output) = self.m9.output.take() else { return };
+		let has_selection = self.docs.get(doc_id).is_some_and(|o| o.doc.selection.is_some());
+		if !has_selection {
+			return;
+		}
+		use fx_core::command::MaskFill;
+		if output == "layer" {
+			self.command(
+				doc_id,
+				Command::DuplicateLayers {
+					layers: vec![fx_core::LayerRef::Active],
+				},
+			);
+		}
+		self.command(
+			doc_id,
+			Command::AddMask {
+				layer: fx_core::LayerRef::Active,
+				fill: MaskFill::RevealSelection,
+			},
+		);
+	}
+
 	/// Select ▸ Transform Selection (M9-T02): Free Transform's box over the
 	/// selection's bounds, committing `Command::TransformSelection`.
 	// FAST: no live preview of the transformed ants (the box only).

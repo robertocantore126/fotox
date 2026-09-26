@@ -419,6 +419,7 @@ export const menus = [
       sep,
       it("Color Range...", "", "dlg:color-range"),
       it("Focus Area...", "", "dlg:focus-area"),
+      it("Select and Mask...", "Alt+Ctrl+R", "dlg:select-mask"),
       it("Subject", "", "ai:subject"),
       it("Sky", "", "ai:sky"),
       sep,
