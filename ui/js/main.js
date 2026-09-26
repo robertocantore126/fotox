@@ -25,6 +25,7 @@ import { initTools, sendColors } from "./native/tools.js";
 import { initBrushes, brushExtras } from "./native/brush-settings.js";
 import { initGradients } from "./native/gradients.js";
 import { initPatterns } from "./native/patterns.js";
+import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -147,14 +148,19 @@ function pickTool(toolId, slotId) {
   refreshSwatches();
 }
 
+/** Tools the UI or the view handles without an engine tool (M8-T10). */
+const UI_TOOLS = new Set(["hand", "zoom", "rotate-view", "quick-mask", "screen"]);
+
 function openFlyout(slot, anchor) {
   if (!slot.flyout.length) return null;
   const items = [slot, ...slot.flyout];
   const content = h("div", { class: "flyout" });
   for (const tool of items) {
+    // In the app, a tool the engine does not build yet is dimmed (M8-T10).
+    const planned = bridge.isNative && !IMPLEMENTED.has("tool:" + tool.id) && !UI_TOOLS.has(tool.id);
     content.append(h("button", {
-      class: "flyout-item" + (state.tool === tool.id ? " sel" : ""), type: "button",
-      dataset: { tip: `${tool.name} (${tool.key})` },
+      class: "flyout-item" + (state.tool === tool.id ? " sel" : "") + (planned ? " planned" : ""), type: "button",
+      dataset: { tip: `${tool.name} (${tool.key})` + (planned ? " — planned for a later milestone" : "") },
       onclick: () => { pickTool(tool.id, slot.id); closeAll(); },
     }, icon(tool.icon, "ic"), h("span", { class: "flyout-label", text: tool.name }), h("span", { class: "flyout-key", text: tool.key })));
   }

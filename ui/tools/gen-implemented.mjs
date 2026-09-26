@@ -51,6 +51,15 @@ export function scan() {
       for (const m of readFileSync(file, "utf8").matchAll(/strip_prefix\("([a-z-]+:[a-z-]+:)"\)/g)) ids.add(m[1] + "*");
     }
   }
+  // Viewport tools the engine builds (M8-T10): `"id" => Some(Box::new(…))`
+  // in the tool registries, written "tool:<id>" (placeholders excluded).
+  for (const file of files(join(repo, "crates/fx-engine/src/tools"), ".rs")) {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.includes("=> Some(Box::new(") || line.includes("NotYet")) continue;
+      const head = line.split("=>")[0];
+      for (const m of head.matchAll(/"([a-z][a-z0-9-]*)"/g)) ids.add("tool:" + m[1]);
+    }
+  }
   // actions.js's own native branches.
   const actions = readFileSync(join(ui, "js/actions.js"), "utf8");
   for (const m of actions.matchAll(/"(dlg:[a-z0-9-]+)"/g)) ids.add(m[1]);

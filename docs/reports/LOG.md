@@ -172,3 +172,12 @@ HARDEN reads this file first, so be honest about what is missing.
 - FAST: the reservoir depletion rate is a guess (2 % × (1 − Load) per dab).
 - VERIFY: the whole model and the preset values (D-066).
 - Try it: B's flyout ▸ Mixer Brush, Preset "Very Wet", drag across two colours.
+
+## M8-T10 — UI  (Claude, 2026-09-26)
+- Done: option bars of every M8 tool (Photoshop's fields: Gradient Type / Method, bucket Anti-alias / Contiguous / pattern, Background Eraser and Color Replacement Sampling, Dodge/Burn Protect Tones, Sharpen Protect Detail, Pattern Stamp pattern, Art History Style / Area / Tolerance, Mixer presets + Wet / Load / Mix, Hardness where missing); the option bar's `registerControl` pickers (gradient, pattern); Brushes and Brush Settings panels, Gradient Editor, Patterns panel, the History panel's source column (T01–T07); `gen-implemented.mjs` now also lists the engine's tools as `tool:<id>`, and in the app the flyouts dim the tools the engine does not build yet ("planned for a later milestone").
+- Skipped: a Properties panel for fill layers (their dialog instead); the Tool Presets panel stays a mock.
+- FAST: the UI-only tools (hand, zoom, rotate view, quick mask, screen) are a hand-written list in `main.js`.
+- VERIFY: none.
+- Try it: open the toolbar flyouts in the app — only Quick Selection, Object Selection, Magnetic Lasso, Custom Shape and the rest of M9+ are dimmed.
+
+## M8-T11 — Acceptance: deferred to HARDEN (S24–S26, the tool-by-tool comparison with Photoshop feeding M14's VERIFY list).
