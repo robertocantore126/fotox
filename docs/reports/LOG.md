@@ -253,3 +253,5 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - Try it: C's flyout ▸ Perspective Crop, drag over a photographed document, move the corners onto its edges, Enter.
 
 ## M9-T10 — Acceptance: deferred to HARDEN (S27–S29, Rob's photo comparisons of Color Range, Select and Mask and Quick Selection).
+
+M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as before M8, plus `fx-io` `a_shape_layer_round_trips_through_a_file`, which also fails on the commit before M8 (76ab901). `fx-ops` (78) passes. No M9 test was added (fast mode).
