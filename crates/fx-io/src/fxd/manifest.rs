@@ -88,6 +88,9 @@ pub struct LayerEntry {
 	/// Layer styles (M6-T08); absent in older files.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub styles: Option<fx_core::styles::LayerStyles>,
+	/// The vector mask (M10-T06).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub vector_mask: Option<fx_core::select_ops::VectorMaskSpec>,
 	#[serde(flatten)]
 	pub kind: LayerKindEntry,
 }
@@ -298,6 +301,12 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
 		styles: layer.styles.clone(),
+		vector_mask: layer.vector_mask.as_ref().map(|v| fx_core::select_ops::VectorMaskSpec {
+			path: v.path.clone(),
+			enabled: v.enabled,
+			feather: v.feather,
+			density: v.density,
+		}),
 		mask: layer.mask.as_ref().map(|mask| MaskEntry {
 			enabled: mask.enabled,
 			linked: mask.linked,
@@ -480,6 +489,15 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 	layer.locked_pixels = entry.locked_pixels;
 	layer.locked_transparency = entry.locked_transparency;
 	layer.locked_position = entry.locked_position;
+	if let Some(v) = &entry.vector_mask {
+		layer.vector_mask = Some(fx_core::VectorMask {
+			path: v.path.clone(),
+			enabled: v.enabled,
+			feather: v.feather,
+			density: v.density,
+			cache: TiledImage::derived(size.0, size.1, fx_core::selection::gray_format(depth_of(format))),
+		});
+	}
 	if let Some(styles) = &entry.styles {
 		layer.styles = Some(styles.clone());
 		layer.effects = fx_core::styles::EffectKind::ALL
@@ -1129,4 +1147,13 @@ mod tests {
 
 fn default_global_light() -> f64 {
 	120.0
+}
+
+/// The bit depth of an RGBA format (vector mask caches are grey of it).
+fn depth_of(format: fx_tiles::PixelFormat) -> fx_core::BitDepth {
+	if format == fx_tiles::PixelFormat::Rgba16 {
+		fx_core::BitDepth::U16
+	} else {
+		fx_core::BitDepth::U8
+	}
 }

@@ -37,7 +37,7 @@ pub use command::{Command, CommandContext, CommandEffect, CommandError, LayerRef
 pub use document::NAME_KINDS;
 pub use document::{Document, Guide};
 pub use history::History;
-pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
+pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask, VectorMask};
 pub use ops::{Conversion, FilterParams, PixelOps};
 pub use selection::{SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 pub use text::{FontStyle, TextAlign, TextAntialias, TextContent, TextFrame, TextRun};

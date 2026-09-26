@@ -304,6 +304,15 @@ export const menus = [
         it("Disable", "", "mask:disable"),
         it("Link / Unlink", "", "mask:link"),
       ]),
+      sub("Vector Mask", [
+        it("Reveal All", "", "vmask:reveal-all"),
+        it("Hide All", "", "vmask:hide-all"),
+        it("Current Path", "", "vmask:current-path"),
+        sep,
+        it("Delete", "", "vmask:delete"),
+        it("Disable / Enable", "", "vmask:toggle"),
+        it("Edit Path", "", "vmask:edit"),
+      ]),
       it("Create Clipping Mask", "Alt+Ctrl+G", "layer:clip"),
       sub("Smart Objects", [
         it("Convert to Smart Object", "", "smart:convert"),

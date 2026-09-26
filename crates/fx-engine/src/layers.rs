@@ -75,6 +75,7 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 			_ => None,
 		},
 		styles: layer.styles.clone(),
+		vector_mask: layer.vector_mask.as_ref().map(|v| v.enabled),
 		fill_layer: match &layer.kind {
 			LayerKind::FillLayer { content, .. } => Some(content.clone()),
 			_ => None,

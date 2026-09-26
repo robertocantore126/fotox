@@ -197,6 +197,8 @@ pub struct VectorRequest {
 	pub level: usize,
 	pub x: u32,
 	pub y: u32,
+	/// The layer's vector mask cache (M10-T06), not its content cache.
+	pub vector_mask: bool,
 }
 
 /// A tile the program needs before it can run: real pixel data that is not
@@ -281,6 +283,8 @@ enum SourceTile {
 	Mip { mask: bool },
 	/// A shape layer's cache, drawn from the geometry at this level.
 	Vector,
+	/// A vector mask's coverage cache (M10-T06).
+	VectorMask,
 	/// A layer-style effect cache (M6-T08).
 	Effect(u8),
 }
@@ -617,6 +621,16 @@ impl Builder<'_> {
 	}
 
 	fn mask(&mut self, layer: &Layer) -> MaskEval {
+		// A vector mask (M10-T06). FAST: with a pixel mask as well, the pixel
+		// mask alone is used (the ops carry one mask).
+		let pixel_mask = matches!(&layer.mask, Some(Mask { enabled: true, .. }));
+		if !pixel_mask && let Some(vm) = layer.vector_mask.as_ref().filter(|v| v.enabled) {
+			let outside = 1.0 - vm.density;
+			let Some(quad) = self.quad(&vm.cache, (0, 0), layer.id, SourceTile::VectorMask) else {
+				return MaskEval::Constant(1.0);
+			};
+			return self.eval_quad(quad, outside);
+		}
 		let Some(mask @ Mask { enabled: true, .. }) = &layer.mask else {
 			return MaskEval::Constant(1.0);
 		};
@@ -661,6 +675,29 @@ impl Builder<'_> {
 		}
 	}
 
+	/// A mask quad as a constant, hidden or varying mask (M10-T06, the same
+	/// test as `mask`'s).
+	fn eval_quad(&self, quad: Quad, outside: f32) -> MaskEval {
+		let mut constant: Option<f32> = None;
+		for slot in &quad.slots {
+			let value = match slot {
+				QuadSlot::Outside => outside,
+				QuadSlot::Slot(TileSlot::Empty) => 0.0,
+				QuadSlot::Slot(TileSlot::Solid(v)) => v.0[0] as f32 / 65535.0,
+				QuadSlot::Slot(TileSlot::Data(_)) => return MaskEval::Varying(MaskRef { quad, outside }),
+			};
+			match constant {
+				None => constant = Some(value),
+				Some(c) if c != value => return MaskEval::Varying(MaskRef { quad, outside }),
+				_ => {}
+			}
+		}
+		match constant.unwrap_or(outside) {
+			v if v <= 0.0 => MaskEval::Hidden,
+			v => MaskEval::Constant(v),
+		}
+	}
+
 	/// The source quad of `image` (shifted by `offset` document pixels) for
 	/// this output tile. Records dirty mips; `None` if any are dirty.
 	fn quad(&mut self, image: &TiledImage, offset: (i32, i32), layer: LayerId, source: SourceTile) -> Option<Quad> {
@@ -697,7 +734,20 @@ impl Builder<'_> {
 						x: gx,
 						y: gy,
 					}),
-					SourceTile::Vector => TileRequest::Vector(VectorRequest { layer, level, x: gx, y: gy }),
+					SourceTile::Vector => TileRequest::Vector(VectorRequest {
+						layer,
+						level,
+						x: gx,
+						y: gy,
+						vector_mask: false,
+					}),
+					SourceTile::VectorMask => TileRequest::Vector(VectorRequest {
+						layer,
+						level,
+						x: gx,
+						y: gy,
+						vector_mask: true,
+					}),
 					SourceTile::Effect(effect) => TileRequest::Effect(EffectRequest {
 						layer,
 						effect,

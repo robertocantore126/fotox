@@ -266,3 +266,31 @@ pub(super) fn fill_path(
 		..Default::default()
 	})
 }
+
+pub(super) fn set_vector_mask(
+	doc: &mut Document,
+	layer: &LayerRef,
+	mask: Option<&crate::select_ops::VectorMaskSpec>,
+	label: &str,
+) -> Result<CommandEffect, CommandError> {
+	let id = resolve(doc, layer)?;
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.gray_format());
+	let target = doc.layer_mut(id).expect("resolved id exists");
+	if matches!(target.kind, LayerKind::Group { .. }) {
+		// FAST: groups do not take a vector mask yet.
+		return Err(CommandError::NotAllowed("a group cannot have a vector mask yet".into()));
+	}
+	target.vector_mask = mask.map(|m| crate::layer::VectorMask {
+		path: m.path.clone(),
+		enabled: m.enabled,
+		feather: m.feather.max(0.0),
+		density: m.density.clamp(0.0, 1.0),
+		cache: TiledImage::derived(w, h, format),
+	});
+	Ok(CommandEffect {
+		label: label.into(),
+		props_changed: vec![id],
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}

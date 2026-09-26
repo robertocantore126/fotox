@@ -274,3 +274,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: a new drawing is one History step when finished (Photoshop records every anchor); Delete Anchor does not refit the neighbours; the target path is drawn only while a pen tool edits it; a shape edited by Direct Selection is stored in document coordinates with an identity matrix.
 - VERIFY: handle behaviour against Photoshop (M10-T09, the logo test).
 - Try it: P, click-drag a few anchors, click the first to close; A's flyout ▸ Direct Selection, drag an anchor; Paths panel shows the Work Path.
+
+## M10-T06 — Vector masks  (Claude, 2026-09-26)
+- Done: `Layer::vector_mask: Option<VectorMask { path, enabled, feather, density, cache }>` (the path in document coordinates, `cache` a derived grey coverage image); `Command::SetVectorMask` (`VectorMaskSpec` as data); the program uses it as the layer's mask (`SourceTile::VectorMask` → `VectorRequest { vector_mask: true }`, `1 − density` outside the path), drawn per tile and level by `fx_render::vector::render_vector_mask_tile` through the engine's derived-tile requests (`vector::draw_vector_mask_requests`); `.fxd` save/load (`LayerEntry.vector_mask`); `LayerInfo.vector_mask`; Layer ▸ Vector Mask ▸ Reveal All / Hide All / Current Path / Delete / Disable-Enable / Edit Path; a second (pen) thumbnail in Layers (Shift+click disables, double-click edits).
+- Skipped: multiplying with a pixel mask (with both, only the pixel mask applies); Feather; Rasterize Vector Mask; Ctrl+click = load as selection; vector masks on groups; Properties' Density / Feather fields; Tests (should check: level 2 ≈ level 0 downsampled within 2/255; multiplication with the pixel mask; `.fxd` round trip).
+- FAST: Edit Path copies the mask's path into the Work Path (edit it, then Vector Mask ▸ Current Path to apply); the thumbnail's actions act on the active layer; canvas-size / crop / rotate do not move vector mask paths.
+- VERIFY: none.
+- Try it: draw a closed path with P, select a layer, Layer ▸ Vector Mask ▸ Current Path.

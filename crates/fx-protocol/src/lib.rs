@@ -234,6 +234,9 @@ pub struct LayerInfo {
 	/// A gradient / pattern fill layer's parameters (M8-T03/T06).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fill_layer: Option<fx_core::fill::FillLayer>,
+	/// The layer has a vector mask (M10-T06); `Some(enabled)`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub vector_mask: Option<bool>,
 }
 
 /// A font family and its styles (M6-T07).

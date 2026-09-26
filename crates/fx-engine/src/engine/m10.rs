@@ -100,7 +100,92 @@ impl Engine {
 	}
 
 	/// An M10 action; `false` when `id` is not one.
+	/// Layer ▸ Vector Mask (M10-T06).
+	fn vector_mask_action(&mut self, doc_id: DocId, id: &str) {
+		use fx_core::path::{Anchor, Path, Subpath};
+		use fx_core::select_ops::VectorMaskSpec;
+		let Some(open) = self.docs.get(doc_id) else { return };
+		let doc = &open.doc;
+		let Some(layer) = doc.active_layer().and_then(|l| doc.layer(l)) else { return };
+		let current = layer.vector_mask.as_ref().map(|v| VectorMaskSpec {
+			path: v.path.clone(),
+			enabled: v.enabled,
+			feather: v.feather,
+			density: v.density,
+		});
+		let canvas = || {
+			let (w, h) = (f64::from(doc.width), f64::from(doc.height));
+			Path {
+				subpaths: vec![Subpath {
+					anchors: vec![
+						Anchor::corner((0.0, 0.0)),
+						Anchor::corner((w, 0.0)),
+						Anchor::corner((w, h)),
+						Anchor::corner((0.0, h)),
+					],
+					closed: true,
+					op: Default::default(),
+				}],
+			}
+		};
+		let spec = |path: Path| VectorMaskSpec {
+			path,
+			enabled: true,
+			feather: 0.0,
+			density: 1.0,
+		};
+		let (mask, label) = match id {
+			"vmask:reveal-all" => (Some(spec(canvas())), "Add Vector Mask"),
+			"vmask:hide-all" => (Some(spec(Path::default())), "Add Vector Mask"),
+			"vmask:current-path" => {
+				let Some(path) = doc.active_path.and_then(|t| doc.path(t)).or(doc.work_path.as_ref()).cloned() else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Select a path in the Paths panel first".into(),
+					});
+					return;
+				};
+				(Some(spec(path)), "Add Vector Mask")
+			}
+			"vmask:delete" => (None, "Delete Vector Mask"),
+			"vmask:toggle" => {
+				let Some(mut c) = current else { return };
+				c.enabled = !c.enabled;
+				let label = if c.enabled { "Enable Vector Mask" } else { "Disable Vector Mask" };
+				(Some(c), label)
+			}
+			// The path goes to the Work Path for the pen tools to edit.
+			"vmask:edit" => {
+				let Some(c) = current else { return };
+				self.command(
+					doc_id,
+					Command::SetPath {
+						target: PathTarget::Work,
+						path: c.path,
+						name: None,
+						label: "Work Path".into(),
+					},
+				);
+				return;
+			}
+			_ => return,
+		};
+		self.command(
+			doc_id,
+			Command::SetVectorMask {
+				layer: LayerRef::Active,
+				mask,
+				label: label.into(),
+			},
+		);
+	}
+
 	pub(super) fn m10_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
+		if id.starts_with("vmask:") {
+			if let Some(doc_id) = self.docs.active_id() {
+				self.vector_mask_action(doc_id, id);
+			}
+			return true;
+		}
 		if !id.starts_with("path:") {
 			return false;
 		}

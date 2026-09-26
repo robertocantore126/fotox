@@ -412,8 +412,17 @@ function row(i, v) {
       onclick: () => bridge.send({ type: UI.ACTION, id: "layer:edit-mask", args: { layer: l.id, mask: true } }),
     }, icon("i-mask", "ic xs"))
     : null;
+  // The vector mask's thumbnail (M10-T06): double-click edits its path.
+  const vmaskThumb = l.vector_mask != null
+    ? h("span", {
+      class: "pthumb nmask", style: { opacity: l.vector_mask ? "1" : "0.4" }, "data-tip": "Vector mask (double-click: edit its path; Shift+click: disable)",
+      onclick: (e) => { if (e.shiftKey) bridge.send({ type: UI.ACTION, id: "vmask:toggle" }); },
+      ondblclick: () => bridge.send({ type: UI.ACTION, id: "vmask:edit" }),
+    }, icon("i-pen", "ic xs"))
+    : null;
   add(el, [eye, expander, thumb,
     maskThumb,
+    vmaskThumb,
     name,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
     l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);

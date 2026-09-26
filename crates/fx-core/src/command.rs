@@ -437,6 +437,13 @@ pub enum Command {
 		mode: BlendMode,
 		opacity: f64,
 	},
+	/// Layer ▸ Vector Mask (M10-T06): set, change or (`None`) delete a layer's
+	/// vector mask. The coverage cache is rebuilt, all dirty.
+	SetVectorMask {
+		layer: LayerRef,
+		mask: Option<crate::select_ops::VectorMaskSpec>,
+		label: String,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -769,6 +776,7 @@ impl Command {
 				anti_alias,
 				mode,
 			} => m10::path_to_selection(doc, *target, *feather, *anti_alias, *mode, ctx),
+			Command::SetVectorMask { layer, mask, label } => m10::set_vector_mask(doc, layer, mask.as_ref(), label),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
 			Command::RedEye {
