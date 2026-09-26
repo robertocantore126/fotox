@@ -124,6 +124,9 @@ pub enum EngineInput {
 	},
 	/// Open these files (native file dialog, drag and drop, command line).
 	Open(Vec<PathBuf>),
+	/// File ▸ Place Embedded and drops (M7-T03): each file becomes a layer of
+	/// the active document; with no document open, the files are opened.
+	Place(Vec<PathBuf>),
 	/// Export the active document, flattened, to `path` (the shell's save
 	/// dialog; the format comes from the extension). `choice`: the Export As
 	/// dialog's options, `None` for the defaults (File ▸ Export ▸ PNG…). M3.

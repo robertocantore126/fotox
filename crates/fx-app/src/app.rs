@@ -254,7 +254,8 @@ impl App {
 				// engine as `Open` (docs/tasks/M1.md, M1-T08).
 				if let UiToEngine::Action { id, args } = &message {
 					match id.as_str() {
-						"dlg:open" => self.open_file_dialog(),
+						"dlg:open" => self.open_file_dialog(false),
+						"misc:place-embedded" | "misc:place-linked" => self.open_file_dialog(true),
 						"export:png" => self.export_file_dialog("PNG", "png", None),
 						"export:tiff" => self.export_file_dialog("TIFF", "tif", None),
 						"export:jpg" => self.export_file_dialog("JPEG", "jpg", None),
@@ -307,11 +308,11 @@ impl App {
 	/// Show the native open dialog on a helper thread (it is modal and would
 	/// otherwise block the event loop); the result comes back as
 	/// `AppEvent::OpenFiles`.
-	fn open_file_dialog(&self) {
+	fn open_file_dialog(&self, place: bool) {
 		let scheduler = self.app_event_scheduler.clone();
 		let spawned = std::thread::Builder::new().name("open-dialog".into()).spawn(move || {
 			let dialog = rfd::AsyncFileDialog::new()
-				.set_title("Open")
+				.set_title(if place { "Place" } else { "Open" })
 				.add_filter("Fotox documents and images", &["fxd", "tif", "tiff", "png", "jpg", "jpeg"])
 				.add_filter("Fotox document", &["fxd"])
 				.add_filter("TIFF", &["tif", "tiff"])
@@ -320,7 +321,8 @@ impl App {
 				.add_filter("All files", &["*"]);
 			let files = futures::executor::block_on(dialog.pick_files()).unwrap_or_default();
 			if !files.is_empty() {
-				scheduler.schedule(AppEvent::OpenFiles(files.iter().map(|f| f.path().to_path_buf()).collect()));
+				let paths = files.iter().map(|f| f.path().to_path_buf()).collect();
+				scheduler.schedule(if place { AppEvent::PlaceFiles(paths) } else { AppEvent::OpenFiles(paths) });
 			}
 		});
 		if let Err(error) = spawned {
@@ -431,6 +433,7 @@ impl App {
 			}
 			AppEvent::Engine(output) => self.engine_output(event_loop, output),
 			AppEvent::OpenFiles(paths) => self.engine.send(EngineInput::Open(paths)),
+			AppEvent::PlaceFiles(paths) => self.engine.send(EngineInput::Place(paths)),
 			AppEvent::ExportTo(path, choice) => self.engine.send(EngineInput::Export { path, choice }),
 			AppEvent::SaveAs { doc, path } => self.engine.send(EngineInput::SaveAs { doc, path }),
 			AppEvent::SaveCancelled(doc) => self.engine.send(EngineInput::SaveCancelled { doc }),
@@ -511,7 +514,8 @@ impl ApplicationHandler for App {
 					self.pending_drop = None;
 					let paths: Vec<_> = uris.iter().filter_map(|uri| file_uri_to_path(uri)).collect();
 					if !paths.is_empty() {
-						self.engine.send(EngineInput::Open(paths));
+						// With a document open a drop places, else it opens (M7-T03).
+						self.engine.send(EngineInput::Place(paths));
 					}
 				}
 				Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}

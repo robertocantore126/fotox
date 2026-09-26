@@ -98,6 +98,8 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
+		/// Place into this document instead of opening (M7-T03).
+		place: Option<DocId>,
 	},
 	/// An export finished or failed (M3).
 	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
@@ -430,7 +432,16 @@ impl Engine {
 			}
 			EngineInput::Open(paths) => {
 				for path in paths {
-					self.open(path);
+					self.open(path, None);
+				}
+				Changed::default()
+			}
+			EngineInput::Place(paths) => {
+				let target = self.docs.active_id();
+				for path in paths {
+					// FAST: a placed .fxd opens instead of being flattened into a layer.
+					let place = target.filter(|_| !is_fxd(&path));
+					self.open(path, place);
 				}
 				Changed::default()
 			}
@@ -1164,6 +1175,8 @@ impl Engine {
 			// The shell answers dlg:open with the native file dialog and sends
 			// the chosen files as `EngineInput::Open`.
 			"dlg:open" => return Changed::default(),
+			// The shell shows the Place dialog and sends `EngineInput::Place` (M7-T03).
+			"misc:place-embedded" | "misc:place-linked" => return Changed::default(),
 			// File ▸ Save / Save As (M3-T06). Save As always asks the shell for a
 			// path; Save only does so when the document has no file yet.
 			"doc:save" => {
@@ -1229,7 +1242,7 @@ impl Engine {
 
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
-	fn open(&mut self, path: PathBuf) {
+	fn open(&mut self, path: PathBuf, place: Option<DocId>) {
 		self.next_task += 1;
 		let task = self.next_task;
 		let (store, internal) = (self.store.clone(), self.internal.clone());
@@ -1278,7 +1291,7 @@ impl Engine {
 				mips::ensure_all_mips(&mut imported.image, &store)?;
 				Ok(imported)
 			});
-			let _ = internal.send(Internal::Imported { task, path, result });
+			let _ = internal.send(Internal::Imported { task, path, result, place });
 		});
 		if let Err(error) = spawned {
 			self.to_ui(&EngineToUi::ProgressDone { task });
@@ -1912,8 +1925,14 @@ impl Engine {
 				Err(error) => tracing::warn!("thumbnail of {layer:?} failed: {error}"),
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
-			Internal::Imported { task, path, result } => {
+			Internal::Imported { task, path, result, place } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let (Some(doc), Ok(imported)) = (place, &result)
+					&& self.docs.get(doc).is_some()
+				{
+					self.place_imported(doc, &path, imported.image.clone());
+					return;
+				}
 				match result {
 					Ok(imported) => {
 						let id = self.docs.allocate_id();
@@ -2918,6 +2937,60 @@ impl Engine {
 
 	/// An image from the Windows clipboard: it becomes the clipboard, then a
 	/// new layer (M5-T05).
+	/// Place an imported image as a layer of `doc` (M7-T03): pasted centred on
+	/// the canvas, named after the file, then a Free Transform box is put up,
+	/// already scaled to fit when the image is larger than the canvas
+	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc keeps
+	/// the layer at its size (FAST: Photoshop removes it).
+	fn place_imported(&mut self, doc: DocId, path: &std::path::Path, image: fx_tiles::TiledImage) {
+		let (w, h) = (image.width(), image.height());
+		let Some(open) = self.docs.get(doc) else { return };
+		let (cw, ch) = (open.doc.width, open.doc.height);
+		let clip = fx_core::pixels::ClipboardImage {
+			image,
+			offset: (0, 0),
+			bounds: (0, 0, w as i32, h as i32),
+		};
+		// Borrow the clipboard for the paste, then put the user's back.
+		let previous = {
+			let mut slot = self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			slot.replace(clip)
+		};
+		self.command(
+			doc,
+			Command::Paste {
+				in_place: false,
+				center: Some((f64::from(cw) / 2.0, f64::from(ch) / 2.0)),
+			},
+		);
+		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
+		let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+		if let Some(name) = name {
+			self.command(
+				doc,
+				Command::SetLayerProps {
+					layer: LayerRef::Active,
+					props: LayerPropsPatch {
+						name: Some(name),
+						..Default::default()
+					},
+				},
+			);
+		}
+		if self.docs.active_id() != Some(doc) {
+			return;
+		}
+		self.start_transform(doc, TransformMode::Free);
+		let fit = (f64::from(cw) / f64::from(w)).min(f64::from(ch) / f64::from(h));
+		if fit < 1.0
+			&& let Some((_, session)) = &mut self.transform
+		{
+			session.set_numeric(None, None, Some(fit * 100.0), Some(fit * 100.0), None);
+			self.restart_transform_preview(false);
+			self.request_frame();
+		}
+	}
+
 	fn paste_image(&mut self, width: u32, height: u32, rgba8: &[u8]) {
 		let Some(doc_id) = self.docs.active_id() else { return };
 		if rgba8.len() != (width as usize) * (height as usize) * 4 || width == 0 || height == 0 {
