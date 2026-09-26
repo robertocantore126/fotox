@@ -63,6 +63,8 @@ export const ENGINE = Object.freeze({
   // The Type tool's session (M6-T07) and the system font list.
   TEXT_EDIT: "text_edit",
   FONTS: "fonts",
+  // The preferences file (M7-T09).
+  PREFERENCES: "preferences",
 });
 
 const encoder = new TextEncoder();

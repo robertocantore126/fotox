@@ -16,6 +16,7 @@ import { isImageDialog, openImageDialog } from "./native/image.js";
 import { isStyleDialog, openStyleDialog } from "./native/styles.js";
 import { openNewDocument } from "./native/newdoc.js";
 import { isGuideDialog, openGuideDialog } from "./native/guides.js";
+import { isPrefsDialog, openPrefsDialog } from "./native/prefs.js";
 import { activeDocument } from "./native/documents.js";
 import { dialogDef } from "./data/dialogs.js";
 
@@ -119,6 +120,8 @@ export function runAction(item) {
   if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
+  // In the app, Preferences are the engine's file (M7-T09).
+  if (a.startsWith("dlg:") && bridge.isNative && isPrefsDialog(a.slice(4))) { openPrefsDialog(a.slice(4)); return; }
   // In the app, guides are the engine's (M7-T06).
   if (a.startsWith("dlg:") && bridge.isNative && isGuideDialog(a.slice(4))) { openGuideDialog(a.slice(4)); return; }
   // In the app, the five layer styles and Blending Options are live (M6-T08).
@@ -195,7 +198,7 @@ export function runAction(item) {
   // shell shows the native save dialog (M3-T06).
   if ((a === "doc:save" || a === "doc:save-as") && bridge.isNative) { status(label); return; }
   if (a.startsWith("doc:save")) { openDialog("export-as"); return; }
-  if (a === "doc:revert") { toast("Reverted to the last saved state (mock)"); return; }
+  if (a === "doc:revert" && !bridge.isNative) { toast("Reverted to the last saved state (mock)"); return; }
   // In the app, PNG and TIFF export are real: the shell shows the save dialog.
   if ((a === "export:png" || a === "export:tiff" || a === "export:jpg") && bridge.isNative) { status(label); return; }
   if (a.startsWith("export:")) { openDialog("export-as"); return; }

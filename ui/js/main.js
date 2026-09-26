@@ -9,6 +9,7 @@ import { toolSlots, findTool } from "./data/tools.js";
 import { initPopupEngine, openDropdown, openPopup, closeAll, isPopupOpen } from "./popup.js";
 import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
 import { initType } from "./native/type.js";
+import { initPrefs } from "./native/prefs.js";
 import { renderOptionsBar, onOptionsChange, readOptions, currentBar } from "./optionsbar.js";
 import { renderDock, focusPanel, togglePanel } from "./panels.js";
 import { openDialog, isDialogOpen } from "./dialogs.js";
@@ -258,6 +259,7 @@ async function boot() {
     initNativePanels();
     initColor();
     initTools();
+    initPrefs();
     initType(() => { if (state.tool === "type") { renderOptionsBar(shell.optionsbar, "type"); sendToolOptions(readOptions()); } });
   }
   bridge.on(ENGINE.TOAST, (m) => toast(m.text));

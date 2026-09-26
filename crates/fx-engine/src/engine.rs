@@ -200,6 +200,8 @@ struct Engine {
 	style_clipboard: Option<fx_core::styles::LayerStyles>,
 	/// File ▸ New's "Untitled-N" counter (M7-T01).
 	untitled: u32,
+	/// The preferences file (M7-T09).
+	prefs: crate::prefs::Prefs,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -348,6 +350,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		fonts_sent: false,
 		style_clipboard: None,
 		untitled: 0,
+		prefs: crate::prefs::Prefs::load(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -631,6 +634,20 @@ impl Engine {
 		}
 		self.apply_tool_result(doc_id, result, &mut changed);
 		changed
+	}
+
+	/// Send the preferences to the UI (M7-T09).
+	fn send_prefs(&self) {
+		self.to_ui(&EngineToUi::Preferences {
+			prefs: serde_json::Value::Object(self.prefs.0.clone()),
+		});
+	}
+
+	/// Remember an opened or saved file in Open Recent (M7-T09).
+	fn remember_recent(&mut self, path: &std::path::Path) {
+		self.prefs.add_recent(path);
+		self.prefs.save();
+		self.send_prefs();
 	}
 
 	/// File ▸ New (M7-T01): `{name?, width, height, ppi, depth: 8|16,
@@ -939,6 +956,8 @@ impl Engine {
 					})
 					.collect();
 				self.to_ui(&EngineToUi::CmykProfiles { profiles });
+				self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
+				self.send_prefs();
 				self.to_ui(&EngineToUi::Toast {
 					text: "Engine connected".into(),
 				});
@@ -959,6 +978,27 @@ impl Engine {
 				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
 				// enters it with all the text selected. The UI has switched the
 				// tool to Type first.
+				// Preferences (M7-T09): merge, save, apply.
+				if id == "prefs:set" {
+					self.prefs.merge(&args);
+					self.prefs.save();
+					self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
+					self.send_prefs();
+					self.request_frame();
+					return Changed::default();
+				}
+				if id == "misc:clear-recent" {
+					self.prefs.0.remove("recent");
+					self.prefs.save();
+					self.send_prefs();
+					return Changed::default();
+				}
+				if let Some(index) = id.strip_prefix("doc:open-recent:") {
+					if let Some(path) = index.parse::<usize>().ok().and_then(|i| self.prefs.recent().get(i).cloned()) {
+						self.open(path, None);
+					}
+					return Changed::default();
+				}
 				// File ▸ New (M7-T01): the dialog's values.
 				if id == "doc:new" {
 					self.new_document(&args);
@@ -1959,6 +1999,7 @@ impl Engine {
 							doc.view.resize(viewport.width, viewport.height);
 						}
 						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
+						self.remember_recent(&path);
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
@@ -1983,6 +2024,7 @@ impl Engine {
 							doc.view.resize(viewport.width, viewport.height);
 						}
 						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
+						self.remember_recent(&path);
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
@@ -2020,6 +2062,7 @@ impl Engine {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
 						tracing::info!("saved {}", path.display());
+						self.remember_recent(&path);
 						self.to_ui(&EngineToUi::Toast {
 							text: format!("Saved {}", path.display()),
 						});

@@ -4,6 +4,20 @@
 
 import { h, icon } from "./el.js";
 import { isChecked } from "./state.js";
+import { IMPLEMENTED } from "./data/implemented.js";
+import * as bridge from "./native/bridge.js";
+
+// Menu honesty (M7-T09, D-061): in the app an action the engine or a native
+// dialog does not implement is greyed out, never a dead end. The UI-local
+// prefixes work everywhere.
+const LOCAL = ["panel:", "panels:", "tool:", "toggle:", "screen:", "zoom:", "ws:", "par:", "debug:"];
+// The milestone an unimplemented family is planned in (docs/tasks/COVERAGE.md).
+const PLANNED_IN = { ai: "M13", smart: "M12", type: "M10", filter: "M8", adj: "M8", export: "M14", mode: "M9", sel: "M9", layer: "M12" };
+function planned(item) {
+  if (!bridge.isNative || item.sub || !item.a || item.dis) return false;
+  if (IMPLEMENTED.has(item.a) || [...IMPLEMENTED].some((id) => id.endsWith("*") && item.a.startsWith(id.slice(0, -1)))) return false;
+  return item.a.startsWith("dlg:") || !LOCAL.some((p) => item.a.startsWith(p));
+}
 import { openPopup, closeAll, closeFrom, topPopup, isPopupOpen } from "./popup.js";
 
 let onAction = () => {};
@@ -17,6 +31,7 @@ export function setMenuAction(fn) {
 
 function makeRow(item, ctx) {
   const { popup, parent } = ctx;
+  if (planned(item)) item = { ...item, dis: true, tip: `Planned for ${PLANNED_IN[item.a.split(":")[0]] || "a later milestone"}` };
   const checked = item.chk ? isChecked(item.chk) : false;
   const row = h("div", {
     class: "mi" + (item.dis ? " off" : "") + (item.sub ? " has-sub" : ""),
@@ -24,6 +39,7 @@ function makeRow(item, ctx) {
     "aria-disabled": item.dis ? "true" : "false",
     "aria-haspopup": item.sub ? "menu" : null,
     "data-label": item.label,
+    "data-tip": item.tip || null,
   },
     h("span", { class: "mi-check" }, checked ? icon("i-check", "ic xs") : null),
     h("span", { class: "mi-label", text: item.label }),
