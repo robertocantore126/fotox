@@ -23,6 +23,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 pub mod bucket;
 pub mod crop;
 pub mod eyedropper;
+pub mod gradient;
 pub mod kinds;
 pub mod lasso;
 pub mod marquee;

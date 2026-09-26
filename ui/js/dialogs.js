@@ -265,6 +265,8 @@ function renderField(f) {
     case "histo": return histoField();
     case "curve": return curveField(f);
     case "colorpicker": return colorPickerField();
+    // A DOM node a native module built (M8: the Gradient Editor, pattern picker).
+    case "element": return f.el;
     case "gradientbar": return gradientBar();
     case "patternpick": return patternPick();
     case "anchor": return anchorField();

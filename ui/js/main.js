@@ -23,6 +23,7 @@ import { initNativePanels } from "./native/layers-panel.js";
 import { initColor } from "./native/color.js";
 import { initTools, sendColors } from "./native/tools.js";
 import { initBrushes, brushExtras } from "./native/brush-settings.js";
+import { initGradients } from "./native/gradients.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -203,6 +204,8 @@ async function boot() {
   // First, so `body.native` is set before any part of the chrome is built.
   bridge.init();
   await loadSprite();
+  // Option-bar pickers of native modules (M8).
+  initGradients();
 
   const shell = buildShell();
   buildMenubar(shell.menubar, menus);

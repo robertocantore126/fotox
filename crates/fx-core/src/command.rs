@@ -92,6 +92,10 @@ pub enum NewLayer {
 	Text {
 		content: TextContent,
 	},
+	/// A gradient or pattern fill layer (M8-T03/T06).
+	Fill {
+		content: crate::fill::FillLayer,
+	},
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +232,39 @@ pub enum Command {
 	/// The Magic Eraser (M8-T02): the Magic Wand's region goes transparent;
 	/// a Background layer becomes a normal layer first (Photoshop).
 	MagicErase { layer: LayerRef, params: WandParams, opacity: f64 },
+	/// The Gradient tool's drag (M8-T03): the gradient through the selection
+	/// with the mode and opacity.
+	FillGradient {
+		layer: LayerRef,
+		fill: crate::gradient::GradientFill,
+		mode: BlendMode,
+		/// `0..=1`.
+		opacity: f64,
+	},
+	/// Edit ▸ Fill ▸ Pattern (M8-T06): a document pattern through the
+	/// selection.
+	FillPattern {
+		layer: LayerRef,
+		pattern: u64,
+		mode: BlendMode,
+		opacity: f64,
+		preserve_transparency: bool,
+	},
+	/// Change a gradient / pattern fill layer's parameters (M8-T03/T06).
+	SetFillLayer { layer: LayerRef, content: crate::fill::FillLayer },
+	/// Edit ▸ Define Pattern (M8-T06): add a pattern to the document's
+	/// resources (a history step that does not dirty the pixels).
+	DefinePattern { pattern: crate::pattern::PatternData },
+	/// The Red Eye tool (M8-T08): find the red pupil around `point` and
+	/// darken it.
+	RedEye {
+		layer: LayerRef,
+		point: (f64, f64),
+		/// `0..=1`: the pupil's share of the found red area.
+		pupil_size: f64,
+		/// `0..=1`.
+		darken: f64,
+	},
 	/// Edit ▸ Clear (Delete): remove the selected pixels of a pixel layer.
 	/// `cut` only changes the History label ("Cut"). M5
 	Clear {
@@ -494,6 +531,22 @@ impl Command {
 				preserve_transparency,
 			} => m8::bucket_fill(doc, layer, params, source, *mode, *opacity, *preserve_transparency, ctx),
 			Command::MagicErase { layer, params, opacity } => m8::magic_erase(doc, layer, params, *opacity, ctx),
+			Command::FillGradient { layer, fill, mode, opacity } => m8::fill_gradient(doc, layer, fill, *mode, *opacity, ctx),
+			Command::FillPattern {
+				layer,
+				pattern,
+				mode,
+				opacity,
+				preserve_transparency,
+			} => m8::fill_pattern(doc, layer, *pattern, *mode, *opacity, *preserve_transparency, ctx),
+			Command::SetFillLayer { layer, content } => m8::set_fill_layer(doc, layer, content),
+			Command::DefinePattern { pattern } => m8::define_pattern(doc, pattern),
+			Command::RedEye {
+				layer,
+				point,
+				pupil_size,
+				darken,
+			} => m8::red_eye(doc, layer, *point, *pupil_size, *darken, ctx),
 			Command::LayerViaCopy { cut } => layer_via_copy(doc, *cut, ctx),
 			Command::Paste { in_place, center } => paste(doc, *in_place, *center, ctx),
 			Command::Stroke {
@@ -610,6 +663,10 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 			align: content.align,
 			antialias: content.antialias,
 			transform: content.transform,
+			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
+		},
+		NewLayer::Fill { content } => LayerKind::FillLayer {
+			content: content.clone(),
 			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
 		},
 	};
@@ -1814,6 +1871,10 @@ fn name_kind(new: &NewLayer) -> NameKind {
 		// counter follows the kind of shape drawn (M6-T06).
 		NewLayer::Shape { shape, .. } => NameKind::of_shape_stem(shape.stem()),
 		NewLayer::Text { .. } => NameKind::Type,
+		NewLayer::Fill {
+			content: crate::fill::FillLayer::Gradient(_),
+		} => NameKind::GradientFill,
+		NewLayer::Fill { .. } => NameKind::PatternFill,
 	}
 }
 
@@ -1829,6 +1890,7 @@ fn add_label(new: &NewLayer) -> String {
 		// Photoshop names the step after the shape: "New Rectangle" (M6-T06).
 		NewLayer::Shape { shape, .. } => format!("New {}", shape.stem()),
 		NewLayer::Text { .. } => "New Type Layer".into(),
+		NewLayer::Fill { content } => format!("New {} Layer", content.label()),
 	}
 }
 

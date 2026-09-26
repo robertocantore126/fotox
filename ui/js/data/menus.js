@@ -319,6 +319,7 @@ export const menus = [
         it("Type", "", "raster:type"),
         it("Shape", "", "raster:shape"),
         it("Smart Object", "", "raster:smart", { dis: true }),
+        it("Fill Content", "", "raster:fill"),
         it("Layer", "", "raster:layer"),
         it("All Layers", "", "raster:all"),
       ]),

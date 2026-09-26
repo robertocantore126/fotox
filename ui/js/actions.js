@@ -2,7 +2,7 @@
 // Le azioni con un effetto visibile sono implementate; tutte le altre
 // rispondono con un feedback coerente, così nessuna voce resta muta.
 
-import { state, setFlag, toggleFlag, setTool } from "./state.js";
+import { state, setFlag, toggleFlag, setTool, emit } from "./state.js";
 import { openDialog } from "./dialogs.js";
 import { toast, status } from "./tooltip.js";
 import { zoomIn, zoomOut, fit, actual, zoomTo, toggleFpsOverlay } from "./canvas.js";
@@ -18,6 +18,8 @@ import { openNewDocument } from "./native/newdoc.js";
 import { isGuideDialog, openGuideDialog } from "./native/guides.js";
 import { isPrefsDialog, openPrefsDialog } from "./native/prefs.js";
 import { activeDocument } from "./native/documents.js";
+import { isGradientDialog, openGradientDialog, openGradientFillDialog } from "./native/gradients.js";
+import { activeLayerInfo } from "./native/layers-panel.js";
 import { dialogDef } from "./data/dialogs.js";
 
 export function runAction(item) {
@@ -37,6 +39,13 @@ export function runAction(item) {
   }
   // In the app, layer and history actions are the engine's (sent above): it
   // answers with the result, or a toast for what is not implemented yet.
+  // Layer Content Options (M8-T03/T06): the fill layer's dialog.
+  if (a === "layer:content-options" && bridge.isNative) {
+    const fill = activeLayerInfo()?.fill_layer;
+    if (fill?.fill === "gradient") openGradientFillDialog(true);
+    else if (fill?.fill === "pattern") emit("pattern:content-options");
+    return;
+  }
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
   // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
   // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
@@ -120,6 +129,8 @@ export function runAction(item) {
   if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
+  // Gradients (M8-T03): New Fill Layer ▸ Gradient, the Gradient Editor.
+  if (a.startsWith("dlg:") && bridge.isNative && isGradientDialog(a.slice(4))) { openGradientDialog(a.slice(4)); return; }
   // In the app, Preferences are the engine's file (M7-T09).
   if (a.startsWith("dlg:") && bridge.isNative && isPrefsDialog(a.slice(4))) { openPrefsDialog(a.slice(4)); return; }
   // In the app, guides are the engine's (M7-T06).

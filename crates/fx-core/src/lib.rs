@@ -14,6 +14,7 @@ pub mod color;
 pub mod command;
 pub mod document;
 pub mod fill;
+pub mod gradient;
 pub mod history;
 pub mod layer;
 pub mod ops;

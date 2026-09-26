@@ -107,6 +107,11 @@ pub fn draw_requests(doc: &mut fx_core::Document, store: &TileStore, requests: &
 			drawn += crate::text::draw_text_tiles(doc, id, store, &tiles);
 			continue;
 		}
+		// Gradient / pattern fill layers (M8-T03/T06).
+		if doc.layer(id).is_some_and(|layer| matches!(layer.kind, LayerKind::FillLayer { .. })) {
+			drawn += draw_fill_tiles(doc, id, store, &tiles);
+			continue;
+		}
 		let Some(layer) = doc.layer_mut(id) else { continue };
 		let LayerKind::Shape {
 			shape,
@@ -135,6 +140,39 @@ pub fn draw_requests(doc: &mut fx_core::Document, store: &TileStore, requests: &
 		drawn += draw_shape_tiles(&geometry, cache, store, &tiles);
 	}
 	drawn
+}
+
+/// Draw tiles of a gradient / pattern fill layer (M8-T03/T06), in parallel.
+fn draw_fill_tiles(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, tiles: &[(usize, u32, u32)]) -> usize {
+	let size = (doc.width, doc.height);
+	let Some(layer) = doc.layer(id) else { return 0 };
+	let LayerKind::FillLayer { content, cache } = &layer.kind else { return 0 };
+	let format = cache.format();
+	let content = content.clone();
+	let placed = match &content {
+		fx_core::fill::FillLayer::Gradient(g) => Some(g.placed(size)),
+		_ => None,
+	};
+	let pattern = match &content {
+		fx_core::fill::FillLayer::Pattern { pattern, .. } => doc.patterns.iter().find(|p| p.id == *pattern).cloned(),
+		_ => None,
+	};
+	let buffers: Vec<((usize, u32, u32), TileBuffer)> = tiles
+		.par_iter()
+		.map(|&(level, tx, ty)| {
+			(
+				(level, tx, ty),
+				fx_render::gradient::render_fill_tile(&content, placed.as_ref(), pattern.as_ref(), level, (tx, ty), format),
+			)
+		})
+		.collect();
+	let Some(layer) = doc.layer_mut(id) else { return 0 };
+	let LayerKind::FillLayer { cache, .. } = &mut layer.kind else { return 0 };
+	for ((level, tx, ty), buffer) in buffers {
+		let slot = slot_for(buffer, format, store);
+		cache.set_derived_slot(level, tx, ty, slot);
+	}
+	tiles.len()
 }
 
 #[cfg(test)]

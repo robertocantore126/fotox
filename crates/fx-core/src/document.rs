@@ -83,6 +83,9 @@ pub(crate) enum NameKind {
 	// M6-T07. A text layer is named after its own first line ("Hello"), so the
 	// counter is only used for a layer with no text yet ("Type 1").
 	Type,
+	// M8-T03/T06: fill layers.
+	GradientFill,
+	PatternFill,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -90,7 +93,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 25;
+	const COUNT: usize = 27;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -121,6 +124,8 @@ impl NameKind {
 			NameKind::Star => "Star",
 			NameKind::Line => "Line",
 			NameKind::Type => "Type",
+			NameKind::GradientFill => "Gradient Fill",
+			NameKind::PatternFill => "Pattern Fill",
 		}
 	}
 

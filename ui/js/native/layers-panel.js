@@ -11,7 +11,7 @@
 import { h, icon, clear, add } from "../el.js";
 import { openDropdown } from "../popup.js";
 import { openDialog } from "../dialogs.js";
-import { state, setTool } from "../state.js";
+import { state, setTool, emit } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
@@ -366,6 +366,13 @@ function row(i, v) {
       // Double-click: the Type tool, all the text selected (M6-T09).
       ondblclick: (e) => { e.stopPropagation(); setTool("type"); bridge.send({ type: UI.ACTION, id: "type:edit-layer", args: { layer: l.id } }); },
     });
+  }
+  // A gradient / pattern fill layer (M8-T03/T06): double-click edits it.
+  else if (l.kind === "fill_layer") {
+    thumb = h("span", {
+      class: "pthumb adj", "data-tip": "Double-click to edit the fill",
+      ondblclick: (e) => { e.stopPropagation(); emit("action", "layer:content-options"); },
+    }, icon(l.fill_layer?.fill === "pattern" ? "i-pattern-stamp" : "i-gradient", "ic sm"));
   }
   else if (l.kind === "adjustment") {
     thumb = h("span", {

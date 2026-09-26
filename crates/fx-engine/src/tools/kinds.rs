@@ -144,6 +144,7 @@ pub fn registered(id: &str) -> Option<Box<dyn Tool>> {
 	match id {
 		"paint-bucket" => Some(Box::new(Click(super::bucket::Bucket))),
 		"eraser-magic" => Some(Box::new(Click(super::bucket::MagicEraser))),
+		"gradient" => Some(Box::new(Drag::new(super::gradient::GradientTool))),
 		_ => None,
 	}
 }

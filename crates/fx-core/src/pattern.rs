@@ -9,7 +9,10 @@ use std::sync::Arc;
 /// The largest pattern side (Edit ▸ Define Pattern refuses bigger).
 pub const MAX_SIDE: u32 = 2048;
 
-#[derive(Clone, Debug, PartialEq)]
+/// What `Command::DefinePattern` carries.
+pub type PatternData = Pattern;
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pattern {
 	/// A hash of the pixels (52 bits, never 0), so the same image is one pattern.
 	pub id: u64,

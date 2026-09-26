@@ -2778,7 +2778,10 @@ impl Engine {
 		let mut layers: Vec<LayerId> = Vec::new();
 		if id == "raster:all" {
 			doc.doc.walk(|layer, _| {
-				if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. }) {
+				if matches!(
+					layer.kind,
+					LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. }
+				) {
 					layers.push(layer.id);
 				}
 			});
@@ -2789,6 +2792,7 @@ impl Engine {
 			let wanted = match kind {
 				Some(LayerKind::Shape { .. }) => id == "raster:shape" || id == "raster:layer",
 				Some(LayerKind::SolidFill { .. }) => id == "raster:layer",
+				Some(LayerKind::FillLayer { .. }) => id == "raster:layer" || id == "raster:fill",
 				Some(LayerKind::Text { .. }) => id == "raster:type" || id == "raster:layer",
 				_ => false,
 			};
@@ -3950,6 +3954,9 @@ fn is_pixel_job(command: &Command) -> bool {
 			// The Paint Bucket and Magic Eraser flood like the wand (M8-T02).
 			| Command::BucketFill { .. }
 			| Command::MagicErase { .. }
+			// A gradient or pattern fill touches every selected tile (M8-T03/T06).
+			| Command::FillGradient { .. }
+			| Command::FillPattern { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
 			| Command::RotateCanvas { .. }
@@ -3974,6 +3981,8 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::MagicWand { .. } => "Magic Wand".to_owned(),
 		Command::BucketFill { .. } => "Paint Bucket".to_owned(),
 		Command::MagicErase { .. } => "Magic Eraser".to_owned(),
+		Command::FillGradient { .. } => "Gradient".to_owned(),
+		Command::FillPattern { .. } => "Fill".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
 		}

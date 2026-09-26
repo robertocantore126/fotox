@@ -189,6 +189,8 @@ pub enum LayerInfoKind {
 	Shape,
 	/// A text layer (M6-T07).
 	Text,
+	/// A gradient or pattern fill layer (M8-T03/T06).
+	FillLayer,
 }
 
 /// Flat, UI-friendly description of one layer. The tree is expressed with
@@ -229,6 +231,9 @@ pub struct LayerInfo {
 	/// Layer styles (M6-T08), for the style dialogs and the fx marker.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub styles: Option<fx_core::styles::LayerStyles>,
+	/// A gradient / pattern fill layer's parameters (M8-T03/T06).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fill_layer: Option<fx_core::fill::FillLayer>,
 }
 
 /// A font family and its styles (M6-T07).

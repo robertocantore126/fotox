@@ -59,6 +59,8 @@ impl Engine {
 	pub(super) fn m8_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
 		let index = || args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
 		match id {
+			// The UI opens the fill layer's dialog itself (M8-T03).
+			"layer:content-options" => return true,
 			"brush:list" => {}
 			"brush:import-abr" => {
 				let data = upload(args);
