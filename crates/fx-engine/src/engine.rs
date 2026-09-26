@@ -3986,6 +3986,11 @@ fn is_pixel_job(command: &Command) -> bool {
 			// A gradient or pattern fill touches every selected tile (M8-T03/T06).
 			| Command::FillGradient { .. }
 			| Command::FillPattern { .. }
+			// Selections computed from pixels, Transform Selection, Perspective Crop (M9).
+			| Command::SelectBy { .. }
+			| Command::TransformSelection { .. }
+			| Command::PerspectiveCrop { .. }
+			| Command::SaveSelection { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
 			| Command::RotateCanvas { .. }
@@ -4012,6 +4017,10 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::MagicErase { .. } => "Magic Eraser".to_owned(),
 		Command::FillGradient { .. } => "Gradient".to_owned(),
 		Command::FillPattern { .. } => "Fill".to_owned(),
+		Command::SelectBy { select, .. } => select.label().to_owned(),
+		Command::TransformSelection { .. } => "Transform Selection".to_owned(),
+		Command::PerspectiveCrop { .. } => "Perspective Crop".to_owned(),
+		Command::SaveSelection { .. } => "Save Selection".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
 		}

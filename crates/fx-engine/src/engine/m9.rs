@@ -105,8 +105,53 @@ impl Engine {
 				self.after_edit(doc_id, true);
 			}
 			"channels:list" => self.send_channels(doc_id),
+			// Select ▸ Grow / Similar (M9-T02) with the Magic Wand's options.
+			"sel:grow" | "sel:similar" => {
+				let tolerance = self.settings.number("magic-wand", "Tolerance").unwrap_or(32.0).clamp(0.0, 255.0);
+				let sample_all = self.settings.bool("magic-wand", "Sample All Layers").unwrap_or(false);
+				let select = if id == "sel:grow" {
+					fx_core::select_ops::SelectOp::Grow { tolerance, sample_all }
+				} else {
+					fx_core::select_ops::SelectOp::Similar { tolerance, sample_all }
+				};
+				self.command(
+					doc_id,
+					Command::SelectBy {
+						select,
+						mode: fx_core::SelectMode::Replace,
+					},
+				);
+			}
+			"sel:transform" => self.start_selection_transform(doc_id),
 			_ => return false,
 		}
 		true
+	}
+}
+
+impl Engine {
+	/// Select ▸ Transform Selection (M9-T02): Free Transform's box over the
+	/// selection's bounds, committing `Command::TransformSelection`.
+	// FAST: no live preview of the transformed ants (the box only).
+	fn start_selection_transform(&mut self, doc_id: DocId) {
+		let filter = fx_core::Filter::Bilinear;
+		let Some(open) = self.docs.get(doc_id) else { return };
+		let size = (open.doc.width, open.doc.height);
+		let Some(bounds) = open.doc.selection.as_ref().and_then(|s| s.canvas_bounds(size)) else {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Transform Selection needs a selection".into(),
+			});
+			return;
+		};
+		let rect = [f64::from(bounds.0), f64::from(bounds.1), f64::from(bounds.2), f64::from(bounds.3)];
+		let layer = open.doc.active_layer().unwrap_or(fx_core::LayerId(0));
+		self.end_stroke();
+		let mut session = crate::tools::transform::Session::new(layer, rect, crate::tools::transform::Mode::Free, filter);
+		session.selection = true;
+		let status = session.status();
+		self.transform = Some((doc_id, session));
+		self.to_ui(&EngineToUi::TransformBox { up: true });
+		self.to_ui(&EngineToUi::ToolInfo { text: status });
+		self.request_frame();
 	}
 }

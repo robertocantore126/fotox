@@ -195,3 +195,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: Quick Mask is a real layer (export / merge / flatten see it while it is on; it is found by its name); thumbnails point-sample level 0; the channel signature is a string of the first slots.
 - VERIFY: none.
 - Try it: make a selection, Select ▸ Save Selection; Deselect; Ctrl+click the thumbnail in Channels. Press Q, paint black / white, press Q.
+
+## M9-T02 — Grow, Similar, Transform Selection  (Claude, 2026-09-26)
+- Done: `fx_ops::select` (M9's selection algorithms: `assemble` builds a selection one row of tiles at a time, `Windows` reads apron windows across tiles); `select::grow` — the selected colours quantised into a 32³ table dilated by the tolerance; Similar = every matching pixel, Grow = a flood across tiles over the matches from the selection's boundary pixels; both keep the old selection. `Command::SelectBy { select: SelectOp, mode }` + `PixelOps::select_op` (engine `EngineOps::select`, sources = active layer or composite) run as jobs; `sel:grow` / `sel:similar` use the Magic Wand's Tolerance and Sample All Layers. Transform Selection: `sel:transform` puts M6-T04's box over the selection's bounds (`Session::selection`), Enter commits `Command::TransformSelection` (the canvas-aligned coverage resampled, pixels untouched, "Transform Selection").
+- Skipped: the live preview of the transformed ants (the box only); Tests (should check: Grow stops at an edge; Similar selects a separate same-coloured region; Transform Selection rotates the coverage and leaves the pixels).
+- FAST: the colour test is quantised to 32 levels per channel; Grow's flood runs on one thread with a bitset per reached tile.
+- VERIFY: Photoshop's Grow / Similar distance.
+- Try it: magic-wand a sky patch, Select ▸ Grow, Select ▸ Similar; Select ▸ Transform Selection, rotate, Enter.

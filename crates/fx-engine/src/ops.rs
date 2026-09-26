@@ -229,6 +229,10 @@ impl PixelOps for EngineOps {
 		fx_ops::brush::replay(crate::stroke::setup(&prepared, doc, *tool, *brush, color), samples, store)
 	}
 
+	fn select_op(&self, doc: &Document, op: &fx_core::select_ops::SelectOp, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+		self.select(doc, op, store)
+	}
+
 	fn clipboard(&self) -> Option<fx_core::pixels::ClipboardImage> {
 		self.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 	}
@@ -261,6 +265,68 @@ impl PixelOps for EngineOps {
 				sub.layers = crate::export::keep_layers(&doc.layers, &std::iter::once(id).collect());
 				fx_ops::flood::magic_wand(&CompositeSource::new(sub, store), size, &wand, depth, store)
 			}
+		}
+	}
+}
+
+impl EngineOps {
+	/// Run `f` on the pixels a selection op reads: the composite, or the
+	/// active layer's own pixels (M9).
+	fn with_source<R>(
+		doc: &Document,
+		sample_all: bool,
+		store: &TileStore,
+		f: impl FnOnce(&dyn fx_ops::flood::WandSource) -> Result<R, CommandError>,
+	) -> Result<R, CommandError> {
+		if sample_all {
+			return f(&CompositeSource::new(doc.clone(), store));
+		}
+		let Some(id) = doc.active_layer() else {
+			return Err(CommandError::NotAllowed("no active layer to sample".into()));
+		};
+		let layer = doc.layer(id).ok_or(CommandError::NotAllowed("no active layer to sample".into()))?;
+		match &layer.kind {
+			LayerKind::Pixel { image, offset } => f(&LayerSource { image, offset: *offset, store }),
+			_ => {
+				let mut sub = doc.clone();
+				sub.layers = crate::export::keep_layers(&doc.layers, &std::iter::once(id).collect());
+				f(&CompositeSource::new(sub, store))
+			}
+		}
+	}
+
+	/// `PixelOps::select_op` (M9-T02..T06).
+	pub fn select(&self, doc: &Document, op: &fx_core::select_ops::SelectOp, store: &TileStore) -> Result<Option<Selection>, CommandError> {
+		use fx_core::select_ops::SelectOp;
+		use fx_ops::select;
+		let size = (doc.width, doc.height);
+		let depth = doc.color.depth;
+		let need_selection = || doc.selection.as_ref().ok_or(CommandError::NotAllowed("nothing is selected".into()));
+		match op {
+			SelectOp::Grow { tolerance, sample_all } | SelectOp::Similar { tolerance, sample_all } => {
+				let selection = need_selection()?;
+				let contiguous = matches!(op, SelectOp::Grow { .. });
+				Self::with_source(doc, *sample_all, store, |src| {
+					select::grow::grow_or_similar(src, selection, size, (tolerance / 255.0).clamp(0.0, 1.0), contiguous, depth, store)
+				})
+			}
+			// Color Range and Focus Area read the composite (Photoshop's
+			// default "Sample Merged" for Color Range; FAST for Focus Area).
+			SelectOp::ColorRange { .. } => Self::with_source(doc, true, store, |src| select::range::color_range(src, size, op, depth, store)),
+			SelectOp::FocusArea { in_focus, noise, soften } => Self::with_source(doc, true, store, |src| {
+				select::focus::focus_area(src, size, *in_focus, *noise, *soften, depth, store)
+			}),
+			SelectOp::Refine(refine) => {
+				let selection = need_selection()?;
+				Self::with_source(doc, true, store, |src| select::refine::refine(src, selection, size, refine, depth, store))
+			}
+			SelectOp::QuickSelect {
+				dabs,
+				sample_all,
+				enhance_edge,
+			} => Self::with_source(doc, *sample_all, store, |src| {
+				select::quick::quick_select(src, size, dabs, *enhance_edge, depth, store)
+			}),
 		}
 	}
 }
