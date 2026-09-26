@@ -30,6 +30,7 @@ use crate::ops::{FilterParams, PixelOps};
 use crate::pixels::Placed;
 use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
+use crate::text::{TextContent, TextRun};
 use crate::transform::{Anchor9, Filter, Mapping, Permutation, dest_rect};
 use crate::vector::{Paint, StrokeStyle, VectorShape, document_box, grow_box};
 
@@ -85,6 +86,11 @@ pub enum NewLayer {
 		fill: Option<Paint>,
 		stroke: Option<StrokeStyle>,
 		transform: [f64; 6],
+	},
+	/// A text layer (M6-T07): the string and its runs are the content, laid out
+	/// and rasterised on demand at whatever level is drawn (D-055).
+	Text {
+		content: TextContent,
 	},
 }
 
@@ -286,10 +292,16 @@ pub enum Command {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		transform: Option<[f64; 6]>,
 	},
-	/// Layer ▸ Rasterize ▸ Shape / Layer (M6-T06): every named layer becomes a
-	/// pixel layer holding what it drew, keeping its id, position in the stack,
-	/// name, opacity, blend mode and mask (Photoshop keeps those too). Only
-	/// non-pixel, non-group layers can be rasterised.
+	/// Change a text layer's content (M6-T07): the string, its formatting runs,
+	/// the frame, the alignment, the anti-aliasing or the placement. `dirty` is
+	/// the document-space box `[x0, y0, x1, y1]` whose tiles have to be drawn
+	/// again — the engine knows the layout, so it measures what the old and the
+	/// new text ink and hands the box over, and undo redraws the same one.
+	SetText { layer: LayerRef, content: TextContent, dirty: [f64; 4] },
+	/// Layer ▸ Rasterize ▸ Shape / Layer / Type (M6-T06/T07): every named layer
+	/// becomes a pixel layer holding what it drew, keeping its id, position in
+	/// the stack, name, opacity, blend mode and mask (Photoshop keeps those
+	/// too). Only non-pixel, non-group layers can be rasterised.
 	Rasterize { layers: Vec<LayerRef> },
 }
 
@@ -417,6 +429,7 @@ impl Command {
 				stroke,
 				transform,
 			} => set_shape(doc, layer, shape.as_ref(), fill.as_ref(), stroke.as_ref(), *transform),
+			Command::SetText { layer, content, dirty } => set_text(doc, layer, content, *dirty),
 			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
 		doc.revision += 1;
@@ -450,7 +463,13 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 	// The counter advances even when the caller supplies a name: it counts the
 	// layers of that kind the document created, so the next default name is
 	// never a duplicate of an earlier one.
-	let default_name = doc.next_default_name(name_kind(new));
+	let counted = doc.next_default_name(name_kind(new));
+	// A text layer is named after its own text ("Hello"), like Photoshop; the
+	// counter is only left for a layer that has none yet (M6-T07).
+	let default_name = match new {
+		NewLayer::Text { content } if !content.layer_name().is_empty() && content.layer_name() != "Type" => content.layer_name(),
+		_ => counted,
+	};
 	let id = doc.allocate_layer_id();
 	let kind = match new {
 		// A pixel layer starts empty: no tile memory at all, whatever the size.
@@ -476,6 +495,17 @@ fn add_layer(doc: &mut Document, new: &NewLayer, name: Option<&str>) -> Result<C
 			fill: *fill,
 			stroke: stroke.clone(),
 			transform: *transform,
+			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
+		},
+		// The same derived-tile model for text (M6-T07): the layout is the
+		// truth, every tile starts dirty.
+		NewLayer::Text { content } => LayerKind::Text {
+			text: content.text.clone(),
+			runs: content.runs.clone(),
+			frame: content.frame,
+			align: content.align,
+			antialias: content.antialias,
+			transform: content.transform,
 			cache: TiledImage::derived(doc.width, doc.height, doc.color.depth.rgba_format()),
 		},
 	};
@@ -919,6 +949,53 @@ fn set_shape(
 fn box_of(shape: &VectorShape, transform: [f64; 6], stroke: Option<&StrokeStyle>) -> [f64; 4] {
 	let reach = stroke.map_or(0.0, |stroke| stroke.width.max(0.0));
 	grow_box(document_box(shape, transform), reach)
+}
+
+/// `SetText` (M6-T07): replace a text layer's content and redraw the tiles the
+/// caller measured as changed.
+///
+/// The layout lives in fx-render (the font stack), so fx-core cannot tell what
+/// the text inks; the engine computes `dirty` from the old and the new layout
+/// and the command carries it, which also makes undo redraw exactly the same
+/// tiles. An empty text layer draws nothing, and its tiles go Empty.
+fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: [f64; 4]) -> Result<CommandEffect, CommandError> {
+	if !content.transform.iter().all(|v| v.is_finite()) {
+		return Err(CommandError::InvalidValue {
+			field: "transform",
+			reason: "the matrix has a non-finite component".into(),
+		});
+	}
+	let id = resolve(doc, layer)?;
+	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	let LayerKind::Text {
+		text,
+		runs,
+		frame,
+		align,
+		antialias,
+		transform,
+		cache,
+	} = &mut target.kind
+	else {
+		return Err(CommandError::NotAllowed("only text layers have text parameters".into()));
+	};
+	// A text layer follows its own text until the user renames it (Photoshop
+	// does the same): rename it only while the name still matches the old text.
+	if *text != content.text && target.name == crate::text::TextContent::name_for_text(text) {
+		target.name = content.layer_name();
+	}
+	*text = content.text.clone();
+	*runs = content.runs.clone();
+	*frame = content.frame;
+	*align = content.align;
+	*antialias = content.antialias;
+	*transform = content.transform;
+	cache.mark_rect_dirty(dirty);
+	Ok(CommandEffect {
+		label: "Type Tool".into(),
+		props_changed: vec![id],
+		..Default::default()
+	})
 }
 
 /// `Rasterize` (M6-T06): turn a generated layer into the pixels it drew.
@@ -1485,6 +1562,39 @@ fn convert_profile(
 					cache,
 				})
 			}
+			// A text layer's runs carry its colours; they convert with the
+			// document and the cache is redrawn from them (M6-T07).
+			LayerKind::Text {
+				text,
+				runs,
+				frame,
+				align,
+				antialias,
+				transform,
+				cache,
+			} => {
+				let mut converted = Vec::with_capacity(runs.len());
+				for run in runs {
+					match ops.convert_color(run.color, &conversion) {
+						Ok(color) => converted.push(TextRun { color, ..run.clone() }),
+						Err(error) => {
+							failure = Some(error);
+							return;
+						}
+					}
+				}
+				let mut cache = cache.clone();
+				cache.mark_all_dirty();
+				Ok(LayerKind::Text {
+					text: text.clone(),
+					runs: converted,
+					frame: *frame,
+					align: *align,
+					antialias: *antialias,
+					transform: *transform,
+					cache,
+				})
+			}
 			_ => return,
 		};
 		match kind {
@@ -1527,6 +1637,7 @@ fn name_kind(new: &NewLayer) -> NameKind {
 		// A rectangle is named "Rectangle 1", like Photoshop's tool, so the
 		// counter follows the kind of shape drawn (M6-T06).
 		NewLayer::Shape { shape, .. } => NameKind::of_shape_stem(shape.stem()),
+		NewLayer::Text { .. } => NameKind::Type,
 	}
 }
 
@@ -1541,6 +1652,7 @@ fn add_label(new: &NewLayer) -> String {
 		}
 		// Photoshop names the step after the shape: "New Rectangle" (M6-T06).
 		NewLayer::Shape { shape, .. } => format!("New {}", shape.stem()),
+		NewLayer::Text { .. } => "New Type Layer".into(),
 	}
 }
 
@@ -1849,11 +1961,11 @@ fn layer_ids(doc: &Document) -> Vec<LayerId> {
 	ids
 }
 
-/// Give the document a new canvas size and rebuild every shape layer's cache
-/// for it (M6-T06). A shape's cache is derived from its geometry and is always
-/// the size of the canvas, so a canvas-level command replaces it — the tiles
-/// come back at the next draw, at whatever level is on screen. Returns the
-/// layers whose cache was rebuilt.
+/// Give the document a new canvas size and rebuild every generated layer's
+/// cache for it (M6-T06/T07). A shape's or text's cache is derived from its
+/// geometry and is always the size of the canvas, so a canvas-level command
+/// replaces it — the tiles come back at the next draw, at whatever level is on
+/// screen. Returns the layers whose cache was rebuilt.
 fn set_canvas(doc: &mut Document, width: u32, height: u32) -> Vec<LayerId> {
 	doc.width = width;
 	doc.height = height;
@@ -1861,7 +1973,7 @@ fn set_canvas(doc: &mut Document, width: u32, height: u32) -> Vec<LayerId> {
 	let mut changed = Vec::new();
 	for id in layer_ids(doc) {
 		if let Some(layer) = doc.layer_mut(id)
-			&& let LayerKind::Shape { cache, .. } = &mut layer.kind
+			&& let Some((_, cache)) = layer.kind.derived_placement()
 		{
 			if (cache.width(), cache.height()) == (width, height) {
 				continue;
@@ -1873,16 +1985,16 @@ fn set_canvas(doc: &mut Document, width: u32, height: u32) -> Vec<LayerId> {
 	changed
 }
 
-/// Fold a canvas-level mapping into every shape layer's matrix (M6-T06): a
-/// shape is placed by a matrix, so the canvas turning, flipping or scaling
-/// turns, flips or scales the shape exactly, and nothing is resampled. Returns
-/// the layers that changed; a mapping that is not affine (which no
-/// canvas-level command produces) leaves them all alone.
-fn map_shape_layers(doc: &mut Document, mapping: Mapping) -> Vec<LayerId> {
+/// Fold a canvas-level mapping into every generated layer's matrix (M6-T06/T07):
+/// a shape or a text layer is placed by a matrix, so the canvas turning,
+/// flipping or scaling turns, flips or scales it exactly, and nothing is
+/// resampled. Returns the layers that changed; a mapping that is not affine
+/// (which no canvas-level command produces) leaves them all alone.
+fn map_generated_layers(doc: &mut Document, mapping: Mapping) -> Vec<LayerId> {
 	let mut changed = Vec::new();
 	for id in layer_ids(doc) {
 		if let Some(layer) = doc.layer_mut(id)
-			&& let LayerKind::Shape { transform, cache, .. } = &mut layer.kind
+			&& let Some((transform, cache)) = layer.kind.derived_placement()
 		{
 			let Some(moved) = mapping.then_affine(*transform) else {
 				continue;
@@ -1999,9 +2111,9 @@ fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>)
 	if let Some((image, offset)) = reselect {
 		doc.reselect = Some(Selection { image, offset });
 	}
-	// Shape layers (M6-T06) carry a transform, not pixels: they turn with the
-	// canvas without losing anything. Text layers follow in M6-T07.
-	changed.extend(map_shape_layers(doc, op.mapping(canvas)));
+	// Generated layers (shapes, M6-T06, and text, M6-T07) carry a transform,
+	// not pixels: they turn with the canvas without losing anything.
+	changed.extend(map_generated_layers(doc, op.mapping(canvas)));
 	changed.extend(set_canvas(doc, dest_w, dest_h));
 	changed.sort_unstable();
 	changed.dedup();
@@ -2115,9 +2227,9 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Res
 	if let (Some(selection), Some(offset)) = (doc.reselect.as_mut(), reselection) {
 		selection.offset = offset;
 	}
-	// A shape layer has no offset to move: its matrix is translated instead
-	// (M6-T06), which is the same thing without touching a single tile.
-	let mut shapes = map_shape_layers(doc, Mapping::translation(f64::from(dx), f64::from(dy)));
+	// A shape or text layer has no offset to move: its matrix is translated
+	// instead (M6-T06/T07), which is the same thing without touching a tile.
+	let mut shapes = map_generated_layers(doc, Mapping::translation(f64::from(dx), f64::from(dy)));
 	let mut masks_moved = Vec::new();
 	for (id, image) in masks {
 		if let Some(layer) = doc.layer_mut(id)
@@ -2464,9 +2576,9 @@ fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, f
 		}
 		changed.push(id);
 	}
-	// Shape layers (M6-T06) go through the same mapping as a matrix instead of
-	// as pixels: a straighten or a resize keeps them sharp.
-	changed.extend(map_shape_layers(doc, mapping));
+	// Generated layers (M6-T06/T07) go through the same mapping as a matrix
+	// instead of as pixels: a straighten or a resize keeps them sharp.
+	changed.extend(map_generated_layers(doc, mapping));
 	if let Some((image, offset)) = selection {
 		doc.selection = Some(Selection { image, offset });
 	}
@@ -2576,6 +2688,7 @@ mod tests {
 	use crate::color::{BitDepth, ColorProfile, DocumentColor};
 	use crate::history::History;
 	use crate::selection::{SelectMode, SelectModify, SelectionShape, gray_at, set_gray as set_coverage};
+	use crate::text::{FontStyle, TextFrame};
 
 	/// Stands in for the engine's pixel operations: a composite is a solid
 	/// image whose value counts the layers composited; a filter returns the
@@ -5431,6 +5544,258 @@ mod tests {
 		f.add_pixel("Layer 1");
 		f.ok(Command::RotateCanvas { quarter_turns: 2 });
 		assert!(shape_layers(&f.doc).is_empty());
+	}
+
+	/// A point text layer as the Type tool adds it (M6-T07).
+	fn text_content(text: &str, x: f64, y: f64) -> TextContent {
+		TextContent {
+			text: text.into(),
+			runs: vec![TextContent::default_run(text)],
+			transform: [1.0, 0.0, 0.0, 1.0, x, y],
+			..Default::default()
+		}
+	}
+
+	impl Fixture {
+		/// A text layer with one run, the way clicking with the Type tool
+		/// starts one.
+		fn add_text(&mut self, text: &str, x: f64, y: f64) -> LayerId {
+			self.add_default(NewLayer::Text {
+				content: text_content(text, x, y),
+			})
+		}
+
+		/// A text layer's whole content.
+		fn text(&self, id: LayerId) -> TextContent {
+			self.kind(id).text_content().expect("a text layer")
+		}
+
+		/// A text layer's derived cache.
+		fn text_cache(&self, id: LayerId) -> &TiledImage {
+			match self.kind(id) {
+				LayerKind::Text { cache, .. } => cache,
+				other => panic!("not a text layer: {other:?}"),
+			}
+		}
+
+		/// The dirty tiles of a text layer's level 0.
+		fn dirty_text_tiles(&self, id: LayerId) -> Vec<(u32, u32)> {
+			self.text_cache(id).dirty_tiles(0).collect()
+		}
+
+		/// Pretend the tiles of a text layer's cache have been drawn.
+		fn clear_text_cache(&mut self, id: LayerId) {
+			let Some(layer) = self.doc.layer_mut(id) else { return };
+			let LayerKind::Text { cache, .. } = &mut layer.kind else { return };
+			for ty in 0..cache.grid(0).rows() {
+				for tx in 0..cache.grid(0).cols() {
+					cache.set_derived_slot(0, tx, ty, TileSlot::Empty);
+				}
+			}
+		}
+
+		/// Replace a text layer's content, dirtying `dirty`.
+		fn set_text(&mut self, id: LayerId, content: TextContent, dirty: [f64; 4]) -> CommandEffect {
+			self.ok(Command::SetText {
+				layer: LayerRef::Id(id),
+				content,
+				dirty,
+			})
+		}
+	}
+
+	/// The text layers of a document, in the document's own order.
+	fn text_layers(doc: &Document) -> Vec<LayerId> {
+		let mut ids = Vec::new();
+		doc.walk(|layer, _| {
+			if matches!(layer.kind, LayerKind::Text { .. }) {
+				ids.push(layer.id);
+			}
+		});
+		ids
+	}
+
+	#[test]
+	fn a_text_layer_carries_a_document_sized_derived_cache() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 40.0, 80.0);
+		let cache = f.text_cache(id);
+		assert!(cache.is_derived(), "text is drawn from its layout, never stored");
+		assert_eq!((cache.width(), cache.height()), (400, 300), "the cache is the canvas");
+		assert_eq!(f.dirty_text_tiles(id).len(), 4, "a new text layer has every tile to draw");
+		assert_eq!(f.text(id).transform, [1.0, 0.0, 0.0, 1.0, 40.0, 80.0], "the click places the frame");
+	}
+
+	#[test]
+	fn a_text_layer_is_named_after_its_text() {
+		let mut f = Fixture::new();
+		let hello = f.add_text("Hello", 0.0, 0.0);
+		let empty = f.add_default(NewLayer::Text {
+			content: TextContent::default(),
+		});
+		assert_eq!(f.name(hello), "Hello", "Photoshop names the layer after its first line");
+		assert_eq!(f.name(empty), "Type 1", "a layer with no text uses the counter");
+	}
+
+	#[test]
+	fn set_text_dirties_only_the_box_it_is_given() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 10.0, 10.0);
+		f.clear_text_cache(id);
+		assert!(f.dirty_text_tiles(id).is_empty());
+		let mut content = f.text(id);
+		content.text = "Hello, world".into();
+		let effect = f.set_text(id, content.clone(), [10.0, 10.0, 120.0, 40.0]);
+		assert_eq!(effect.label, "Type Tool", "Photoshop's history name for a committed edit");
+		assert_eq!(f.text(id).text, "Hello, world");
+		assert_eq!(f.dirty_text_tiles(id), vec![(0, 0)], "the box is inside the first tile");
+		// Undo redraws the same box and restores the old text.
+		assert!(f.history.undo(&mut f.doc));
+		assert_eq!(f.text(id).text, "Hello");
+		assert_eq!(f.dirty_text_tiles(id), vec![(0, 0)]);
+	}
+
+	#[test]
+	fn a_text_layer_follows_its_text_until_it_is_renamed() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 0.0, 0.0);
+		let mut content = f.text(id);
+		content.text = "Goodbye".into();
+		f.set_text(id, content.clone(), [0.0; 4]);
+		assert_eq!(f.name(id), "Goodbye", "the name follows the text");
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(id),
+			props: LayerPropsPatch {
+				name: Some("Title".into()),
+				..Default::default()
+			},
+		});
+		content.text = "Farewell".into();
+		f.set_text(id, content, [0.0; 4]);
+		assert_eq!(f.name(id), "Title", "a renamed layer keeps its name");
+	}
+
+	#[test]
+	fn set_text_only_takes_a_text_layer_and_a_finite_matrix() {
+		let mut f = Fixture::new();
+		let pixel = f.add_pixel("Layer 1");
+		let error = f.fail(Command::SetText {
+			layer: LayerRef::Id(pixel),
+			content: text_content("Hello", 0.0, 0.0),
+			dirty: [0.0; 4],
+		});
+		assert!(matches!(error, CommandError::NotAllowed(_)), "{error:?}");
+		let id = f.add_text("Hello", 0.0, 0.0);
+		let mut content = f.text(id);
+		content.transform = [1.0, 0.0, 0.0, 1.0, f64::NAN, 0.0];
+		let error = f.fail(Command::SetText {
+			layer: LayerRef::Id(id),
+			content,
+			dirty: [0.0; 4],
+		});
+		assert!(matches!(error, CommandError::InvalidValue { field: "transform", .. }), "{error:?}");
+		assert_eq!(f.text(id).transform[4], 0.0, "the document is untouched");
+	}
+
+	#[test]
+	fn a_text_layer_turns_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 10.0, 20.0);
+		f.set_text(
+			id,
+			{
+				let mut content = f.text(id);
+				content.frame = TextFrame::Box { w: 100.0, h: 50.0 };
+				content
+			},
+			[0.0; 4],
+		);
+		f.ok(Command::RotateCanvas { quarter_turns: 1 });
+		assert_eq!((f.doc.width, f.doc.height), (300, 400), "the canvas turns");
+		assert_eq!(
+			(f.text_cache(id).width(), f.text_cache(id).height()),
+			(300, 400),
+			"and the cache is rebuilt for it"
+		);
+		let m = f.text(id).transform;
+		assert!((m[1] - 1.0).abs() < 1e-9 && (m[2] + 1.0).abs() < 1e-9, "the frame turns with it: {m:?}");
+		// The frame's own size is unchanged: the canvas mapping is in the matrix.
+		assert_eq!(f.text(id).frame, TextFrame::Box { w: 100.0, h: 50.0 });
+		// A point inside the frame lands where the canvas mapping puts it.
+		let (x, y) = (m[0] * 50.0 + m[4], m[1] * 50.0 + m[5]);
+		assert!((x - 330.0).abs() < 1e-9 && (y + 30.0).abs() < 1e-9, "(10 + 50, 20) turns to ({x}, {y})");
+	}
+
+	#[test]
+	fn a_text_layer_crops_and_resizes_with_the_canvas() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 100.0, 100.0);
+		f.ok(Command::CanvasSize {
+			width: 200,
+			height: 150,
+			anchor: Anchor9::Center,
+		});
+		assert_eq!((f.text_cache(id).width(), f.text_cache(id).height()), (200, 150));
+		assert_eq!(f.text(id).transform[4], 0.0, "a centre canvas resize moves the origin");
+		assert_eq!(f.text(id).transform[5], 25.0, "by the anchor's share of the difference");
+		f.ok(Command::Crop {
+			rect: (0, 0, 100, 100),
+			angle_deg: 0.0,
+			delete_cropped: false,
+		});
+		assert_eq!((f.text_cache(id).width(), f.text_cache(id).height()), (100, 100));
+		assert_eq!(f.text(id).transform[4], -100.0, "the crop's origin folds in too");
+	}
+
+	#[test]
+	fn a_text_layer_converts_its_run_colours_with_the_document() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 0.0, 0.0);
+		f.ok(Command::AssignProfile {
+			profile: ColorProfile::AdobeRgb1998,
+		});
+		let mut content = f.text(id);
+		content.runs[0].color = [100, 200, 300, 65_535];
+		content.runs[0].style = FontStyle::Bold;
+		f.set_text(id, content, [0.0; 4]);
+		f.clear_text_cache(id);
+		f.ok_with_ops(Command::ConvertProfile {
+			profile: ColorProfile::Srgb,
+			intent: RenderingIntent::RelativeColorimetric,
+			bpc: true,
+		});
+		assert_eq!(f.text(id).runs[0].style, FontStyle::Bold, "the formatting stays");
+		assert!(!f.dirty_text_tiles(id).is_empty(), "the colours changed, so the tiles have to be drawn again");
+	}
+
+	#[test]
+	fn rasterising_a_text_layer_keeps_its_identity() {
+		let mut f = Fixture::new();
+		let id = f.add_text("Hello", 5.0, 5.0);
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(id),
+			props: LayerPropsPatch {
+				opacity: Some(0.25),
+				..Default::default()
+			},
+		});
+		f.ok_with_ops(Command::Rasterize {
+			layers: vec![LayerRef::Id(id)],
+		});
+		let (image, offset) = f.pixel(id);
+		assert_eq!(offset, (0, 0));
+		assert_eq!((image.width(), image.height()), (400, 300));
+		assert_eq!(f.layer(id).opacity, 0.25, "rasterising keeps the layer's own settings");
+		assert_eq!(f.name(id), "Hello");
+		assert!(text_layers(&f.doc).is_empty(), "and it is no longer a text layer");
+	}
+
+	#[test]
+	fn a_document_without_text_keeps_no_text_state() {
+		let mut f = Fixture::new();
+		f.add_pixel("Layer 1");
+		f.ok(Command::RotateCanvas { quarter_turns: 2 });
+		assert!(text_layers(&f.doc).is_empty());
 	}
 }
 

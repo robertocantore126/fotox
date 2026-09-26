@@ -24,6 +24,7 @@ pub mod mips;
 pub mod ops;
 pub mod selection;
 pub mod stroke;
+pub mod text;
 pub mod thumbs;
 pub mod tools;
 pub mod transform_preview;
@@ -199,6 +200,8 @@ pub enum CursorShape {
 	Move,
 	/// Brush outline is drawn by the viewport overlay; hide the OS cursor.
 	None,
+	/// The I-beam of the Type tool (M6-T07).
+	Text,
 }
 
 /// Where the engine delivers its outputs. The shell wraps its event-loop

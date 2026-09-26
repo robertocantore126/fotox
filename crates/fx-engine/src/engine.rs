@@ -189,6 +189,8 @@ struct Engine {
 	preview_latest: HashMap<DocId, Arc<AtomicU64>>,
 	/// The last filter applied, for Filter ▸ Last Filter (Ctrl+F).
 	last_filter: Option<FilterParams>,
+	/// The font list went to the UI (M6-T07), the first time Type was picked.
+	fonts_sent: bool,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -328,6 +330,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		ops: EngineOps::default(),
 		preview_latest: HashMap::new(),
 		last_filter: None,
+		fonts_sent: false,
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -595,6 +598,31 @@ impl Engine {
 		changed
 	}
 
+	/// Run `f` on the active document's active tool and apply its answer.
+	fn with_active_tool(&mut self, f: impl FnOnce(&mut Box<dyn crate::tools::Tool>, &mut ToolContext<'_>) -> ToolResult) {
+		let Some(doc_id) = self.docs.active_id() else { return };
+		let tool_id = self.docs.get(doc_id).map_or_else(String::new, |open| open.view.tool.clone());
+		let store = self.store.clone();
+		let result = match (self.tools.get(&tool_id), self.docs.get_mut(doc_id)) {
+			(Some(tool), Some(open)) => {
+				let mask_target = open.paints_mask();
+				let mut ctx = ToolContext {
+					doc: &mut open.doc,
+					store: &store,
+					ops: &self.ops,
+					settings: &self.settings,
+					view: open.view.view,
+					mask_target,
+				};
+				f(tool, &mut ctx)
+			}
+			_ => return,
+		};
+		let mut changed = Changed::default();
+		self.apply_tool_result(doc_id, result, &mut changed);
+		self.apply(changed);
+	}
+
 	/// Apply what a tool answered (M5-T01): the cursor, a status line, a picked
 	/// colour for the UI, a command to execute (R1), or an overlay redraw
 	/// (M5-T04: a marquee or lasso rubber band, which needs no re-composite).
@@ -620,6 +648,27 @@ impl Engine {
 		}
 		for event in result.strokes {
 			self.stroke_event(doc_id, event);
+		}
+		// The Type tool edits the document outside the history (M6-T07).
+		if result.doc_changed
+			&& let Some(open) = self.docs.get_mut(doc_id)
+		{
+			open.changed();
+			self.send_layers();
+			self.request_frame();
+		}
+		match result.text_session {
+			Some(crate::tools::type_tool::TextSession::Open { text, selection }) => {
+				self.to_ui(&EngineToUi::TextEdit { open: true, text, selection });
+			}
+			Some(crate::tools::type_tool::TextSession::Closed) => {
+				self.to_ui(&EngineToUi::TextEdit {
+					open: false,
+					text: String::new(),
+					selection: (0, 0),
+				});
+			}
+			None => {}
 		}
 		if result.redraw {
 			self.request_frame();
@@ -886,7 +935,11 @@ impl Engine {
 			}
 			UiToEngine::ToolOptions { tool, options } => {
 				let transform = tool == "_transform";
+				let active = self.docs.active_mut().is_some_and(|open| open.view.tool == tool);
 				self.settings.options.insert(tool, options);
+				if active {
+					self.with_active_tool(|tool, ctx| tool.options_changed(ctx));
+				}
 				// The transform bar's Interpolation applies to the box that is up.
 				if transform && self.transform.is_some() {
 					let filter = self.transform_filter();
@@ -903,6 +956,10 @@ impl Engine {
 				Changed::default()
 			}
 			UiToEngine::Key { key } => self.tool_key(&key),
+			UiToEngine::TextEdit { text, selection } => {
+				self.with_active_tool(|tool, ctx| tool.text_input(ctx, &text, selection));
+				Changed::default()
+			}
 			UiToEngine::ProofSetup {
 				doc,
 				path,
@@ -1056,6 +1113,21 @@ impl Engine {
 			// Likewise export: the save dialog, then `EngineInput::Export`.
 			"export:png" | "export:tiff" | "export:jpg" | "export:as" => return Changed::default(),
 			_ => {}
+		}
+		// Leaving a tool finishes what it has under way (the Type tool commits).
+		if id.starts_with("tool:") {
+			self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+			if id == "tool:type" && !self.fonts_sent {
+				self.fonts_sent = true;
+				let families = crate::text::families()
+					.into_iter()
+					.map(|f| fx_protocol::FontFamilyInfo {
+						name: f.name,
+						styles: f.styles.iter().map(|s| s.label().to_owned()).collect(),
+					})
+					.collect();
+				self.to_ui(&EngineToUi::Fonts { families });
+			}
 		}
 		if let Some(changed) = self.view_mut().action(id) {
 			let mut changed = changed;
@@ -2038,6 +2110,7 @@ impl Engine {
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
 		self.end_stroke();
+		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 		// Any other edit while a transform box is up drops the box (Photoshop
 		// greys everything else out; here the edit wins).
 		if matches!(self.transform, Some((doc, _)) if doc == id) && !matches!(command, Command::Transform { .. }) {
@@ -2121,6 +2194,8 @@ impl Engine {
 	/// Undo (`redo == false`) or redo one step.
 	fn step_history(&mut self, id: DocId, redo: bool) {
 		self.end_stroke();
+		// FAST: undo while typing commits first, then undoes the commit.
+		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 		if matches!(self.transform, Some((doc, _)) if doc == id) {
 			// Undo while the box is up cancels the box, as in Photoshop.
 			self.end_transform(false);
@@ -2369,7 +2444,7 @@ impl Engine {
 		let mut layers: Vec<LayerId> = Vec::new();
 		if id == "raster:all" {
 			doc.doc.walk(|layer, _| {
-				if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::SolidFill { .. }) {
+				if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. }) {
 					layers.push(layer.id);
 				}
 			});
@@ -2380,6 +2455,7 @@ impl Engine {
 			let wanted = match kind {
 				Some(LayerKind::Shape { .. }) => id == "raster:shape" || id == "raster:layer",
 				Some(LayerKind::SolidFill { .. }) => id == "raster:layer",
+				Some(LayerKind::Text { .. }) => id == "raster:type" || id == "raster:layer",
 				_ => false,
 			};
 			if wanted {

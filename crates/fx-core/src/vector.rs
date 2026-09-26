@@ -21,6 +21,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The identity `[a, b, c, d, e, f]`: local coordinates are document
+/// coordinates. Starting point of every shape and text layer's placement.
+pub const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
 /// One element of a path, in shape-local coordinates — the element set PSD
 /// stores for a vector path.
 ///

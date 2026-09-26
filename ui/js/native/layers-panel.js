@@ -349,6 +349,8 @@ function row(i, v) {
 
   let thumb;
   if (l.kind === "group") thumb = h("span", { class: "pthumb adj" }, icon("i-group", "ic sm"));
+  // A text layer shows Photoshop's "T" (M6-T07).
+  else if (l.kind === "text") thumb = h("span", { class: "pthumb adj", "data-tip": "Text layer", style: { fontWeight: "700", fontFamily: "serif", display: "grid", placeItems: "center" }, text: "T" });
   else if (l.kind === "adjustment") {
     thumb = h("span", {
       class: "pthumb adj", "data-tip": "Double-click to edit the adjustment",

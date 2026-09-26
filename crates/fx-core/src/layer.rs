@@ -4,6 +4,7 @@ use fx_tiles::TiledImage;
 use serde::{Deserialize, Serialize};
 
 use crate::blend::BlendMode;
+use crate::text::{TextAlign, TextAntialias, TextFrame, TextRun};
 use crate::vector::{Paint, StrokeStyle, VectorShape};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -175,6 +176,106 @@ pub enum LayerKind {
 		/// Document-sized, one level per document mip level.
 		cache: TiledImage,
 	},
+	/// A text layer (M6-T07): the string and its formatting runs are the truth,
+	/// and `cache` holds the tiles laid out and rendered from them, at the level
+	/// being drawn — the same derived-tile model as a shape layer (D-055).
+	Text {
+		text: String,
+		runs: Vec<TextRun>,
+		frame: TextFrame,
+		align: TextAlign,
+		antialias: TextAntialias,
+		/// Local → document, `[a, b, c, d, e, f]`; the frame's origin is the
+		/// matrix's translation.
+		transform: [f64; 6],
+		cache: TiledImage,
+	},
+}
+
+impl LayerKind {
+	/// Whether the layer draws itself from parameters instead of storing
+	/// pixels: both kinds have a derived tile cache (M6-T06/T07).
+	pub fn is_derived(&self) -> bool {
+		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. })
+	}
+
+	/// Whether a rasterizer can turn it into pixels (Layer ▸ Rasterize).
+	pub fn is_rasterizable(&self) -> bool {
+		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. })
+	}
+
+	/// The derived cache of a shape or text layer, when it has one.
+	pub fn derived_cache(&self) -> Option<&TiledImage> {
+		match self {
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Some(cache),
+			_ => None,
+		}
+	}
+
+	/// The derived cache, to rebuild it.
+	pub fn derived_cache_mut(&mut self) -> Option<&mut TiledImage> {
+		match self {
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Some(cache),
+			_ => None,
+		}
+	}
+
+	/// A shape or text layer's placement matrix.
+	pub fn transform(&self) -> Option<[f64; 6]> {
+		match self {
+			LayerKind::Shape { transform, .. } | LayerKind::Text { transform, .. } => Some(*transform),
+			_ => None,
+		}
+	}
+
+	/// Set the placement of a shape or text layer. `false` for another kind.
+	pub fn set_transform(&mut self, matrix: [f64; 6]) -> bool {
+		match self {
+			LayerKind::Shape { transform, .. } | LayerKind::Text { transform, .. } => {
+				*transform = matrix;
+				true
+			}
+			_ => false,
+		}
+	}
+
+	/// The placement and derived cache of a generated layer, to fold a
+	/// canvas-level mapping in and rebuild what it holds (M6-T06/T07). `None`
+	/// for a layer whose pixels are authoritative.
+	pub fn derived_placement(&mut self) -> Option<(&mut [f64; 6], &mut TiledImage)> {
+		match self {
+			LayerKind::Shape { transform, cache, .. } | LayerKind::Text { transform, cache, .. } => Some((transform, cache)),
+			_ => None,
+		}
+	}
+
+	/// Whether the layer is a text layer, whose content the Type tool edits.
+	pub fn is_text(&self) -> bool {
+		matches!(self, LayerKind::Text { .. })
+	}
+
+	/// A text layer's content, everything but its cache.
+	pub fn text_content(&self) -> Option<crate::text::TextContent> {
+		match self {
+			LayerKind::Text {
+				text,
+				runs,
+				frame,
+				align,
+				antialias,
+				transform,
+				..
+			} => Some(crate::text::TextContent {
+				text: text.clone(),
+				runs: runs.clone(),
+				frame: *frame,
+				align: *align,
+				antialias: *antialias,
+				transform: *transform,
+			}),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Clone, Debug)]

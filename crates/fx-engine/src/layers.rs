@@ -84,6 +84,7 @@ fn layer_kind(kind: &LayerKind) -> LayerInfoKind {
 		LayerKind::Adjustment(_) => LayerInfoKind::Adjustment,
 		LayerKind::SolidFill { .. } => LayerInfoKind::SolidFill,
 		LayerKind::Shape { .. } => LayerInfoKind::Shape,
+		LayerKind::Text { .. } => LayerInfoKind::Text,
 	}
 }
 

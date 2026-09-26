@@ -110,6 +110,12 @@ lcms2 = "6.2"
 # tiny-skia's anti-aliased CPU renderer (decision D-050)
 tiny-skia = "0.12"
 
+# text layout, glyph outlines and system font enumeration for text layers
+# (decision D-051): parley lays out, skrifa outlines, fontique lists fonts
+parley = "0.9"
+skrifa = "0.42"
+fontique = "0.9"
+
 # dev
 criterion = "0.8"
 

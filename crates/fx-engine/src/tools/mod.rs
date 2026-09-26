@@ -28,6 +28,7 @@ pub mod paint;
 pub mod path_select;
 pub mod shape;
 pub mod transform;
+pub mod type_tool;
 pub mod wand;
 
 pub use eyedropper::sample_pixel;
@@ -260,6 +261,12 @@ pub struct ToolResult {
 	pub redraw: bool,
 	/// Brush stroke events for the engine to paint (M5-T07), in order.
 	pub strokes: Vec<StrokeEvent>,
+	/// The tool changed the document outside the history (the Type tool's
+	/// live edit, M6-T07): the engine refreshes the snapshot and the panels.
+	pub doc_changed: bool,
+	/// The Type tool's session changed (M6-T07): the UI shows or hides its
+	/// textarea.
+	pub text_session: Option<type_tool::TextSession>,
 }
 
 /// What a painting tool asks the engine to do with its stroke (M5-T07).
@@ -326,6 +333,22 @@ pub trait Tool {
 	fn selection_nudge(&self) -> Option<(i32, i32)> {
 		None
 	}
+
+	/// The UI's text input for the Type tool (M6-T07): the whole text and the
+	/// selection as byte offsets.
+	fn text_input(&mut self, _ctx: &mut ToolContext<'_>, _text: &str, _selection: (usize, usize)) -> ToolResult {
+		ToolResult::default()
+	}
+
+	/// The tool's option bar changed.
+	fn options_changed(&mut self, _ctx: &mut ToolContext<'_>) -> ToolResult {
+		ToolResult::default()
+	}
+
+	/// Another tool is being picked: finish what is under way.
+	fn deactivate(&mut self, _ctx: &mut ToolContext<'_>) -> ToolResult {
+		ToolResult::default()
+	}
 }
 
 /// The tool registry: one boxed tool per id, created on first use, so a tool's
@@ -380,6 +403,7 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"shape-polygon" => Some(Box::new(shape::Shape::new("shape-polygon", shape::Kind::Polygon))),
 		"shape-line" => Some(Box::new(shape::Shape::new("shape-line", shape::Kind::Line))),
 		"path-select" => Some(Box::new(path_select::PathSelect::default())),
+		"type" => Some(Box::new(type_tool::TypeTool::default())),
 		"quick-select" | "object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		_ => None,
 	}

@@ -424,6 +424,28 @@ impl Builder<'_> {
 					clip,
 				}
 			}
+			// A text layer's pixels are its cache too: laid out from the string
+			// and rasterised at this level, on demand (M6-T07). The run colours
+			// live in the tiles, so the op is the same as for a shape's.
+			LayerKind::Text { text, cache, .. } => {
+				if text.is_empty() {
+					return Vec::new();
+				}
+				let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Vector) else {
+					return Vec::new();
+				};
+				if quad.all_empty() {
+					return Vec::new();
+				}
+				Op::Layer {
+					layer: layer.id,
+					source: Source::Tiles(quad),
+					blend,
+					alpha,
+					mask,
+					clip,
+				}
+			}
 			LayerKind::Adjustment(adjustment) => {
 				let adjust = match adjustment {
 					Adjustment::HueSaturation {

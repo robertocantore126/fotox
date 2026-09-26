@@ -114,11 +114,11 @@ export const optionBars = {
   "anchor-convert": [{ type: "label", text: "Drag a direction handle to convert a point" }],
 
   type: [
-    { type: "select", text: "", options: ["Open Sans", "Arimo", "Bitter", "Lato", "Lora", "Merriweather", "Montserrat", "Open Sans Condensed", "Oswald", "Playfair Display", "Poppins", "Raleway", "Roboto", "Roboto Condensed", "Source Sans Pro", "Ubuntu"], value: "Open Sans", width: 130 },
-    { type: "select", text: "", options: ["Regular", "Italic", "Bold", "Bold Italic"], value: "Regular" },
-    { type: "num", text: "", value: "24", unit: "pt", width: 40 },
-    { type: "select", text: "", options: ["Sharp", "Crisp", "Strong", "Smooth", "None"], value: "Sharp" },
-    { type: "btngroup", icons: ["i-quote", "i-props", "i-quote"], titles: ["Left align text", "Center text", "Right align text"], active: 0 },
+    { type: "select", key: "Font", text: "", options: ["Open Sans", "Arimo", "Bitter", "Lato", "Lora", "Merriweather", "Montserrat", "Open Sans Condensed", "Oswald", "Playfair Display", "Poppins", "Raleway", "Roboto", "Roboto Condensed", "Source Sans Pro", "Ubuntu"], value: "Open Sans", width: 130 },
+    { type: "select", key: "Style", text: "", options: ["Regular", "Italic", "Bold", "Bold Italic"], value: "Regular" },
+    { type: "num", key: "Size", text: "", value: "24", unit: "pt", width: 40 },
+    { type: "select", key: "Anti-alias", text: "", options: ["Sharp", "Crisp", "Strong", "Smooth", "None"], value: "Sharp" },
+    { type: "btngroup", key: "Align", icons: ["i-quote", "i-props", "i-quote"], titles: ["Left align text", "Center text", "Right align text"], active: 0 },
     { type: "select", text: "", options: ["Faux Bold", "Faux Italic"], value: "Faux Bold" },
     { type: "swatch", title: "Text colour" },
   ],

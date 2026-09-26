@@ -19,6 +19,7 @@ pub mod ops;
 pub mod pixels;
 pub mod selection;
 pub mod stroke;
+pub mod text;
 pub mod transform;
 pub mod vector;
 
@@ -31,5 +32,6 @@ pub use history::History;
 pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask};
 pub use ops::{Conversion, FilterParams, PixelOps};
 pub use selection::{SelectMode, SelectModify, Selection, SelectionShape, WandParams};
+pub use text::{FontStyle, TextAlign, TextAntialias, TextContent, TextFrame, TextRun};
 pub use transform::{Anchor9, BezierPatch, Filter, Mapping, Permutation, dest_rect};
 pub use vector::{Paint, PathEl, StrokeAlign, StrokeStyle, VectorShape};

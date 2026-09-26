@@ -20,6 +20,8 @@ rayon = { workspace = true }
 half = { workspace = true }
 wgpu-sync = { workspace = true }
 tiny-skia = { workspace = true }
+parley = { workspace = true }
+skrifa = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

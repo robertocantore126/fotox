@@ -99,6 +99,10 @@ pub enum LayerKindEntry {
 		#[serde(default)]
 		transform: [f64; 6],
 	},
+	/// A text layer (M6-T07): its content; the cache is rebuilt after opening.
+	Text {
+		content: fx_core::TextContent,
+	},
 }
 
 /// A layer mask.
@@ -272,6 +276,9 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 				stroke: stroke.clone(),
 				transform: *transform,
 			},
+			LayerKind::Text { .. } => LayerKindEntry::Text {
+				content: layer.kind.text_content().unwrap_or_default(),
+			},
 		},
 	}
 }
@@ -382,6 +389,15 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			fill: *fill,
 			stroke: stroke.clone(),
 			transform: *transform,
+			cache: TiledImage::derived(size.0, size.1, format),
+		},
+		LayerKindEntry::Text { content } => LayerKind::Text {
+			text: content.text.clone(),
+			runs: content.runs.clone(),
+			frame: content.frame,
+			align: content.align,
+			antialias: content.antialias,
+			transform: content.transform,
 			cache: TiledImage::derived(size.0, size.1, format),
 		},
 	};

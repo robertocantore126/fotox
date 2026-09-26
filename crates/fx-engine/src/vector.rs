@@ -48,7 +48,7 @@ pub fn draw_shape_tiles(geometry: &ShapeGeometry<'_>, cache: &mut TiledImage, st
 }
 
 /// The slot a freshly rendered buffer becomes: uniform tiles cost no memory.
-fn slot_for(buffer: TileBuffer, format: PixelFormat, store: &TileStore) -> TileSlot {
+pub(crate) fn slot_for(buffer: TileBuffer, format: PixelFormat, store: &TileStore) -> TileSlot {
 	match buffer.uniform_value() {
 		Some(v) if v.is_transparent(format) || (!format.has_alpha() && v.0[0] == 0) => TileSlot::Empty,
 		Some(v) => TileSlot::Solid(v),
@@ -69,7 +69,7 @@ pub fn prepare_level0(doc: &mut fx_core::Document, store: &TileStore, layers: Op
 		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
 			return;
 		}
-		if let LayerKind::Shape { cache, .. } = &layer.kind {
+		if let Some(cache) = layer.kind.derived_cache() {
 			requests.extend(cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, 0, tx, ty)));
 		}
 	});
@@ -91,6 +91,11 @@ pub fn draw_requests(doc: &mut fx_core::Document, store: &TileStore, requests: &
 	}
 	let mut drawn = 0;
 	for (id, tiles) in by_layer {
+		// Text layers (M6-T07) share the request path: lay out, then draw.
+		if doc.layer(id).is_some_and(|layer| layer.kind.is_text()) {
+			drawn += crate::text::draw_text_tiles(doc, id, store, &tiles);
+			continue;
+		}
 		let Some(layer) = doc.layer_mut(id) else { continue };
 		let LayerKind::Shape {
 			shape,

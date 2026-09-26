@@ -37,7 +37,7 @@ pub fn active_pixels(doc: &Document) -> Option<(&TiledImage, (i32, i32))> {
 	let id = doc.active_layer()?;
 	match &doc.layer(id)?.kind {
 		LayerKind::Pixel { image, offset } => Some((image, *offset)),
-		LayerKind::Shape { cache, .. } => Some((cache, (0, 0))),
+		LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Some((cache, (0, 0))),
 		_ => None,
 	}
 }

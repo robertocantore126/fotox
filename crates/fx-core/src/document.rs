@@ -65,6 +65,9 @@ pub(crate) enum NameKind {
 	Polygon,
 	Star,
 	Line,
+	// M6-T07. A text layer is named after its own first line ("Hello"), so the
+	// counter is only used for a layer with no text yet ("Type 1").
+	Type,
 }
 
 /// Number of per-kind default-name counters of a document
@@ -72,7 +75,7 @@ pub(crate) enum NameKind {
 pub const NAME_KINDS: usize = NameKind::COUNT;
 
 impl NameKind {
-	const COUNT: usize = 24;
+	const COUNT: usize = 25;
 
 	/// The name Photoshop gives the first layer of this kind; the counter is
 	/// appended ("Curves 1").
@@ -102,6 +105,7 @@ impl NameKind {
 			NameKind::Polygon => "Polygon",
 			NameKind::Star => "Star",
 			NameKind::Line => "Line",
+			NameKind::Type => "Type",
 		}
 	}
 
@@ -375,8 +379,9 @@ mod tests {
 		// Counters are saved by index in `.fxd` manifests: kinds are only ever
 		// appended, and COUNT follows the last one.
 		assert_eq!(NameKind::Invert as usize, 8, "the M2 kinds keep their indices");
+		assert_eq!(NameKind::BlackWhite as usize, 16, "the M4 kinds follow them");
 		assert_eq!(
-			NameKind::BlackWhite as usize,
+			NameKind::Type as usize,
 			NameKind::COUNT - 1,
 			"a new NameKind goes at the end, and COUNT must grow"
 		);

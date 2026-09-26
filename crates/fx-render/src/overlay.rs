@@ -48,6 +48,10 @@ pub enum OverlayItem {
 	/// the quad in either direction; a straightened crop box (and any box under
 	/// a rotated view, M6-T05) is not axis-aligned on screen.
 	Shade { quad: [(f64, f64); 4], color: [f32; 4] },
+	/// A convex document quadrilateral, filled — the *inside* counterpart of
+	/// [`OverlayItem::Shade`]. The Type tool paints the text selection with it
+	/// (M6-T07); the corners go round the quad in either direction.
+	Fill { quad: [(f64, f64); 4], color: [f32; 4] },
 }
 
 /// Everything the tools draw over the document this frame.
@@ -81,6 +85,10 @@ impl OverlayItem {
 				quad: quad.map(shift),
 				color: *color,
 			},
+			OverlayItem::Fill { quad, color } => OverlayItem::Fill {
+				quad: quad.map(shift),
+				color: *color,
+			},
 		}
 	}
 }
@@ -90,7 +98,7 @@ impl Overlay {
 	pub fn has_ants(&self) -> bool {
 		self.items.iter().any(|item| match item {
 			OverlayItem::Polyline { style, .. } | OverlayItem::Circle { style, .. } => *style == OverlayStyle::Ants,
-			OverlayItem::Handle { .. } | OverlayItem::Crosshair { .. } | OverlayItem::Shade { .. } => false,
+			OverlayItem::Handle { .. } | OverlayItem::Crosshair { .. } | OverlayItem::Shade { .. } | OverlayItem::Fill { .. } => false,
 		})
 	}
 }
@@ -164,6 +172,10 @@ pub fn tessellate(overlay: &Overlay, view: &ViewTransform, viewport: ViewportSiz
 			OverlayItem::Shade { quad, color } => {
 				let screen = quad.map(|(x, y)| to_screen(x, y));
 				shade(&screen, [viewport.width as f32, viewport.height as f32], *color, &mut out);
+			}
+			OverlayItem::Fill { quad, color } => {
+				let screen = quad.map(|(x, y)| to_screen(x, y));
+				fill(screen, *color, &mut out);
 			}
 		}
 	}
