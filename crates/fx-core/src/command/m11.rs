@@ -397,14 +397,28 @@ pub(super) fn content_aware_fill(
 
 /// The canvas pixels a selection covers, read straight from a layer: for a
 /// patch / move, the content under `selection` shifted by `(dx, dy)`.
-fn shifted_reader<'a>(image: &'a TiledImage, offset: (i32, i32), store: &'a TileStore) -> impl FnMut(i64, i64) -> Px + 'a {
+///
+/// A tile that cannot be read is recorded in `failed` (the first error) and
+/// reads transparent meanwhile; the caller checks `failed` before writing
+/// anything (HARDEN H3: it used to paint the transparency into the layer).
+fn shifted_reader<'a>(
+	image: &'a TiledImage,
+	offset: (i32, i32),
+	store: &'a TileStore,
+	failed: &'a std::sync::Mutex<Option<CommandError>>,
+) -> impl FnMut(i64, i64) -> Px + 'a {
 	let tile = i64::from(TILE_SIZE);
 	let mut cache: HashMap<(i64, i64), Option<Vec<Px>>> = HashMap::new();
 	move |x, y| {
 		let (lx, ly) = (x - i64::from(offset.0), y - i64::from(offset.1));
 		let key = (lx.div_euclid(tile), ly.div_euclid(tile));
-		// FAST: unwrap-free but a missing tile reads transparent.
-		let t = cache.entry(key).or_insert_with(|| layer_tile(image, key.0, key.1, store).ok().flatten());
+		let t = cache.entry(key).or_insert_with(|| match layer_tile(image, key.0, key.1, store) {
+			Ok(t) => t,
+			Err(error) => {
+				failed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_or_insert(error);
+				None
+			}
+		});
 		match t {
 			Some(p) => premul(p[(ly.rem_euclid(tile) * tile + lx.rem_euclid(tile)) as usize]),
 			None => [0.0; 4],
@@ -459,9 +473,14 @@ pub(super) fn patch(
 			// FAST: big patches are refused rather than solved on a pyramid window.
 			return Err(CommandError::NotAllowed("the patch is too large".into()));
 		}
-		let mut read = shifted_reader(&image, offset, ctx.tiles);
+		let failed = std::sync::Mutex::new(None);
+		let mut read = shifted_reader(&image, offset, ctx.tiles, &failed);
 		let before: Vec<Px> = (0..w * h).map(|i| read(r.0 + (i % w) as i64, r.1 + (i / w) as i64)).collect();
 		let source: Vec<Px> = (0..w * h).map(|i| read(r.0 + (i % w) as i64 + sx, r.1 + (i / w) as i64 + sy)).collect();
+		drop(read);
+		if let Some(error) = failed.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
+			return Err(error);
+		}
 		let mut reader = PatchReader::new(&hole, ctx.tiles, canvas);
 		let coverage = reader.patch(r.0, r.1, w, h)?;
 		let healed = ops.heal_blend(&coverage, &before, &source, w, h)?;
@@ -513,10 +532,16 @@ pub(super) fn content_aware_move(
 	moved.offset = (selection.offset.0 + dx as i32, selection.offset.1 + dy as i32);
 	let target = clip((hb.0 + dx, hb.1 + dy, hb.2 + dx, hb.3 + dy), canvas);
 	if target.0 < target.2 && target.1 < target.3 {
-		let read = std::sync::Mutex::new(shifted_reader(&image, offset, ctx.tiles));
+		let failed = std::sync::Mutex::new(None);
+		let read = std::sync::Mutex::new(shifted_reader(&image, offset, ctx.tiles, &failed));
 		write_through(&mut out, out_offset, &moved, target, canvas, ctx.tiles, &|x, y| {
 			(read.lock().expect("one thread"))(x - dx, y - dy)
 		})?;
+		drop(read);
+		// `out` is discarded with the error: the layer is not touched.
+		if let Some(error) = failed.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
+			return Err(error);
+		}
 	}
 	set_pixels(doc, id, out, out_offset);
 	// The selection follows the content.

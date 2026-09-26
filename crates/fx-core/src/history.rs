@@ -36,9 +36,20 @@ impl Default for History {
 impl History {
 	/// Apply a command to `doc` and record it. Selection-only commands are
 	/// applied without creating an undo step.
+	///
+	/// A command is all or nothing: when it fails, `doc` is put back as it was,
+	/// whatever the command had changed before it gave up (HARDEN H3 — several
+	/// commands validate as they go, and a half-applied edit with no History
+	/// step could not be undone).
 	pub fn execute(&mut self, doc: &mut Document, command: Command, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 		let before = doc.clone();
-		let effect = command.apply(doc, ctx)?;
+		let effect = match command.apply(doc, ctx) {
+			Ok(effect) => effect,
+			Err(error) => {
+				*doc = before;
+				return Err(error);
+			}
+		};
 		if !effect.selection_only {
 			self.redo.clear();
 			self.undo.push(HistoryEntry {
@@ -160,5 +171,52 @@ mod tests {
 		assert!(!history.undo(&mut doc));
 		assert!(history.redo(&mut doc));
 		assert_eq!(doc.layer(id).unwrap().opacity, 0.25);
+	}
+
+	/// HARDEN H3: a command that fails half-way leaves the document as it was
+	/// (MoveEach moved the first layer, then hit a locked one).
+	#[test]
+	fn a_failed_command_changes_nothing() {
+		let tiles = TileStore::new(TileStoreConfig::for_tests(std::env::temp_dir())).unwrap();
+		let mut ctx = CommandContext { tiles: &tiles, ops: None };
+		let mut doc = Document::new(
+			10,
+			10,
+			DocumentColor {
+				depth: BitDepth::U8,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		let pixel = |id| {
+			Layer::new(
+				id,
+				"P",
+				LayerKind::Pixel {
+					image: fx_tiles::TiledImage::new(10, 10, fx_tiles::PixelFormat::Rgba8),
+					offset: (0, 0),
+				},
+			)
+		};
+		let a = doc.allocate_layer_id();
+		let b = doc.allocate_layer_id();
+		let mut locked = pixel(b);
+		locked.locked_position = true;
+		doc.layers = vec![Arc::new(pixel(a)), Arc::new(locked)];
+		let mut history = History::default();
+		let result = history.execute(
+			&mut doc,
+			Command::MoveEach {
+				moves: vec![(LayerRef::Id(a), 5, 5), (LayerRef::Id(b), 5, 5)],
+				label: "Move".into(),
+			},
+			&mut ctx,
+		);
+		assert!(result.is_err(), "the locked layer refuses");
+		let LayerKind::Pixel { offset, .. } = &doc.layer(a).unwrap().kind else {
+			unreachable!()
+		};
+		assert_eq!(*offset, (0, 0), "and the first move is undone with it");
+		assert!(!history.can_undo(), "no step was recorded");
 	}
 }

@@ -797,7 +797,7 @@ impl Command {
 					if *dx == 0 && *dy == 0 {
 						continue;
 					}
-					// FAST: a refusal half-way leaves the earlier moves applied.
+					// A refusal half-way is undone by `History::execute` (all or nothing).
 					changed.extend(offset_layers(doc, std::slice::from_ref(layer), *dx, *dy)?.props_changed);
 				}
 				Ok(CommandEffect {
