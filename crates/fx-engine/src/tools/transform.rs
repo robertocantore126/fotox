@@ -133,6 +133,9 @@ pub struct Session {
 	drag: Option<Drag>,
 	hover: Option<Point>,
 	zoom: f64,
+	/// Select ▸ Transform Selection (M9-T02): the box transforms the
+	/// selection's coverage, not the layer.
+	pub selection: bool,
 }
 
 impl Session {
@@ -150,6 +153,7 @@ impl Session {
 			drag: None,
 			hover: None,
 			zoom: 1.0,
+			selection: false,
 		};
 		session.set_mode(mode);
 		session
@@ -360,6 +364,10 @@ impl Session {
 	/// The command Enter applies, or a cancel when nothing changed.
 	pub fn commit(&self) -> Update {
 		match self.mapping() {
+			Some(mapping) if !self.is_identity() && self.selection => Update::Commit(Command::TransformSelection {
+				mapping: Box::new(mapping),
+				filter: Filter::Bilinear,
+			}),
 			Some(mapping) if !self.is_identity() => Update::Commit(Command::Transform {
 				layer: LayerRef::Id(self.layer),
 				mapping: Box::new(mapping),

@@ -10,6 +10,8 @@ import * as bridge from "./native/bridge.js";
 import * as nativePanels from "./native/layers-panel.js";
 import * as nativeBrushes from "./native/brush-settings.js";
 import * as nativePatterns from "./native/patterns.js";
+import * as nativeChannels from "./native/channels-panel.js";
+import * as nativeInfo from "./native/info-panel.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -240,6 +242,7 @@ const renderers = {
   },
 
   channels() {
+    if (bridge.isNative) return nativeChannels.channelsPanel();
     const rows = [["RGB", "#b9b9bd", true], ["Red", "#e26060", true], ["Green", "#7ac74f", true], ["Blue", "#5b8df5", true],
       ["Alpha 1", "#d9d9de", false], ["Alpha 2", "#d9d9de", false]];
     const list = h("div", { class: "plist" });
@@ -368,6 +371,7 @@ const renderers = {
   },
 
   info() {
+    if (bridge.isNative) return nativeInfo.infoPanel();
     const wrap = h("div", { class: "pinfo" });
     const rows = h("div", { class: "pinfo-rows" });
     for (const [k, v] of mock.infoRows) {
@@ -491,6 +495,7 @@ const renderers = {
   },
 
   notes() {
+    if (bridge.isNative) return nativeInfo.notesPanel();
     return h("div", { class: "pnotes" }, listRow({ label: "Review note — check the headline kerning", thumb: h("span", { class: "pthumb note" }, icon("i-note", "ic sm")) }), bar([barBtn("i-plus", "New note"), barBtn("i-trash", "Delete note")]));
   },
 

@@ -20,6 +20,8 @@ import { isPrefsDialog, openPrefsDialog } from "./native/prefs.js";
 import { activeDocument } from "./native/documents.js";
 import { isGradientDialog, openGradientDialog, openGradientFillDialog } from "./native/gradients.js";
 import { isPatternDialog, openPatternFillDialog } from "./native/patterns.js";
+import { isChannelDialog, openChannelDialog } from "./native/channels-panel.js";
+import { isSelectionDialog, openSelectionDialog } from "./native/selections.js";
 import { activeLayerInfo } from "./native/layers-panel.js";
 import { dialogDef } from "./data/dialogs.js";
 
@@ -48,6 +50,8 @@ export function runAction(item) {
     return;
   }
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
+  // M8/M9 engine actions (brushes, patterns, measuring tools, Define Pattern).
+  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-pattern"].some((p) => a.startsWith(p))) return;
   // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
   // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
   // Layer ▸ Rasterize (M6-T06): the mock's "not implemented" toast must not
@@ -133,6 +137,8 @@ export function runAction(item) {
   // Gradients (M8-T03): New Fill Layer ▸ Gradient, the Gradient Editor.
   if (a.startsWith("dlg:") && bridge.isNative && isGradientDialog(a.slice(4))) { openGradientDialog(a.slice(4)); return; }
   if (a.startsWith("dlg:") && bridge.isNative && isPatternDialog(a.slice(4))) { openPatternFillDialog(false); return; }
+  if (a.startsWith("dlg:") && bridge.isNative && isChannelDialog(a.slice(4))) { openChannelDialog(a.slice(4)); return; }
+  if (a.startsWith("dlg:") && bridge.isNative && isSelectionDialog(a.slice(4))) { openSelectionDialog(a.slice(4)); return; }
   // In the app, Preferences are the engine's file (M7-T09).
   if (a.startsWith("dlg:") && bridge.isNative && isPrefsDialog(a.slice(4))) { openPrefsDialog(a.slice(4)); return; }
   // In the app, guides are the engine's (M7-T06).

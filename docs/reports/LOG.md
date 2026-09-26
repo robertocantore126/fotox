@@ -183,3 +183,75 @@ HARDEN reads this file first, so be honest about what is missing.
 ## M8-T11 — Acceptance: deferred to HARDEN (S24–S26, the tool-by-tool comparison with Photoshop feeding M14's VERIFY list).
 
 M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures that are already on `main` (M6 shape/text/rotate tests: rotate needs the engine's ops in fx-core tests, shape crop/dirty-tile expectations, "Type 1" naming, two vector tests); `cargo test -p fx-engine --lib` aborts (SIGABRT) in a GPU-less Linux container on `main` too. `fx-ops` (78) passes. M8 changed one test: `every_name_kind_has_a_counter` (two name kinds appended).
+
+## M9-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the card's five recommendations recorded as fast defaults D-068..D-072.
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
+
+## M9-T01 — Channels, Save / Load Selection, Quick Mask  (Claude, 2026-09-26)
+- Done: `fx_core::channel::Channel` in `Document::channels` (canvas-aligned grey, colour, opacity; `canvas_aligned` rewrites a selection tile by tile), saved in the `.fxd` (manifest `channels`, tiles written with the layers'); commands `SaveSelection` (new channel or Replace / Add / Subtract / Intersect into one), `LoadSelection` (Invert + the four modes), `DeleteChannel`, `DuplicateChannel`, `SetChannel`; `EngineToUi::Channels` with 48² thumbnails, resent when the list's signature changes; Channels panel (`ui/js/native/channels-panel.js`: RGB rows, alpha channels, Ctrl(+Shift/Alt)+click thumbnail = load, double-click = rename, load / save / duplicate / delete buttons) and native Save / Load Selection dialogs. Quick Mask: `Command::QuickMask { on }` + Q (`sel:quick-mask`): the selection becomes a red 50 % "Quick Mask" solid-fill layer on top whose mask is the unselected amount, painting targets that mask with the grey inverted (black adds red, as in Photoshop), Q again turns the mask back into the selection. Also added now for later cards: `Document::annotations`, `Command::{SelectBy, TransformSelection, SetAnnotations, PerspectiveCrop}`, `PixelOps::select_op`.
+- Skipped: showing R / G / B (or an alpha channel) as grey in the viewport and the channel eye toggles; drag rows onto the buttons; Quick Mask Options (colour, opacity, masked vs selected); a new empty channel; Tests (should check: save then load = same coverage; the four modes; channels round-trip through `.fxd`; Quick Mask paint then exit = the painted selection).
+- FAST: Quick Mask is a real layer (export / merge / flatten see it while it is on; it is found by its name); thumbnails point-sample level 0; the channel signature is a string of the first slots.
+- VERIFY: none.
+- Try it: make a selection, Select ▸ Save Selection; Deselect; Ctrl+click the thumbnail in Channels. Press Q, paint black / white, press Q.
+
+## M9-T02 — Grow, Similar, Transform Selection  (Claude, 2026-09-26)
+- Done: `fx_ops::select` (M9's selection algorithms: `assemble` builds a selection one row of tiles at a time, `Windows` reads apron windows across tiles); `select::grow` — the selected colours quantised into a 32³ table dilated by the tolerance; Similar = every matching pixel, Grow = a flood across tiles over the matches from the selection's boundary pixels; both keep the old selection. `Command::SelectBy { select: SelectOp, mode }` + `PixelOps::select_op` (engine `EngineOps::select`, sources = active layer or composite) run as jobs; `sel:grow` / `sel:similar` use the Magic Wand's Tolerance and Sample All Layers. Transform Selection: `sel:transform` puts M6-T04's box over the selection's bounds (`Session::selection`), Enter commits `Command::TransformSelection` (the canvas-aligned coverage resampled, pixels untouched, "Transform Selection").
+- Skipped: the live preview of the transformed ants (the box only); Tests (should check: Grow stops at an edge; Similar selects a separate same-coloured region; Transform Selection rotates the coverage and leaves the pixels).
+- FAST: the colour test is quantised to 32 levels per channel; Grow's flood runs on one thread with a bitset per reached tile.
+- VERIFY: Photoshop's Grow / Similar distance.
+- Try it: magic-wand a sky patch, Select ▸ Grow, Select ▸ Similar; Select ▸ Transform Selection, rotate, Enter.
+
+## M9-T03 — Color Range  (Claude, 2026-09-26)
+- Done: `SelectOp::ColorRange` + `fx_ops::select::range` (soft coverage per pixel, per tile, row by row): Sampled Colors (`1 − d / fuzziness`, nearest sample, optional localized fade), Reds … Magentas (±30° hue windows × saturation), Highlights / Midtones / Shadows (luminance against split points with 20-level ramps), Skin Tones (a hue / saturation / luminance box), Invert; runs on the composite as a job ("Color Range"). Native dialog in `ui/js/native/selections.js` (with Focus Area and Select and Mask).
+- Skipped: the dialog's live preview modes (Selection / Grayscale / Black / White Matte / Quick Mask — the result shows after OK), the image eyedropper with +/− samples (the swatches are the samples), Localized Color Clusters' centre, Out of Gamut, Detect Faces (M13); Tests (should check: sampled red on a hue ramp selects a band growing with fuzziness; Highlights pick the bright end; localized clusters drop the far region).
+- FAST: samples come from the foreground / background swatches.
+- VERIFY: every curve (D-064).
+- Try it: set the foreground to a colour in the image, Select ▸ Color Range…, Fuzziness 60.
+
+## M9-T04 — Focus Area  (Claude, 2026-09-26)
+- Done: `SelectOp::FocusArea` + `fx_ops::select::focus` (per tile with a 16 px apron: luminance detail at σ 1 and 2 as a DoG stand-in for the LoG, 9 × 9 energy, noise floor, `e / (e + 0.02)` normalisation, soft threshold at `1 − In-Focus Range`, Soften Edge = σ 2 blur), on the composite, as a job; dialog with In-Focus Range, Image Noise Level, Soften Edge. Shared helpers `focus::blur` / `box_mean`.
+- Skipped: the dialog's add / subtract brushes, preview and view modes, output to mask / new layer (use Select and Mask's output or Layer ▸ Layer Mask afterwards); Tests (should check: sharp-left / blurred-right synthetic selects the left half within a few pixels; the noise floor keeps a noisy flat area out).
+- FAST: each tile reads a 288² window (apron) through a small tile cache.
+- VERIFY: normalisation constant, threshold curve, Photoshop's slider meaning.
+- Try it: a photo with a shallow depth of field, Select ▸ Focus Area…
+
+## M9-T05 — Select and Mask  (Claude, 2026-09-26)
+- Done: `SelectOp::Refine(Refine)` + `fx_ops::select::refine` (D-070): only tiles whose apron is not uniformly 0 or 1 are worked (a big document costs its boundary); in the band a grey guided filter (He et al.) of the coverage guided by the luminance, window = Radius, Smart Radius keeps more of the input on strong guide edges; then Smooth, Feather, Contrast, Shift Edge. Select ▸ Select and Mask… (Alt+Ctrl+R) dialog: Radius, Smart Radius, Smooth, Feather, Contrast, Shift Edge, Output To Selection / Layer Mask / New Layer with Layer Mask (the output is queued and made once the job is done: `select-mask:output`, `after_job_m9`).
+- Skipped: Photoshop's modal workspace (view modes, Show Edge / Original, its Quick Selection / Refine Edge / Brush / Lasso tools), Decontaminate Colors, output to New Layer / New Document; Tests (should check: a soft-haired synthetic's band error halves; Shift Edge +50 % grows the selection).
+- FAST: a dialog without preview instead of the workspace; Radius ≤ 64, Feather ≤ 50; Shift Edge only moves partially-selected pixels.
+- VERIFY: guided-filter ε and window, the global refinements' curves.
+- Try it: a rough lasso around hair, Select ▸ Select and Mask…, Radius 20, Output To Layer Mask.
+
+## M9-T06 — Quick Selection tool  (Claude, 2026-09-26)
+- Done: `SelectOp::QuickSelect { dabs, sample_all, enhance_edge }` + `fx_ops::select::quick` (D-069): the stroke's window (dabs' bounds + 4 radii, ≤ 1536²) read once; the seeds' mean and spread give a colour tolerance; a 4-connected flood from the pixels under the dabs stops where the luminance gradient exceeds an edge threshold; Auto-Enhance softens the border. Tool `tools/quick_select.rs` ("quick-select", W): dabs every half radius, brush circle + path overlay, one "Quick Selection" step at release — Replace for the first stroke, then Add, Alt (or the Subtract mode) subtracts; Size from the option bar (`[`/`]` as for brushes).
+- Skipped: the live outline during the stroke (it updates at release); the coarse-level pass + boundary refinement of D-069; Select Subject (M13); Tests (should check: a stroke in a flat region bounded by a strong edge stops at the edge; Alt subtracts; live = replay).
+- FAST: level-0 window capped at 1536²; the tolerance and edge threshold are constants.
+- VERIFY: constants against Photoshop on Rob's photos (M9-T10).
+- Try it: W, drag inside an object with clear edges; Alt+drag to remove.
+
+## M9-T07 — Magnetic Lasso  (Claude, 2026-09-26)
+- Done: `fx_ops::select::livewire` (Sobel gradient → cost `1 − g + 0.02` with Contrast ignoring weak edges; 8-connected Dijkstra between two window pixels); tool `tools/magnetic.rs` ("lasso-magnet"): click to start, the live wire from the last anchor to the strongest edge within Width of the pointer (the composite's luminance, tiles cached for the gesture), a click adds an anchor, Frequency adds anchors automatically (spacing `20 + (100 − f)·3` px), Backspace removes the last anchor, Enter or a double-click closes into one `Command::Select` polygon with the mode / feather / anti-alias of the bar, Escape cancels.
+- Skipped: Alt switching to the freehand / polygonal lasso, pen pressure = width, a magnetic closing segment; Tests (should check: tracing near a synthetic disc closes on its edge within 1.5 px).
+- FAST: the live wire runs on the engine thread per pointer move (window up to ~2048²; composite tiles rendered on first use); the closing segment is straight.
+- VERIFY: cost function, Frequency spacing.
+- Try it: L's flyout ▸ Magnetic Lasso, click on an edge and move along it, double-click to close.
+
+## M9-T08 — Color Sampler, Ruler, Note, Count  (Claude, 2026-09-26)
+- Done: `fx_core::annotations` (notes, count groups, samplers) in `Document::annotations`, saved in the `.fxd` (D-072), edited by `Command::SetAnnotations` steps; `tools/measure.rs`: Color Sampler ("sampler", ≤ 10 points, Alt+click removes, Clear All), Ruler ("ruler-tool": X / Y / W / H / angle / length on the status line and in Info, Shift = 45° steps, Straighten Layer rotates the active layer so the line is level, Clear), Note ("note-tool": click adds, Alt+click deletes, Author, Clear All), Count ("counting": click adds to the current group, Alt+click removes, New Group, Clear). `EngineToUi::Annotations` after every edit with the samplers' values from the composite averaged over Sample Size (Point … 101 × 101); Info panel (sampler RGB, ruler, counts) and Notes panel (edit / delete notes) in `ui/js/native/info-panel.js`. The option-bar buttons' actions reach the active tool as keys.
+- Skipped: the protractor (Alt-drag from a ruler end), Straighten's crop, the sampler's second readout mode (HSB / Lab…), dragging samplers / notes, count labels and group colours / sizes, showing annotations while another tool is active, Tests (should check: a sampler's average; the ruler's angle; Straighten levels a tilted line; notes and counts round-trip through `.fxd`).
+- FAST: annotations are drawn only while their tool is active, as crosshairs / handles without numbers; the samplers are re-read from the composite on the engine thread at every edit.
+- VERIFY: Straighten's sign convention against Photoshop.
+- Try it: I's flyout ▸ Color Sampler, click the image, open Window ▸ Info; the Ruler along a tilted horizon, Straighten Layer.
+
+## M9-T09 — Perspective Crop  (Claude, 2026-09-26)
+- Done: `Command::PerspectiveCrop { quad, width, height }` (in `command/m9.rs`: the inverse of M6-T01's rectangle→quad homography resamples every pixel layer and mask through `resample_document`, clipped to the new canvas, selection dropped, "Perspective Crop", run as a job); tool `tools/perspective_crop.rs` ("crop-persp"): drag a box, move each corner (convex only), drag inside to move it, 3 × 3 grid, Enter / ✓ commits with the bar's W × H or the quad's average sides, Escape / ✗ cancels.
+- Skipped: Resolution, Front Image, Show Grid toggle; Tests (should check: a synthetic rectangle in perspective comes out axis-aligned within a pixel).
+- FAST: Bicubic Automatic always; shape and text layers keep their geometry (only pixel layers and masks are resampled, like Crop's straighten).
+- VERIFY: none.
+- Try it: C's flyout ▸ Perspective Crop, drag over a photographed document, move the corners onto its edges, Enter.
+
+## M9-T10 — Acceptance: deferred to HARDEN (S27–S29, Rob's photo comparisons of Color Range, Select and Mask and Quick Selection).
+
+M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as before M8, plus `fx-io` `a_shape_layer_round_trips_through_a_file`, which also fails on the commit before M8 (76ab901). `fx-ops` (78) passes. No M9 test was added (fast mode).

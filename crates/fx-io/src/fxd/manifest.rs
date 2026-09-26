@@ -53,6 +53,12 @@ pub struct Manifest {
 	/// The document's patterns (M8-T06). FAST: pixels as JSON numbers.
 	#[serde(default)]
 	pub patterns: Vec<fx_core::pattern::Pattern>,
+	/// Alpha channels (M9-T01).
+	#[serde(default)]
+	pub channels: Vec<ChannelEntry>,
+	/// Notes, counts, samplers (M9-T08).
+	#[serde(default)]
+	pub annotations: fx_core::annotations::Annotations,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -119,6 +125,15 @@ pub enum LayerKindEntry {
 	Text {
 		content: fx_core::TextContent,
 	},
+}
+
+/// An alpha channel (M9-T01).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelEntry {
+	pub name: String,
+	pub color: [u16; 4],
+	pub opacity: f32,
+	pub image: ImageEntry,
 }
 
 /// A layer mask.
@@ -247,6 +262,17 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		global_light: doc.global_light,
 		guides: doc.guides.clone(),
 		patterns: doc.patterns.clone(),
+		channels: doc
+			.channels
+			.iter()
+			.map(|c| ChannelEntry {
+				name: c.name.clone(),
+				color: c.color,
+				opacity: c.opacity,
+				image: image_entry(&c.image, tile_ref),
+			})
+			.collect(),
+		annotations: doc.annotations.clone(),
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
@@ -379,6 +405,13 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.global_light = manifest.global_light;
 	doc.guides = manifest.guides.clone();
 	doc.patterns = manifest.patterns.clone();
+	doc.annotations = manifest.annotations.clone();
+	for entry in &manifest.channels {
+		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_from_entry(&entry.image, file, store)?);
+		channel.color = entry.color;
+		channel.opacity = entry.opacity;
+		doc.channels.push(channel);
+	}
 	let mut counters = [0u32; fx_core::NAME_KINDS];
 	for (slot, value) in counters.iter_mut().zip(&manifest.name_counters) {
 		*slot = *value;

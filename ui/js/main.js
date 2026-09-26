@@ -25,6 +25,8 @@ import { initTools, sendColors } from "./native/tools.js";
 import { initBrushes, brushExtras } from "./native/brush-settings.js";
 import { initGradients } from "./native/gradients.js";
 import { initPatterns } from "./native/patterns.js";
+import { initChannels } from "./native/channels-panel.js";
+import { initInfo } from "./native/info-panel.js";
 import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
@@ -214,6 +216,8 @@ async function boot() {
   // Option-bar pickers of native modules (M8).
   initGradients();
   initPatterns();
+  initChannels();
+  initInfo();
 
   const shell = buildShell();
   buildMenubar(shell.menubar, menus);
@@ -232,7 +236,16 @@ async function boot() {
   initShortcuts();
 
   // eventi -------------------------------------------------------------
+  // Q is Quick Mask (M9-T01), not a tool: toggle it and keep the tool.
+  let lastTool = state.tool;
   on("tool", (id) => {
+    if (id === "quick-mask") {
+      if (bridge.isNative) bridge.send({ type: UI.ACTION, id: "sel:quick-mask" });
+      else toast("Quick Mask needs the app");
+      setTool(lastTool === "quick-mask" ? "brush" : lastTool);
+      return;
+    }
+    lastTool = id;
     // Every tool change passes here (toolbar, flyouts, single-key shortcuts,
     // menu actions): tell the engine, which pans with the Hand tool and will
     // route viewport input to the active tool (docs/tasks/M5.md, M5-T01).

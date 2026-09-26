@@ -319,7 +319,13 @@ impl Paint {
 		if !mask {
 			return base;
 		}
-		let lum = (0.299 * f64::from(base[0]) + 0.587 * f64::from(base[1]) + 0.114 * f64::from(base[2])).round() as u16;
+		let mut lum = (0.299 * f64::from(base[0]) + 0.587 * f64::from(base[1]) + 0.114 * f64::from(base[2])).round() as u16;
+		// Quick Mask (M9-T01): its mask holds the *unselected* amount, so black
+		// (Photoshop: add to the mask) paints white there.
+		// FAST: detected by the layer's name.
+		if ctx.doc.active_layer() == fx_core::command::m9::quick_mask_layer(ctx.doc) && ctx.doc.active_layer().is_some() {
+			lum = u16::MAX - lum;
+		}
 		[lum, lum, lum, u16::MAX]
 	}
 

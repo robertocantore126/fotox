@@ -204,6 +204,8 @@ struct Engine {
 	prefs: crate::prefs::Prefs,
 	/// Brush presets and patterns (M8-T01/T06).
 	resources: m8::Resources,
+	/// M9's per-document UI state (channel list signatures).
+	m9: m9::State,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -354,6 +356,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
 		resources: m8::Resources::load(),
+		m9: m9::State::default(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -1027,7 +1030,7 @@ impl Engine {
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
-				if self.m8_action(&id, &args) {
+				if self.m8_action(&id, &args) || self.m9_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -1936,6 +1939,8 @@ impl Engine {
 				for layer in effect.pixels_changed {
 					self.refresh_thumbnail(id, layer);
 				}
+				// Work queued behind a job (M9-T05: Select and Mask's output).
+				self.after_job_m9(id);
 			}
 			Err(error) => {
 				self.to_ui(&EngineToUi::Error { text: error.to_string() });
@@ -2454,6 +2459,8 @@ impl Engine {
 				self.request_frame();
 			}
 		}
+		// Channels, notes and samplers (M9).
+		self.after_edit_m9(id);
 	}
 
 	fn hot_expiry(&mut self) -> Option<Instant> {
@@ -3981,6 +3988,11 @@ fn is_pixel_job(command: &Command) -> bool {
 			// A gradient or pattern fill touches every selected tile (M8-T03/T06).
 			| Command::FillGradient { .. }
 			| Command::FillPattern { .. }
+			// Selections computed from pixels, Transform Selection, Perspective Crop (M9).
+			| Command::SelectBy { .. }
+			| Command::TransformSelection { .. }
+			| Command::PerspectiveCrop { .. }
+			| Command::SaveSelection { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
 			| Command::RotateCanvas { .. }
@@ -4007,6 +4019,10 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::MagicErase { .. } => "Magic Eraser".to_owned(),
 		Command::FillGradient { .. } => "Gradient".to_owned(),
 		Command::FillPattern { .. } => "Fill".to_owned(),
+		Command::SelectBy { select, .. } => select.label().to_owned(),
+		Command::TransformSelection { .. } => "Transform Selection".to_owned(),
+		Command::PerspectiveCrop { .. } => "Perspective Crop".to_owned(),
+		Command::SaveSelection { .. } => "Save Selection".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
 		}
@@ -4019,6 +4035,7 @@ fn pixel_job_label(command: &Command) -> String {
 }
 
 mod m8;
+mod m9;
 
 #[cfg(test)]
 mod tests {

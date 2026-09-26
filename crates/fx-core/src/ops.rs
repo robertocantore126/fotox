@@ -154,6 +154,12 @@ pub trait PixelOps: Send + Sync {
 		Err(CommandError::NotAllowed("painting needs the engine's brush engine".into()))
 	}
 
+	/// A selection computed from the document (M9-T02..T06). `None` =
+	/// nothing selected.
+	fn select_op(&self, _doc: &Document, _op: &crate::select_ops::SelectOp, _store: &TileStore) -> Result<Option<Selection>, CommandError> {
+		Err(CommandError::NotAllowed("this selection needs the engine".into()))
+	}
+
 	/// What Edit ▸ Paste pastes (M5-T05): the engine's clipboard. `None` =
 	/// empty.
 	fn clipboard(&self) -> Option<crate::pixels::ClipboardImage> {

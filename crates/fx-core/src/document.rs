@@ -31,6 +31,10 @@ pub struct Document {
 	/// The patterns the document uses (M8-T06): Pattern Stamp, bucket and
 	/// pattern fills, saved with it.
 	pub patterns: Vec<crate::pattern::Pattern>,
+	/// Alpha channels (M9-T01, D-068), saved with the document.
+	pub channels: Vec<crate::channel::Channel>,
+	/// Notes, counts and colour samplers (M9-T08, D-072), saved with it.
+	pub annotations: crate::annotations::Annotations,
 	next_id: u64,
 	/// How many layers of each kind this document has created, for the
 	/// Photoshop-style default names (`"Layer 1"`, `"Group 2"`, `"Curves 1"`).
@@ -182,6 +186,8 @@ impl Document {
 			global_light: 120.0,
 			guides: Vec::new(),
 			patterns: Vec::new(),
+			channels: Vec::new(),
+			annotations: Default::default(),
 			next_id: 1,
 			name_counters: [0; NameKind::COUNT],
 		}
