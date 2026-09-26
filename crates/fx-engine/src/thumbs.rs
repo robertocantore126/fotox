@@ -61,6 +61,12 @@ impl ThumbSource {
 				stroke: stroke.clone(),
 				transform: *transform,
 			}),
+			// FAST: a Smart Object's thumbnail is its source composite at its
+			// box's origin (the transform's scale / rotation are ignored).
+			LayerKind::Smart { smart, .. } => Some(Self::Pixels {
+				image: smart.source.composite.clone(),
+				offset: smart.bounds().map_or((0, 0), |(at, _)| at),
+			}),
 			_ => None,
 		}
 	}

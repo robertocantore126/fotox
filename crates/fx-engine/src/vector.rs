@@ -107,6 +107,11 @@ pub fn draw_requests(doc: &mut fx_core::Document, store: &TileStore, requests: &
 			drawn += crate::text::draw_text_tiles(doc, id, store, &tiles);
 			continue;
 		}
+		// Smart Objects (M12-T01).
+		if doc.layer(id).is_some_and(|layer| matches!(layer.kind, LayerKind::Smart { .. })) {
+			drawn += crate::smart::draw_smart_tiles(doc, id, store, &tiles);
+			continue;
+		}
 		// Gradient / pattern fill layers (M8-T03/T06).
 		if doc.layer(id).is_some_and(|layer| matches!(layer.kind, LayerKind::FillLayer { .. })) {
 			drawn += draw_fill_tiles(doc, id, store, &tiles);

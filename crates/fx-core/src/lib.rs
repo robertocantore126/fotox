@@ -25,6 +25,7 @@ pub mod pattern;
 pub mod pixels;
 pub mod select_ops;
 pub mod selection;
+pub mod smart;
 pub mod stroke;
 pub mod styles;
 pub mod text;

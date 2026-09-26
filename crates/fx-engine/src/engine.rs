@@ -232,6 +232,8 @@ struct Engine {
 	transform_latest: Arc<AtomicU64>,
 	/// When a drag's coarse preview is refined at the view level.
 	transform_refine: Option<Instant>,
+	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
+	smart_children: HashMap<DocId, (DocId, LayerId)>,
 }
 
 /// How long the pointer must rest before a dragged transform is previewed at
@@ -368,6 +370,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		transform: None,
 		transform_latest: Arc::new(AtomicU64::new(0)),
 		transform_refine: None,
+		smart_children: HashMap::new(),
 	};
 
 	loop {
@@ -1030,7 +1033,12 @@ impl Engine {
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
-				if self.m8_action(&id, &args) || self.m9_action(&id, &args) || self.m10_action(&id, &args) || self.m11_action(&id, &args) {
+				if self.m8_action(&id, &args)
+					|| self.m9_action(&id, &args)
+					|| self.m10_action(&id, &args)
+					|| self.m11_action(&id, &args)
+					|| self.m12_action(&id, &args)
+				{
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -1539,7 +1547,7 @@ impl Engine {
 		}
 		let Some(layer_id) = open.doc.active_layer() else { return };
 		let refusal = match open.doc.layer(layer_id) {
-			Some(layer) if !matches!(layer.kind, LayerKind::Pixel { .. }) => Some("Free Transform works on a pixel layer"),
+			Some(layer) if !matches!(layer.kind, LayerKind::Pixel { .. } | LayerKind::Smart { .. }) => Some("Free Transform works on a pixel layer"),
 			Some(layer) if layer.locked_position || layer.locked_pixels => Some("The layer is locked"),
 			None => Some("Select a layer to transform"),
 			_ => None,
@@ -1562,6 +1570,12 @@ impl Engine {
 			}
 		};
 		self.end_stroke();
+		// A Smart Object's preview reads its level-0 cache (M12-T01).
+		if let Some(open) = self.docs.get_mut(doc_id)
+			&& open.doc.layer(layer_id).is_some_and(|l| matches!(l.kind, LayerKind::Smart { .. }))
+		{
+			vector::prepare_level0(&mut open.doc, &self.store, Some(&[layer_id]));
+		}
 		let mut session = free_transform::Session::new(layer_id, rect, mode, filter);
 		session.custom = custom;
 		let status = session.status();
@@ -2814,7 +2828,7 @@ impl Engine {
 			doc.doc.walk(|layer, _| {
 				if matches!(
 					layer.kind,
-					LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. }
+					LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. } | LayerKind::Smart { .. }
 				) {
 					layers.push(layer.id);
 				}
@@ -2828,6 +2842,7 @@ impl Engine {
 				Some(LayerKind::SolidFill { .. }) => id == "raster:layer",
 				Some(LayerKind::FillLayer { .. }) => id == "raster:layer" || id == "raster:fill",
 				Some(LayerKind::Text { .. }) => id == "raster:type" || id == "raster:layer",
+				Some(LayerKind::Smart { .. }) => id == "raster:smart" || id == "raster:layer",
 				_ => false,
 			};
 			if wanted {
@@ -3370,6 +3385,9 @@ impl Engine {
 				},
 			);
 		}
+		// M12-T01: a placed file is a Smart Object (Place Embedded).
+		let placed = self.docs.get(doc).map(|o| o.doc.selected.clone()).unwrap_or_default();
+		self.convert_to_smart(doc, &placed);
 		if self.docs.active_id() != Some(doc) {
 			return;
 		}
@@ -4015,6 +4033,7 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::Patch { .. }
 			| Command::ContentAwareMove { .. }
 			| Command::ContentAwareScale { .. }
+			| Command::SetSmartFilters { .. }
 			| Command::SaveSelection { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
@@ -4049,6 +4068,7 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::Patch { .. } => "Patch Tool".to_owned(),
 		Command::ContentAwareMove { .. } => "Content-Aware Move".to_owned(),
 		Command::ContentAwareScale { .. } => "Content-Aware Scale".to_owned(),
+		Command::SetSmartFilters { label, .. } => label.clone(),
 		Command::SaveSelection { .. } => "Save Selection".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())
@@ -4063,6 +4083,7 @@ fn pixel_job_label(command: &Command) -> String {
 
 mod m10;
 mod m11;
+mod m12;
 mod m8;
 mod m9;
 

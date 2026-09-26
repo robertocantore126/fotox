@@ -528,8 +528,9 @@ impl Builder<'_> {
 				}
 			}
 			// A gradient / pattern fill layer (M8-T03/T06): drawn from its
-			// parameters at this level, like a shape.
-			LayerKind::FillLayer { cache, .. } => {
+			// parameters at this level, like a shape. A Smart Object (M12-T01)
+			// is resampled from its source at this level the same way.
+			LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => {
 				let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Vector) else {
 					return Vec::new();
 				};

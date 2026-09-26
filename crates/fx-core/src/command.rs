@@ -490,6 +490,22 @@ pub enum Command {
 		#[serde(default)]
 		protect_skin: bool,
 	},
+	/// Layer ▸ Smart Objects ▸ Convert to Smart Object (M12-T01).
+	ConvertToSmartObject {
+		layers: Vec<LayerRef>,
+	},
+	/// Layer ▸ Smart Objects ▸ New Smart Object via Copy (M12-T01).
+	NewSmartObjectViaCopy {
+		layer: LayerRef,
+	},
+	/// A Smart Object's Smart Filters (M12-T03): the list and the stack's eye.
+	SetSmartFilters {
+		layer: LayerRef,
+		filters: Vec<crate::smart::SmartFilter>,
+		#[serde(default = "default_true")]
+		enabled: bool,
+		label: String,
+	},
 	/// The Content-Aware Move tool's commit (M11-T04).
 	ContentAwareMove {
 		layer: LayerRef,
@@ -850,6 +866,14 @@ impl Command {
 				protect,
 				protect_skin,
 			} => m11::content_aware_scale(doc, layer, *width, *height, *amount, *protect, *protect_skin, ctx),
+			Command::ConvertToSmartObject { layers } => m12::convert_to_smart(doc, layers, ctx),
+			Command::NewSmartObjectViaCopy { layer } => m12::new_smart_via_copy(doc, layer),
+			Command::SetSmartFilters {
+				layer,
+				filters,
+				enabled,
+				label,
+			} => m12::set_smart_filters(doc, layer, filters, *enabled, label),
 			Command::ContentAwareMove { layer, dx, dy, extend } => m11::content_aware_move(doc, layer, *dx, *dy, *extend, ctx),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
@@ -910,6 +934,7 @@ impl Command {
 
 mod m10;
 pub mod m11;
+pub mod m12;
 mod m8;
 pub mod m9;
 
@@ -2903,6 +2928,10 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 		});
 	}
 	let id = resolve(doc, layer)?;
+	// A Smart Object only changes its transform (M12-T01).
+	if matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Smart { .. })) {
+		return m12::transform_smart(doc, id, mapping);
+	}
 	let ops = pixel_ops(ctx, "Free Transform")?;
 	let store = ctx.tiles;
 	let canvas = (doc.width, doc.height);
@@ -6639,4 +6668,8 @@ mod using_the_selection_tests {
 		assert_eq!(f.px(centred, 172, 72), [100, 200, 300, 65535]);
 		assert_eq!(f.px(centred, 171, 72)[3], 0);
 	}
+}
+
+fn default_true() -> bool {
+	true
 }

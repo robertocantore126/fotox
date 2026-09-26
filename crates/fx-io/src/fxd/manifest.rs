@@ -133,6 +133,28 @@ pub enum LayerKindEntry {
 	Text {
 		content: fx_core::TextContent,
 	},
+	/// A Smart Object (M12-T01, D-082): the nested document (its tiles in
+	/// the same file), its composite, the transform and the Smart Filters.
+	/// The cache is derived.
+	Smart {
+		source: Box<Manifest>,
+		composite: ImageEntry,
+		#[serde(default)]
+		linked: Option<String>,
+		#[serde(default)]
+		linked_mtime: Option<u64>,
+		#[serde(default)]
+		uid: u64,
+		transform: fx_core::Mapping,
+		#[serde(default)]
+		filters: Vec<fx_core::smart::SmartFilter>,
+		#[serde(default = "yes")]
+		filters_enabled: bool,
+	},
+}
+
+fn yes() -> bool {
+	true
 }
 
 /// An alpha channel (M9-T01).
@@ -255,7 +277,12 @@ impl<'de> Deserialize<'de> for SlotEntry {
 /// save path wrote for it; `None` for a derived (mip) tile the save skipped
 /// because it was evicted — it is then left out and rebuilt after opening.
 pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> Manifest {
-	let tile_ref = &tile_ref;
+	manifest_of(doc, &tile_ref)
+}
+
+/// [`to_manifest`] behind a trait object: a Smart Object's nested document
+/// recurses through it (M12-T01) without instantiating a new closure type.
+fn manifest_of(doc: &Document, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>) -> Manifest {
 	let (next_layer_id, name_counters) = doc.id_state();
 	Manifest {
 		version: MANIFEST_VERSION,
@@ -288,7 +315,7 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 	}
 }
 
-fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef>) -> LayerEntry {
+fn layer_entry(layer: &Layer, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>) -> LayerEntry {
 	LayerEntry {
 		id: layer.id,
 		name: layer.name.clone(),
@@ -342,6 +369,16 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 				content: layer.kind.text_content().unwrap_or_default(),
 			},
 			LayerKind::FillLayer { content, .. } => LayerKindEntry::Fill { content: content.clone() },
+			LayerKind::Smart { smart, .. } => LayerKindEntry::Smart {
+				source: Box::new(manifest_of(&smart.source.doc, tile_ref)),
+				composite: image_entry(&smart.source.composite, tile_ref),
+				linked: smart.source.linked.clone(),
+				linked_mtime: smart.source.linked_mtime,
+				uid: smart.source.uid,
+				transform: smart.transform,
+				filters: smart.filters.clone(),
+				filters_enabled: smart.filters_enabled,
+			},
 		},
 	}
 }
@@ -478,6 +515,30 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			antialias: content.antialias,
 			transform: content.transform,
 			warp: content.warp,
+			cache: TiledImage::derived(size.0, size.1, format),
+		},
+		LayerKindEntry::Smart {
+			source,
+			composite,
+			linked,
+			linked_mtime,
+			uid,
+			transform,
+			filters,
+			filters_enabled,
+		} => LayerKind::Smart {
+			smart: fx_core::smart::SmartObject {
+				source: fx_core::smart::SmartSource {
+					doc: Arc::new(from_manifest(source, file, store)?),
+					composite: image_from_entry(composite, file, store)?,
+					linked: linked.clone(),
+					linked_mtime: *linked_mtime,
+					uid: *uid,
+				},
+				transform: *transform,
+				filters: filters.clone(),
+				filters_enabled: *filters_enabled,
+			},
 			cache: TiledImage::derived(size.0, size.1, format),
 		},
 	};

@@ -198,27 +198,36 @@ pub enum LayerKind {
 		content: crate::fill::FillLayer,
 		cache: TiledImage,
 	},
+	/// A Smart Object (M12-T01, D-082): the source and its transform are the
+	/// truth, `cache` the tiles resampled (and filtered) from them.
+	Smart {
+		smart: crate::smart::SmartObject,
+		cache: TiledImage,
+	},
 }
 
 impl LayerKind {
 	/// Whether the layer draws itself from parameters instead of storing
 	/// pixels: both kinds have a derived tile cache (M6-T06/T07).
 	pub fn is_derived(&self) -> bool {
-		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::FillLayer { .. })
+		matches!(
+			self,
+			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::FillLayer { .. } | LayerKind::Smart { .. }
+		)
 	}
 
 	/// Whether a rasterizer can turn it into pixels (Layer ▸ Rasterize).
 	pub fn is_rasterizable(&self) -> bool {
 		matches!(
 			self,
-			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. }
+			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. } | LayerKind::Smart { .. }
 		)
 	}
 
 	/// The derived cache of a shape or text layer, when it has one.
 	pub fn derived_cache(&self) -> Option<&TiledImage> {
 		match self {
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => Some(cache),
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => Some(cache),
 			_ => None,
 		}
 	}
@@ -226,7 +235,7 @@ impl LayerKind {
 	/// The derived cache, to rebuild it.
 	pub fn derived_cache_mut(&mut self) -> Option<&mut TiledImage> {
 		match self {
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => Some(cache),
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => Some(cache),
 			_ => None,
 		}
 	}

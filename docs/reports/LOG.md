@@ -368,3 +368,17 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Done: the recommendations recorded as fast defaults D-082 (Smart Objects, reverses D-055), D-083, D-085, D-086, D-087. Point 3 had no recommendation ("Rob's call"): the filter families go in as M12-T03b (D-084), flagged for Rob.
 - Skipped: none. FAST: none. VERIFY: none.
 - Try it: `docs/DECISIONS.md`.
+
+## M12-T01 — Smart Object core  (Claude, 2026-09-26)
+- Done: `fx_core::smart` (`SmartSource { doc: Arc<Document>, composite, linked, linked_mtime, uid }`, `SmartObject { source, transform: Mapping, filters, filters_enabled }`, `SmartFilter`); `LayerKind::Smart { smart, cache }` is a derived-tile layer (program: like a fill layer; engine `smart.rs`: requested tiles resampled from the composite's mips through the transform, per level). Commands `ConvertToSmartObject` (the layers become the nested document, the composite is taken, the top layer's place and name are kept), `NewSmartObjectViaCopy` (new uid; Duplicate Layer shares the source), `Command::Transform` on a Smart Object composes the mapping (lossless); Free Transform accepts Smart Objects (preview from the level-0 cache); Rasterize / Layer ▸ Rasterize ▸ Smart Object; `.fxd`: `LayerKindEntry::Smart` stores the nested manifest (its tiles in the same file) and the composite; `LayerInfoKind::Smart` + `SmartInfo`; Place (Embedded) now makes a Smart Object; Layers panel badge, double-click = Edit Contents.
+- Skipped: the nested canvas as the layers' union (it is the parent's canvas), lazy opening of nested tiles checked, Tests.
+- FAST: every mip of the composite is built on the first draw; Bicubic always; a warp / custom mesh cannot be applied to a Smart Object (refused: rasterise first); the thumbnail ignores the transform's scale; placing converts synchronously.
+- VERIFY: Photoshop's name for a converted group of layers.
+- Try it: select two layers, Layer ▸ Smart Objects ▸ Convert to Smart Object; Ctrl+T, scale to 10 %, Enter, Ctrl+T back to 1000 %: sharp.
+
+## M12-T02 — Edit Contents  (Claude, 2026-09-26)
+- Done: Layer ▸ Smart Objects ▸ Edit Contents (or double-click the thumbnail) opens the nested document in its own tab ("<name>.psb"); Ctrl+S in that tab composites it and writes it back into the parent as one "Edit Contents" history step (undo restores the old source); a second Edit Contents brings the open tab forward.
+- Skipped: Linked Smart Objects (Place Linked, mtime watch, Update Modified Content, Relink, Embed Linked), Replace Contents, Export Contents; Tests.
+- FAST: the history entry's command is a placeholder (history is by snapshots); instances that share the source are not updated with it; closing the child tab without saving asks nothing special.
+- VERIFY: none.
+- Try it: double-click a Smart Object's thumbnail, paint in the new tab, Ctrl+S, switch back.

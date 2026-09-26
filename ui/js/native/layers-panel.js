@@ -389,6 +389,13 @@ function row(i, v) {
     const url = thumbs.get(key);
     if (url) thumb.append(h("img", { src: url, alt: "" }));
     else if (l.fill_color) thumb.style.background = rgba16ToCss(l.fill_color);
+    // A Smart Object (M12-T01): Photoshop's badge; double-click edits contents.
+    if (l.kind === "smart") {
+      thumb.style.position = "relative";
+      thumb.dataset.tip = "Smart Object (double-click: Edit Contents)";
+      thumb.append(h("span", { style: { position: "absolute", right: "0", bottom: "0", background: "var(--panel, #333)", borderRadius: "2px", lineHeight: "0" } }, icon(l.smart?.linked ? "i-link" : "i-layers", "ic xs")));
+      thumb.addEventListener("dblclick", (e) => { e.stopPropagation(); bridge.send({ type: UI.ACTION, id: "smart:edit" }); });
+    }
   }
 
   const name = h("span", { class: "plist-label", text: (l.clipped ? "↳ " : "") + l.name });

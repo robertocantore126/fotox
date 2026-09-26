@@ -317,8 +317,8 @@ export const menus = [
       it("Create Clipping Mask", "Alt+Ctrl+G", "layer:clip"),
       sub("Smart Objects", [
         it("Convert to Smart Object", "", "smart:convert"),
-        it("New Smart Object via Copy", "", "smart:copy", { dis: true }),
-        it("Edit Contents", "", "smart:edit", { dis: true }),
+        it("New Smart Object via Copy", "", "smart:copy"),
+        it("Edit Contents", "", "smart:edit"),
         it("Export Contents...", "", "smart:export", { dis: true }),
         it("Replace Contents...", "", "smart:replace", { dis: true }),
         it("Relink to File", "", "smart:relink", { dis: true }),
@@ -328,7 +328,7 @@ export const menus = [
       sub("Rasterize", [
         it("Type", "", "raster:type"),
         it("Shape", "", "raster:shape"),
-        it("Smart Object", "", "raster:smart", { dis: true }),
+        it("Smart Object", "", "raster:smart"),
         it("Fill Content", "", "raster:fill"),
         it("Layer", "", "raster:layer"),
         it("All Layers", "", "raster:all"),
