@@ -10,7 +10,7 @@ export const panelDefs = {
   paths: { title: "Paths", icon: "i-paths", kind: "paths" },
   history: { title: "History", icon: "i-history", kind: "history" },
   actions: { title: "Actions", icon: "i-actions", kind: "actions" },
-  layerscomps: { title: "Layer Comps", icon: "i-presets", kind: "simple", note: "No layer comps yet" },
+  layerscomps: { title: "Layer Comps", icon: "i-presets", kind: "layerscomps", note: "No layer comps yet" },
   adjustments: { title: "Adjustments", icon: "i-adjust", kind: "adjustments" },
   properties: { title: "Properties", icon: "i-props", kind: "properties" },
   histogram: { title: "Histogram", icon: "i-props", kind: "histogram" },

@@ -15,6 +15,7 @@ import { state, setTool, emit } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
+import { pickFile } from "./brush-settings.js";
 
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
@@ -48,7 +49,29 @@ const NEW_ADJUSTMENTS = [
   ["Posterize...", () => ({ adjustment: { kind: "posterize", levels: 4 } })],
   ["Threshold...", () => ({ adjustment: { kind: "threshold", level: 128 } })],
   ["Gradient Map...", () => ({ adjustment: { kind: "gradient_map", stops: GRADIENTS["Black, White"], reverse: false } })],
+  // M12-T05. Color Lookup asks for a file first (`null` = handled here).
+  ["Selective Color...", () => ({ adjustment: { kind: "selective_color", ranges: Array.from({ length: 9 }, () => [0, 0, 0, 0]), relative: true } })],
+  ["Color Lookup...", () => { pickLut(null); return null; }],
 ];
+
+/** Read a `.cube` / `.3dl` and send it to the engine (M12-T05). */
+function pickLut(layer) {
+  pickFile(".cube,.3dl").then((file) => {
+    if (!file) return;
+    bridge.send({ type: UI.ACTION, id: "adj:color-lookup", args: { name: file.name, data: file.data, layer } });
+  });
+}
+
+/** Image ▸ Adjustments ▸ … for the M12 adjustments: a new adjustment layer. */
+export function newAdjustmentLayer(label) {
+  const make = NEW_ADJUSTMENTS.find(([n]) => n === label);
+  if (!make) return false;
+  const layer = make[1]();
+  if (!layer) return true;
+  if (layer.adjustment) editNew = new Set(layers.map((l) => l.id));
+  send({ op: "add_layer", layer, name: null });
+  return true;
+}
 
 // Photo Filter colours (straight 0..1). VERIFY (M7): Photoshop's exact values.
 const rgb8 = (r, g, b) => [r / 255, g / 255, b / 255];
@@ -309,6 +332,7 @@ function renderLayers() {
         const make = NEW_ADJUSTMENTS.find(([n]) => n === name);
         if (!make) return;
         const layer = make[1]();
+        if (!layer) return;
         if (layer.adjustment) editNew = new Set(layers.map((l) => l.id));
         send({ op: "add_layer", layer, name: null });
       },
@@ -389,6 +413,13 @@ function row(i, v) {
     const url = thumbs.get(key);
     if (url) thumb.append(h("img", { src: url, alt: "" }));
     else if (l.fill_color) thumb.style.background = rgba16ToCss(l.fill_color);
+    // A Smart Object (M12-T01): Photoshop's badge; double-click edits contents.
+    if (l.kind === "smart") {
+      thumb.style.position = "relative";
+      thumb.dataset.tip = "Smart Object (double-click: Edit Contents)";
+      thumb.append(h("span", { style: { position: "absolute", right: "0", bottom: "0", background: "var(--panel, #333)", borderRadius: "2px", lineHeight: "0" } }, icon(l.smart?.linked ? "i-link" : "i-layers", "ic xs")));
+      thumb.addEventListener("dblclick", (e) => { e.stopPropagation(); bridge.send({ type: UI.ACTION, id: "smart:edit" }); });
+    }
   }
 
   const name = h("span", { class: "plist-label", text: (l.clipped ? "↳ " : "") + l.name });
@@ -420,10 +451,20 @@ function row(i, v) {
       ondblclick: () => bridge.send({ type: UI.ACTION, id: "vmask:edit" }),
     }, icon("i-pen", "ic xs"))
     : null;
+  // Smart Filters (M12-T03): a summary; a click opens the list's dialog.
+  const filters = l.smart?.filters?.length
+    ? h("span", {
+      class: "pmeta", style: { cursor: "pointer", textDecoration: l.smart.filters_enabled ? "none" : "line-through" },
+      "data-tip": "Smart Filters (click to edit the list)",
+      text: "⧉ " + l.smart.filters.map(([n, on]) => (on ? n : `(${n})`)).join(", "),
+      onclick: (e) => { e.stopPropagation(); openSmartFilters(l); },
+    })
+    : null;
   add(el, [eye, expander, thumb,
     maskThumb,
     vmaskThumb,
     name,
+    filters,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
     l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
 
@@ -678,6 +719,16 @@ const PER_CHANNEL_DIALOGS = {
     toValues: (row) => ({ "Red:": row[0], "Green:": row[1], "Blue:": row[2], "Constant:": row[3] }),
     fromValues: (v) => [v["Red:"], v["Green:"], v["Blue:"], v["Constant:"]],
   },
+  // M12-T05: CMYK per colour range, −100..100 in the dialog.
+  selective_color: {
+    dialog: "selective-color",
+    selector: "Colors:", names: ["Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Whites", "Neutrals", "Blacks"],
+    parts: (a) => a.ranges.map((r) => r.map((v) => Math.round(v * 100))),
+    make: (a, parts, v) => ({ kind: "selective_color", ranges: parts.map((r) => r.map((x) => (Number(x) || 0) / 100)), relative: v["Method:"] !== "Absolute" && v["Method:"] !== 1 }),
+    extra: (a) => ({ "Method:": a.relative ? "Relative" : "Absolute" }),
+    toValues: (t) => ({ "Cyan:": t[0], "Magenta:": t[1], "Yellow:": t[2], "Black:": t[3] }),
+    fromValues: (v) => [v["Cyan:"], v["Magenta:"], v["Yellow:"], v["Black:"]],
+  },
   color_balance: {
     dialog: "color-balance",
     selector: "Tone:", names: ["Shadows", "Midtones", "Highlights"], first: 1,
@@ -693,6 +744,7 @@ function editAdjustment(l) {
   const adj = l.adjustment;
   if (!adj) return;
   if (PER_CHANNEL_DIALOGS[adj.kind]) { editPerChannel(l, PER_CHANNEL_DIALOGS[adj.kind]); return; }
+  if (adj.kind === "color_lookup") { pickLut(l.id); return; }
   const spec = ADJUSTMENT_DIALOGS[adj.kind];
   if (!spec) {
     toast(adj.kind === "invert" ? "Invert has no settings" : "This adjustment has no dialog yet");
@@ -799,4 +851,32 @@ function hexToRgba16(hex) {
 
 function rgba16ToCss([r, g, b, a]) {
   return `rgba(${Math.round(r / 257)}, ${Math.round(g / 257)}, ${Math.round(b / 257)}, ${(a / 65535).toFixed(3)})`;
+}
+
+/** The Smart Filters dialog (M12-T03): eye, opacity, order and delete per filter. */
+function openSmartFilters(l) {
+  const list = l.smart?.filters || [];
+  const fields = [{ type: "check", label: "Smart Filters on", on: !!l.smart.filters_enabled }];
+  list.forEach(([n, on, op], i) => {
+    fields.push({ type: "sep" });
+    fields.push({ type: "check", label: `${i + 1}. ${n}`, on });
+    fields.push({ type: "num", label: `Opacity ${i + 1}:`, value: Math.round((op ?? 1) * 100), unit: "%", w: 50 });
+    fields.push({ type: "num", label: `Order ${i + 1}:`, value: i + 1, w: 40 });
+    fields.push({ type: "check", label: `Delete ${i + 1}`, on: false });
+  });
+  openDialog("smart-filters", {
+    fields,
+    onOk: (v) => bridge.send({
+      type: UI.ACTION, id: "smart:filters-set",
+      args: {
+        enabled: !!v["Smart Filters on"],
+        filters: list.map(([n], i) => ({
+          enabled: !!v[`${i + 1}. ${n}`],
+          opacity: Number(v[`Opacity ${i + 1}:`]),
+          order: Number(v[`Order ${i + 1}:`]),
+          delete: !!v[`Delete ${i + 1}`],
+        })),
+      },
+    }),
+  });
 }

@@ -96,9 +96,10 @@ export const optionBars = {
     { type: "gap" },
     { type: "btngroup", icons: ["i-check", "i-close"], titles: ["Commit Perspective Warp (Enter)", "Cancel (Esc)"], actions: ["tool:commit", "tool:cancel"] },
   ],
+  artboard: [{ type: "label", text: "Drag to draw an artboard · drag inside one to move it · Alt+drag to resize" }, { type: "btn", text: "Artboard from Layers", action: "layer:artboard-from" }],
   "crop-persp": [{ type: "num", text: "W:", value: "", unit: "px", width: 60 }, { type: "num", text: "H:", value: "", unit: "px", width: 60 }, { type: "btn", text: "✓", action: "tool:commit" }, { type: "btn", text: "✗", action: "tool:cancel" }, { type: "label", text: "Drag a box, move its corners onto the plane, Enter" }],
-  slice: [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
-  "slice-select": [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice select"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
+  slice: [{ type: "label", text: "Drag to add a slice" }, { type: "btn", text: "Slices From Guides", action: "slices:from-guides" }, { type: "btn", text: "Export Slices", action: "misc:export-slices" }],
+  "slice-select": [{ type: "label", text: "Click a slice · drag to move · Alt+drag to resize · Delete removes" }, { type: "btn", text: "Slices From Guides", action: "slices:from-guides" }],
 
   eyedropper: [{ type: "select", text: "Sample Size:", options: ["Point Sample", "3 by 3 Average", "5 by 5 Average", "11 by 11 Average", "51 by 51 Average"], value: "Point Sample" }, { type: "select", text: "Sample:", options: ["All Layers", "Current Layer"], value: "All Layers" }, { type: "toggle", text: "Show Sampling Ring", on: true }],
   sampler: [{ type: "select", text: "Sample Size:", options: ["Point Sample", "3 by 3 Average", "5 by 5 Average", "11 by 11 Average", "31 by 31 Average", "51 by 51 Average", "101 by 101 Average"], value: "Point Sample" }, { type: "btn", text: "Clear All", action: "sampler:clear" }, { type: "label", text: "Click up to 10 spots; Alt+click removes one" }],

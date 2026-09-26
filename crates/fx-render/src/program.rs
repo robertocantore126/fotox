@@ -102,6 +102,10 @@ pub enum AdjustKind {
 	/// Black & White weights (fractions: reds, yellows, greens, cyans, blues,
 	/// magentas) and the optional tint `[hue°, saturation %]` (M4-T07).
 	BlackWhite { weights: [f32; 6], tint: Option<[f32; 2]> },
+	/// Color Lookup (M12-T05): a 16³ table in one LUT row.
+	Lut3d(Arc<Lut>),
+	/// Selective Color (M12-T05): its 9-range table in a LUT row.
+	Selective { lut: Arc<Lut>, relative: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -363,7 +367,22 @@ impl Builder<'_> {
 		}
 		match &layer.kind {
 			LayerKind::Group { children, .. } => {
-				let inner = self.list(children);
+				let mut inner = self.list(children);
+				// An artboard's background under its layers (M12-T07); the
+				// group's vector mask clips both to its bounds.
+				if let Some(bg) = layer.artboard.as_ref().and_then(|a| a.background) {
+					inner.insert(
+						0,
+						Op::Layer {
+							layer: layer.id,
+							source: Source::Solid(bg.map(|v| v as f32 / 65535.0)),
+							blend: BlendMode::Normal,
+							alpha: 1.0,
+							mask: None,
+							clip: false,
+						},
+					);
+				}
 				if inner.is_empty() {
 					return Vec::new();
 				}
@@ -528,8 +547,9 @@ impl Builder<'_> {
 				}
 			}
 			// A gradient / pattern fill layer (M8-T03/T06): drawn from its
-			// parameters at this level, like a shape.
-			LayerKind::FillLayer { cache, .. } => {
+			// parameters at this level, like a shape. A Smart Object (M12-T01)
+			// is resampled from its source at this level the same way.
+			LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => {
 				let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Vector) else {
 					return Vec::new();
 				};
@@ -604,6 +624,11 @@ impl Builder<'_> {
 					} => AdjustKind::BlackWhite {
 						weights: [*reds, *yellows, *greens, *cyans, *blues, *magentas].map(|v| v / 100.0),
 						tint: tint.then_some([*tint_hue, *tint_saturation]),
+					},
+					Adjustment::ColorLookup { .. } => AdjustKind::Lut3d((self.luts)(adjustment)),
+					Adjustment::SelectiveColor { relative, .. } => AdjustKind::Selective {
+						lut: (self.luts)(adjustment),
+						relative: *relative,
 					},
 					other => AdjustKind::Lut((self.luts)(other)),
 				};
@@ -814,7 +839,11 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 		} => {
 			layer.hash(h);
 			match adjust {
-				AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) => lut.key.hash(h),
+				AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) | AdjustKind::Lut3d(lut) => lut.key.hash(h),
+				AdjustKind::Selective { lut, relative } => {
+					lut.key.hash(h);
+					relative.hash(h);
+				}
 				AdjustKind::Matrix { rows, preserve_luma } => {
 					rows.iter().flatten().map(|v| v.to_bits()).for_each(|b| b.hash(h));
 					preserve_luma.hash(h);

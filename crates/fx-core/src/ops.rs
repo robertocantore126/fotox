@@ -24,10 +24,80 @@ use crate::transform::{Filter, Mapping, Permutation};
 pub enum FilterParams {
 	/// Gaussian Blur. `radius` = the standard deviation σ in pixels (D-035),
 	/// 0.1..=1000.
-	GaussianBlur { radius: f32 },
+	GaussianBlur {
+		radius: f32,
+	},
 	/// Unsharp Mask. `amount` in percent (1..=500), `radius` = σ of the blur in
 	/// pixels (0.1..=1000), `threshold` in 8-bit levels (0..=255).
-	UnsharpMask { amount: f32, radius: f32, threshold: u8 },
+	UnsharpMask {
+		amount: f32,
+		radius: f32,
+		threshold: u8,
+	},
+	// M12-T03b (D-084): the common families. Distances in document pixels.
+	BoxBlur {
+		radius: f32,
+	},
+	/// `angle` in degrees, `distance` the streak length.
+	MotionBlur {
+		angle: f32,
+		distance: f32,
+	},
+	/// Spin (`zoom: false`) or Zoom about the canvas centre; `amount` 1..=100.
+	RadialBlur {
+		amount: f32,
+		zoom: bool,
+	},
+	SurfaceBlur {
+		radius: f32,
+		threshold: f32,
+	},
+	/// `amount` in percent (0.1..=400).
+	AddNoise {
+		amount: f32,
+		gaussian: bool,
+		monochromatic: bool,
+		seed: u32,
+	},
+	Median {
+		radius: f32,
+	},
+	DustScratches {
+		radius: f32,
+		threshold: f32,
+	},
+	Despeckle,
+	/// Sharpen (`edges: false`) / Sharpen Edges.
+	Sharpen {
+		edges: bool,
+	},
+	Emboss {
+		angle: f32,
+		height: f32,
+		amount: f32,
+	},
+	FindEdges,
+	HighPass {
+		radius: f32,
+	},
+	Minimum {
+		radius: f32,
+	},
+	Maximum {
+		radius: f32,
+	},
+	/// `mode`: 0 transparent, 1 repeat edge pixels, 2 wrap around.
+	Offset {
+		dx: f32,
+		dy: f32,
+		mode: u8,
+	},
+	/// Render ▸ Clouds between two straight 16-bit colours.
+	Clouds {
+		fg: [u16; 4],
+		bg: [u16; 4],
+		seed: u32,
+	},
 }
 
 impl FilterParams {
@@ -36,6 +106,23 @@ impl FilterParams {
 		match self {
 			FilterParams::GaussianBlur { .. } => "Gaussian Blur",
 			FilterParams::UnsharpMask { .. } => "Unsharp Mask",
+			FilterParams::BoxBlur { .. } => "Box Blur",
+			FilterParams::MotionBlur { .. } => "Motion Blur",
+			FilterParams::RadialBlur { .. } => "Radial Blur",
+			FilterParams::SurfaceBlur { .. } => "Surface Blur",
+			FilterParams::AddNoise { .. } => "Add Noise",
+			FilterParams::Median { .. } => "Median",
+			FilterParams::DustScratches { .. } => "Dust & Scratches",
+			FilterParams::Despeckle => "Despeckle",
+			FilterParams::Sharpen { edges: false } => "Sharpen",
+			FilterParams::Sharpen { edges: true } => "Sharpen Edges",
+			FilterParams::Emboss { .. } => "Emboss",
+			FilterParams::FindEdges => "Find Edges",
+			FilterParams::HighPass { .. } => "High Pass",
+			FilterParams::Minimum { .. } => "Minimum",
+			FilterParams::Maximum { .. } => "Maximum",
+			FilterParams::Offset { .. } => "Offset",
+			FilterParams::Clouds { .. } => "Clouds",
 		}
 	}
 
@@ -65,6 +152,20 @@ impl FilterParams {
 					})
 				}
 			}
+			// FAST: the new filters only refuse non-finite and absurd values.
+			FilterParams::BoxBlur { radius: r }
+			| FilterParams::Median { radius: r }
+			| FilterParams::HighPass { radius: r }
+			| FilterParams::Minimum { radius: r }
+			| FilterParams::Maximum { radius: r }
+			| FilterParams::SurfaceBlur { radius: r, .. }
+			| FilterParams::DustScratches { radius: r, .. } => radius(r.max(0.1)),
+			FilterParams::MotionBlur { distance, .. } => radius(distance.max(0.1)),
+			FilterParams::Offset { dx, dy, .. } if !dx.is_finite() || !dy.is_finite() => Err(CommandError::InvalidValue {
+				field: "offset",
+				reason: "not a number".into(),
+			}),
+			_ => Ok(()),
 		}
 	}
 }

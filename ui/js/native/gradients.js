@@ -194,3 +194,12 @@ export function openGradientDialog(id) {
 }
 
 export { bridge, UI };
+
+/** The current gradient, its swatch stops resolved (Gradient Overlay, M12-T04). */
+export function currentGradientResolved() {
+  const g = structuredClone(current);
+  resolveSwatches(g);
+  return g;
+}
+
+export { resolveSwatches };

@@ -44,6 +44,9 @@ const K_ADJUST_MATRIX: u32 = 9;
 const K_ADJUST_BALANCE: u32 = 10;
 const K_ADJUST_VIBRANCE: u32 = 11;
 const K_ADJUST_BW: u32 = 12;
+// M12-T05.
+const K_ADJUST_LUT3D: u32 = 13;
+const K_ADJUST_SELECTIVE: u32 = 14;
 /// Adjustment flag: keep the input's luminance (`composite.wgsl` F_PRESERVE).
 const F_PRESERVE: u32 = 8;
 const K_BEGIN_ISOLATED: u32 = 3;
@@ -420,7 +423,7 @@ impl GpuCompositor {
 			.flat_map(|&i| programs[i].ops.iter())
 			.filter_map(|op| match op {
 				Op::Adjust {
-					adjust: AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut),
+					adjust: AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) | AdjustKind::Lut3d(lut) | AdjustKind::Selective { lut, .. },
 					..
 				} => Some(lut.clone()),
 				_ => None,
@@ -699,6 +702,15 @@ impl GpuCompositor {
 					AdjustKind::Vibrance { vibrance, saturation } => {
 						g.kind = K_ADJUST_VIBRANCE;
 						g.params = [*vibrance, *saturation, 0.0, 0.0];
+					}
+					AdjustKind::Lut3d(lut) => {
+						g.kind = K_ADJUST_LUT3D;
+						g.lut_row = *self.lut_rows.get(&lut.key).expect("ensure_luts ran before encoding");
+					}
+					AdjustKind::Selective { lut, relative } => {
+						g.kind = K_ADJUST_SELECTIVE;
+						g.lut_row = *self.lut_rows.get(&lut.key).expect("ensure_luts ran before encoding");
+						g.params = [if *relative { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
 					}
 					AdjustKind::BlackWhite { weights, tint } => {
 						g.kind = K_ADJUST_BW;

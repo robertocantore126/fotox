@@ -32,7 +32,7 @@
 //! resampled) and why one tile of a page of text costs one tile of work.
 
 use fx_core::text::{FontStyle, TextAlign, TextAntialias, TextContent, TextFrame, TextRun};
-use fx_tiles::{PixelFormat, TILE_PIXELS, TILE_SIZE, TileBuffer};
+use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer};
 use parley::editing::{Cursor, Selection};
 use parley::{
 	Affinity, Alignment, AlignmentOptions, FontContext, FontFamily, FontWeight, Layout, LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty,
@@ -681,7 +681,7 @@ impl OutlinePen for PathPen {
 /// tile are appended, so a tile of a full page costs a tile's worth of
 /// outline work. The result is a `TILE_SIZE × TILE_SIZE` buffer in `format`.
 pub fn render_text_tile(layout: &TextLayout, transform: [f64; 6], level: usize, tile: (u32, u32), format: PixelFormat, antialias: TextAntialias) -> TileBuffer {
-	let pixels = TILE_PIXELS as u32;
+	let pixels = TILE_SIZE;
 	if layout.is_empty() {
 		return TileBuffer::zeroed(format);
 	}

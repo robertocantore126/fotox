@@ -7,6 +7,7 @@ import { openDialog } from "./dialogs.js";
 import { toast, status } from "./tooltip.js";
 import { zoomIn, zoomOut, fit, actual, zoomTo, toggleFpsOverlay } from "./canvas.js";
 import * as panels from "./panels.js";
+import { newAdjustmentLayer } from "./native/layers-panel.js";
 import { dockGroups } from "./data/panels.js";
 import * as bridge from "./native/bridge.js";
 import { UI } from "./native/protocol.js";
@@ -51,7 +52,7 @@ export function runAction(item) {
   }
   if (bridge.isNative && (a.startsWith("layer:") || a.startsWith("hist:"))) return;
   // M8/M9 engine actions (brushes, patterns, measuring tools, Define Pattern).
-  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-", "path:", "vmask:", "type:work-path", "type:to-shape"].some((p) => a.startsWith(p))) return;
+  if (bridge.isNative && ["brush:", "pattern:", "sampler:", "ruler:", "notes:", "count:", "select-mask:", "channels:", "misc:define-", "path:", "vmask:", "type:work-path", "type:to-shape", "smart:", "raster:smart", "layer:artboard", "comps:", "slices:", "misc:export-slices", "misc:export-artboards"].some((p) => a.startsWith(p))) return;
   // So are the Image menu's rotations and crops (M6-T02/T03), Free Transform
   // and its submenu (M6-T04), the Select menu (M5), Filter ▸ Last Filter and
   // Layer ▸ Rasterize (M6-T06): the mock's "not implemented" toast must not
@@ -139,6 +140,12 @@ export function runAction(item) {
   const warps = { "dlg:liquify": "warp:liquify", "misc:puppet-warp": "warp:puppet", "misc:perspective-warp": "warp:perspective", "warp:straighten": "warp:straighten" };
   if (warps[a] && bridge.isNative) {
     bridge.send({ type: UI.ACTION, id: warps[a] });
+    return;
+  }
+  // Image ▸ Adjustments ▸ Color Lookup / Selective Color (M12-T05): as
+  // adjustment layers.
+  if ((a === "dlg:color-lookup" || a === "dlg:selective-color") && bridge.isNative) {
+    newAdjustmentLayer(a === "dlg:color-lookup" ? "Color Lookup..." : "Selective Color...");
     return;
   }
   // Edit ▸ Content-Aware Scale (M11-T05). FAST: a dialog instead of the

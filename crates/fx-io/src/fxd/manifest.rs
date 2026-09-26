@@ -64,6 +64,14 @@ pub struct Manifest {
 	pub work_path: Option<fx_core::path::Path>,
 	#[serde(default)]
 	pub paths: Vec<fx_core::path::NamedPath>,
+	/// Layer Comps (M12-T06).
+	#[serde(default)]
+	pub comps: Vec<fx_core::comps::LayerComp>,
+	#[serde(default)]
+	pub active_comp: Option<usize>,
+	/// User slices (M12-T08).
+	#[serde(default)]
+	pub slices: Vec<fx_core::comps::Slice>,
 	/// Flattened composite preview at levels ≥ 3, if the save produced one
 	/// (M3-T04).
 	pub preview: Option<ImageEntry>,
@@ -91,6 +99,9 @@ pub struct LayerEntry {
 	/// The vector mask (M10-T06).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub vector_mask: Option<fx_core::select_ops::VectorMaskSpec>,
+	/// An artboard's bounds and background (M12-T07).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub artboard: Option<fx_core::layer::Artboard>,
 	#[serde(flatten)]
 	pub kind: LayerKindEntry,
 }
@@ -133,6 +144,28 @@ pub enum LayerKindEntry {
 	Text {
 		content: fx_core::TextContent,
 	},
+	/// A Smart Object (M12-T01, D-082): the nested document (its tiles in
+	/// the same file), its composite, the transform and the Smart Filters.
+	/// The cache is derived.
+	Smart {
+		source: Box<Manifest>,
+		composite: ImageEntry,
+		#[serde(default)]
+		linked: Option<String>,
+		#[serde(default)]
+		linked_mtime: Option<u64>,
+		#[serde(default)]
+		uid: u64,
+		transform: fx_core::Mapping,
+		#[serde(default)]
+		filters: Vec<fx_core::smart::SmartFilter>,
+		#[serde(default = "yes")]
+		filters_enabled: bool,
+	},
+}
+
+fn yes() -> bool {
+	true
 }
 
 /// An alpha channel (M9-T01).
@@ -255,7 +288,12 @@ impl<'de> Deserialize<'de> for SlotEntry {
 /// save path wrote for it; `None` for a derived (mip) tile the save skipped
 /// because it was evicted — it is then left out and rebuilt after opening.
 pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<ChunkRef>) -> Manifest {
-	let tile_ref = &tile_ref;
+	manifest_of(doc, &tile_ref)
+}
+
+/// [`to_manifest`] behind a trait object: a Smart Object's nested document
+/// recurses through it (M12-T01) without instantiating a new closure type.
+fn manifest_of(doc: &Document, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>) -> Manifest {
 	let (next_layer_id, name_counters) = doc.id_state();
 	Manifest {
 		version: MANIFEST_VERSION,
@@ -283,12 +321,15 @@ pub fn to_manifest(doc: &Document, tile_ref: impl Fn(&TileHandle) -> Option<Chun
 		annotations: doc.annotations.clone(),
 		work_path: doc.work_path.clone(),
 		paths: doc.paths.clone(),
+		comps: doc.comps.clone(),
+		active_comp: doc.active_comp,
+		slices: doc.slices.clone(),
 		// The flattened composite preview is rendered by the save path (M3-T04).
 		preview: None,
 	}
 }
 
-fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef>) -> LayerEntry {
+fn layer_entry(layer: &Layer, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>) -> LayerEntry {
 	LayerEntry {
 		id: layer.id,
 		name: layer.name.clone(),
@@ -301,6 +342,7 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 		locked_transparency: layer.locked_transparency,
 		locked_position: layer.locked_position,
 		styles: layer.styles.clone(),
+		artboard: layer.artboard.clone(),
 		vector_mask: layer.vector_mask.as_ref().map(|v| fx_core::select_ops::VectorMaskSpec {
 			path: v.path.clone(),
 			enabled: v.enabled,
@@ -342,6 +384,16 @@ fn layer_entry(layer: &Layer, tile_ref: &impl Fn(&TileHandle) -> Option<ChunkRef
 				content: layer.kind.text_content().unwrap_or_default(),
 			},
 			LayerKind::FillLayer { content, .. } => LayerKindEntry::Fill { content: content.clone() },
+			LayerKind::Smart { smart, .. } => LayerKindEntry::Smart {
+				source: Box::new(manifest_of(&smart.source.doc, tile_ref)),
+				composite: image_entry(&smart.source.composite, tile_ref),
+				linked: smart.source.linked.clone(),
+				linked_mtime: smart.source.linked_mtime,
+				uid: smart.source.uid,
+				transform: smart.transform,
+				filters: smart.filters.clone(),
+				filters_enabled: smart.filters_enabled,
+			},
 		},
 	}
 }
@@ -424,6 +476,9 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.annotations = manifest.annotations.clone();
 	doc.work_path = manifest.work_path.clone();
 	doc.paths = manifest.paths.clone();
+	doc.comps = manifest.comps.clone();
+	doc.active_comp = manifest.active_comp;
+	doc.slices = manifest.slices.clone();
 	for entry in &manifest.channels {
 		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_from_entry(&entry.image, file, store)?);
 		channel.color = entry.color;
@@ -480,6 +535,30 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			warp: content.warp,
 			cache: TiledImage::derived(size.0, size.1, format),
 		},
+		LayerKindEntry::Smart {
+			source,
+			composite,
+			linked,
+			linked_mtime,
+			uid,
+			transform,
+			filters,
+			filters_enabled,
+		} => LayerKind::Smart {
+			smart: fx_core::smart::SmartObject {
+				source: fx_core::smart::SmartSource {
+					doc: Arc::new(from_manifest(source, file, store)?),
+					composite: image_from_entry(composite, file, store)?,
+					linked: linked.clone(),
+					linked_mtime: *linked_mtime,
+					uid: *uid,
+				},
+				transform: *transform,
+				filters: filters.clone(),
+				filters_enabled: *filters_enabled,
+			},
+			cache: TiledImage::derived(size.0, size.1, format),
+		},
 	};
 	let mut layer = Layer::new(entry.id, entry.name.clone(), kind);
 	layer.visible = entry.visible;
@@ -499,6 +578,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			cache: TiledImage::derived(size.0, size.1, fx_core::selection::gray_format(depth_of(format))),
 		});
 	}
+	layer.artboard = entry.artboard.clone();
 	if let Some(styles) = &entry.styles {
 		layer.styles = Some(styles.clone());
 		layer.effects = fx_core::styles::EffectKind::ALL

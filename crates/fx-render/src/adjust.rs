@@ -43,6 +43,12 @@ impl Lut {
 
 /// Bake a LUT. Panics for `HueSaturation`, which is not a per-channel function.
 pub fn bake(adjustment: &Adjustment) -> Lut {
+	// M12-T05: tables of their own, one LUT row each.
+	match adjustment {
+		Adjustment::ColorLookup { .. } => return bake_3d(adjustment),
+		Adjustment::SelectiveColor { .. } => return bake_selective(adjustment),
+		_ => {}
+	}
 	let f: Box<dyn Fn(usize, f64) -> f64> = match adjustment {
 		Adjustment::Invert => Box::new(|_, x| 1.0 - x),
 		Adjustment::Levels { channels } => {
@@ -88,7 +94,9 @@ pub fn bake(adjustment: &Adjustment) -> Lut {
 		| Adjustment::PhotoFilter { .. }
 		| Adjustment::ColorBalance { .. }
 		| Adjustment::Vibrance { .. }
-		| Adjustment::BlackWhite { .. } => panic!("{adjustment:?} is not a LUT adjustment"),
+		| Adjustment::BlackWhite { .. }
+		| Adjustment::ColorLookup { .. }
+		| Adjustment::SelectiveColor { .. } => panic!("{adjustment:?} is not a LUT adjustment"),
 	};
 	let entries = (0..LUT_SIZE)
 		.map(|i| {
@@ -568,4 +576,136 @@ mod tests {
 		let v = vibrance([1.0, 0.0, 0.0], -1.0, 0.0);
 		assert!((v[0] - v[1]).abs() < 1e-9 && (v[0] - LUMA[0]).abs() < 1e-9);
 	}
+}
+
+/// Side of the 3D table a Color Lookup is resampled to: 16³ = one LUT row
+/// (`LUT_SIZE` entries). FAST: a 33³ `.cube` loses detail (trilinear).
+pub const LUT3D: usize = 16;
+
+/// Color Lookup (M12-T05): the table resampled to [`LUT3D`]³ entries, red
+/// fastest, padded to `LUT_SIZE`.
+pub fn bake_3d(adjustment: &Adjustment) -> Lut {
+	let Adjustment::ColorLookup { size, table, .. } = adjustment else {
+		panic!("not a Color Lookup");
+	};
+	let n = (*size as usize).max(2);
+	let at = |r: usize, g: usize, b: usize| -> [f32; 3] { table.get(r + n * (g + n * b)).copied().unwrap_or([0.0; 3]) };
+	let sample = |x: f32, y: f32, z: f32| -> [f32; 3] {
+		let f = |v: f32| {
+			let p = v.clamp(0.0, 1.0) * (n - 1) as f32;
+			let i = (p.floor() as usize).min(n - 2);
+			(i, p - i as f32)
+		};
+		let ((r, fr), (g, fg), (b, fb)) = (f(x), f(y), f(z));
+		let mut out = [0.0f32; 3];
+		for (dr, wr) in [(0, 1.0 - fr), (1, fr)] {
+			for (dg, wg) in [(0, 1.0 - fg), (1, fg)] {
+				for (db, wb) in [(0, 1.0 - fb), (1, fb)] {
+					let v = at(r + dr, g + dg, b + db);
+					for c in 0..3 {
+						out[c] += v[c] * wr * wg * wb;
+					}
+				}
+			}
+		}
+		out
+	};
+	let m = (LUT3D - 1) as f32;
+	let mut entries = vec![[0.0f32; 3]; LUT_SIZE];
+	for b in 0..LUT3D {
+		for g in 0..LUT3D {
+			for r in 0..LUT3D {
+				entries[r + LUT3D * (g + LUT3D * b)] = sample(r as f32 / m, g as f32 / m, b as f32 / m).map(|v| v.clamp(0.0, 1.0));
+			}
+		}
+	}
+	Lut {
+		entries: entries.into_boxed_slice(),
+		key: params_key(adjustment),
+	}
+}
+
+/// Trilinear lookup in a [`bake_3d`] table, as `composite.wgsl` does it.
+pub fn lut3d(lut: &Lut, rgb: [f64; 3]) -> [f64; 3] {
+	let m = (LUT3D - 1) as f64;
+	let f = |v: f64| {
+		let p = v.clamp(0.0, 1.0) * m;
+		let i = (p.floor() as usize).min(LUT3D - 2);
+		(i, p - i as f64)
+	};
+	let ((r, fr), (g, fg), (b, fb)) = (f(rgb[0]), f(rgb[1]), f(rgb[2]));
+	let mut out = [0.0f64; 3];
+	for (dr, wr) in [(0, 1.0 - fr), (1, fr)] {
+		for (dg, wg) in [(0, 1.0 - fg), (1, fg)] {
+			for (db, wb) in [(0, 1.0 - fb), (1, fb)] {
+				let v = lut.entries[(r + dr) + LUT3D * ((g + dg) + LUT3D * (b + db))];
+				for c in 0..3 {
+					out[c] += f64::from(v[c]) * wr * wg * wb;
+				}
+			}
+		}
+	}
+	out
+}
+
+/// Selective Color's table (M12-T05): entries 0..9 are (C, M, Y) of each
+/// range, 9..18 its K; the rest is padding.
+pub fn bake_selective(adjustment: &Adjustment) -> Lut {
+	let Adjustment::SelectiveColor { ranges, .. } = adjustment else {
+		panic!("not Selective Color");
+	};
+	let mut entries = vec![[0.0f32; 3]; LUT_SIZE];
+	for (i, r) in ranges.iter().enumerate() {
+		entries[i] = [r[0], r[1], r[2]];
+		entries[9 + i] = [r[3], 0.0, 0.0];
+	}
+	Lut {
+		entries: entries.into_boxed_slice(),
+		key: params_key(adjustment),
+	}
+}
+
+/// Selective Color of one straight RGB value. Range weights: a chromatic
+/// range by the distance between the channels that define it, Whites /
+/// Blacks by how far the extremes pass ½, Neutrals by the rest. CMY act on
+/// R, G, B; K on all three; Relative scales by the ink already there.
+/// VERIFY: Photoshop's exact weights and Relative / Absolute formulas.
+pub fn selective_color(lut: &Lut, rgb: [f64; 3], relative: bool) -> [f64; 3] {
+	let [r, g, b] = rgb;
+	let max = r.max(g).max(b);
+	let min = r.min(g).min(b);
+	let mid = r + g + b - max - min;
+	let mut w = [0.0f64; 9];
+	if r == max {
+		w[0] = max - mid;
+	} else if g == max {
+		w[2] = max - mid;
+	} else {
+		w[4] = max - mid;
+	}
+	if b == min {
+		w[1] = mid - min;
+	} else if r == min {
+		w[3] = mid - min;
+	} else {
+		w[5] = mid - min;
+	}
+	w[6] = ((min - 0.5) * 2.0).max(0.0);
+	w[8] = ((0.5 - max) * 2.0).max(0.0);
+	w[7] = (1.0 - (max - min) - w[6] - w[8]).clamp(0.0, 1.0);
+	let mut out = rgb;
+	for (i, wi) in w.iter().enumerate() {
+		if *wi <= 0.0 {
+			continue;
+		}
+		let cmy = lut.entries[i];
+		let k = f64::from(lut.entries[9 + i][0]);
+		for c in 0..3 {
+			let ink = 1.0 - rgb[c];
+			let a = f64::from(cmy[c]);
+			let delta = if relative { (a + k) * ink } else { a + k };
+			out[c] -= wi * delta;
+		}
+	}
+	out.map(|v| v.clamp(0.0, 1.0))
 }

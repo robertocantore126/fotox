@@ -22,6 +22,26 @@ const FILTERS = {
     radius: clamp(v["Radius:"], 0.1, 1000),
     threshold: Math.round(clamp(v["Threshold:"], 0, 255)),
   }),
+  // M12-T03b (D-084).
+  "box-blur": (v) => ({ kind: "box_blur", radius: clamp(v["Radius:"], 1, 2000) }),
+  "motion-blur": (v) => ({ kind: "motion_blur", angle: clamp(v["Angle:"], -360, 360), distance: clamp(v["Distance:"], 1, 2000) }),
+  "radial-blur": (v) => ({ kind: "radial_blur", amount: clamp(v["Amount:"], 1, 100), zoom: v["Blur Method:"] === "Zoom" || v["Blur Method:"] === 1 }),
+  "surface-blur": (v) => ({ kind: "surface_blur", radius: clamp(v["Radius:"], 1, 100), threshold: clamp(v["Threshold:"], 2, 255) }),
+  "add-noise": (v) => ({
+    kind: "add_noise", amount: clamp(v["Amount:"], 0.1, 400),
+    gaussian: v["Distribution:"] === "Gaussian" || v["Distribution:"] === 1, monochromatic: !!v.Monochromatic, seed: 1,
+  }),
+  median: (v) => ({ kind: "median", radius: clamp(v["Radius:"], 1, 500) }),
+  "dust-scratches": (v) => ({ kind: "dust_scratches", radius: clamp(v["Radius:"], 1, 500), threshold: clamp(v["Threshold:"], 0, 255) }),
+  emboss: (v) => ({ kind: "emboss", angle: clamp(v["Angle:"], -360, 360), height: clamp(v["Height:"], 1, 100), amount: clamp(v["Amount:"], 1, 500) }),
+  "high-pass": (v) => ({ kind: "high_pass", radius: clamp(v["Radius:"], 0.1, 1000) }),
+  maximum: (v) => ({ kind: "maximum", radius: clamp(v["Radius:"], 1, 500) }),
+  minimum: (v) => ({ kind: "minimum", radius: clamp(v["Radius:"], 1, 500) }),
+  offset: (v) => {
+    const mode = v["Undefined Areas:"];
+    const m = typeof mode === "number" ? mode : ["Set to Transparent", "Repeat Edge Pixels", "Wrap Around"].indexOf(mode);
+    return { kind: "offset", dx: Number(v["Horizontal:"]) || 0, dy: Number(v["Vertical:"]) || 0, mode: Math.max(0, m) };
+  },
 };
 
 const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(value) ? value : lo));
@@ -36,7 +56,8 @@ export function openFilterDialog(dialogId) {
   const doc = activeDocument();
   const layer = activeLayerId();
   if (doc == null || layer == null) { toast("Open a document and select a layer first"); return; }
-  if (activeLayerKind() !== "pixel") { toast("Filters work on pixel layers: select one"); return; }
+  // A Smart Object takes the filter as a Smart Filter (M12-T03).
+  if (activeLayerKind() !== "pixel" && activeLayerKind() !== "smart") { toast("Filters work on pixel layers: select one"); return; }
   const params = FILTERS[dialogId];
   const preview = (values) => {
     if (values.Preview === false) bridge.send({ type: UI.FILTER_PREVIEW_CANCEL, doc });

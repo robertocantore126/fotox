@@ -51,8 +51,21 @@ impl Prepared {
 	/// compute every mip level of it so a preview at any zoom reads the level
 	/// it needs. `None` when there is nothing to move.
 	pub fn new(doc: &Document, layer: LayerId, store: &TileStore) -> Result<Option<Self>, TileError> {
-		let Some(LayerKind::Pixel { image, offset }) = doc.layer(layer).map(|l| &l.kind) else {
-			return Ok(None);
+		// A Smart Object previews from its drawn level-0 cache (M12-T01;
+		// FAST: the committed transform is resampled from the source, the
+		// preview from the cache). The caller drew level 0 first.
+		let smart_pixels;
+		let (image, offset) = match doc.layer(layer).map(|l| &l.kind) {
+			Some(LayerKind::Pixel { image, offset }) => (image, offset),
+			Some(LayerKind::Smart { cache, .. }) => {
+				let mut copy = TiledImage::new(cache.width(), cache.height(), cache.format());
+				for (tx, ty, slot) in cache.grid(0).non_empty() {
+					copy.set_slot(tx, ty, slot.clone());
+				}
+				smart_pixels = copy;
+				(&smart_pixels, &(0, 0))
+			}
+			_ => return Ok(None),
 		};
 		let canvas = (doc.width, doc.height);
 		let placed = Placed { image, offset: *offset };
@@ -212,6 +225,8 @@ pub fn start_rect(doc: &Document, layer: LayerId, store: &TileStore) -> Result<O
 		Some(Selection { image, offset }) => content_bounds(Placed { image, offset: *offset }, Content::Opaque, store)?,
 		None => match doc.layer(layer).map(|l| &l.kind) {
 			Some(LayerKind::Pixel { image, offset }) => content_bounds(Placed { image, offset: *offset }, Content::Opaque, store)?,
+			// A Smart Object's box is its source through its transform (M12-T01).
+			Some(LayerKind::Smart { smart, .. }) => smart.bounds().map(|((x, y), (w, h))| (x, y, x + w as i32, y + h as i32)),
 			_ => None,
 		},
 	};

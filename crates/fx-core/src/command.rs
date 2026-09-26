@@ -490,6 +490,49 @@ pub enum Command {
 		#[serde(default)]
 		protect_skin: bool,
 	},
+	/// Layer ▸ Smart Objects ▸ Convert to Smart Object (M12-T01).
+	ConvertToSmartObject {
+		layers: Vec<LayerRef>,
+	},
+	/// Layer ▸ Smart Objects ▸ New Smart Object via Copy (M12-T01).
+	NewSmartObjectViaCopy {
+		layer: LayerRef,
+	},
+	/// A Smart Object's Smart Filters (M12-T03): the list and the stack's eye.
+	SetSmartFilters {
+		layer: LayerRef,
+		filters: Vec<crate::smart::SmartFilter>,
+		#[serde(default = "default_true")]
+		enabled: bool,
+		label: String,
+	},
+	/// A new artboard (M12-T07): `layers` move into it.
+	NewArtboard {
+		rect: (i32, i32, u32, u32),
+		#[serde(default)]
+		name: Option<String>,
+		#[serde(default)]
+		layers: Vec<LayerRef>,
+		#[serde(default)]
+		background: Option<[u16; 4]>,
+	},
+	/// Move / resize an artboard, or set its background (M12-T07).
+	SetArtboard {
+		layer: LayerRef,
+		rect: (i32, i32, u32, u32),
+		#[serde(default)]
+		background: Option<[u16; 4]>,
+	},
+	/// The user slices, replaced as a whole (M12-T08: add, move, resize,
+	/// delete, Slices from Guides).
+	SetSlices {
+		slices: Vec<crate::comps::Slice>,
+		label: String,
+	},
+	/// The Layer Comps panel (M12-T06).
+	LayerComp {
+		comp: m12::CompAction,
+	},
 	/// The Content-Aware Move tool's commit (M11-T04).
 	ContentAwareMove {
 		layer: LayerRef,
@@ -850,6 +893,29 @@ impl Command {
 				protect,
 				protect_skin,
 			} => m11::content_aware_scale(doc, layer, *width, *height, *amount, *protect, *protect_skin, ctx),
+			Command::LayerComp { comp } => m12::layer_comp(doc, comp),
+			Command::SetSlices { slices, label } => {
+				doc.slices = slices.clone();
+				Ok(CommandEffect {
+					label: label.clone(),
+					..Default::default()
+				})
+			}
+			Command::NewArtboard {
+				rect,
+				name,
+				layers,
+				background,
+			} => m12::new_artboard(doc, *rect, name.as_deref(), layers, *background),
+			Command::SetArtboard { layer, rect, background } => m12::set_artboard(doc, layer, *rect, *background),
+			Command::ConvertToSmartObject { layers } => m12::convert_to_smart(doc, layers, ctx),
+			Command::NewSmartObjectViaCopy { layer } => m12::new_smart_via_copy(doc, layer),
+			Command::SetSmartFilters {
+				layer,
+				filters,
+				enabled,
+				label,
+			} => m12::set_smart_filters(doc, layer, filters, *enabled, label),
 			Command::ContentAwareMove { layer, dx, dy, extend } => m11::content_aware_move(doc, layer, *dx, *dy, *extend, ctx),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),
@@ -910,6 +976,7 @@ impl Command {
 
 mod m10;
 pub mod m11;
+pub mod m12;
 mod m8;
 pub mod m9;
 
@@ -2903,6 +2970,10 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 		});
 	}
 	let id = resolve(doc, layer)?;
+	// A Smart Object only changes its transform (M12-T01).
+	if matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Smart { .. })) {
+		return m12::transform_smart(doc, id, mapping);
+	}
 	let ops = pixel_ops(ctx, "Free Transform")?;
 	let store = ctx.tiles;
 	let canvas = (doc.width, doc.height);
@@ -6639,4 +6710,8 @@ mod using_the_selection_tests {
 		assert_eq!(f.px(centred, 172, 72), [100, 200, 300, 65535]);
 		assert_eq!(f.px(centred, 171, 72)[3], 0);
 	}
+}
+
+fn default_true() -> bool {
+	true
 }

@@ -16,7 +16,7 @@
 //! anti-aliasing is 8-bit too).
 
 use fx_core::vector::{Paint, PathEl, StrokeAlign, StrokeStyle, VectorShape};
-use fx_tiles::{PixelFormat, TILE_PIXELS, TILE_SIZE, TileBuffer};
+use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer};
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Path, PathBuilder, Pixmap, Stroke, Transform};
 
 /// Draw one tile of `level` of a shape.
@@ -37,7 +37,7 @@ pub fn render_shape_tile(
 	let origin = (f64::from(tile.0) * f64::from(TILE_SIZE), f64::from(tile.1) * f64::from(TILE_SIZE));
 	// Level-space → document pixels: 2^level is the mip scale.
 	let scale = f64::from(1u32 << level);
-	let pixels = TILE_PIXELS as u32;
+	let pixels = TILE_SIZE;
 	let Some(mut pixmap) = Pixmap::new(pixels, pixels) else {
 		return TileBuffer::zeroed(format);
 	};
@@ -107,7 +107,7 @@ fn draw_stroke(pixmap: &mut Pixmap, path: &Path, stroke: &StrokeStyle, scale: f6
 		pixmap.stroke_path(path, &paint, &skia, transform, None);
 		return;
 	}
-	let pixels = TILE_PIXELS as u32;
+	let pixels = TILE_SIZE;
 	let Some(mut cover) = Mask::new(pixels, pixels) else {
 		return;
 	};

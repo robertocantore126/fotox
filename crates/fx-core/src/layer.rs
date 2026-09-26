@@ -114,6 +114,20 @@ pub enum Adjustment {
 		tint_hue: f32,
 		tint_saturation: f32,
 	},
+	/// Color Lookup (M12-T05, D-086): a 3D table of `size³` straight RGB
+	/// entries, red fastest, applied in the document's encoding; `name` is
+	/// the file it came from.
+	ColorLookup {
+		name: String,
+		size: u32,
+		table: Vec<[f32; 3]>,
+	},
+	/// Selective Color (M12-T05): CMYK adjustments (−1..=1) for Reds,
+	/// Yellows, Greens, Cyans, Blues, Magentas, Whites, Neutrals, Blacks.
+	SelectiveColor {
+		ranges: [[f32; 4]; 9],
+		relative: bool,
+	},
 }
 
 /// One colour stop of a Gradient Map.
@@ -198,27 +212,36 @@ pub enum LayerKind {
 		content: crate::fill::FillLayer,
 		cache: TiledImage,
 	},
+	/// A Smart Object (M12-T01, D-082): the source and its transform are the
+	/// truth, `cache` the tiles resampled (and filtered) from them.
+	Smart {
+		smart: crate::smart::SmartObject,
+		cache: TiledImage,
+	},
 }
 
 impl LayerKind {
 	/// Whether the layer draws itself from parameters instead of storing
 	/// pixels: both kinds have a derived tile cache (M6-T06/T07).
 	pub fn is_derived(&self) -> bool {
-		matches!(self, LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::FillLayer { .. })
+		matches!(
+			self,
+			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::FillLayer { .. } | LayerKind::Smart { .. }
+		)
 	}
 
 	/// Whether a rasterizer can turn it into pixels (Layer ▸ Rasterize).
 	pub fn is_rasterizable(&self) -> bool {
 		matches!(
 			self,
-			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. }
+			LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::SolidFill { .. } | LayerKind::FillLayer { .. } | LayerKind::Smart { .. }
 		)
 	}
 
 	/// The derived cache of a shape or text layer, when it has one.
 	pub fn derived_cache(&self) -> Option<&TiledImage> {
 		match self {
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => Some(cache),
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => Some(cache),
 			_ => None,
 		}
 	}
@@ -226,7 +249,7 @@ impl LayerKind {
 	/// The derived cache, to rebuild it.
 	pub fn derived_cache_mut(&mut self) -> Option<&mut TiledImage> {
 		match self {
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => Some(cache),
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => Some(cache),
 			_ => None,
 		}
 	}
@@ -317,6 +340,18 @@ pub struct Layer {
 	pub effects: Vec<TiledImage>,
 	/// The vector mask (M10-T06), multiplied with the pixel mask.
 	pub vector_mask: Option<VectorMask>,
+	/// An artboard (M12-T07, D-085): a top-level group with bounds (its
+	/// vector mask clips the children to them) and a background.
+	pub artboard: Option<Artboard>,
+}
+
+/// An artboard's bounds and background colour.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Artboard {
+	/// `(x, y, width, height)`, document pixels.
+	pub rect: (i32, i32, u32, u32),
+	/// Straight 16-bit RGBA; `None` = transparent.
+	pub background: Option<[u16; 4]>,
 }
 
 /// A layer's vector mask (M10-T06): a path in document coordinates, drawn
@@ -355,6 +390,7 @@ impl Layer {
 			styles: None,
 			effects: Vec::new(),
 			vector_mask: None,
+			artboard: None,
 		}
 	}
 

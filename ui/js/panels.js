@@ -13,6 +13,7 @@ import * as nativePatterns from "./native/patterns.js";
 import * as nativeChannels from "./native/channels-panel.js";
 import * as nativeInfo from "./native/info-panel.js";
 import * as nativePaths from "./native/paths-panel.js";
+import * as nativeComps from "./native/comps-panel.js";
 
 const activeTabs = { ...initialActiveTab };
 const collapsed = {};
@@ -253,6 +254,12 @@ const renderers = {
       list.append(row);
     });
     return h("div", {}, list, bar([barBtn("i-image", "Load channel as selection"), barBtn("i-new-layer", "Create new channel"), barBtn("i-trash", "Delete channel"), barBtn("i-menu", "Channels menu")]));
+  },
+
+  // Layer Comps (M12-T06).
+  layerscomps(def) {
+    if (bridge.isNative) return nativeComps.compsPanel();
+    return renderers.simple(def);
   },
 
   paths() {

@@ -78,6 +78,8 @@ export const menus = [
       it("Print...", "Ctrl+P", "dlg:print"),
       sep,
       it("Export Layers...", "", "dlg:export-layers"),
+      it("Slices to Files", "", "misc:export-slices"),
+      it("Artboards to Files", "", "misc:export-artboards"),
       it("Export Color Lookup...", "", "misc:export-lut", { dis: true }),
       sep,
       it("File Info...", "Alt+Shift+Ctrl+I", "dlg:file-info"),
@@ -266,6 +268,8 @@ export const menus = [
         it("Layer from Background...", "", "layer:new-from-bg"),
         it("Group...", "", "layer:new-group"),
         it("Group from Layers...", "", "layer:group-from"),
+        it("Artboard...", "", "layer:artboard"),
+        it("Artboard from Layers...", "", "layer:artboard-from"),
         sep,
         it("Layer via Copy", "Ctrl+J", "layer:via-copy"),
         it("Layer via Cut", "Shift+Ctrl+J", "layer:via-cut"),
@@ -317,8 +321,8 @@ export const menus = [
       it("Create Clipping Mask", "Alt+Ctrl+G", "layer:clip"),
       sub("Smart Objects", [
         it("Convert to Smart Object", "", "smart:convert"),
-        it("New Smart Object via Copy", "", "smart:copy", { dis: true }),
-        it("Edit Contents", "", "smart:edit", { dis: true }),
+        it("New Smart Object via Copy", "", "smart:copy"),
+        it("Edit Contents", "", "smart:edit"),
         it("Export Contents...", "", "smart:export", { dis: true }),
         it("Replace Contents...", "", "smart:replace", { dis: true }),
         it("Relink to File", "", "smart:relink", { dis: true }),
@@ -328,7 +332,7 @@ export const menus = [
       sub("Rasterize", [
         it("Type", "", "raster:type"),
         it("Shape", "", "raster:shape"),
-        it("Smart Object", "", "raster:smart", { dis: true }),
+        it("Smart Object", "", "raster:smart"),
         it("Fill Content", "", "raster:fill"),
         it("Layer", "", "raster:layer"),
         it("All Layers", "", "raster:all"),
@@ -456,7 +460,7 @@ export const menus = [
   {
     id: "filter", label: "Filter", items: [
       it("Last Filter", "Ctrl+F", "filter:last", { dis: true }),
-      it("Convert for Smart Filters", "", "filter:smart", { dis: true }),
+      it("Convert for Smart Filters", "", "filter:smart"),
       sep,
       sub("Blur", [
         it("Gaussian Blur...", "", "dlg:gaussian-blur"),

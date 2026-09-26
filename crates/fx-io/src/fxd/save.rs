@@ -250,6 +250,14 @@ pub(crate) fn images_of(doc: &Document) -> Vec<&TiledImage> {
 		}
 		match &layer.kind {
 			LayerKind::Pixel { image, .. } => out.push(image),
+			// A Smart Object's source composite and nested document (M12-T01).
+			LayerKind::Smart { smart, .. } => {
+				out.push(&smart.source.composite);
+				for layer in &smart.source.doc.layers {
+					go(layer, out);
+				}
+				out.extend(smart.source.doc.channels.iter().map(|c| &c.image));
+			}
 			LayerKind::Group { children, .. } => {
 				for child in children {
 					go(child, out);

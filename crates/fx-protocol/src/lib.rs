@@ -191,6 +191,17 @@ pub enum LayerInfoKind {
 	Text,
 	/// A gradient or pattern fill layer (M8-T03/T06).
 	FillLayer,
+	/// A Smart Object (M12-T01).
+	Smart,
+}
+
+/// A Smart Object's row details (M12-T01..T03).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SmartInfo {
+	pub linked: bool,
+	/// The Smart Filters, bottom → top: label, whether it is on, opacity.
+	pub filters: Vec<(String, bool, f32)>,
+	pub filters_enabled: bool,
 }
 
 /// Flat, UI-friendly description of one layer. The tree is expressed with
@@ -234,6 +245,9 @@ pub struct LayerInfo {
 	/// A gradient / pattern fill layer's parameters (M8-T03/T06).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fill_layer: Option<fx_core::fill::FillLayer>,
+	/// A Smart Object's details (M12).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub smart: Option<SmartInfo>,
 	/// The layer has a vector mask (M10-T06); `Some(enabled)`.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub vector_mask: Option<bool>,
@@ -406,6 +420,12 @@ pub enum EngineToUi {
 		work: bool,
 		paths: Vec<String>,
 		active: serde_json::Value,
+	},
+	/// The document's Layer Comps (M12-T06): names and the applied one.
+	Comps {
+		doc: DocId,
+		names: Vec<String>,
+		active: Option<usize>,
 	},
 	/// The custom shapes' names (M10-T07), built-in first.
 	Shapes {

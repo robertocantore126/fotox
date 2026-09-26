@@ -153,6 +153,54 @@ pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: 
 	export_image(path, doc.width, doc.height, options, &mut render, progress)
 }
 
+/// Composite the canvas rectangle `rect` (`x, y, w, h`) of `doc` and write
+/// it to `path` (M12-T07/T08: artboards and slices). One row of tiles across
+/// the rectangle is kept at a time.
+pub fn export_region(
+	doc: &Document,
+	store: &TileStore,
+	path: &Path,
+	options: ExportOptions,
+	rect: (i32, i32, u32, u32),
+	progress: Progress<'_>,
+) -> Result<(), IoError> {
+	let t = i64::from(TILE_SIZE);
+	let (x0, y0) = (i64::from(rect.0).max(0), i64::from(rect.1).max(0));
+	let x1 = (i64::from(rect.0) + i64::from(rect.2)).min(i64::from(doc.width));
+	let y1 = (i64::from(rect.1) + i64::from(rect.3)).min(i64::from(doc.height));
+	if x1 <= x0 || y1 <= y0 {
+		return Err(IoError::Unsupported("the region is outside the canvas".into()));
+	}
+	let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+	let (tx0, tx1) = (x0 / t, (x1 - 1) / t);
+	let mut luts = LutCache::default();
+	let fetch = |handle: &fx_tiles::TileHandle| store.get(handle).expect("tile of a live document");
+	let mut row: Option<(i64, Vec<Vec<[f64; 4]>>)> = None;
+	let mut render = |y: u32, rows: u32, out: &mut [[u16; 4]]| -> Result<(), IoError> {
+		for r in 0..rows {
+			let dy = y0 + i64::from(y + r);
+			let ty = dy / t;
+			if row.as_ref().is_none_or(|(cached, _)| *cached != ty) {
+				let programs = (tx0..=tx1)
+					.map(|tx| build_program(doc, 0, tx as u32, ty as u32, &mut |a| luts.get(a)))
+					.collect::<Result<Vec<_>, _>>()
+					.map_err(|_| IoError::Decode("full-resolution tiles are missing".into()))?;
+				let tiles: Vec<Vec<[f64; 4]>> = programs.par_iter().map(|p| render_tile(p, &fetch)).collect();
+				row = Some((ty, tiles));
+			}
+			let (_, tiles) = row.as_ref().expect("filled above");
+			for x in 0..i64::from(w) {
+				let dx = x0 + x;
+				let p = tiles[(dx / t - tx0) as usize][((dy % t) * t + dx % t) as usize];
+				let rgb = unpremultiply(p);
+				out[(r as usize) * w as usize + x as usize] = [to_u16(rgb[0]), to_u16(rgb[1]), to_u16(rgb[2]), to_u16(p[3])];
+			}
+		}
+		Ok(())
+	};
+	export_image(path, w, h, options, &mut render, progress)
+}
+
 /// The composite of `layers` of `doc` as one pixel image of the document's
 /// size (level 0), for Merge, Flatten and Stamp Visible (M4-T08). The layers
 /// are composited as an isolated stack, each with its own blend mode,

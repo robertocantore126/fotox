@@ -363,3 +363,74 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Skipped: the whole card (a modal workspace with planes, perspective marquee / stamp / brush, paste into a plane). The pieces it needs exist (homographies in `Mapping::from_quad`, `Mapping::Custom` meshes, the Clone Stamp); left for HARDEN or a later milestone after two cards' worth of warp sessions.
 
 ## M11-T10 — Acceptance: deferred to HARDEN (S32–S34, Rob's comparison with Photoshop).
+
+## M12-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the recommendations recorded as fast defaults D-082 (Smart Objects, reverses D-055), D-083, D-085, D-086, D-087. Point 3 had no recommendation ("Rob's call"): the filter families go in as M12-T03b (D-084), flagged for Rob.
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
+
+## M12-T01 — Smart Object core  (Claude, 2026-09-26)
+- Done: `fx_core::smart` (`SmartSource { doc: Arc<Document>, composite, linked, linked_mtime, uid }`, `SmartObject { source, transform: Mapping, filters, filters_enabled }`, `SmartFilter`); `LayerKind::Smart { smart, cache }` is a derived-tile layer (program: like a fill layer; engine `smart.rs`: requested tiles resampled from the composite's mips through the transform, per level). Commands `ConvertToSmartObject` (the layers become the nested document, the composite is taken, the top layer's place and name are kept), `NewSmartObjectViaCopy` (new uid; Duplicate Layer shares the source), `Command::Transform` on a Smart Object composes the mapping (lossless); Free Transform accepts Smart Objects (preview from the level-0 cache); Rasterize / Layer ▸ Rasterize ▸ Smart Object; `.fxd`: `LayerKindEntry::Smart` stores the nested manifest (its tiles in the same file) and the composite; `LayerInfoKind::Smart` + `SmartInfo`; Place (Embedded) now makes a Smart Object; Layers panel badge, double-click = Edit Contents.
+- Skipped: the nested canvas as the layers' union (it is the parent's canvas), lazy opening of nested tiles checked, Tests.
+- FAST: every mip of the composite is built on the first draw; Bicubic always; a warp / custom mesh cannot be applied to a Smart Object (refused: rasterise first); the thumbnail ignores the transform's scale; placing converts synchronously.
+- VERIFY: Photoshop's name for a converted group of layers.
+- Try it: select two layers, Layer ▸ Smart Objects ▸ Convert to Smart Object; Ctrl+T, scale to 10 %, Enter, Ctrl+T back to 1000 %: sharp.
+
+## M12-T02 — Edit Contents  (Claude, 2026-09-26)
+- Done: Layer ▸ Smart Objects ▸ Edit Contents (or double-click the thumbnail) opens the nested document in its own tab ("<name>.psb"); Ctrl+S in that tab composites it and writes it back into the parent as one "Edit Contents" history step (undo restores the old source); a second Edit Contents brings the open tab forward.
+- Skipped: Linked Smart Objects (Place Linked, mtime watch, Update Modified Content, Relink, Embed Linked), Replace Contents, Export Contents; Tests.
+- FAST: the history entry's command is a placeholder (history is by snapshots); instances that share the source are not updated with it; closing the child tab without saving asks nothing special.
+- VERIFY: none.
+- Try it: double-click a Smart Object's thumbnail, paint in the new tab, Ctrl+S, switch back.
+
+## M12-T03 — Smart Filters  (Claude, 2026-09-26)
+- Done: `SmartObject.filters` / `filters_enabled`; `Command::SetSmartFilters` (the whole list + the stack's eye, one history step, cache redrawn); a filter applied to a Smart Object (Filter menu, Ctrl+F) is rewritten into a new Smart Filter (`smart_filter_rewrite`); evaluation per requested tile and level in `fx-engine/src/smart_filters.rs`: each filter is a `LevelSource` stage (memoised) over the one below, the bottom one resampling the source lazily so aprons and coarser blur levels are served; per-filter opacity. Filter ▸ Convert for Smart Filters. The Layers row shows "⧉ Gaussian Blur, (Unsharp Mask)"; a click opens the Smart Filters dialog (stack on/off; per filter on/off, opacity, order, delete).
+- Skipped: the filter mask; per-filter blend modes; filter rows under the layer with drag-reorder; double-click to re-edit a filter's parameters with the live preview; Tests (a Smart Filter equals the destructive filter: checked by hand, max difference 0 at level 0).
+- FAST: no live preview while the filter dialog is open on a Smart Object (OK applies); aprons are re-resampled on every draw; the mode is ignored (Normal).
+- VERIFY: none.
+- Try it: convert a layer, Filter ▸ Blur ▸ Gaussian Blur…, OK; click the "⧉" text in its row.
+
+## M12-T03b — More filters  (Claude, 2026-09-26, D-084)
+- Done: `FilterParams` Box Blur, Motion Blur, Radial Blur (Spin / Zoom about the canvas centre), Surface Blur, Add Noise (uniform / Gaussian, monochromatic), Median, Dust & Scratches, Despeckle, Sharpen, Sharpen Edges, Emboss, Find Edges, High Pass, Minimum, Maximum, Offset (transparent / repeat / wrap), Clouds (foreground → background) in `fx-ops/src/filter_more.rs` on the M4 tile driver (any level, distances × 2⁻ᴸ, live preview and Smart Filters for free); dialogs wired in `ui/js/native/filters.js`, the dialog-less ones as engine actions (`filter:despeckle` …).
+- Skipped: Lens Blur, Average, Smart Sharpen, the Distort / Pixelate / other Render / Stylize / Video entries, Custom, Difference Clouds, Tests.
+- FAST: square windows; Radial Blur's window is capped at 1024 px of the level (streaks clipped far from the centre); Median over a big radius is slow (a sort per pixel); Wrap Around repeats the edge beyond the window; noise and clouds are hashed per level-0 pixel.
+- VERIFY: every formula against Photoshop (Radial Blur's amounts, Sharpen's strength, Surface Blur's weights, Emboss grey level, Despeckle's edge test).
+- Try it: Filter ▸ Noise ▸ Add Noise…, Filter ▸ Other ▸ High Pass…, Filter ▸ Render ▸ Clouds.
+
+## M12-T04 — Layer styles: the other five  (Claude, 2026-09-26)
+- Done: `LayerStyles` gains `bevel` (Inner / Outer Bevel, Emboss, Pillow Emboss; depth, direction, size, soften, angle / global light, altitude, highlight and shadow mode / colour / opacity), `inner_glow`, `satin`, `gradient_overlay` (a `GradientLayer`) and `pattern_overlay` (a document pattern, scale); `EffectKind` now has 11 caches in composite order (Drop Shadow, Outer Glow, Pattern / Gradient / Color Overlay, Satin, Inner Glow, Inner Shadow, Stroke, Bevel shadow, Bevel highlight); `EffectParams.extra`; engine `effects.rs`: Inner Glow (edge), Satin (|blur(shift +d) − blur(shift −d)|, Invert), Bevel (height field from the exact distance transform inside / outside, soften blur, shaded by the light vector: highlight and shadow passes), overlays with per-pixel colour; effects now also read Smart Object and fill-layer alpha. Dialogs: Inner Glow, Satin, Bevel & Emboss live; Gradient Overlay (gradient editor, style, angle, scale, reverse) and Pattern Overlay (pattern list, scale) on OK.
+- Skipped: Contour and Texture sub-sections, Chisel techniques, gloss contours, Inner Glow's Center source and noise, Stroke Emboss (acts as Emboss), advanced blending (Blend If, Knockout, Blend Interior Effects as Group, Blend Clipped Layers as Group, Transparency Shapes Layer, Layer Mask Hides Effects), GPU = CPU check, Tests.
+- FAST: gradient overlay placed over the canvas (not "Align with Layer"); overlay dialogs apply on OK only; bevel's shading curve is my own.
+- VERIFY: all five effects against Photoshop at identical parameters (M12-T09), the composite order.
+- Try it: a shape layer, Layer ▸ Layer Style ▸ Bevel & Emboss…, Size 10.
+
+## M12-T05 — Color Lookup and Selective Color  (Claude, 2026-09-26)
+- Done: `Adjustment::ColorLookup { name, size, table }` (the table stored in the document, D-086) and `Adjustment::SelectiveColor { ranges: [[C, M, Y, K]; 9], relative }`, with their NameKinds; `fx_io::lut` parses `.cube` (3D, and 1D expanded to 17³) and `.3dl` (blue-fastest reordered, 10/12/16-bit scaled); render: `AdjustKind::Lut3d` (resampled to 16³ = one 4096-texel LUT row, trilinear in `composite.wgsl` and `adjust::lut3d`) and `AdjustKind::Selective` (9-range table in a LUT row; range weights, CMY → RGB, K on all, Relative × ink), GPU shader validated with naga. UI: the Layers panel's new-adjustment menu and Image ▸ Adjustments ▸ Color Lookup… (file picker → `adj:color-lookup`) / Selective Color… (per-range dialog, Relative / Absolute); double-click a Color Lookup layer to load another file.
+- Skipped: Color Lookup as a destructive image adjustment, Abstract / Device Link profiles, `.look` / `.csp`, dithering for 8-bit, Export Color Lookup, Tests (identity LUT exact, 1D cube = Curves, Reds −100 % cyan on pure red).
+- FAST: a 33³ LUT is resampled to 16³ (trilinear); `.cube` domains other than 0..1 ignored.
+- VERIFY: Selective Color's range weights and Relative / Absolute formulas (published approximations, not Photoshop's).
+- Try it: Layers panel ◐ ▸ Color Lookup…, pick a `.cube`; ◐ ▸ Selective Color…, Reds, Cyan −100.
+
+## M12-T06 — Layer Comps  (Claude, 2026-09-26)
+- Done: `fx_core::comps` (`LayerComp { name, comment, visibility, position, appearance, states }`, `CompState` per layer: visible, pixel offset / shape-text matrix / Smart Object transform, opacity, fill, blend, styles); `Document::comps` / `active_comp`, saved in `.fxd`; `Command::LayerComp { comp: New | Update | Apply | Delete | Rename }` (Apply redraws the derived caches it moves); engine `comps:*` actions (prev / next wrap round) and `EngineToUi::Comps`; the Layer Comps panel (`ui/js/native/comps-panel.js`): click applies, double-click renames, ◀ ▶ previous / next, update, + new (dialog: name, Visibility, Position, Appearance), delete.
+- Skipped: File ▸ Export ▸ Layer Comps to Files, the Smart Object source state, comments UI, the "Last Document State" row, Tests.
+- FAST: layers added after a comp was recorded are left as they are when it is applied (Photoshop hides nothing either — VERIFY).
+- VERIFY: Photoshop's behaviour for layers the comp does not know.
+- Try it: Window ▸ Layer Comps, + to record, hide a layer, + again; click the first comp.
+
+## M12-T07 — Artboards  (Claude, 2026-09-26)
+- Done: `Layer::artboard: Option<Artboard { rect, background }>` on a top-level group whose vector mask is the artboard's rectangle (it clips the children); the program draws the background under the children; `Command::NewArtboard { rect, name, layers, background }` (the layers move in; the canvas grows to hold it, every canvas-sized derived cache reset) and `Command::SetArtboard` (move takes the layers along, resize, background); `.fxd` `LayerEntry.artboard`; the Artboard tool ("artboard", Move's flyout: drag = new, drag inside = move, Alt+drag = resize, outlines of every artboard); Layer ▸ New ▸ Artboard / Artboard from Layers (the selected layers' bounds). `prepare_level0` now also draws vector-mask tiles (merge / export of vector-masked layers and artboards needed it).
+- Also fixed: shape, text and vector-mask tiles sized their tiny-skia pixmap with `TILE_PIXELS` (65 536) instead of `TILE_SIZE`: every such tile tried to allocate 16 GB and aborted (separate commit). The fx-engine suite is green again; fx-render has 4 test expectations that the crash had hidden (text layout / a rotated line's anti-aliasing) — for HARDEN.
+- Skipped: export per artboard (File ▸ Export ▸ Artboards to Files), side handles, "+" adjacent buttons, presets, guides / snapping knowing artboards, artboards left of / above the origin (the canvas only grows right / down), an artboard marker in the Layers panel, Tests.
+- FAST: an artboard is a pass-through group with a vector mask; its background is a solid op inside it.
+- VERIFY: none.
+- Try it: select the Artboard tool (Move's flyout), drag a rectangle; drag a layer into its group in Layers.
+
+## M12-T08 — Slices and slice export  (Claude, 2026-09-26)
+- Done: `fx_core::comps::Slice { name, rect }` in `Document::slices` (saved in `.fxd`), `auto_slices` (the grid of the user slices' edges minus the covered cells), `Command::SetSlices`; the Slice tool (drag = new slice) and the Slice Select tool (click, drag = move, Alt+drag = resize, Delete) drawing user slices (blue, selected orange) and auto slices (grey) — `tools/slice.rs`; Slices From Guides (bar button, `slices:from-guides`); `export::export_region` (one row of tiles across the rectangle at a time); File ▸ Export ▸ Slices to Files (user + auto slices, top-left order, `<doc>-slices/<doc>_NN.png`) and Artboards to Files (`<doc>-<artboard>.png`) next to the saved document.
+- Skipped: Divide Slice, the Slice Options dialog, layer-based slices, slice numbers drawn on the canvas, JPEG / WebP choice for slices (PNG only), Tests.
+- FAST: the exports run on the engine thread without a progress bar; auto slices are not merged into bigger rectangles.
+- VERIFY: Photoshop's auto-slice layout and numbering.
+- Try it: C's flyout ▸ Slice Tool, drag two rectangles; save the document; File ▸ Export ▸ Slices to Files.
+
+## M12-T09 — Acceptance: deferred to HARDEN (S35–S37, Rob's mock-up and the styles comparison).

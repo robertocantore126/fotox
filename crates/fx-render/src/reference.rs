@@ -97,6 +97,8 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 				} => crate::adjust::color_balance(cb, *shadows, *midtones, *highlights, *preserve_luma),
 				AdjustKind::Vibrance { vibrance, saturation } => crate::adjust::vibrance(cb, *vibrance, *saturation),
 				AdjustKind::BlackWhite { weights, tint } => crate::adjust::black_white(cb, *weights, *tint),
+				AdjustKind::Lut3d(lut) => crate::adjust::lut3d(lut, cb),
+				AdjustKind::Selective { lut, relative } => crate::adjust::selective_color(lut, cb, *relative),
 			};
 			*top = composite(*blend, *top, f, *alpha as f64 * m, true);
 		}

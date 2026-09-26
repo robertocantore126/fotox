@@ -67,6 +67,7 @@ export const ENGINE = Object.freeze({
   PATTERNS: "patterns",
   CHANNELS: "channels",
   PATHS: "paths",
+  COMPS: "comps",
   SHAPES: "shapes",
   ANNOTATIONS: "annotations",
   HISTORY_SOURCE: "history_source",
