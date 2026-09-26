@@ -103,7 +103,7 @@ function pickerControl() {
 
 /* ------------------------------------------------------ fill layer dialog */
 
-function patternList(selected, onPick) {
+export function patternList(selected, onPick) {
   const list = h("div", { class: "pattern-grid", style: { display: "flex", flexWrap: "wrap", gap: "4px", maxHeight: "140px", overflow: "auto" } });
   const draw = () => {
     clear(list);
@@ -152,4 +152,9 @@ export function initPatterns() {
     for (const refresh of pickers) refresh();
   });
   on("pattern:content-options", () => openPatternFillDialog(true));
+}
+
+/** The picked pattern's id (Pattern Overlay, M12-T04). */
+export function currentPattern() {
+  return current;
 }

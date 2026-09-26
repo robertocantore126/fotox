@@ -10,7 +10,7 @@
 //! Every content change of the document marks every effect cache dirty
 //! ([`invalidate`]); only the visible tiles are recomputed.
 
-use fx_core::styles::{EffectKind, EffectParams, StrokePosition};
+use fx_core::styles::{BevelStyle, EffectExtra, EffectKind, EffectParams, StrokePosition};
 use fx_core::{Document, LayerId, LayerKind};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileSlot, TileStore, TiledImage};
 use rayon::prelude::*;
@@ -66,14 +66,34 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 			}
 			continue;
 		}
-		jobs.push((id, effect, level, tx, ty, params, scale, reach as usize, side, alpha));
+		// Pattern Overlay's pattern (M12-T04), looked up once.
+		let pattern = match &params.extra {
+			EffectExtra::Pattern { id: pid, .. } => doc.patterns.iter().find(|p| p.id == *pid).cloned(),
+			_ => None,
+		};
+		jobs.push((id, effect, level, tx, ty, params, scale, reach as usize, side, alpha, pattern));
 	}
 	let format = doc.color.depth.rgba_format();
+	let size = (doc.width, doc.height);
 	let tiles: Vec<_> = jobs
 		.into_par_iter()
-		.map(|(id, effect, level, tx, ty, params, scale, reach, side, alpha)| {
+		.map(|(id, effect, level, tx, ty, params, scale, reach, side, alpha, pattern)| {
 			let coverage = compute(&params, &alpha, side, reach, scale);
-			let buffer = paint(&coverage, params.color, format);
+			let buffer = match &params.extra {
+				// Per-pixel colour: the gradient / pattern at the document point.
+				EffectExtra::Gradient(g) => {
+					let placed = g.placed(size);
+					paint_with(&coverage, format, |x, y| placed.color_at_point(x, y, x as i64, y as i64), (tx, ty), scale)
+				}
+				EffectExtra::Pattern { scale: s, .. } => match &pattern {
+					Some(p) => {
+						let k = (s / 100.0).max(0.01);
+						paint_with(&coverage, format, |x, y| p.sample(x / k, y / k), (tx, ty), scale)
+					}
+					None => paint(&coverage, [32_768, 32_768, 32_768, 65_535], format),
+				},
+				_ => paint(&coverage, params.color, format),
+			};
 			(id, effect, level, tx, ty, buffer)
 		})
 		.collect();
@@ -99,7 +119,7 @@ fn read_alpha(doc: &mut Document, store: &TileStore, id: LayerId, level: usize, 
 			let off = |o: i32| (o as i64 * 2 + scale).div_euclid(scale * 2);
 			(off(offset.0), off(offset.1))
 		}
-		LayerKind::Shape { .. } | LayerKind::Text { .. } => (0, 0),
+		LayerKind::Shape { .. } | LayerKind::Text { .. } | LayerKind::Smart { .. } | LayerKind::FillLayer { .. } => (0, 0),
 		LayerKind::SolidFill { .. } => {
 			// FAST: a fill layer is opaque over the canvas.
 			let (w, h) = ((i64::from(doc.width) + scale - 1) / scale, (i64::from(doc.height) + scale - 1) / scale);
@@ -121,7 +141,7 @@ fn read_alpha(doc: &mut Document, store: &TileStore, id: LayerId, level: usize, 
 	let (ix1, iy1) = (ix0 + side as i64 - 1, iy0 + side as i64 - 1);
 	let image = match &layer.kind {
 		LayerKind::Pixel { image, .. } => image,
-		LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => cache,
+		LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::Smart { cache, .. } | LayerKind::FillLayer { cache, .. } => cache,
 		_ => return out,
 	};
 	let level = level.min(image.level_count() - 1);
@@ -152,7 +172,7 @@ fn read_alpha(doc: &mut Document, store: &TileStore, id: LayerId, level: usize, 
 	let Some(layer) = doc.layer(id) else { return out };
 	let image = match &layer.kind {
 		LayerKind::Pixel { image, .. } => image,
-		LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => cache,
+		LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::Smart { cache, .. } | LayerKind::FillLayer { cache, .. } => cache,
 		_ => return out,
 	};
 	for (gx, gy) in tiles {
@@ -219,7 +239,43 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 			let blurred = box_blur3(&src, side, blur / 2.0);
 			blurred.iter().zip(alpha).map(|(s, a)| s * a).collect()
 		}
-		EffectKind::ColorOverlay => alpha.to_vec(),
+		EffectKind::ColorOverlay | EffectKind::GradientOverlay | EffectKind::PatternOverlay => alpha.to_vec(),
+		// M12-T04: Inner Glow (edge source) is an inner shadow without offset.
+		EffectKind::InnerGlow => {
+			let mut src: Vec<f32> = alpha.iter().map(|a| 1.0 - a).collect();
+			if morph > 0.0 {
+				src = dilate(&src, side, morph);
+			}
+			let blurred = box_blur3(&src, side, blur / 2.0);
+			blurred.iter().zip(alpha).map(|(s, a)| s * a).collect()
+		}
+		EffectKind::Satin => {
+			let (o, invert) = match &params.extra {
+				EffectExtra::Satin { offset, invert } => (((offset.0 / scale).round() as i64, (offset.1 / scale).round() as i64), *invert),
+				_ => ((0, 0), false),
+			};
+			let shifted = |dx: i64, dy: i64| -> Vec<f32> { (0..side * side).map(|i| at(alpha, (i % side) as i64 - dx, (i / side) as i64 - dy)).collect() };
+			let a = box_blur3(&shifted(o.0, o.1), side, blur / 2.0);
+			let b = box_blur3(&shifted(-o.0, -o.1), side, blur / 2.0);
+			(0..side * side)
+				.map(|i| {
+					let d = (a[i] - b[i]).abs().min(1.0);
+					(if invert { 1.0 - d } else { d }) * alpha[i]
+				})
+				.collect()
+		}
+		EffectKind::BevelShadow | EffectKind::BevelHighlight => match &params.extra {
+			EffectExtra::Bevel {
+				style,
+				depth,
+				up,
+				size,
+				soften,
+				light,
+				highlight,
+			} => bevel(alpha, side, *style, *depth, *up, size / scale, soften / scale, *light, *highlight),
+			_ => vec![0.0; side * side],
+		},
 		EffectKind::Stroke => {
 			let (size, position) = params.stroke.unwrap_or((0.0, StrokePosition::Outside));
 			let size = size / scale;
@@ -316,6 +372,114 @@ fn paint(coverage: &[f32], color: [u16; 4], format: PixelFormat) -> TileBuffer {
 					continue;
 				}
 				px[i * 4..i * 4 + 4].copy_from_slice(&[c8[0], c8[1], c8[2], a]);
+			}
+		}
+	}
+	buffer
+}
+
+/// One pass of Bevel & Emboss (M12-T04): a height field from the distance
+/// to the edge, shaded by the light; the highlight or the shadow part.
+/// FAST: Smooth technique only, no Contour / Texture; VERIFY the shading
+/// against Photoshop.
+#[allow(clippy::too_many_arguments)]
+fn bevel(alpha: &[f32], side: usize, style: BevelStyle, depth: f64, up: bool, size: f64, soften: f64, light: (f64, f64), highlight: bool) -> Vec<f32> {
+	let size = size.max(0.5);
+	let inside: Vec<bool> = alpha.iter().map(|&a| a < 0.5).collect();
+	let outside: Vec<bool> = alpha.iter().map(|&a| a >= 0.5).collect();
+	let d_in = fx_ops::morph::edt_2d(&inside, side, side);
+	let d_out = fx_ops::morph::edt_2d(&outside, side, side);
+	// Height 0 at the edge, 1 on the plateau (inside) or the far ground.
+	let (reach_in, reach_out) = match style {
+		BevelStyle::InnerBevel => (size, 0.0),
+		BevelStyle::OuterBevel => (0.0, size),
+		BevelStyle::Emboss | BevelStyle::PillowEmboss => (size / 2.0, size / 2.0),
+	};
+	let mut h: Vec<f32> = (0..side * side)
+		.map(|i| {
+			let v = if alpha[i] >= 0.5 {
+				if reach_in > 0.0 { (d_in[i] / reach_in).min(1.0) } else { 1.0 }
+			} else if reach_out > 0.0 {
+				let r = 1.0 - (d_out[i] / reach_out).min(1.0);
+				// Outer bevel / emboss: the ground rises towards the shape.
+				if style == BevelStyle::PillowEmboss { -r } else { r - 1.0 }
+			} else {
+				0.0
+			};
+			v as f32
+		})
+		.collect();
+	if soften > 0.3 {
+		h = box_blur3(&h, side, soften / 2.0);
+	}
+	let k = (depth / 100.0 * size) as f32 * if up { 1.0 } else { -1.0 };
+	let (az, alt) = light;
+	let l = [(alt.cos() * az.cos()) as f32, (-alt.cos() * az.sin()) as f32, alt.sin() as f32];
+	let flat = l[2];
+	let region = |i: usize| -> f32 {
+		let inside = alpha[i];
+		match style {
+			BevelStyle::InnerBevel => inside,
+			BevelStyle::OuterBevel => (1.0 - inside) * if d_out[i] <= reach_out + 1.0 { 1.0 } else { 0.0 },
+			_ => {
+				if alpha[i] >= 0.5 || d_out[i] <= reach_out + 1.0 {
+					1.0
+				} else {
+					0.0
+				}
+			}
+		}
+	};
+	(0..side * side)
+		.map(|i| {
+			let (x, y) = (i % side, i / side);
+			let get = |xx: usize, yy: usize| h[yy.min(side - 1) * side + xx.min(side - 1)];
+			let gx = (get(x + 1, y) - get(x.saturating_sub(1), y)) / 2.0;
+			let gy = (get(x, y + 1) - get(x, y.saturating_sub(1))) / 2.0;
+			let n = [-k * gx, -k * gy, 1.0];
+			let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+			let shade = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / len;
+			let v = if highlight { (shade - flat) * 2.0 } else { (flat - shade) * 2.0 };
+			v.clamp(0.0, 1.0) * region(i)
+		})
+		.collect()
+}
+
+/// A straight-alpha tile whose colour comes from `color(x, y)` (document
+/// point of each pixel centre) and whose alpha is coverage × that alpha.
+fn paint_with(coverage: &[f32], format: PixelFormat, color: impl Fn(f64, f64) -> [f64; 4], (tx, ty): (u32, u32), scale: f64) -> TileBuffer {
+	let t = TILE_SIZE as usize;
+	let mut buffer = TileBuffer::zeroed(format);
+	for (i, &c) in coverage.iter().enumerate() {
+		if c <= 0.0 {
+			continue;
+		}
+		let (x, y) = (
+			(f64::from(tx) * t as f64 + (i % t) as f64 + 0.5) * scale,
+			(f64::from(ty) * t as f64 + (i / t) as f64 + 0.5) * scale,
+		);
+		let rgba = color(x, y);
+		let a = c.clamp(0.0, 1.0) as f64 * rgba[3];
+		match format {
+			PixelFormat::Rgba16 => {
+				let px = buffer.as_u16_mut();
+				px[i * 4..i * 4 + 4].copy_from_slice(
+					&[0, 1, 2]
+						.map(|k| (rgba[k] * 65535.0).round() as u16)
+						.into_iter()
+						.chain([(a * 65535.0).round() as u16])
+						.collect::<Vec<_>>(),
+				);
+			}
+			_ => {
+				let px = buffer.bytes_mut();
+				px[i * 4..i * 4 + 4].copy_from_slice(
+					&[0, 1, 2]
+						.map(|k| (rgba[k] * 255.0).round() as u8)
+						.into_iter()
+						.chain([(a * 255.0).round() as u8])
+						.collect::<Vec<_>>(),
+				);
 			}
 		}
 	}
