@@ -257,3 +257,32 @@ fn a_turning_layer_matrix_turns_the_text() {
 	assert!(any_ink(&upright) && any_ink(&turned), "the glyph is drawn in both");
 	assert!(upright.as_u16() != turned.as_u16(), "and not in the same pixels");
 }
+
+/// HARDEN: glyphs were drawn upside down (font outlines are y-up). A "T" set
+/// on a baseline must have its bar at the top: the rows just under the cap
+/// height hold far more ink than the rows just above the baseline (the stem).
+#[test]
+fn glyphs_are_drawn_upright() {
+	let (mut fonts, _) = stack!();
+	// Arial when the machine has it (the fallback otherwise): a plain "T".
+	let content = point_text("T", "Arial", 120.0, 0.0, 0.0);
+	let layout = layout_of(&mut fonts, &content, 72.0);
+	// Baseline at y = 200 in the tile, the T to the right of x = 40.
+	let tile = render_text_tile(
+		&layout,
+		[1.0, 0.0, 0.0, 1.0, 40.0, 200.0],
+		0,
+		(0, 0),
+		PixelFormat::Rgba16,
+		TextAntialias::Smooth,
+	);
+	let words = tile.as_u16();
+	let row_ink = |y: u32| (0..256u32).filter(|x| words[((y * 256 + x) * 4 + 3) as usize] > 32768).count();
+	// The first inked row is the top of the glyph.
+	let top = (0..200).find(|y| row_ink(*y) > 0).expect("the T is drawn above its baseline");
+	let (upper, lower): (usize, usize) = ((top + 4..top + 12).map(row_ink).sum(), (192..200).map(row_ink).sum());
+	assert!(
+		upper > 2 * lower,
+		"the bar is at the top: {upper} ink px under the cap height, {lower} over the baseline"
+	);
+}

@@ -169,6 +169,7 @@ pub(crate) fn run(ctx: RenderContext) {
 		let time = started_at.elapsed().as_secs_f32();
 		animated = f.overlay.as_ref().is_some_and(|overlay| overlay.has_ants());
 		let started = Instant::now();
+		crate::trace::busy(crate::trace::Thread::Render, "frame");
 
 		let reuse = textures[next]
 			.as_ref()
@@ -230,6 +231,14 @@ pub(crate) fn run(ctx: RenderContext) {
 				stats.gpu_bytes = pipeline.gpu_bytes;
 			}
 		}
+		let ms = started.elapsed().as_millis() as u64;
+		if ms >= crate::trace::SLOW_FRAME_MS {
+			crate::trace::event(
+				"frame_slow",
+				serde_json::json!({ "ms": ms, "uploads": uploads, "viewport": [viewport.width, viewport.height], "zoom": f.view.zoom, "generation": f.generation }),
+			);
+		}
+		crate::trace::idle(crate::trace::Thread::Render);
 		if again {
 			let _ = ctx.wake.send(RenderRequest::Wake);
 		}
@@ -260,6 +269,8 @@ struct TilePipeline {
 	/// carries the layer, kind, level and position, so distinct requests stay
 	/// distinct keys).
 	mips_sent: HashSet<TileRequest>,
+	/// When a frame with holes was last written to the flight recorder.
+	holes_logged: Option<Instant>,
 	/// Tiles being loaded by rayon jobs.
 	loading: Arc<Mutex<HashSet<TileId>>>,
 	/// Source tiles uploaded by the last frame, and the running total it is
@@ -284,6 +295,7 @@ impl TilePipeline {
 			current: None,
 			snapshot: None,
 			mips_sent: HashSet::new(),
+			holes_logged: None,
 			loading: Arc::new(Mutex::new(HashSet::new())),
 			frame_uploads: 0,
 			total_uploads: 0,
@@ -311,9 +323,18 @@ impl TilePipeline {
 		// A new document or content generation invalidates everything cached
 		// for it; a new snapshot of the same generation (mips committed) only
 		// allows the failed tiles to be retried.
+		//
+		// A new generation of the *same* document keeps `ready`: every ready
+		// tile the plan looks at is re-requested anyway (with its new program),
+		// and until its new composite is done it shows the previous one
+		// (`keep_previous`). Clearing it made every edit flash the background
+		// for a frame (the tiles waiting on the upload budget or a mip drew
+		// nothing, and so did their coarse fallbacks).
 		if self.current != Some((id, generation)) {
+			if self.current.is_none_or(|(old, _)| old != id) {
+				self.ready.clear();
+			}
 			self.current = Some((id, generation));
-			self.ready.clear();
 			self.programs.clear();
 		}
 		if !self.snapshot.as_ref().is_some_and(|s| Arc::ptr_eq(s, doc)) {
@@ -342,6 +363,8 @@ impl TilePipeline {
 		let mut seen: HashSet<TileKey> = keys.iter().copied().collect();
 		keys.extend(touched.into_inner().into_iter().filter(|k| seen.insert(*k)));
 
+		// Tiles shown with their previous composite while the new one waits.
+		let mut stale = false;
 		// Programs: cached per revision; tiles with dirty mips go to the engine.
 		let mut mips = Vec::new();
 		let mut programs = Vec::with_capacity(keys.len());
@@ -355,6 +378,8 @@ impl TilePipeline {
 					}
 					Err(missing) => {
 						mips.extend(missing.into_iter().filter(|m| self.mips_sent.insert(*m)));
+						// Waiting for a mip: keep showing the previous composite.
+						self.keep_or_forget(key);
 						continue;
 					}
 				}
@@ -388,7 +413,8 @@ impl TilePipeline {
 				TileOutcome::Ready { slot } => progressed |= self.ready.insert(key, Ready::Slot(slot)) != Some(Ready::Slot(slot)),
 				TileOutcome::Empty => progressed |= self.ready.insert(key, Ready::Empty) != Some(Ready::Empty),
 				TileOutcome::Deferred { missing } => {
-					self.ready.remove(&key);
+					// Keep showing the previous composite while this one waits.
+					stale |= self.keep_or_forget(key);
 					if missing.is_empty() {
 						budget_spent = true;
 					}
@@ -401,6 +427,15 @@ impl TilePipeline {
 
 		// Plan again with this frame's results, and draw.
 		let mut plan: FramePlan = plan_frame(view, viewport, doc.width, doc.height, levels, &|key| self.ready.get(&key).copied().map(slot_of));
+		// The flight recorder: visible tiles with nothing to draw (the background
+		// shows through) — a flicker when it follows an edit. At most 10 a second.
+		if plan.holes > 0 && self.holes_logged.is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(100)) {
+			self.holes_logged = Some(Instant::now());
+			crate::trace::event(
+				"holes",
+				serde_json::json!({ "holes": plan.holes, "draws": plan.draws.len(), "generation": generation, "zoom": view.zoom, "deferred": self.compositor.stats().deferred }),
+			);
+		}
 		plan.draws.retain(|d| d.slot != EMPTY_SLOT);
 		// The overlay is tessellated here, on the render thread, so a hover (which
 		// only changes the overlay) never touches the compositor (M5-T02).
@@ -418,7 +453,30 @@ impl TilePipeline {
 			&vertices,
 			time,
 		);
-		Ok(!plan.complete && (progressed || budget_spent))
+		// A stale tile is not done: draw again while progress is being made.
+		Ok((!plan.complete || stale) && (progressed || budget_spent))
+	}
+
+	/// A tile whose new composite is not ready this frame: keep its previous
+	/// composite on screen if the compositor still holds it (and protect that
+	/// slot for this frame), else forget it so the planner falls back.
+	fn keep_or_forget(&mut self, key: TileKey) -> bool {
+		if !self.ready.contains_key(&key) {
+			return false;
+		}
+		match self.compositor.keep_previous(key.level, key.tx, key.ty) {
+			Some(slot) => {
+				self.ready.insert(key, Ready::Slot(slot));
+				true
+			}
+			None => {
+				// A tile that was empty stays empty; a recycled slot is gone.
+				if self.ready.get(&key) != Some(&Ready::Empty) {
+					self.ready.remove(&key);
+				}
+				false
+			}
+		}
 	}
 
 	/// Bring a missing tile into RAM on the rayon pool, then wake the render

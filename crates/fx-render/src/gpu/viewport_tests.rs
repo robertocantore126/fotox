@@ -103,6 +103,7 @@ fn plan() -> FramePlan {
 		}],
 		requests: Vec::new(),
 		complete: true,
+		holes: 0,
 		doc_rect: rect,
 	}
 }

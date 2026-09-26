@@ -31,6 +31,7 @@ use crate::stats::RenderStats;
 use crate::thumbs::{self, ThumbSource, Thumbnail};
 use crate::tools::transform::{self as free_transform, Mode as TransformMode, Update as TransformUpdate};
 use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSettings, Tools};
+use crate::trace;
 use crate::transform_preview::{Prepared, PreviewJob as TransformJob, TransformPreview};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
 use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips, vector};
@@ -167,6 +168,26 @@ pub(crate) enum Internal {
 	Ai(Box<m13::AiDone>),
 }
 
+/// What an internal message is, for the watchdog.
+fn internal_name(message: &Internal) -> &'static str {
+	match message {
+		Internal::Progress { .. } => "internal progress",
+		Internal::Imported { .. } => "internal imported",
+		Internal::Exported { .. } => "internal exported",
+		Internal::OpenedFxd { .. } => "internal opened fxd",
+		Internal::Saved { .. } => "internal saved",
+		Internal::Copied { .. } => "internal copied",
+		Internal::B3Built { .. } => "internal b3 built",
+		Internal::TransformPrepared { .. } => "internal transform prepared",
+		Internal::TransformShown { .. } => "internal transform shown",
+		Internal::PreviewTiles { .. } => "internal preview tiles",
+		Internal::PreviewFailed { .. } => "internal preview failed",
+		Internal::PixelJobDone { .. } => "internal pixel job done",
+		Internal::Thumbnail { .. } => "internal thumbnail",
+		Internal::Ai(_) => "internal ai done",
+	}
+}
+
 struct Engine {
 	output: OutputSink,
 	render: Sender<RenderRequest>,
@@ -238,6 +259,8 @@ struct Engine {
 	transform_refine: Option<Instant>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
+	/// Pointer moves since the last traced input (the recorder counts them).
+	trace_moves: u32,
 }
 
 /// How long the pointer must rest before a dragged transform is previewed at
@@ -376,6 +399,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		transform_latest: Arc::new(AtomicU64::new(0)),
 		transform_refine: None,
 		smart_children: HashMap::new(),
+		trace_moves: 0,
 	};
 
 	loop {
@@ -392,10 +416,20 @@ pub(crate) fn run(ctx: EngineContext) {
 		select_biased! {
 			recv(inputs) -> input => match input {
 				Ok(EngineInput::Shutdown) | Err(_) => break,
-				Ok(input) => engine.handle(input),
+				Ok(input) => {
+					let what = crate::trace_input(&input, &mut engine.trace_moves);
+					trace::busy(trace::Thread::Engine, &what);
+					engine.handle(input);
+				}
 			},
-			recv(internal_rx) -> msg => if let Ok(msg) = msg { engine.internal(msg) },
-			recv(mips_rx) -> work => if let Ok(work) = work { engine.compute_mips(work) },
+			recv(internal_rx) -> msg => if let Ok(msg) = msg {
+				trace::busy(trace::Thread::Engine, internal_name(&msg));
+				engine.internal(msg);
+			},
+			recv(mips_rx) -> work => if let Ok(work) = work {
+				trace::busy(trace::Thread::Engine, "compute mips");
+				engine.compute_mips(work);
+			},
 			default(timeout) => {}
 		}
 		engine.flush_view_message();
@@ -403,6 +437,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		engine.cool_hot_layer();
 		engine.render_due_thumbnails();
 		engine.refine_transform_if_due();
+		trace::idle(trace::Thread::Engine);
 	}
 
 	let _ = engine.render.send(RenderRequest::Stop);
@@ -1035,6 +1070,11 @@ impl Engine {
 				// Double-click on a text layer's thumbnail (M6-T09): the Type tool
 				// enters it with all the text selected. The UI has switched the
 				// tool to Type first.
+				// The UI's own errors, for the flight recorder only (`trace_input`
+				// has written the message already).
+				if id.starts_with("trace:") {
+					return Changed::default();
+				}
 				// Preferences (M7-T09): merge, save, apply.
 				if id == "prefs:set" {
 					self.prefs.merge(&args);
@@ -2415,7 +2455,15 @@ impl Engine {
 			tiles: &store,
 			ops: Some(&self.ops),
 		};
+		let traced = trace::enabled().then(|| (format!("{:?}", std::mem::discriminant(&command)), Instant::now()));
+		let cmd_name = trace::enabled().then(|| trace::cut(&serde_json::to_string(&command).unwrap_or_default(), 400));
 		let result = doc.history.execute(&mut doc.doc, command, &mut ctx);
+		if let Some((_, at)) = traced {
+			trace::event(
+				"cmd",
+				serde_json::json!({ "cmd": cmd_name, "ok": result.as_ref().map(|e| e.label.clone()).map_err(ToString::to_string), "ms": at.elapsed().as_secs_f64() * 1000.0 }),
+			);
+		}
 		if let (Err(_), Some(before)) = (&result, before_merge) {
 			// The new value was refused: put the merged step back as it was.
 			doc.history.redo(&mut doc.doc);
@@ -3926,6 +3974,15 @@ impl Engine {
 	}
 
 	fn to_ui(&self, message: &EngineToUi) {
+		match message {
+			EngineToUi::Error { text } => trace::event("ui_error", serde_json::json!({ "text": text })),
+			EngineToUi::Toast { text } => trace::event("toast", serde_json::json!({ "text": text })),
+			EngineToUi::Progress { task, label, fraction } if *fraction == 0.0 => {
+				trace::event("job", serde_json::json!({ "task": task, "label": label, "state": "start" }))
+			}
+			EngineToUi::ProgressDone { task } => trace::event("job", serde_json::json!({ "task": task, "state": "done" })),
+			_ => {}
+		}
 		(self.output)(EngineOutput::ToUi(fx_protocol::encode_json(message)));
 	}
 }

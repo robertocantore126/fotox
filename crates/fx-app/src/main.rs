@@ -50,7 +50,19 @@ fn main() -> ExitCode {
 
 /// Start a second instance with the UI acceleration disabled and exit.
 fn init_logging() {
-	tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init();
+	// The console follows RUST_LOG; the flight recorder always gets warnings
+	// and errors (`fx_engine::trace`, one JSON-lines file per session).
+	use tracing_subscriber::layer::SubscriberExt;
+	use tracing_subscriber::util::SubscriberInitExt;
+	use tracing_subscriber::{Layer, filter::LevelFilter};
+	let recording = fx_engine::trace::init();
+	tracing_subscriber::registry()
+		.with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::from_default_env()))
+		.with(fx_engine::trace::TraceLayer.with_filter(LevelFilter::WARN))
+		.init();
+	if let Some(path) = recording {
+		tracing::info!("flight recorder: {}", path.display());
+	}
 }
 
 /// Everything after the CEF helper check.

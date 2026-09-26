@@ -630,8 +630,10 @@ impl PathPen {
 		}
 	}
 
+	/// Font outlines are y-up (skrifa), frame space is y-down: flip about the
+	/// baseline. Without it every glyph was drawn upside down (HARDEN).
 	fn point(&self, x: f32, y: f32) -> (f32, f32) {
-		((f64::from(x) + self.dx) as f32, (f64::from(y) + self.dy) as f32)
+		((f64::from(x) + self.dx) as f32, (self.dy - f64::from(y)) as f32)
 	}
 
 	/// The glyph's path, or `None` when it has no outline at all (a space,

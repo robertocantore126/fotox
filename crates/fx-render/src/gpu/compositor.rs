@@ -345,6 +345,20 @@ impl GpuCompositor {
 		self.atlas.begin_frame();
 	}
 
+	/// The slot still holding the last composite of tile `(level, tx, ty)`,
+	/// whatever program made it, kept alive for this frame (not recycled).
+	///
+	/// While an edit's new composite of a tile waits (upload budget, a tile
+	/// loading, a mip being computed), the viewport shows this one instead of
+	/// nothing: without it every brush dab flashed the background.
+	pub fn keep_previous(&mut self, level: usize, tx: u32, ty: u32) -> Option<u32> {
+		let coord = (level, tx, ty);
+		let entry = self.cache.get_mut(&coord)?;
+		entry.last_frame = self.frame;
+		self.composite_slot_owner[entry.slot as usize] = Some((coord, self.frame));
+		Some(entry.slot)
+	}
+
 	/// The layer currently being edited (enables the prefix cache), or `None`.
 	pub fn set_hot_layer(&mut self, layer: Option<LayerId>) {
 		self.hot_layer = layer;

@@ -410,6 +410,7 @@ impl App {
 
 	/// Handle one event that arrived from another thread.
 	fn user_event(&mut self, event_loop: &dyn ActiveEventLoop, event: AppEvent) {
+		let _busy = ui_busy("user event");
 		match event {
 			AppEvent::WebCommunicationInitialized => {
 				tracing::info!("the UI is ready");
@@ -485,6 +486,7 @@ impl ApplicationHandler for App {
 	}
 
 	fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+		let _busy = ui_busy(&fx_engine::trace::cut(&format!("window {event:?}"), 80));
 		// Pointer input over the viewport goes to the engine, everything else
 		// to the UI (`docs/ARCHITECTURE.md` §2.2, `input.rs`).
 		let was_on_engine = self.input_state.pointer_on_engine();
@@ -549,6 +551,21 @@ impl ApplicationHandler for App {
 	fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
 		event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + IDLE_WAIT));
 	}
+}
+
+/// The shell thread works on something until this is dropped (the flight
+/// recorder's watchdog reports a freeze of the UI thread).
+struct UiBusy;
+
+impl Drop for UiBusy {
+	fn drop(&mut self) {
+		fx_engine::trace::idle(fx_engine::trace::Thread::Ui);
+	}
+}
+
+fn ui_busy(what: &str) -> UiBusy {
+	fx_engine::trace::busy(fx_engine::trace::Thread::Ui, what);
+	UiBusy
 }
 
 /// The OS cursor for an engine cursor shape.

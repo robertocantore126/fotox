@@ -34,6 +34,15 @@ export function init() {
   document.body.classList.add("native");
   window.receiveNativeMessage = receive;
   window.initializeNativeCommunication();
+  // The UI's own errors go to the engine's flight recorder
+  // (%LOCALAPPDATA%\Fotox\logs), next to what the user did.
+  const report = (kind, message, stack) => {
+    try {
+      send({ type: "action", id: "trace:js-error", args: { kind, message: String(message).slice(0, 500), stack: String(stack || "").slice(0, 1500) } });
+    } catch (_) { /* never let the reporter throw */ }
+  };
+  window.addEventListener("error", (e) => report("error", e.message, e.error && e.error.stack));
+  window.addEventListener("unhandledrejection", (e) => report("rejection", e.reason && (e.reason.message || e.reason), e.reason && e.reason.stack));
 }
 
 /** Send a JSON message (an object with a `type` field). */

@@ -37,6 +37,7 @@ pub mod stroke;
 pub mod text;
 pub mod thumbs;
 pub mod tools;
+pub mod trace;
 pub mod transform_preview;
 pub mod vector;
 pub mod view;
@@ -174,6 +175,59 @@ pub enum EngineInput {
 		rgba8: Vec<u8>,
 	},
 	Shutdown,
+}
+
+/// Write an input to the flight recorder and name it for the watchdog.
+/// Pointer moves are only counted (`moves`), and reported with the next input.
+pub(crate) fn trace_input(input: &EngineInput, moves: &mut u32) -> String {
+	use serde_json::json;
+	if let EngineInput::Pointer(p) = input
+		&& p.kind == PointerKind::Move
+	{
+		*moves += 1;
+		return "pointer move".into();
+	}
+	if !trace::enabled() {
+		return "input".into();
+	}
+	let skipped = std::mem::take(moves);
+	let (what, detail) = match input {
+		EngineInput::Ui(message) => {
+			let value = serde_json::to_value(message).unwrap_or_default();
+			let kind = value.get("type").and_then(|t| t.as_str()).unwrap_or("ui").to_owned();
+			let id = value.get("id").and_then(|t| t.as_str()).map(str::to_owned);
+			let what = match &id {
+				Some(id) => format!("ui {kind} {id}"),
+				None => format!("ui {kind}"),
+			};
+			(what, json!({ "msg": trace::cut(&value.to_string(), 800) }))
+		}
+		EngineInput::Pointer(p) => (
+			format!("pointer {:?}", p.kind),
+			json!({ "x": p.x, "y": p.y, "buttons": p.buttons, "pressure": p.pressure, "mods": format!("{:?}", p.modifiers) }),
+		),
+		EngineInput::Wheel { x, y, dx, dy, modifiers } => ("wheel".into(), json!({ "x": x, "y": y, "dx": dx, "dy": dy, "mods": format!("{modifiers:?}") })),
+		EngineInput::ViewportResized { width, height } => ("viewport resized".into(), json!({ "w": width, "h": height })),
+		EngineInput::Open(paths) => ("open".into(), json!({ "paths": paths })),
+		EngineInput::Place(paths) => ("place".into(), json!({ "paths": paths })),
+		EngineInput::Export { path, .. } => ("export".into(), json!({ "path": path })),
+		EngineInput::Save { doc } => ("save".into(), json!({ "doc": doc.0 })),
+		EngineInput::SaveAs { doc, path } => ("save as".into(), json!({ "doc": doc.0, "path": path })),
+		EngineInput::SaveCancelled { doc } => ("save cancelled".into(), json!({ "doc": doc.0 })),
+		EngineInput::CloseRequested => ("close requested".into(), json!({})),
+		EngineInput::DisplayProfile(p) => ("display profile".into(), json!({ "bytes": p.as_ref().map(Vec::len) })),
+		EngineInput::PasteImage { width, height, rgba8 } => ("paste image".into(), json!({ "w": width, "h": height, "bytes": rgba8.len() })),
+		EngineInput::Shutdown => ("shutdown".into(), json!({})),
+	};
+	let mut detail = detail;
+	if let serde_json::Value::Object(map) = &mut detail {
+		map.insert("what".into(), json!(what));
+		if skipped > 0 {
+			map.insert("moves_before".into(), json!(skipped));
+		}
+	}
+	trace::event("in", detail);
+	what
 }
 
 #[derive(Clone, Debug, PartialEq)]
