@@ -434,3 +434,9 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Try it: C's flyout ▸ Slice Tool, drag two rectangles; save the document; File ▸ Export ▸ Slices to Files.
 
 ## M12-T09 — Acceptance: deferred to HARDEN (S35–S37, Rob's mock-up and the styles comparison).
+
+## M13-T00 — Decisions  (Claude, 2026-09-26)
+- Done: D-088 (ort, load-dynamic, DirectML), D-089 (Rob's model picks: BiRefNet, EfficientSAM; no Sky Select, no Neural Filters in M13; licences checked on the repos' LICENSE files), D-090 (models folder), D-091 (ComfyUI bridge), D-092 (honest UI).
+- Skipped: M13-T03 (Sky Select) and M13-T05 (Neural Filters), by Rob's choice.
+- FAST: none. VERIFY: the ONNX weights' licence terms when the download links are fixed.
+- Try it: `docs/DECISIONS.md`.
