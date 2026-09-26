@@ -230,3 +230,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: level-0 window capped at 1536²; the tolerance and edge threshold are constants.
 - VERIFY: constants against Photoshop on Rob's photos (M9-T10).
 - Try it: W, drag inside an object with clear edges; Alt+drag to remove.
+
+## M9-T07 — Magnetic Lasso  (Claude, 2026-09-26)
+- Done: `fx_ops::select::livewire` (Sobel gradient → cost `1 − g + 0.02` with Contrast ignoring weak edges; 8-connected Dijkstra between two window pixels); tool `tools/magnetic.rs` ("lasso-magnet"): click to start, the live wire from the last anchor to the strongest edge within Width of the pointer (the composite's luminance, tiles cached for the gesture), a click adds an anchor, Frequency adds anchors automatically (spacing `20 + (100 − f)·3` px), Backspace removes the last anchor, Enter or a double-click closes into one `Command::Select` polygon with the mode / feather / anti-alias of the bar, Escape cancels.
+- Skipped: Alt switching to the freehand / polygonal lasso, pen pressure = width, a magnetic closing segment; Tests (should check: tracing near a synthetic disc closes on its edge within 1.5 px).
+- FAST: the live wire runs on the engine thread per pointer move (window up to ~2048²; composite tiles rendered on first use); the closing segment is straight.
+- VERIFY: cost function, Frequency spacing.
+- Try it: L's flyout ▸ Magnetic Lasso, click on an edge and move along it, double-click to close.

@@ -26,6 +26,7 @@ pub mod eyedropper;
 pub mod gradient;
 pub mod kinds;
 pub mod lasso;
+pub mod magnetic;
 pub mod marquee;
 pub mod move_tool;
 pub mod paint;
@@ -432,7 +433,9 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
-		"object-select" | "lasso-magnet" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		// The Magnetic Lasso (M9-T07).
+		"lasso-magnet" => Some(Box::new(magnetic::MagneticLasso::default())),
+		"object-select" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
 		// Tools built from a kind (M7-T08, HOWTO R11).
 		other => kinds::registered(other),
 	}

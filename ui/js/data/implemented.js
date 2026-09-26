@@ -164,6 +164,7 @@ export const IMPLEMENTED = new Set([
   "tool:heal-brush",
   "tool:history-brush",
   "tool:lasso",
+  "tool:lasso-magnet",
   "tool:lasso-poly",
   "tool:magic-wand",
   "tool:marquee",
