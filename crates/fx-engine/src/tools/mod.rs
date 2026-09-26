@@ -28,6 +28,7 @@ pub mod kinds;
 pub mod lasso;
 pub mod magnetic;
 pub mod marquee;
+pub mod measure;
 pub mod move_tool;
 pub mod paint;
 pub mod path_select;
@@ -433,6 +434,11 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"move" => Some(Box::new(move_tool::MoveTool::default())),
 		// Quick Selection (M9-T06).
 		"quick-select" => Some(Box::new(quick_select::QuickSelect::default())),
+		// The measuring tools (M9-T08).
+		"sampler" => Some(Box::new(measure::ColorSampler::default())),
+		"ruler-tool" => Some(Box::new(measure::Ruler::default())),
+		"note-tool" => Some(Box::new(measure::NoteTool::default())),
+		"counting" => Some(Box::new(measure::CountTool::default())),
 		// The Magnetic Lasso (M9-T07).
 		"lasso-magnet" => Some(Box::new(magnetic::MagneticLasso::default())),
 		"object-select" | "shape-custom" | "shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),

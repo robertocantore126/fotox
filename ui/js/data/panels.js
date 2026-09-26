@@ -25,7 +25,7 @@ export const panelDefs = {
   libraries: { title: "Libraries", icon: "i-libs", kind: "libraries" },
   patterns: { title: "Patterns", icon: "i-pattern-stamp", kind: "patterns" },
   timeline: { title: "Timeline", icon: "i-video", kind: "timeline" },
-  notes: { title: "Notes", icon: "i-note", kind: "simple", note: "No notes in this document" },
+  notes: { title: "Notes", icon: "i-note", kind: "notes" },
 };
 
 // Gruppi di schede del dock destro, nell'ordine in cui appaiono.

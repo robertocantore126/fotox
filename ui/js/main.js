@@ -26,6 +26,7 @@ import { initBrushes, brushExtras } from "./native/brush-settings.js";
 import { initGradients } from "./native/gradients.js";
 import { initPatterns } from "./native/patterns.js";
 import { initChannels } from "./native/channels-panel.js";
+import { initInfo } from "./native/info-panel.js";
 import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
@@ -216,6 +217,7 @@ async function boot() {
   initGradients();
   initPatterns();
   initChannels();
+  initInfo();
 
   const shell = buildShell();
   buildMenubar(shell.menubar, menus);

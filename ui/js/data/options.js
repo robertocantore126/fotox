@@ -72,10 +72,10 @@ export const optionBars = {
   "slice-select": [{ type: "btngroup", icons: ["i-slice"], titles: ["Slice select"], active: 0 }, { type: "toggle", text: "Show Slice Numbers", on: false }],
 
   eyedropper: [{ type: "select", text: "Sample Size:", options: ["Point Sample", "3 by 3 Average", "5 by 5 Average", "11 by 11 Average", "51 by 51 Average"], value: "Point Sample" }, { type: "select", text: "Sample:", options: ["All Layers", "Current Layer"], value: "All Layers" }, { type: "toggle", text: "Show Sampling Ring", on: true }],
-  sampler: [{ type: "label", text: "Click up to 4 spots to read their colour values" }],
-  "ruler-tool": [{ type: "label", text: "Drag to measure — results appear in the Info panel" }],
-  "note-tool": [{ type: "btngroup", icons: ["i-note"], titles: ["Note"], active: 0 }, { type: "btn", text: "Clear All" }],
-  counting: [{ type: "btngroup", icons: ["i-counting"], titles: ["Counting"], active: 0 }, { type: "btn", text: "Reset Count" }],
+  sampler: [{ type: "select", text: "Sample Size:", options: ["Point Sample", "3 by 3 Average", "5 by 5 Average", "11 by 11 Average", "31 by 31 Average", "51 by 51 Average", "101 by 101 Average"], value: "Point Sample" }, { type: "btn", text: "Clear All", action: "sampler:clear" }, { type: "label", text: "Click up to 10 spots; Alt+click removes one" }],
+  "ruler-tool": [{ type: "label", text: "Drag to measure (Shift: 45° steps)" }, { type: "btn", text: "Straighten Layer", action: "ruler:straighten" }, { type: "btn", text: "Clear", action: "ruler:clear" }],
+  "note-tool": [{ type: "text", text: "Author:", value: "" }, { type: "btn", text: "Clear All", action: "notes:clear-all" }, { type: "label", text: "Click to add a note, Alt+click deletes one" }],
+  counting: [{ type: "btn", text: "New Group", action: "count:new-group" }, { type: "btn", text: "Clear", action: "count:reset" }, { type: "label", text: "Click to count, Alt+click removes" }],
 
   heal: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Type:", options: ["Proximity Match"], value: "Proximity Match" }],
   "heal-brush": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Normal", "Multiply", "Screen"], value: "Normal" }, { type: "toggle", text: "Aligned", on: true }, { type: "toggle", text: "Sample All Layers", on: true }, { type: "toggle", text: "Pressure for size", on: false }],

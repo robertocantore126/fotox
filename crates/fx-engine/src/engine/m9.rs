@@ -59,8 +59,10 @@ fn thumbnail(image: &fx_tiles::TiledImage, store: &TileStore) -> Vec<u8> {
 }
 
 impl Engine {
-	/// After an edit: resend the channel list when it changed.
+	/// After an edit: resend the channel list when it changed, and the
+	/// annotations with the samplers' current values.
 	pub(super) fn after_edit_m9(&mut self, id: DocId) {
+		self.send_annotations(id);
 		let Some(open) = self.docs.get(id) else { return };
 		let sig = signature(&open.doc);
 		if self.m9.channels.get(&id) == Some(&sig) {
@@ -68,6 +70,33 @@ impl Engine {
 		}
 		self.m9.channels.insert(id, sig);
 		self.send_channels(id);
+	}
+
+	/// Notes, counts and samplers with the samplers' values (M9-T08): read from
+	/// the composite, averaged over the option bar's Sample Size.
+	pub(super) fn send_annotations(&self, id: DocId) {
+		let Some(open) = self.docs.get(id) else { return };
+		let a = &open.doc.annotations;
+		let area = match self.settings.string("sampler", "Sample Size").as_deref() {
+			Some("3 by 3 Average") => 3,
+			Some("5 by 5 Average") => 5,
+			Some("11 by 11 Average") => 11,
+			Some("31 by 31 Average") => 31,
+			Some("51 by 51 Average") => 51,
+			Some("101 by 101 Average") => 101,
+			_ => 1,
+		};
+		// FAST: composited on the engine thread at every edit (≤ 10 points).
+		let samples = a
+			.samplers
+			.iter()
+			.map(|s| crate::tools::sample_pixel(&open.doc, s.x, s.y, area, None, &self.store).unwrap_or([0; 4]))
+			.collect();
+		self.to_ui(&EngineToUi::Annotations {
+			doc: id,
+			annotations: serde_json::to_value(a).unwrap_or_default(),
+			samples,
+		});
 	}
 
 	pub(super) fn send_channels(&self, id: DocId) {
@@ -125,6 +154,58 @@ impl Engine {
 				);
 			}
 			"sel:transform" => self.start_selection_transform(doc_id),
+			// The measuring tools' option-bar buttons (M9-T08) go to the active
+			// tool as keys.
+			"ruler:straighten" => {
+				self.tool_key("Straighten");
+			}
+			"ruler:clear" | "notes:clear-all" | "count:reset" => {
+				self.tool_key("Clear");
+			}
+			"count:new-group" => {
+				self.tool_key("NewGroup");
+			}
+			"sampler:clear" => {
+				let mut annotations = self.docs.get(doc_id).map(|o| o.doc.annotations.clone()).unwrap_or_default();
+				annotations.samplers.clear();
+				self.command(
+					doc_id,
+					Command::SetAnnotations {
+						annotations,
+						label: "Delete All Color Samplers".into(),
+					},
+				);
+			}
+			// The Notes panel's edits.
+			"notes:set" => {
+				let index = _args.get("index").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as usize;
+				let text = _args.get("text").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+				let mut annotations = self.docs.get(doc_id).map(|o| o.doc.annotations.clone()).unwrap_or_default();
+				if let Some(note) = annotations.notes.get_mut(index) {
+					note.text = text;
+					self.command(
+						doc_id,
+						Command::SetAnnotations {
+							annotations,
+							label: "Edit Note".into(),
+						},
+					);
+				}
+			}
+			"notes:delete" => {
+				let index = _args.get("index").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as usize;
+				let mut annotations = self.docs.get(doc_id).map(|o| o.doc.annotations.clone()).unwrap_or_default();
+				if index < annotations.notes.len() {
+					annotations.notes.remove(index);
+					self.command(
+						doc_id,
+						Command::SetAnnotations {
+							annotations,
+							label: "Delete Note".into(),
+						},
+					);
+				}
+			}
 			"select-mask:output" => {
 				self.m9.output = _args.get("output").and_then(|v| v.as_str()).map(str::to_owned);
 			}

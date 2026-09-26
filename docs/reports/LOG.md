@@ -237,3 +237,10 @@ M8 note for HARDEN (Claude, 2026-09-26): `cargo test -p fx-core` has 10 failures
 - FAST: the live wire runs on the engine thread per pointer move (window up to ~2048²; composite tiles rendered on first use); the closing segment is straight.
 - VERIFY: cost function, Frequency spacing.
 - Try it: L's flyout ▸ Magnetic Lasso, click on an edge and move along it, double-click to close.
+
+## M9-T08 — Color Sampler, Ruler, Note, Count  (Claude, 2026-09-26)
+- Done: `fx_core::annotations` (notes, count groups, samplers) in `Document::annotations`, saved in the `.fxd` (D-072), edited by `Command::SetAnnotations` steps; `tools/measure.rs`: Color Sampler ("sampler", ≤ 10 points, Alt+click removes, Clear All), Ruler ("ruler-tool": X / Y / W / H / angle / length on the status line and in Info, Shift = 45° steps, Straighten Layer rotates the active layer so the line is level, Clear), Note ("note-tool": click adds, Alt+click deletes, Author, Clear All), Count ("counting": click adds to the current group, Alt+click removes, New Group, Clear). `EngineToUi::Annotations` after every edit with the samplers' values from the composite averaged over Sample Size (Point … 101 × 101); Info panel (sampler RGB, ruler, counts) and Notes panel (edit / delete notes) in `ui/js/native/info-panel.js`. The option-bar buttons' actions reach the active tool as keys.
+- Skipped: the protractor (Alt-drag from a ruler end), Straighten's crop, the sampler's second readout mode (HSB / Lab…), dragging samplers / notes, count labels and group colours / sizes, showing annotations while another tool is active, Tests (should check: a sampler's average; the ruler's angle; Straighten levels a tilted line; notes and counts round-trip through `.fxd`).
+- FAST: annotations are drawn only while their tool is active, as crosshairs / handles without numbers; the samplers are re-read from the composite on the engine thread at every edit.
+- VERIFY: Straighten's sign convention against Photoshop.
+- Try it: I's flyout ▸ Color Sampler, click the image, open Window ▸ Info; the Ruler along a tilted horizon, Straighten Layer.
