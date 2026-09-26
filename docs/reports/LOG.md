@@ -36,3 +36,71 @@ HARDEN reads this file first, so be honest about what is missing.
 - Try it: Ctrl+T on a layer, type 50 in W:.
 
 ## M6-T10 — Acceptance: deferred to HARDEN (S16–S20, Photoshop comparisons).
+
+## M7-T00 — Decisions  (Claude, 2026-09-26, a2dccfd)
+- Done: the card's five recommendations recorded as fast defaults D-058..D-062.
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
+
+## M7-T01 — File ▸ New  (Claude, 2026-09-26, f3a7c23)
+- Done: `doc:new` action → `OpenDoc::blank` (Solid tiles, or Empty + "Layer 1" for Transparent), Untitled-N, clean; native dialog with presets (`ui/js/native/newdoc.js`); Ctrl+N and the tab "+".
+- Skipped: the Clipboard preset (shell does not report the clipboard size), name field, colour profile choice (always sRGB), units other than px.
+- FAST: the preset fills the number boxes by poking the DOM.
+- VERIFY: none.
+- Try it: Ctrl+N, 30 000² preset.
+
+## M7-T02 — Move tool  (Claude, 2026-09-26, 1cdedf4)
+- Done: `tools/move_tool.rs` + `Command::OffsetLayers` (groups move their content, shape/text translate their matrix, locked refuse, "Move"); live drag outside history, one step at the drop; pixel selection → whole-pixel `Transform`; Shift 0/45/90°; Alt duplicates; Ctrl or Auto-Select (Layer/Group) picks the top opaque layer from its level-0 tiles; arrow nudges merged.
+- Skipped: Show Transform Controls (box + handle drag), live preview of a selection move.
+- FAST: Alt+drag is two history steps; a burst of nudges relies on the engine's 1 s merge window; auto-select ignores shape/text tiles never drawn at level 0.
+- VERIFY: nudge history label.
+- Try it: V, drag a layer; Ctrl+drag over another layer.
+
+## M7-T03 — Place Embedded  (Claude, 2026-09-26, 9c3973f)
+- Done: `EngineInput::Place` (menu Place Embedded/Linked via the shell's dialog, and drops): import job → pasted centred as a layer named after the file → Free Transform box, pre-scaled to fit when larger than the canvas.
+- Skipped: placing a `.fxd` (it opens instead), Escape removing the placed layer, one "Place" history step (it is Paste + Rename + Transform).
+- FAST: the clipboard is borrowed for the paste and restored.
+- VERIFY: none.
+- Try it: drop a PNG on an open document.
+
+## M7-T04 — Arrange, Align, Distribute  (Claude, 2026-09-26, 05a4df8)
+- Done: `order:*` within the parent; `align:*` / `dist:*` on exact content bounds against the selection / canvas (one layer) / union, one `MoveEach` step; Move bar buttons.
+- Skipped: `dist:hspace|vspace` (equal gaps), groups and fill layers in align.
+- FAST: `MoveEach` is not all-or-nothing on a refusal half-way; the bounds are computed on the engine thread (no job).
+- VERIFY: MoveLayer's index semantics for "forward/backward" (assumed final index).
+- Try it: select three layers, Layer ▸ Distribute ▸ Horizontal Centers.
+
+## M7-T05 — Mask and Layer menus  (Claude, 2026-09-26, d83c25b)
+- Done: mask reveal-all/hide-all/delete/apply, disable and link toggles (`SetMaskFlags`), Layer from Background, File ▸ Revert.
+- Skipped: Background from Layer.
+- FAST: Revert undoes every history step (exact only while the history kept them all).
+- VERIFY: none.
+- Try it: Layer ▸ Layer Mask ▸ Disable.
+
+## M7-T06 — Guides, grid and snapping  (Claude, 2026-09-26, 8909afe)
+- Done: `Document::guides` (in `.fxd`), `SetGuides` (history, not dirty); guides from a ruler drag, New Guide, New Guide Layout, Clear; engine-drawn guides and grid over the visible rect (`fx-engine/src/snap.rs`) from the UI's View flags; snapping of marquee/crop/shape/move/type/transform pointers to guides, grid and canvas edges/centre (8 screen px).
+- Skipped: dragging or deleting a single guide, guide/grid colours from prefs, pixel grid in the app, snapping to layer bounds and selection edges.
+- FAST: the Move tool snaps the pointer, not the moved box's edges.
+- VERIFY: snap radius.
+- Try it: drag from the top ruler; View ▸ Show ▸ Grid.
+
+## M7-T07 — Zoom tool  (Claude, 2026-09-26, 8424af6)
+- Done: Zoom tool click in/out about the point, scrubby drag; double-click Hand = Fit, Zoom = 100 %.
+- Skipped: rectangle zoom (Scrubby off).
+- FAST: none. VERIFY: scrubby speed (1 % per px).
+- Try it: Z, click; Alt+click; drag right.
+
+## M7-T08 — Tool kinds  (Claude, 2026-09-26, 15a33b8)
+- Done: `fx_ops::brush::DabOp` (Paint, Erase, CloneSource, Veil; `op_for`), `StatefulDabOp` declared; `tools/kinds.rs` ClickTool/DragTool adapters + `registered`; HOWTO R11. The 18 brush tests pass after the refactor.
+- Skipped: DragTool live preview, a toy op, the stored-hash test.
+- FAST: none. VERIFY: none.
+- Try it: nothing visible — M8 builds on it.
+
+## M7-T09 — Menu honesty and Preferences  (Claude, 2026-09-26, fe8cad3)
+- Done: `ui/tools/gen-implemented.mjs` → `js/data/implemented.js`; in the app unimplemented menu items are greyed with "Planned for Mx"; `check-data` fails when the list is stale. `fx-engine/src/prefs.rs` owns `%APPDATA%\Fotox\preferences.json` (grid, memory budget, scratch folder at start, recent files); Open Recent, Clear Recent; Preferences dialogs (Performance, Guides & Grid).
+- Skipped: scratch folder editing, units, guide/grid colours, the other preference pages.
+- FAST: the implemented list is scanned from string literals, so an id that appears in the engine only as a refusal counts as implemented; the Planned milestone is per action prefix.
+- VERIFY: none.
+- Try it: open a file, then File ▸ Open Recent; hover a greyed item.
+
+## M7-T10 — Acceptance: deferred to HARDEN (S21–S23, the working-day checklist).
