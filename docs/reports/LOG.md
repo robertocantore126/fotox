@@ -104,3 +104,8 @@ HARDEN reads this file first, so be honest about what is missing.
 - Try it: open a file, then File ▸ Open Recent; hover a greyed item.
 
 ## M7-T10 — Acceptance: deferred to HARDEN (S21–S23, the working-day checklist).
+
+## M8-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the card's five recommendations recorded as fast defaults D-063..D-067.
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
