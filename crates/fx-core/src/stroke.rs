@@ -229,6 +229,25 @@ pub enum StrokeTool {
 		#[serde(default)]
 		vibrance: bool,
 	},
+	/// Blur (M8-T05): the layer (or composite) blurred, laid down by Strength.
+	Blur {
+		#[serde(default)]
+		sample_all: bool,
+	},
+	/// Sharpen (M8-T05): an unsharp step.
+	Sharpen {
+		#[serde(default)]
+		sample_all: bool,
+		#[serde(default)]
+		protect_detail: bool,
+	},
+	/// Smudge (M8-T05): drags the colour under the brush along the path.
+	Smudge {
+		#[serde(default)]
+		finger_painting: bool,
+		#[serde(default)]
+		sample_all: bool,
+	},
 	/// The Background Eraser (M8-T02): erase what matches `sample` (straight
 	/// 16-bit RGB) within `tolerance` (`0..=1`), keeping `protect`.
 	BgEraser {
@@ -250,6 +269,9 @@ impl StrokeTool {
 			StrokeTool::Heal { .. } => "Healing Brush",
 			StrokeTool::SpotHeal => "Spot Healing Brush",
 			StrokeTool::BgEraser { .. } => "Background Eraser",
+			StrokeTool::Blur { .. } => "Blur Tool",
+			StrokeTool::Sharpen { .. } => "Sharpen Tool",
+			StrokeTool::Smudge { .. } => "Smudge Tool",
 			StrokeTool::Dodge { .. } => "Dodge Tool",
 			StrokeTool::Burn { .. } => "Burn Tool",
 			StrokeTool::Sponge { .. } => "Sponge Tool",

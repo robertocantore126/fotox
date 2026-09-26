@@ -52,6 +52,27 @@ pub trait StatefulDabOp: DabOp {
 	fn pick_up(&mut self, under: [f64; 4]);
 }
 
+/// A tool whose dabs read what the earlier dabs of the same stroke painted
+/// (M8: Smudge, Mixer Brush, Art History): the stroke engine hands it the
+/// dab's rectangle of the *current* pixels, one dab at a time in order, and
+/// writes back what it returns. Live = replay because the dabs and their
+/// order are the same. FAST: sequential, one dab after the other.
+pub trait DabSequence: Send + Sync {
+	/// `pixels` are premultiplied RGBA of the rectangle `rect` (canvas pixels
+	/// `[x0, y0, x1, y1]`, inclusive), row-major; `coverage` is the tip × the
+	/// selection there. `source(x, y)` reads the stroke's source window
+	/// (premultiplied) at a canvas pixel, when the tool has one.
+	fn dab(
+		&mut self,
+		dab: &super::path::Dab,
+		rect: [i64; 4],
+		pixels: &mut [[f64; 4]],
+		coverage: &[f32],
+		source: &dyn Fn(i64, i64) -> [f32; 4],
+		ctx: &DabContext,
+	);
+}
+
 /// Brush and Pencil: the colour through the blend mode.
 pub struct Paint;
 
@@ -118,6 +139,9 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 		StrokeTool::Eraser => Box::new(Erase),
 		StrokeTool::Clone { dx, dy, .. } | StrokeTool::Heal { dx, dy, .. } => Box::new(CloneSource { offset: (*dx, *dy) }),
 		StrokeTool::SpotHeal => Box::new(Veil),
+		// The filtered source is the source window (M8-T05); Smudge paints
+		// through its `DabSequence`, this op is never asked.
+		StrokeTool::Blur { .. } | StrokeTool::Sharpen { .. } | StrokeTool::Smudge { .. } => Box::new(CloneSource { offset: (0.0, 0.0) }),
 		StrokeTool::Dodge { range, protect_tones } | StrokeTool::Burn { range, protect_tones } => Box::new(super::ops::tone::Tone {
 			lighten: matches!(tool, StrokeTool::Dodge { .. }),
 			range: *range,

@@ -30,6 +30,10 @@ pub enum Kind {
 	Dodge,
 	Burn,
 	Sponge,
+	/// Blur, Sharpen, Smudge (M8-T05).
+	Blur,
+	Sharpen,
+	Smudge,
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -127,6 +131,11 @@ impl Paint {
 				brush.flow = percent("Flow", 50.0);
 				brush.mode = BlendMode::Normal;
 			}
+			// Strength (M8-T05); the Mode drop-down stays the brush mode.
+			Kind::Blur | Kind::Sharpen | Kind::Smudge => {
+				brush.opacity = 1.0;
+				brush.flow = percent("Strength", 50.0);
+			}
 			_ => {}
 		}
 		brush
@@ -154,6 +163,17 @@ impl Paint {
 					StrokeTool::Burn { range, protect_tones }
 				}
 			}
+			Kind::Blur => StrokeTool::Blur {
+				sample_all: s.bool(self.id, "Sample All Layers").unwrap_or(false),
+			},
+			Kind::Sharpen => StrokeTool::Sharpen {
+				sample_all: s.bool(self.id, "Sample All Layers").unwrap_or(false),
+				protect_detail: s.bool(self.id, "Protect Detail").unwrap_or(true),
+			},
+			Kind::Smudge => StrokeTool::Smudge {
+				finger_painting: s.bool(self.id, "Finger Painting").unwrap_or(false),
+				sample_all: s.bool(self.id, "Sample All Layers").unwrap_or(false),
+			},
 			Kind::Sponge => StrokeTool::Sponge {
 				saturate: s.string(self.id, "Mode").as_deref() != Some("Desaturate"),
 				vibrance: s.bool(self.id, "Vibrance").unwrap_or(true),

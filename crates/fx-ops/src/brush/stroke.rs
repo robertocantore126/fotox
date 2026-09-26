@@ -130,6 +130,8 @@ pub struct Stroke {
 	source_cache: Mutex<HashMap<(u32, u32), SourceTile>>,
 	/// The samples so far (the recorded command).
 	samples: Vec<StrokeSample>,
+	/// A tool that reads its own stroke (M8: Smudge, Mixer, Art History).
+	sequence: Option<Box<dyn super::op::DabSequence>>,
 }
 
 impl Stroke {
@@ -138,10 +140,19 @@ impl Stroke {
 	pub fn begin(setup: StrokeSetup<'_>, store: &TileStore) -> Result<Self, CommandError> {
 		let format = setup.image.format();
 		let gray = matches!(format, PixelFormat::Gray8 | PixelFormat::Gray16);
-		if gray && matches!(setup.tool, StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal) {
+		if gray
+			&& (matches!(
+				setup.tool,
+				StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::Blur { .. } | StrokeTool::Sharpen { .. }
+			) || super::ops::sequence_for(&setup.tool, [0.0; 3]).is_some())
+		{
 			return Err(CommandError::NotAllowed("clone and heal work on pixels, not on a mask".into()));
 		}
-		if matches!(setup.tool, StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal) && setup.source.is_none() {
+		if matches!(
+			setup.tool,
+			StrokeTool::Clone { .. } | StrokeTool::Heal { .. } | StrokeTool::SpotHeal | StrokeTool::Blur { .. } | StrokeTool::Sharpen { .. }
+		) && setup.source.is_none()
+		{
 			return Err(CommandError::NotAllowed("the clone source is missing".into()));
 		}
 		let (before, offset) = if gray {
@@ -167,6 +178,7 @@ impl Stroke {
 			source: setup.source,
 			source_cache: Mutex::new(HashMap::new()),
 			samples: Vec::new(),
+			sequence: super::ops::sequence_for(&setup.tool, [0, 1, 2].map(|i| f64::from(setup.color[i]) / 65535.0)),
 		})
 	}
 
@@ -192,6 +204,9 @@ impl Stroke {
 	fn paint(&mut self, dabs: &[Dab]) -> Result<Vec<ChangedTile>, TileError> {
 		if dabs.is_empty() {
 			return Ok(Vec::new());
+		}
+		if self.sequence.is_some() {
+			return self.paint_sequence(dabs);
 		}
 		let tile = i64::from(TILE_SIZE);
 		let (cols, rows) = (i64::from(self.before.grid(0).cols()), i64::from(self.before.grid(0).rows()));
@@ -270,6 +285,107 @@ impl Stroke {
 			self.tiles.insert(key, state);
 		}
 		Ok(results)
+	}
+
+	/// Stamp `dabs` one by one with the stroke's [`DabSequence`] (M8).
+	fn paint_sequence(&mut self, dabs: &[Dab]) -> Result<Vec<ChangedTile>, TileError> {
+		let mut sequence = self.sequence.take().expect("checked by the caller");
+		let result = self.paint_sequence_with(&mut *sequence, dabs);
+		self.sequence = Some(sequence);
+		result
+	}
+
+	fn paint_sequence_with(&mut self, sequence: &mut dyn super::op::DabSequence, dabs: &[Dab]) -> Result<Vec<ChangedTile>, TileError> {
+		let tile = i64::from(TILE_SIZE);
+		let (iw, ih) = (i64::from(self.before.width()), i64::from(self.before.height()));
+		let pencil = matches!(self.tool, StrokeTool::Pencil);
+		let sampled = super::tip::sampled(self.brush.tip);
+		let ctx = super::op::DabContext {
+			mode: self.brush.mode,
+			color: self.color,
+			color_alpha: self.color_alpha,
+			lock_alpha: self.lock_alpha,
+		};
+		let mut touched: Vec<(u32, u32)> = Vec::new();
+		for dab in dabs {
+			let tip = match &sampled {
+				Some(t) => Tip::sampled(t.clone(), dab.diameter, dab.roundness, dab.angle, pencil),
+				None => Tip::new(dab.diameter, self.brush.hardness, dab.roundness, dab.angle, pencil),
+			};
+			let reach = f64::from(tip.reach());
+			// The dab's rectangle in layer pixels, clipped to the image.
+			let lx0 = ((dab.x - reach - f64::from(self.offset.0)).floor() as i64).max(0);
+			let ly0 = ((dab.y - reach - f64::from(self.offset.1)).floor() as i64).max(0);
+			let lx1 = ((dab.x + reach - f64::from(self.offset.0)).ceil() as i64).min(iw - 1);
+			let ly1 = ((dab.y + reach - f64::from(self.offset.1)).ceil() as i64).min(ih - 1);
+			if lx0 > lx1 || ly0 > ly1 {
+				continue;
+			}
+			let (w, h) = ((lx1 - lx0 + 1) as usize, (ly1 - ly0 + 1) as usize);
+			for ty in ly0 / tile..=ly1 / tile {
+				for tx in lx0 / tile..=lx1 / tile {
+					let key = (tx as u32, ty as u32);
+					if !self.tiles.contains_key(&key) {
+						let state = self.new_tile(key)?;
+						self.tiles.insert(key, state);
+						touched.push(key);
+					} else if !touched.contains(&key) {
+						touched.push(key);
+					}
+				}
+			}
+			let mut pixels = vec![[0.0f64; 4]; w * h];
+			let mut coverage = vec![0.0f32; w * h];
+			let flow = self.brush.flow * dab.strength;
+			for y in 0..h {
+				for x in 0..w {
+					let (lx, ly) = (lx0 + x as i64, ly0 + y as i64);
+					let state = &self.tiles[&((lx / tile) as u32, (ly / tile) as u32)];
+					let at = ((ly % tile) * tile + lx % tile) as usize;
+					let p = pixel_at(&state.working, self.format, at);
+					let a = f64::from(p[3]);
+					pixels[y * w + x] = [f64::from(p[0]) * a, f64::from(p[1]) * a, f64::from(p[2]) * a, a];
+					let (cx, cy) = ((lx + i64::from(self.offset.0)) as f64 + 0.5, (ly + i64::from(self.offset.1)) as f64 + 0.5);
+					coverage[y * w + x] = tip.coverage((cx - dab.x) as f32, (cy - dab.y) as f32)
+						* state.selection.at((lx % tile) as u32, (ly % tile) as u32)
+						* flow * self.brush.opacity;
+				}
+			}
+			let alphas: Vec<f64> = pixels.iter().map(|p| p[3]).collect();
+			let rect = [
+				lx0 + i64::from(self.offset.0),
+				ly0 + i64::from(self.offset.1),
+				lx1 + i64::from(self.offset.0),
+				ly1 + i64::from(self.offset.1),
+			];
+			let source = |x: i64, y: i64| -> [f32; 4] {
+				if self.source.is_none() || x < 0 || y < 0 || x >= i64::from(self.canvas.0) || y >= i64::from(self.canvas.1) {
+					return [0.0; 4];
+				}
+				// FAST: a tile read error reads as transparent.
+				match self.source_tile((x / tile) as u32, (y / tile) as u32) {
+					Ok(t) => t[((y % tile) * tile + x % tile) as usize],
+					Err(_) => [0.0; 4],
+				}
+			};
+			sequence.dab(dab, rect, &mut pixels, &coverage, &source, &ctx);
+			for y in 0..h {
+				for x in 0..w {
+					let (lx, ly) = (lx0 + x as i64, ly0 + y as i64);
+					let at = ((ly % tile) * tile + lx % tile) as usize;
+					let mut p = pixels[y * w + x];
+					if self.lock_alpha {
+						// Keep the alpha the pixel had before this dab.
+						let old = alphas[y * w + x];
+						let a = p[3].max(1e-9);
+						p = [p[0] / a * old, p[1] / a * old, p[2] / a * old, old];
+					}
+					let state = self.tiles.get_mut(&((lx / tile) as u32, (ly / tile) as u32)).expect("created above");
+					set_pixel(&mut state.working, self.format, at, p);
+				}
+			}
+		}
+		Ok(touched.into_iter().map(|key| (key, self.tiles[&key].working.clone())).collect())
 	}
 
 	/// A tile's state at its first dab: `S = 0`, the selection's coverage, and

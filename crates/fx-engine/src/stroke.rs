@@ -50,7 +50,26 @@ pub fn prepare(doc: &Document, layer: LayerId, target: StrokeTarget, tool: &Stro
 			offset,
 			store: store.clone(),
 		})),
-		_ => None,
+		// Blur and Sharpen read the layer (or the composite) filtered (M8-T05).
+		StrokeTool::Blur { sample_all } | StrokeTool::Sharpen { sample_all, .. } => {
+			let inner: Arc<dyn SourceTiles> = if *sample_all {
+				Arc::new(CompositeTiles::new(doc.clone(), store.clone()))
+			} else {
+				Arc::new(LayerSource {
+					image: image.clone(),
+					offset,
+					store: store.clone(),
+				})
+			};
+			let focus = match tool {
+				StrokeTool::Sharpen { protect_detail, .. } => fx_ops::brush::ops::focus::Focus::Sharpen {
+					protect_detail: *protect_detail,
+				},
+				_ => fx_ops::brush::ops::focus::Focus::Blur,
+			};
+			Some(Arc::new(fx_ops::brush::ops::focus::FilteredTiles::new(inner, focus, (doc.width, doc.height))))
+		}
+		_ => m8_source(doc, tool, &image, offset, store)?,
 	};
 	Ok(Prepared {
 		image,
@@ -59,6 +78,17 @@ pub fn prepare(doc: &Document, layer: LayerId, target: StrokeTarget, tool: &Stro
 		lock_alpha: target == StrokeTarget::Pixels && found.locked_transparency,
 		source,
 	})
+}
+
+/// The source window of M8's other tools (T06 pattern, T07 history).
+fn m8_source(
+	_doc: &Document,
+	_tool: &StrokeTool,
+	_image: &TiledImage,
+	_offset: (i32, i32),
+	_store: &TileStore,
+) -> Result<Option<Arc<dyn SourceTiles>>, CommandError> {
+	Ok(None)
 }
 
 /// The brush engine's setup for prepared parts.

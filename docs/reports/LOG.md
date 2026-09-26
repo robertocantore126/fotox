@@ -137,3 +137,10 @@ HARDEN reads this file first, so be honest about what is missing.
 - FAST: none beyond the `// FAST:` marks.
 - VERIFY: every formula (D-064), Photoshop's default Protect Tones (on), Exposure as flow.
 - Try it: O, paint over a photo's midtones; Shift+O cycles to Burn / Sponge.
+
+## M8-T05 — Blur, Sharpen, Smudge  (Claude, 2026-09-26)
+- Done: `StrokeTool::{Blur, Sharpen, Smudge}`. Blur / Sharpen lay down a filtered source through the source window: `brush::ops::focus::FilteredTiles` filters the layer (or the composite with Sample All Layers) per canvas tile with a kernel apron (Gaussian σ 2, unsharp ×1.2 or ×0.6 with Protect Detail), cached per stroke; Strength = flow at 100 % opacity; the Mode drop-down is the blend mode. Smudge: a new sequential path in the stroke engine, `brush::op::DabSequence` (the dab's rectangle of the *current* pixels, dab by dab; lock transparency kept) — `ops::smudge` carries the previous dab's result to the new position (Finger Painting starts with the foreground). Tools "blur", "sharpen", "smudge" wired.
+- Skipped: accumulation of Blur/Sharpen within one stroke (one pass per stroke), Smudge's Sample All Layers, Tests (should check: blur flattens a step monotonically with strength; sharpen raises edge contrast, flat stays flat; smudge drags a colour and fades with strength < 1; live = replay for the three).
+- FAST: `DabSequence` runs on one thread; M7's `StatefulDabOp` is left unused (the sequence trait replaces it); the smudge offset is rounded to whole pixels.
+- VERIFY: kernel size, sharpen amount, smudge strength curve.
+- Try it: R, scrub over an edge; Shift+R to Sharpen / Smudge.
