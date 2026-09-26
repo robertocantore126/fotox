@@ -316,3 +316,17 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: a hole larger than the budget is filled at a coarser scale and upsampled (soft); transparent pixels are never sampled; spot heal's window grows with a long stroke.
 - VERIFY: Photoshop's Auto sampling area; its default seedless behaviour (Fotox is deterministic per seed).
 - Try it: select an object with the Lasso, Edit ▸ Content-Aware Fill… ▸ OK; or Shift+F5 ▸ Use: Content-Aware. J (Spot Healing) over a blemish.
+
+## M11-T03 — Patch tool  (Claude, 2026-09-26)
+- Done: `tools/patch.rs` ("patch"): a freehand lasso draws the selection (or use the current one); a drag started inside it moves the ants and commits `Command::Patch { dx, dy, destination, content_aware }` on release. Normal = the D-045 healing blend of the content `(dx, dy)` away into the selection (through `PixelOps::heal_blend`); Content-Aware = PatchMatch sampling only the source box. Destination mode patches the dragged-to place from the selection. Option bar: Patch (Normal / Content-Aware), Source / Destination.
+- Skipped: live preview while dragging, Transparent, Structure / Color (Content-Aware), Diffusion, Tests.
+- FAST: a Normal patch over 4 × 768² pixels is refused; after a Destination patch the selection stays at the source.
+- VERIFY: Photoshop's selection after a patch.
+- Try it: J's flyout ▸ Patch Tool, lasso around a blemish, drag it onto clean skin.
+
+## M11-T04 — Content-Aware Move  (Claude, 2026-09-26)
+- Done: the same tool as "content-move": the drag commits `Command::ContentAwareMove { dx, dy, extend }` — Move fills the old place by PatchMatch (Auto band) and composites the content at the new place through the moved selection; Extend keeps the old place. The selection follows the content.
+- Skipped: Transform on Drop, Structure / Color (edge blending), Sample All Layers, Duplicate mode, Tests.
+- FAST: the moved content's edge is not blended (coverage only).
+- VERIFY: none.
+- Try it: J's flyout ▸ Content-Aware Move Tool, lasso an object, drag it.

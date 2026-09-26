@@ -79,8 +79,8 @@ export const optionBars = {
 
   heal: [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Type:", options: ["Content-Aware", "Proximity Match"], value: "Content-Aware" }],
   "heal-brush": [{ type: "brushpreset" }, { type: "num", text: "Size:", value: "40", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "50", unit: "%", width: 40 }, { type: "select", text: "Mode:", options: ["Normal", "Multiply", "Screen"], value: "Normal" }, { type: "toggle", text: "Aligned", on: true }, { type: "toggle", text: "Sample All Layers", on: true }, { type: "toggle", text: "Pressure for size", on: false }],
-  patch: [{ type: "btngroup", icons: ["i-patch", "i-patch"], titles: ["Source", "Destination"], active: 0 }, { type: "toggle", text: "Transparent", on: false }],
-  "content-move": [{ type: "btngroup", icons: ["i-content-move"], titles: ["Move"], active: 0 }, { type: "select", text: "Mode:", options: ["Move", "Extend", "Duplicate"], value: "Move" }, { type: "select", text: "Structure:", options: ["1", "2", "3", "4", "5"], value: "1" }, { type: "num", text: "Color:", value: "0", width: 36 }],
+  patch: [{ type: "select", text: "Patch:", options: ["Normal", "Content-Aware"], value: "Normal" }, { type: "btngroup", key: "Source/Destination", icons: ["i-patch", "i-patch"], titles: ["Source", "Destination"], active: 0 }, { type: "toggle", text: "Transparent", on: false }],
+  "content-move": [{ type: "btngroup", icons: ["i-content-move"], titles: ["Move"], active: 0 }, { type: "select", text: "Mode:", options: ["Move", "Extend"], value: "Move" }, { type: "select", text: "Structure:", options: ["1", "2", "3", "4", "5"], value: "1" }, { type: "num", text: "Color:", value: "0", width: 36 }],
   "red-eye": [{ type: "num", text: "Pupil Size:", value: "50", unit: "%", width: 40 }, { type: "num", text: "Darken Amount:", value: "50", unit: "%", width: 40 }],
 
   brush: [

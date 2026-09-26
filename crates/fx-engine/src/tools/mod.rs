@@ -31,6 +31,7 @@ pub mod marquee;
 pub mod measure;
 pub mod move_tool;
 pub mod paint;
+pub mod patch;
 pub mod path_select;
 pub mod pen;
 pub mod perspective_crop;
@@ -412,6 +413,8 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		"clone" => Some(Box::new(paint::Paint::new("clone", paint::Kind::Clone))),
 		"heal-brush" => Some(Box::new(paint::Paint::new("heal-brush", paint::Kind::Heal))),
 		"heal" => Some(Box::new(paint::Paint::new("heal", paint::Kind::SpotHeal))),
+		"patch" => Some(Box::new(patch::Patch::new("patch", patch::Kind::Patch))),
+		"content-move" => Some(Box::new(patch::Patch::new("content-move", patch::Kind::ContentMove))),
 		"eraser-bg" => Some(Box::new(paint::Paint::new("eraser-bg", paint::Kind::BgEraser))),
 		"dodge" => Some(Box::new(paint::Paint::new("dodge", paint::Kind::Dodge))),
 		"burn" => Some(Box::new(paint::Paint::new("burn", paint::Kind::Burn))),
