@@ -297,3 +297,8 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Try it: type some text, Type ▸ Warp Text…, Arc, Bend 50. Type ▸ Convert to Shape. T's flyout ▸ Horizontal Type Mask, type, Ctrl+Enter.
 
 ## M10-T09 — Acceptance: deferred to HARDEN (S30–S31, the logo redraw and the vertical Japanese paragraph).
+
+## M11-T00 — Decisions  (Claude, 2026-09-26)
+- Done: the five recommendations recorded as fast defaults D-077..D-081 (D-079 notes the fast-mode MLS solver).
+- Skipped: none. FAST: none. VERIFY: none.
+- Try it: `docs/DECISIONS.md`.
