@@ -140,6 +140,9 @@ pub enum Command {
 	/// Align / Distribute (M7-T04): each layer by its own amount, one step
 	/// named `label`.
 	MoveEach { moves: Vec<(LayerRef, i32, i32)>, label: String },
+	/// New / move / clear guides (M7-T06): a history step that does not dirty
+	/// the pixels.
+	SetGuides { guides: Vec<crate::document::Guide>, label: String },
 	/// M2
 	AddMask { layer: LayerRef, fill: MaskFill },
 	/// M2
@@ -384,6 +387,20 @@ impl Command {
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
 			Command::OffsetLayers { layers, dx, dy } => offset_layers(doc, layers, *dx, *dy),
+			Command::SetGuides { guides, label } => {
+				if guides.iter().any(|g| !g.position.is_finite()) {
+					return Err(CommandError::InvalidValue {
+						field: "guides",
+						reason: "a guide position is not finite".into(),
+					});
+				}
+				doc.guides = guides.clone();
+				Ok(CommandEffect {
+					label: label.clone(),
+					history_only: true,
+					..Default::default()
+				})
+			}
 			Command::SetMaskFlags { layer, enabled, linked } => {
 				let id = resolve(doc, layer)?;
 				let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;

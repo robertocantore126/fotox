@@ -15,6 +15,7 @@ import { cmykProfiles, isColorDialog, openColorDialog } from "./native/color.js"
 import { isImageDialog, openImageDialog } from "./native/image.js";
 import { isStyleDialog, openStyleDialog } from "./native/styles.js";
 import { openNewDocument } from "./native/newdoc.js";
+import { isGuideDialog, openGuideDialog } from "./native/guides.js";
 import { activeDocument } from "./native/documents.js";
 import { dialogDef } from "./data/dialogs.js";
 
@@ -118,6 +119,8 @@ export function runAction(item) {
   if (a.startsWith("dlg:") && bridge.isNative && isEngineFilter(a.slice(4))) { openFilterDialog(a.slice(4)); return; }
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
+  // In the app, guides are the engine's (M7-T06).
+  if (a.startsWith("dlg:") && bridge.isNative && isGuideDialog(a.slice(4))) { openGuideDialog(a.slice(4)); return; }
   // In the app, the five layer styles and Blending Options are live (M6-T08).
   if (a.startsWith("dlg:") && bridge.isNative && isStyleDialog(a.slice(4))) { openStyleDialog(a.slice(4)); return; }
   // In the app, Open is the native file dialog (the shell shows it).

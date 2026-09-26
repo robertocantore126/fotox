@@ -43,6 +43,9 @@ const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A repeat of the same edit within this interval replaces the previous
 /// history step instead of adding one (slider drags, live dialogs).
+/// Tools whose pointer snaps to guides, grid and canvas (M7-T06).
+const SNAPPING_TOOLS: &[&str] = &["marquee", "crop", "shape", "move", "type"];
+
 const MERGE_EDITS_WITHIN: Duration = Duration::from_secs(1);
 
 /// A layer's thumbnail is re-rendered at most this often while it changes (M2-T07).
@@ -527,6 +530,15 @@ impl Engine {
 				},
 			)
 		};
+		// Snapping (M7-T06): the tools that place things get a snapped point.
+		let mut event = event;
+		if SNAPPING_TOOLS.iter().any(|t| tool_id.starts_with(t)) || self.transform.is_some() {
+			if let Some(open) = self.docs.get(doc_id) {
+				let (x, y) = crate::snap::point(&open.doc, &self.settings, open.view.view.zoom, (event.x, event.y));
+				event.x = x;
+				event.y = y;
+			}
+		}
 		// A Free Transform box takes every pointer event while it is up.
 		if let Some((doc, session)) = &mut self.transform
 			&& *doc == doc_id
@@ -1004,6 +1016,12 @@ impl Engine {
 			}
 			UiToEngine::FilterPreviewCancel { doc } => {
 				self.cancel_preview(doc);
+				Changed::default()
+			}
+			UiToEngine::ToolOptions { tool, options } if tool == "_view" || tool == "_prefs" => {
+				// The View flags and the grid preferences (M7-T06).
+				self.settings.options.insert(tool, options);
+				self.request_frame();
 				Changed::default()
 			}
 			UiToEngine::ToolOptions { tool, options } => {
@@ -2920,6 +2938,64 @@ impl Engine {
 				};
 				self.command(doc_id, Command::AddMask { layer: LayerRef::Active, fill });
 			}
+			// Guides (M7-T06).
+			"guide:add" | "guides:clear" | "guide:layout" => {
+				let Some(open) = self.docs.get(doc_id) else { return true };
+				if self.settings.bool("_view", "lockguides").unwrap_or(false) && id != "guides:clear" {
+					return true;
+				}
+				let (w, h) = (f64::from(open.doc.width), f64::from(open.doc.height));
+				let mut guides = open.doc.guides.clone();
+				let label = match id {
+					"guides:clear" => {
+						guides.clear();
+						"Clear Guides"
+					}
+					"guide:add" => {
+						let vertical = args.get("vertical").and_then(serde_json::Value::as_bool).unwrap_or(true);
+						let position = if let Some(p) = args.get("position").and_then(serde_json::Value::as_f64) {
+							if args.get("percent").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+								p / 100.0 * if vertical { w } else { h }
+							} else {
+								p
+							}
+						} else {
+							// Dropped from a ruler: a viewport pixel.
+							let Some(viewport) = open.view.viewport else { return true };
+							let s = args.get("screen").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+							let (x, y) = if vertical {
+								open.view.view.screen_to_doc(viewport, s, 0.0)
+							} else {
+								open.view.view.screen_to_doc(viewport, 0.0, s)
+							};
+							(if vertical { x } else { y }).round()
+						};
+						guides.push(fx_core::Guide { vertical, position });
+						"New Guide"
+					}
+					_ => {
+						let n = |k: &str, d: f64| args.get(k).and_then(serde_json::Value::as_f64).unwrap_or(d);
+						let (cols, rows, gutter, margin) = (n("columns", 0.0) as u32, n("rows", 0.0) as u32, n("gutter", 0.0), n("margin", 0.0));
+						for (count, size, vertical) in [(cols, w, true), (rows, h, false)] {
+							if count == 0 {
+								continue;
+							}
+							let inner = size - 2.0 * margin;
+							let cell = (inner - gutter * f64::from(count - 1)) / f64::from(count);
+							for i in 0..count {
+								let start = margin + f64::from(i) * (cell + gutter);
+								guides.push(fx_core::Guide { vertical, position: start });
+								guides.push(fx_core::Guide {
+									vertical,
+									position: start + cell,
+								});
+							}
+						}
+						"New Guide Layout"
+					}
+				};
+				self.command(doc_id, Command::SetGuides { guides, label: label.into() });
+			}
 			// The rest of Layer ▸ Layer Mask (M7-T05).
 			"mask:reveal-all" | "mask:hide-all" => {
 				let fill = if id == "mask:hide-all" { MaskFill::HideAll } else { MaskFill::RevealAll };
@@ -3384,6 +3460,14 @@ impl Engine {
 				items.extend(overlay.items);
 			}
 			nudge = tool.selection_nudge();
+		}
+		// Guides and grid (M7-T06), under the tool's own overlay items.
+		if let Some(open) = self.docs.active_mut()
+			&& let Some(viewport) = open.view.viewport
+		{
+			let mut extras = crate::snap::overlay(&open.doc, &self.settings, &open.view.view, viewport);
+			extras.append(&mut items);
+			items = extras;
 		}
 		if let Some(selection) = self.selection_overlay() {
 			match nudge {

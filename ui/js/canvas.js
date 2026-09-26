@@ -1,6 +1,7 @@
 // Fotox — area di lavoro: disegna un documento finto, gestisce zoom, pan,
 // righelli e guide. Il contenuto è interamente generato dal codice.
 
+import { initGuides } from "./native/guides.js";
 import { h, icon, clear } from "./el.js";
 import { state, setZoom, emit, on } from "./state.js";
 import * as bridge from "./native/bridge.js";
@@ -54,6 +55,9 @@ export function initWorkspace(host) {
       h("div", { class: "workspace-main" }, viewport, gridLayer, fpsOverlay));
     host.append(tabs, rulerRow, body);
     viewportEl = viewport;
+    // Guides, grid and snapping are the engine's (M7-T06); the CSS grid mock is off.
+    gridLayer.hidden = true;
+    initGuides(rulerTop, rulerLeft, viewport);
     bridge.on(ENGINE.STATUS, showStatus);
     // Tabs come from the engine's documents, not the demo document.
     initDocumentTabs(tabs, newTab);
@@ -469,7 +473,8 @@ function drawRulers() {
 
 function applyGrid() {
   const host = document.querySelector(".workspace");
-  if (!host) return;
+  // In the app the engine draws the grid (M7-T06). FAST: no pixel grid there.
+  if (!host || bridge.isNative) return;
   host.classList.toggle("show-grid", !!state.flags.grid);
   host.classList.toggle("show-pixelgrid", !!state.flags.pixelgrid);
   const layer = host.querySelector(".grid-layer");

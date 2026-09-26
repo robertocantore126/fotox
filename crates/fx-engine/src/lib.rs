@@ -24,6 +24,7 @@ pub mod layers;
 pub mod mips;
 pub mod ops;
 pub mod selection;
+pub mod snap;
 pub mod stroke;
 pub mod text;
 pub mod thumbs;
