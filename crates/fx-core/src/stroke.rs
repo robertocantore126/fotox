@@ -32,6 +32,114 @@ pub struct BrushParams {
 	/// Pen pressure scales each dab's strength (the opacity pen button).
 	#[serde(default)]
 	pub pressure_opacity: bool,
+	/// The sampled tip (M8-T01): the id of a tip registered with
+	/// `fx_ops::brush::tip::register`, 0 = the round computed tip.
+	#[serde(default)]
+	pub tip: u64,
+	/// Brush Settings' dynamics (M8-T01).
+	#[serde(default)]
+	pub dynamics: Dynamics,
+	/// The seed of every jitter of this stroke (set at pen-down and stored
+	/// with the stroke, so live = replay).
+	#[serde(default)]
+	pub seed: u64,
+}
+
+/// What drives a dynamic (Photoshop's "Control" drop-downs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Control {
+	#[default]
+	Off,
+	/// Fades from full to the minimum over `Dynamics::fade_steps` dabs.
+	Fade,
+	PenPressure,
+	PenTilt,
+}
+
+/// The Brush Settings sections of M8-T01: Shape Dynamics, Scattering,
+/// Transfer and Color Dynamics. Jitters are `0..=1` (Photoshop's percent).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dynamics {
+	pub size_jitter: f32,
+	pub size_control: Control,
+	/// `0..=1` of the diameter: the smallest a control shrinks the tip to.
+	pub min_diameter: f32,
+	/// `0..=1` of 360°.
+	pub angle_jitter: f32,
+	pub angle_control: Control,
+	pub roundness_jitter: f32,
+	pub roundness_control: Control,
+	pub min_roundness: f32,
+	/// Dabs a fade control lasts.
+	pub fade_steps: u32,
+	/// Scatter distance as a fraction of the diameter (`0..=10`).
+	pub scatter: f32,
+	pub scatter_both_axes: bool,
+	/// Dabs per spacing interval, `1..=16`.
+	pub count: u32,
+	pub count_jitter: f32,
+	pub opacity_jitter: f32,
+	pub opacity_control: Control,
+	pub flow_jitter: f32,
+	pub flow_control: Control,
+	/// Foreground/background jitter; the stroke's colour moves toward the
+	/// background by a random amount.
+	pub fg_bg_jitter: f32,
+	pub hue_jitter: f32,
+	pub saturation_jitter: f32,
+	pub brightness_jitter: f32,
+	/// Colour jitter per tip (Photoshop's "Apply Per Tip"). FAST: the stroke
+	/// model paints one colour per stroke, so this is read as per stroke.
+	pub per_tip: bool,
+}
+
+impl Default for Dynamics {
+	fn default() -> Self {
+		Self {
+			size_jitter: 0.0,
+			size_control: Control::Off,
+			min_diameter: 0.0,
+			angle_jitter: 0.0,
+			angle_control: Control::Off,
+			roundness_jitter: 0.0,
+			roundness_control: Control::Off,
+			min_roundness: 0.25,
+			fade_steps: 25,
+			scatter: 0.0,
+			scatter_both_axes: false,
+			count: 1,
+			count_jitter: 0.0,
+			opacity_jitter: 0.0,
+			opacity_control: Control::Off,
+			flow_jitter: 0.0,
+			flow_control: Control::Off,
+			fg_bg_jitter: 0.0,
+			hue_jitter: 0.0,
+			saturation_jitter: 0.0,
+			brightness_jitter: 0.0,
+			per_tip: false,
+		}
+	}
+}
+
+impl Dynamics {
+	/// Whether anything varies from dab to dab.
+	pub fn is_static(&self) -> bool {
+		self.size_jitter == 0.0
+			&& self.size_control == Control::Off
+			&& self.angle_jitter == 0.0
+			&& self.angle_control == Control::Off
+			&& self.roundness_jitter == 0.0
+			&& self.roundness_control == Control::Off
+			&& self.scatter == 0.0
+			&& self.count <= 1
+			&& self.opacity_jitter == 0.0
+			&& self.opacity_control == Control::Off
+			&& self.flow_jitter == 0.0
+			&& self.flow_control == Control::Off
+	}
 }
 
 impl Default for BrushParams {
@@ -47,6 +155,9 @@ impl Default for BrushParams {
 			mode: BlendMode::Normal,
 			pressure_size: false,
 			pressure_opacity: false,
+			tip: 0,
+			dynamics: Dynamics::default(),
+			seed: 0,
 		}
 	}
 }

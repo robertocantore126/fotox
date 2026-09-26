@@ -2,6 +2,7 @@
 //! path, and Photoshop's stroke model on the CPU (f32 maths, rayon over
 //! tiles). Live strokes and their replay share [`stroke::Stroke`].
 
+pub mod color_dynamics;
 pub mod heal;
 pub mod op;
 pub mod path;

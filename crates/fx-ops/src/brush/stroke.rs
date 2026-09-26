@@ -198,9 +198,13 @@ impl Stroke {
 		let pencil = matches!(self.tool, StrokeTool::Pencil);
 		// Dabs per touched tile, in stroke order, with their pixel rectangles.
 		let mut per_tile: HashMap<(u32, u32), Vec<DabRect>> = HashMap::new();
+		let sampled = super::tip::sampled(self.brush.tip);
 		let tips: Vec<Tip> = dabs
 			.iter()
-			.map(|d| Tip::new(d.diameter, self.brush.hardness, self.brush.roundness, self.brush.angle, pencil))
+			.map(|d| match &sampled {
+				Some(tip) => Tip::sampled(tip.clone(), d.diameter, d.roundness, d.angle, pencil),
+				None => Tip::new(d.diameter, self.brush.hardness, d.roundness, d.angle, pencil),
+			})
 			.collect();
 		for (i, (dab, tip)) in dabs.iter().zip(&tips).enumerate() {
 			let reach = f64::from(tip.reach());

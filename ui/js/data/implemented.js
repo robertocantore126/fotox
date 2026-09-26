@@ -2,6 +2,11 @@
 // The actions the app implements; other menu items are greyed out in the app.
 export const IMPLEMENTED = new Set([
   "align:*",
+  "brush:delete-preset",
+  "brush:import-abr",
+  "brush:list",
+  "brush:rename-preset",
+  "brush:save-preset",
   "clip:clear",
   "clip:copy",
   "clip:copy-merged",

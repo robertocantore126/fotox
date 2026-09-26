@@ -354,6 +354,12 @@ pub enum EngineToUi {
 	Preferences {
 		prefs: serde_json::Value,
 	},
+	/// The brush presets (M8-T01): name, size, hardness, spacing, roundness,
+	/// angle, dynamics, `tip` (a sampled tip's id, 0 = round) and `thumb`
+	/// (base64 8-bit coverage, 96 × 32).
+	Brushes {
+		presets: Vec<serde_json::Value>,
+	},
 	/// The system's font families (M6-T07), for the Type option bar.
 	Fonts {
 		families: Vec<FontFamilyInfo>,

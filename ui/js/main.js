@@ -22,6 +22,7 @@ import { UI, ENGINE } from "./native/protocol.js";
 import { initNativePanels } from "./native/layers-panel.js";
 import { initColor } from "./native/color.js";
 import { initTools, sendColors } from "./native/tools.js";
+import { initBrushes, brushExtras } from "./native/brush-settings.js";
 
 const UI_VERSION = "0.1.0";
 
@@ -125,7 +126,8 @@ function buildToolbar(container) {
 function sendToolOptions(options) {
   if (!bridge.isNative) return;
   // The bar on show: the active tool's, or Free Transform's (M6-T04).
-  bridge.send({ type: UI.TOOL_OPTIONS, tool: currentBar() || state.tool, options });
+  // The Brush Settings panel's part of the brush (M8-T01).
+  bridge.send({ type: UI.TOOL_OPTIONS, tool: currentBar() || state.tool, options: { ...options, _brush: brushExtras() } });
 }
 
 function pickTool(toolId, slotId) {
@@ -260,6 +262,8 @@ async function boot() {
     initColor();
     initTools();
     initPrefs();
+    initBrushes();
+    on("brush:changed", () => sendToolOptions(readOptions()));
     initType(() => { if (state.tool === "type") { renderOptionsBar(shell.optionsbar, "type"); sendToolOptions(readOptions()); } });
   }
   bridge.on(ENGINE.TOAST, (m) => toast(m.text));

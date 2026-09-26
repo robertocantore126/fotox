@@ -202,6 +202,8 @@ struct Engine {
 	untitled: u32,
 	/// The preferences file (M7-T09).
 	prefs: crate::prefs::Prefs,
+	/// Brush presets and patterns (M8-T01/T06).
+	resources: m8::Resources,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
 	/// The window is closing: after each dirty document is answered, ask about
@@ -351,6 +353,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		style_clipboard: None,
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
+		resources: m8::Resources::load(),
 		pending_close: None,
 		window_close_pending: false,
 		display_profile: None,
@@ -958,6 +961,7 @@ impl Engine {
 				self.to_ui(&EngineToUi::CmykProfiles { profiles });
 				self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
 				self.send_prefs();
+				self.send_resources();
 				self.to_ui(&EngineToUi::Toast {
 					text: "Engine connected".into(),
 				});
@@ -985,6 +989,10 @@ impl Engine {
 					self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
 					self.send_prefs();
 					self.request_frame();
+					return Changed::default();
+				}
+				// M8: brushes, patterns, the History Brush source, gradients.
+				if self.m8_action(&id, &args) {
 					return Changed::default();
 				}
 				if id == "misc:clear-recent" {
@@ -1301,6 +1309,10 @@ impl Engine {
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
 	fn open(&mut self, path: PathBuf, place: Option<DocId>) {
+		// Brush and pattern files go to their libraries (M8-T01/T06).
+		if self.open_resource(&path) {
+			return;
+		}
 		self.next_task += 1;
 		let task = self.next_task;
 		let (store, internal) = (self.store.clone(), self.internal.clone());
@@ -3945,6 +3957,8 @@ fn pixel_job_label(command: &Command) -> String {
 		_ => "Working".to_owned(),
 	}
 }
+
+mod m8;
 
 #[cfg(test)]
 mod tests {

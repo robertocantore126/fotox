@@ -97,7 +97,11 @@ impl Paint {
 			},
 			pressure_size: s.bool(self.id, "Pressure for size").unwrap_or(false),
 			pressure_opacity: s.bool(self.id, "Pressure for opacity").unwrap_or(false),
+			tip: 0,
+			dynamics: Default::default(),
+			seed: 0,
 		}
+		.with_settings(s.options.get(self.id).and_then(|o| o.get("_brush")))
 	}
 
 	/// The stroke tool, or why the stroke cannot start.
@@ -228,12 +232,17 @@ impl Tool for Paint {
 						};
 					}
 				};
-				let brush = self.brush(ctx);
+				let mut brush = self.brush(ctx);
+				// The stroke's jitter seed (M8-T01), stored with the command.
+				brush.seed = event.time_us.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (event.x.to_bits().rotate_left(13));
 				self.diameter = f64::from(brush.diameter);
 				self.pen = None;
 				self.stroking = true;
 				let target = if ctx.mask_target { StrokeTarget::Mask } else { StrokeTarget::Pixels };
-				let color = self.color(ctx, ctx.mask_target);
+				let mut color = self.color(ctx, ctx.mask_target);
+				if matches!(self.kind, Kind::Brush | Kind::Pencil) && !ctx.mask_target {
+					color = fx_ops::brush::color_dynamics::jitter_color(color, ctx.settings.bg, &brush.dynamics, brush.seed);
+				}
 				let first = self.follow(ctx, event).into_iter().collect();
 				ToolResult {
 					strokes: vec![StrokeEvent::Begin {
@@ -315,5 +324,34 @@ impl Tool for Paint {
 	fn cursor(&self, _modifiers: Modifiers) -> CursorShape {
 		// The outline (or crosshair) is drawn by the overlay.
 		CursorShape::None
+	}
+}
+
+/// The Brush Settings panel's part of a brush (M8-T01): the UI sends it with
+/// every painting tool's options as `_brush`.
+pub(crate) trait WithSettings {
+	fn with_settings(self, extra: Option<&serde_json::Value>) -> Self;
+}
+
+impl WithSettings for BrushParams {
+	fn with_settings(mut self, extra: Option<&serde_json::Value>) -> Self {
+		let Some(extra) = extra else { return self };
+		let num = |key: &str| extra.get(key).and_then(serde_json::Value::as_f64);
+		if let Some(tip) = extra.get("tip").and_then(serde_json::Value::as_u64) {
+			self.tip = tip;
+		}
+		if let Some(v) = num("roundness") {
+			self.roundness = (v as f32).clamp(0.01, 1.0);
+		}
+		if let Some(v) = num("angle") {
+			self.angle = v as f32;
+		}
+		if let Some(v) = num("spacing") {
+			self.spacing = (v as f32).clamp(0.01, 10.0);
+		}
+		if let Some(d) = extra.get("dynamics").and_then(|d| serde_json::from_value(d.clone()).ok()) {
+			self.dynamics = d;
+		}
+		self
 	}
 }
