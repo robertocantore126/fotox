@@ -330,3 +330,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: the moved content's edge is not blended (coverage only).
 - VERIFY: none.
 - Try it: J's flyout ▸ Content-Aware Move Tool, lasso an object, drag it.
+
+## M11-T05 — Content-Aware Scale  (Claude, 2026-09-26)
+- Done: `fx_ops::seam::carve` (Avidan–Shamir: gradient energy + 1000 × protection, DP seams, columns then rows on the carved image; enlargement duplicates the first k removal seams, k ≤ half) behind `PixelOps::seam_carve`; `Command::ContentAwareScale { layer, width, height, amount, protect, protect_skin }` reads the layer onto a ≤ 640² working grid, carves to the amount's share of the change, then maps every output pixel (tile by tile, rayon) through the plain scale → carved full-res pixel → working cell → source pixel. Edit ▸ Content-Aware Scale… (dialog: Width / Height %, Amount, Protect channel, Protect Skin Tones).
+- Skipped: the transform box UI and its view-level preview, scaling a selection only, Tests.
+- FAST: seams are `scale` px wide at full resolution (blocky steps on big images); nearest neighbour for the plain-scale part; the layer mask is not scaled; skin tones by a crude RGB rule; energy recomputed per seam.
+- VERIFY: Photoshop's skin detector and how Amount mixes the two.
+- Try it: Edit ▸ Content-Aware Scale…, Width 60 %.

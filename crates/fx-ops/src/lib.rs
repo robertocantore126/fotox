@@ -29,4 +29,5 @@ pub mod patchmatch;
 pub mod permute;
 pub mod raster;
 pub mod resample;
+pub mod seam;
 pub mod select;

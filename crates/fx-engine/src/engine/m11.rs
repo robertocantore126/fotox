@@ -38,6 +38,37 @@ impl Engine {
 				);
 				true
 			}
+			// Edit ▸ Content-Aware Scale (M11-T05): percentages of the layer.
+			"edit:content-aware-scale" => {
+				let Some((w, h)) = self.docs.get(doc_id).and_then(|o| {
+					let layer = o.doc.layer(o.doc.active_layer()?)?;
+					match &layer.kind {
+						fx_core::LayerKind::Pixel { image, .. } => Some((image.width(), image.height())),
+						_ => None,
+					}
+				}) else {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Content-Aware Scale works on a pixel layer".into(),
+					});
+					return true;
+				};
+				let pct = |k: &str| args.get(k).and_then(|v| v.as_f64()).unwrap_or(100.0) / 100.0;
+				let width = (f64::from(w) * pct("width")).round().max(1.0) as u32;
+				let height = (f64::from(h) * pct("height")).round().max(1.0) as u32;
+				let protect = args.get("protect").and_then(|v| v.as_i64()).filter(|i| *i >= 0).map(|i| i as usize);
+				self.command(
+					doc_id,
+					Command::ContentAwareScale {
+						layer: LayerRef::Active,
+						width,
+						height,
+						amount: pct("amount"),
+						protect,
+						protect_skin: args.get("skin").and_then(|v| v.as_bool()).unwrap_or(false),
+					},
+				);
+				true
+			}
 			_ => false,
 		}
 	}

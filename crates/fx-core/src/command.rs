@@ -478,6 +478,18 @@ pub enum Command {
 		#[serde(default)]
 		content_aware: bool,
 	},
+	/// Edit ▸ Content-Aware Scale (M11-T05): the layer's image to `width ×
+	/// height`; `amount` `0..=1` of it by seam carving.
+	ContentAwareScale {
+		layer: LayerRef,
+		width: u32,
+		height: u32,
+		amount: f64,
+		#[serde(default)]
+		protect: Option<usize>,
+		#[serde(default)]
+		protect_skin: bool,
+	},
 	/// The Content-Aware Move tool's commit (M11-T04).
 	ContentAwareMove {
 		layer: LayerRef,
@@ -830,6 +842,14 @@ impl Command {
 				destination,
 				content_aware,
 			} => m11::patch(doc, layer, *dx, *dy, *destination, *content_aware, ctx),
+			Command::ContentAwareScale {
+				layer,
+				width,
+				height,
+				amount,
+				protect,
+				protect_skin,
+			} => m11::content_aware_scale(doc, layer, *width, *height, *amount, *protect, *protect_skin, ctx),
 			Command::ContentAwareMove { layer, dx, dy, extend } => m11::content_aware_move(doc, layer, *dx, *dy, *extend, ctx),
 			Command::SelectionToPath { tolerance } => m10::selection_to_path(doc, *tolerance, ctx),
 			Command::FillPath { target, source, mode, opacity } => m10::fill_path(doc, *target, source, *mode, *opacity, ctx),

@@ -529,3 +529,119 @@ pub(super) fn content_aware_move(
 		..Default::default()
 	})
 }
+
+/// Pixels seam carving works on at most (D-080: a mip level for big images).
+/// FAST: 640², seams are `scale` pixels wide at full resolution.
+const SEAM_BUDGET: i64 = 640 * 640;
+
+/// Edit ▸ Content-Aware Scale (M11-T05): the layer's image to `width ×
+/// height`, `amount` (`0..=1`) of the change by seam carving and the rest by
+/// a plain scale. `protect` = an alpha channel's index.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn content_aware_scale(
+	doc: &mut Document,
+	layer: &LayerRef,
+	width: u32,
+	height: u32,
+	amount: f64,
+	protect: Option<usize>,
+	protect_skin: bool,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
+	use rayon::prelude::*;
+	let ops = pixel_ops(ctx, "Content-Aware Scale")?;
+	let (id, image, offset) = pixel_target(doc, layer)?;
+	if width == 0 || height == 0 {
+		return Err(CommandError::NotAllowed("the size must be at least one pixel".into()));
+	}
+	let (w, h) = (i64::from(image.width()), i64::from(image.height()));
+	let mut scale = 1i64;
+	while (w / scale) * (h / scale) > SEAM_BUDGET {
+		scale += 1;
+	}
+	let grid = Grid {
+		x0: 0,
+		y0: 0,
+		w: (w / scale).max(1) as usize,
+		h: (h / scale).max(1) as usize,
+		scale,
+	};
+	let layer_size = (image.width(), image.height());
+	let pixels = read_grid(&image, (0, 0), &grid, layer_size, ctx.tiles)?;
+	let mut protection = vec![0.0f32; grid.w * grid.h];
+	if let Some(index) = protect {
+		let channel = doc.channels.get(index).ok_or_else(|| CommandError::NotAllowed("no such channel".into()))?;
+		let at = Grid {
+			x0: i64::from(offset.0),
+			y0: i64::from(offset.1),
+			..grid
+		};
+		protection = grid_coverage(&channel.as_selection(), &at, (doc.width, doc.height), ctx.tiles)?;
+	}
+	if protect_skin {
+		for (p, v) in pixels.iter().zip(protection.iter_mut()) {
+			let q = unpremul(*p);
+			// FAST: a crude RGB skin rule (VERIFY: Photoshop's skin detector).
+			if q[0] > 0.35 && q[0] > q[1] && q[1] > q[2] && q[0] - q[2] > 0.08 && q[0] - q[1] < 0.35 {
+				*v = v.max(1.0);
+			}
+		}
+	}
+	// Carve to the amount's share of the change, scale the rest.
+	let carve_to = |from: i64, to: u32| -> usize {
+		((from as f64 + amount.clamp(0.0, 1.0) * (f64::from(to) - from as f64)) / scale as f64)
+			.round()
+			.max(1.0) as usize
+	};
+	let (tw, th) = (carve_to(w, width), carve_to(h, height));
+	let (aw, ah, map) = ops.seam_carve(&pixels, grid.w, grid.h, &protection, tw, th)?;
+	// Output tiles: each pixel → carved full-res pixel → working cell → source.
+	let format = image.format();
+	let (cw, ch) = ((aw as i64 * scale) as f64, (ah as i64 * scale) as f64);
+	let mut out = TiledImage::new(width, height, format);
+	let tile = i64::from(TILE_SIZE);
+	let keys: Vec<(u32, u32)> = (0..out.grid(0).rows()).flat_map(|ty| (0..out.grid(0).cols()).map(move |tx| (tx, ty))).collect();
+	let buffers: Vec<((u32, u32), fx_tiles::TileBuffer)> = keys
+		.par_iter()
+		.map(|&(tx, ty)| -> Result<_, CommandError> {
+			let mut cache: HashMap<(i64, i64), Option<Vec<Px>>> = HashMap::new();
+			let mut pixels = vec![[0.0f32; 4]; TILE_PIXELS];
+			for py in 0..tile {
+				let oy = i64::from(ty) * tile + py;
+				if oy >= i64::from(height) {
+					break;
+				}
+				// FAST: nearest neighbour for the plain-scale part.
+				let yc = (((oy as f64 + 0.5) * ch / f64::from(height)) as i64).clamp(0, ch as i64 - 1);
+				for px in 0..tile {
+					let ox = i64::from(tx) * tile + px;
+					if ox >= i64::from(width) {
+						break;
+					}
+					let xc = (((ox as f64 + 0.5) * cw / f64::from(width)) as i64).clamp(0, cw as i64 - 1);
+					let (sx, sy) = map[(yc / scale) as usize * aw + (xc / scale) as usize];
+					let x = (i64::from(sx) * scale + xc % scale).min(w - 1);
+					let y = (i64::from(sy) * scale + yc % scale).min(h - 1);
+					let key = (x / tile, y / tile);
+					if !cache.contains_key(&key) {
+						cache.insert(key, layer_tile(&image, key.0, key.1, ctx.tiles)?);
+					}
+					if let Some(t) = &cache[&key] {
+						pixels[(py * tile + px) as usize] = t[((y % tile) * tile + x % tile) as usize];
+					}
+				}
+			}
+			Ok(((tx, ty), crate::pixels::encode(&pixels, format)))
+		})
+		.collect::<Result<_, _>>()?;
+	for ((tx, ty), buffer) in buffers {
+		out.put_buffer(ctx.tiles, tx, ty, buffer);
+	}
+	// FAST: the layer mask is not scaled with the pixels.
+	set_pixels(doc, id, out, offset);
+	Ok(CommandEffect {
+		label: "Content-Aware Scale".into(),
+		pixels_changed: vec![id],
+		..Default::default()
+	})
+}

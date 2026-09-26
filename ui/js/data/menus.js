@@ -132,7 +132,7 @@ export const menus = [
       it("Stroke...", "", "dlg:stroke"),
       sep,
       it("Content-Aware Fill...", "", "dlg:content-aware-fill"),
-      it("Content-Aware Scale", "Alt+Shift+Ctrl+C", "misc:content-aware-scale", { dis: true }),
+      it("Content-Aware Scale...", "Alt+Shift+Ctrl+C", "misc:content-aware-scale"),
       it("Puppet Warp", "", "misc:puppet-warp", { dis: true }),
       it("Perspective Warp", "Alt+Shift+Ctrl+W", "misc:perspective-warp", { dis: true }),
       it("Free Transform", "Ctrl+T", "xf:free"),

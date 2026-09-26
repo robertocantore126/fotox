@@ -57,6 +57,7 @@ export const IMPLEMENTED = new Set([
   "dlg:unsharp-mask",
   "dlg:warp-text",
   "dlg:content-aware-fill",
+  "misc:content-aware-scale",
   "doc:new",
   "doc:open-recent:*",
   "doc:revert",

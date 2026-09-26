@@ -20,7 +20,7 @@ import { isPrefsDialog, openPrefsDialog } from "./native/prefs.js";
 import { activeDocument } from "./native/documents.js";
 import { isGradientDialog, openGradientDialog, openGradientFillDialog } from "./native/gradients.js";
 import { isPatternDialog, openPatternFillDialog } from "./native/patterns.js";
-import { isChannelDialog, openChannelDialog } from "./native/channels-panel.js";
+import { isChannelDialog, openChannelDialog, channelNames } from "./native/channels-panel.js";
 import { isSelectionDialog, openSelectionDialog } from "./native/selections.js";
 import { activeLayerInfo } from "./native/layers-panel.js";
 import { dialogDef } from "./data/dialogs.js";
@@ -135,6 +135,20 @@ export function runAction(item) {
   // In the app, File ▸ New builds a real document (M7-T01).
   if (a === "dlg:new-doc" && bridge.isNative) { openNewDocument(); return; }
   // Type ▸ Warp Text (M10-T08).
+  // Edit ▸ Content-Aware Scale (M11-T05). FAST: a dialog instead of the
+  // transform box.
+  if (a === "misc:content-aware-scale" && bridge.isNative) {
+    const names = channelNames();
+    const def = dialogDef("content-aware-scale");
+    openDialog("content-aware-scale", {
+      fields: def.fields.map((f) => (f.label === "Protect:" ? { ...f, options: ["None", ...names] } : f)),
+      onOk: (v) => bridge.send({
+        type: UI.ACTION, id: "edit:content-aware-scale",
+        args: { width: Number(v["Width:"]), height: Number(v["Height:"]), amount: Number(v["Amount:"]), protect: names.indexOf(v["Protect:"]), skin: !!v["Protect Skin Tones"] },
+      }),
+    });
+    return;
+  }
   if (a === "dlg:content-aware-fill" && bridge.isNative) {
     openDialog("content-aware-fill", {
       onOk: (v) => bridge.send({ type: UI.ACTION, id: "edit:content-aware-fill", args: { output: v["Output To:"], seed: Number(v["Seed:"]) || 1 } }),

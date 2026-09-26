@@ -43,6 +43,11 @@ function grayThumb(b64) {
 
 const MODES = { "New Selection": "replace", "Add to Selection": "add", "Subtract from Selection": "subtract", "Intersect with Selection": "intersect" };
 
+/** The active document's alpha channel names (Content-Aware Scale's Protect, M11-T05). */
+export function channelNames() {
+  return channels().channels.map((c) => c.name);
+}
+
 export function channelsPanel() {
   if (!root) root = h("div", { class: "pchannels native" });
   render();

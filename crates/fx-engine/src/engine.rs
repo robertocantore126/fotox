@@ -4001,6 +4001,7 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::ContentAwareFill { .. }
 			| Command::Patch { .. }
 			| Command::ContentAwareMove { .. }
+			| Command::ContentAwareScale { .. }
 			| Command::SaveSelection { .. }
 			// Rotating a big canvas is tile I/O, resampling is a full pass over
 			// every layer (M6-T02): both would freeze the engine thread.
@@ -4034,6 +4035,7 @@ fn pixel_job_label(command: &Command) -> String {
 		Command::ContentAwareFill { .. } => "Content-Aware Fill".to_owned(),
 		Command::Patch { .. } => "Patch Tool".to_owned(),
 		Command::ContentAwareMove { .. } => "Content-Aware Move".to_owned(),
+		Command::ContentAwareScale { .. } => "Content-Aware Scale".to_owned(),
 		Command::SaveSelection { .. } => "Save Selection".to_owned(),
 		Command::RotateCanvas { quarter_turns } => {
 			Permutation::from_quarter_turns(*quarter_turns).map_or_else(|| "Rotate Canvas".to_owned(), |op| op.label().to_owned())

@@ -173,6 +173,21 @@ pub trait PixelOps: Send + Sync {
 		Err(CommandError::NotAllowed("content-aware filling needs the engine".into()))
 	}
 
+	/// Seam carving (M11-T05) of a `w × h` buffer towards `tw × th`: the
+	/// achieved size and each carved pixel's source.
+	#[allow(clippy::type_complexity)]
+	fn seam_carve(
+		&self,
+		_pixels: &[[f32; 4]],
+		_w: usize,
+		_h: usize,
+		_protect: &[f32],
+		_tw: usize,
+		_th: usize,
+	) -> Result<(usize, usize, Vec<(u32, u32)>), CommandError> {
+		Err(CommandError::NotAllowed("seam carving needs the engine".into()))
+	}
+
 	/// The healing blend (D-045) of premultiplied `source` into `before` over
 	/// the covered pixels.
 	fn heal_blend(&self, _coverage: &[f32], _before: &[[f32; 4]], _source: &[[f32; 4]], _w: usize, _h: usize) -> Result<Vec<[f32; 4]>, CommandError> {

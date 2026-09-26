@@ -243,6 +243,18 @@ impl PixelOps for EngineOps {
 		Ok(fx_ops::patchmatch::fill(pixels, w, h, hole, sampling, &params))
 	}
 
+	fn seam_carve(
+		&self,
+		pixels: &[[f32; 4]],
+		w: usize,
+		h: usize,
+		protect: &[f32],
+		tw: usize,
+		th: usize,
+	) -> Result<(usize, usize, Vec<(u32, u32)>), CommandError> {
+		Ok(fx_ops::seam::carve(pixels, w, h, protect, tw, th))
+	}
+
 	fn heal_blend(&self, coverage: &[f32], before: &[[f32; 4]], source: &[[f32; 4]], w: usize, h: usize) -> Result<Vec<[f32; 4]>, CommandError> {
 		Ok(fx_ops::brush::heal::poisson(coverage, before, source, w, h))
 	}
