@@ -18,6 +18,7 @@ import { isStyleDialog, openStyleDialog } from "./native/styles.js";
 import { openNewDocument } from "./native/newdoc.js";
 import { isGuideDialog, openGuideDialog } from "./native/guides.js";
 import { isPrefsDialog, openPrefsDialog } from "./native/prefs.js";
+import { isGenerativeDialog, openGenerativeFill } from "./native/generative.js";
 import { activeDocument } from "./native/documents.js";
 import { isGradientDialog, openGradientDialog, openGradientFillDialog } from "./native/gradients.js";
 import { isPatternDialog, openPatternFillDialog } from "./native/patterns.js";
@@ -181,6 +182,9 @@ export function runAction(item) {
   if (a.startsWith("dlg:") && bridge.isNative && isSelectionDialog(a.slice(4))) { openSelectionDialog(a.slice(4)); return; }
   // In the app, Preferences are the engine's file (M7-T09).
   if (a.startsWith("dlg:") && bridge.isNative && isPrefsDialog(a.slice(4))) { openPrefsDialog(a.slice(4)); return; }
+  // Generative Fill's prompt (M13-T06); the other AI actions are the engine's.
+  if (a.startsWith("dlg:") && bridge.isNative && isGenerativeDialog(a.slice(4))) { openGenerativeFill(); return; }
+  if (bridge.isNative && a.startsWith("ai:")) return;
   // In the app, guides are the engine's (M7-T06).
   if (a.startsWith("dlg:") && bridge.isNative && isGuideDialog(a.slice(4))) { openGuideDialog(a.slice(4)); return; }
   // In the app, the five layer styles and Blending Options are live (M6-T08).
@@ -263,7 +267,7 @@ export function runAction(item) {
   if (a.startsWith("export:")) { openDialog("export-as"); return; }
 
   // IA, estensioni, account ---------------------------------------------
-  if (a === "ai:generate" || a === "ai:fill") { openDialog("generate"); return; }
+  if (a === "ai:generate" || a === "ai:fill" || a === "dlg:generative-fill") { openDialog("generate"); return; }
   if (a.startsWith("ai:")) { toast(label + " — the AI engine is not part of this mock"); return; }
   if (a.startsWith("ext:") || a.startsWith("tpl:") || a.startsWith("acct:")) { toast(label + " (mock)"); return; }
   if (a === "app:exit") { toast("Fotox stays open — this is a browser mock"); return; }

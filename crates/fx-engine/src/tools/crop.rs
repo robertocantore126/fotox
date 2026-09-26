@@ -320,6 +320,23 @@ impl Crop {
 		})
 	}
 
+	/// Fill: Generative Expand (M13-T06): when the upright box reaches past
+	/// the canvas, the engine fills the new area through ComfyUI once the crop
+	/// has grown the canvas. The old canvas in the new canvas's pixels.
+	fn expand_request(&self, ctx: &ToolContext<'_>) -> Option<crate::tools::AiRequest> {
+		if ctx.settings.string(self.id, "Fill").as_deref() != Some("Generative Expand") || self.turn_deg != 0.0 {
+			return None;
+		}
+		let (x, y, w, h) = self.rect?.whole();
+		let (x, y, w, h) = (i64::from(x), i64::from(y), i64::from(w), i64::from(h));
+		let (dw, dh) = (i64::from(ctx.doc.width), i64::from(ctx.doc.height));
+		let grows = x < 0 || y < 0 || x + w > dw || y + h > dh;
+		grows.then(|| crate::tools::AiRequest::Expand {
+			old: (-x, -y, dw - x, dh - y),
+			prompt: ctx.settings.string(self.id, "Prompt").unwrap_or_default(),
+		})
+	}
+
 	/// The box a resize drag asks for, in the press-time frame (`pointer` is
 	/// in it too): the grabbed edges follow the pointer, the option bar's ratio
 	/// or size has the last word, and Alt grows the box about its centre.
@@ -477,6 +494,7 @@ impl Tool for Crop {
 		match key {
 			"Enter" => ToolResult {
 				command: self.command(ctx),
+				ai: self.expand_request(ctx),
 				..Default::default()
 			},
 			"Escape" => {

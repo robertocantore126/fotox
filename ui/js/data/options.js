@@ -35,9 +35,11 @@ export const optionBars = {
   lasso: [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Feather:", value: "0", unit: "px", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }],
   "lasso-poly": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Feather:", value: "0", unit: "px", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }],
   "lasso-magnet": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Width:", value: "10", unit: "px", width: 40 }, { type: "select", text: "Contrast:", options: ["1%", "5%", "10%", "25%", "50%", "75%", "100%"], value: "10%" }, { type: "num", text: "Frequency:", value: "57", width: 40 }],
-  "quick-select": [SELECTION_MODE, { type: "gap" }, { type: "toggle", text: "Sample All Layers", on: false }, { type: "toggle", text: "Auto-Enhance", on: true }, { type: "gap" }, { type: "num", text: "Size:", value: "30", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "100", unit: "%", width: 40 }],
+  "quick-select": [SELECTION_MODE, { type: "gap" }, { type: "toggle", text: "Sample All Layers", on: false }, { type: "toggle", text: "Auto-Enhance", on: true }, { type: "gap" }, { type: "num", text: "Size:", value: "30", unit: "px", width: 40 }, { type: "num", text: "Hardness:", value: "100", unit: "%", width: 40 }, { type: "gap" }, { type: "btn", text: "Select Subject", action: "ai:subject" }],
   "magic-wand": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
-  "object-select": [{ type: "btngroup", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "toggle", text: "Sample All Layers", on: false }],
+  // M13-T04: Shape = Rectangle / Lasso; the model reads the composite
+  // (Sample All Layers is always on in Fotox).
+  "object-select": [SELECTION_MODE, { type: "gap" }, { type: "btngroup", key: "Shape", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "gap" }, { type: "btn", text: "Select Subject", action: "ai:subject" }, { type: "label", text: "Drag around an object (EfficientSAM, local)" }],
 
   // The crop tool reads Ratio / W / H and the Delete Cropped Pixels toggle
   // (M6-T03): the engine's crop command takes exactly those.
@@ -46,6 +48,10 @@ export const optionBars = {
     { type: "num", text: "W:", value: "", width: 44 }, { type: "num", text: "H:", value: "", width: 44 },
     { type: "gap" },
     { type: "toggle", text: "Delete Cropped Pixels", on: false },
+    { type: "gap" },
+    // M13-T06: a box past the canvas filled by ComfyUI on Enter.
+    { type: "select", text: "Fill:", options: ["Background (Default)", "Generative Expand"], value: "Background (Default)" },
+    { type: "text", text: "Prompt:", label: "Prompt:", value: "", width: 140 },
     { type: "gap" },
     // The ✓ and ✗ are actions, not values: the engine commits the box with
     // the same `Enter` / `Escape` the keyboard sends.

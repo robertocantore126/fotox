@@ -47,12 +47,24 @@ impl Model {
 	pub fn load(path: &Path) -> Result<Self, AiError> {
 		crate::runtime::ensure()?;
 		let mut builder = Session::builder()?;
-		// Unavailable providers are skipped with a warning (CPU fallback).
+		// DirectML only when the runtime lists it: registering it on a CPU-only
+		// build (ComfyUI's onnxruntime 1.29) crashes EfficientSAM's decoder
+		// with an access violation instead of returning an error.
+		// `FOTOX_AI_CPU=1` forces the CPU.
 		#[cfg(windows)]
-		let providers = [ort::ep::DirectML::default().build(), ort::ep::CPU::default().build()];
+		let providers = {
+			use ort::ep::ExecutionProvider;
+			let dml = ort::ep::DirectML::default();
+			if std::env::var_os("FOTOX_AI_CPU").is_none() && dml.is_available().unwrap_or(false) {
+				vec![dml.build(), ort::ep::CPU::default().build()]
+			} else {
+				vec![ort::ep::CPU::default().build()]
+			}
+		};
 		#[cfg(not(windows))]
 		let providers = [ort::ep::CPU::default().build()];
 		builder = builder.with_execution_providers(providers).map_err(|e| AiError::Inference(e.to_string()))?;
+		tracing::debug!("loading {}", path.display());
 		let session = builder.commit_from_file(path)?;
 		let inputs = session.inputs().iter().map(|o| o.name().to_owned()).collect();
 		let outputs = session.outputs().iter().map(|o| o.name().to_owned()).collect();
