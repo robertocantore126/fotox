@@ -1,112 +1,90 @@
-# Instructions for the coding agent
+# Instructions for the coding agent — FAST MODE
 
-You implement Fotox **one task card at a time** (`docs/tasks/M*.md`). Claude
-reviews every task before the next one starts; Rob owns the decisions. You do
-not need to design the architecture — it is written down. You need to follow
-it precisely, write solid code, and report honestly.
+**From M6-T07 on, Fotox is built in fast mode (D-057): write all the code
+first, test and debug later.** Speed matters more than polish. Bugs are
+expected; they are found and fixed in one hardening phase at the end
+(`docs/tasks/HARDEN.md`), which Claude leads. Your job is to get every card's
+feature *written and wired up*, then move straight on to the next card.
 
-## 1. Before you start a task
+Wherever a card, `HOWTO.md` or `REVIEW.md` asks for any of the following,
+**skip it now**. It is deferred to HARDEN:
 
-1. Read, in this order: this file, `docs/ARCHITECTURE.md`, the task card, and
-   every file the card mentions (including doc comments in the code — they
-   are part of the spec).
-2. Check `docs/DECISIONS.md`. Decisions are not re-opened inside a task.
-3. Create a branch: `task/<ID>-<short-name>` (e.g. `task/M0-T03-shell`) from
-   the latest `main`.
-4. Write a short plan (5–15 lines) at the top of your report file
-   `docs/reports/<ID>.md` (copy `docs/reports/_TEMPLATE.md`) **before** coding.
+* `**Tests**` paragraphs, spec tests, `#[ignore = "<task>"]` tests to un-ignore;
+* performance measurements, exit-criteria tables, `T10`/acceptance cards;
+* per-task reports, the review round, clippy, "every `pub` item documented";
+* comparisons with Photoshop (write `VERIFY` in a comment and keep going).
 
-## 2. While you work
+## 1. Workflow
 
-* Code marked "Written by Claude" (tile store, `fx-render` programs,
-  compositor, planner, viewport pass — see `docs/reports/CLAUDE-core.md`)
-  is finished and tested. Use its APIs; do not restructure it. A bug there:
-  write a failing test, make the smallest fix, explain it in your report.
+1. Read the milestone card file (`docs/tasks/M*.md`) and skim the files it
+   names. `docs/ARCHITECTURE.md` and `HOWTO.md` recipes are there to copy
+   from, not to study.
+2. Work directly on the milestone branch (`m6`, `m7`, …). No task branches.
+3. One commit per card, message `M6-T07: text layers` (several commits are
+   fine for a big card). Push after each card as a backup.
+4. Add a few lines to `docs/reports/LOG.md` (format at the top of that file).
+5. Start the next card immediately. Do not wait for review.
+6. When the milestone's cards are done, merge `m<N>` into `main`
+   (`git merge --no-ff`), push, and start `m<N+1>` from `main`.
 
-* Implement **only** the task. Useful ideas outside it go in the report under
-  "Suggestions", not in the code.
-* Keep the public APIs already defined in the skeleton. If one must change,
-  change it minimally and explain why in the report.
-* Commit in small logical steps. Message format: `M0-T03: port winit app handler`.
-* Run the checks (§4) before every commit you consider "done".
+**T00 decision cards:** take the card's recommendation for every point,
+record it in `docs/DECISIONS.md` marked "fast default — Rob may overturn",
+and continue. Stop and ask Rob only when a point has no recommendation, or
+involves a licence choice, money, or a download over 1 GB.
 
-## 3. Hard rules
+**Stuck?** After two failed attempts at a piece, leave it out, write it under
+"Skipped" in `LOG.md`, and go on with the rest of the card. Do not stop the
+whole run for one piece.
 
-1. **No buffer proportional to the document size.** Bands and tiles only.
-2. **The render thread never blocks** on disk, on `TileStore::get`, or on the engine.
-3. **Spec tests are the spec.** Tests marked `#[ignore = "<task>"]` must be
-   un-ignored and pass *without changing their assertions*. If one looks
-   wrong, stop and ask (§6).
-4. **Dependencies:** only crates listed in the root `Cargo.toml`
-   `[workspace.dependencies]`, used as `{ workspace = true }`. A new crate
-   needs a line in `docs/DECISIONS.md` in the same commit.
-5. **Vendored code** (`vendor/graphite/`) is not refactored. A necessary
-   change is marked `// FOTOX PATCH: <why>` and listed in
-   `vendor/graphite/VENDORED.md`.
-6. **`reference/`** is read-only study material. Never compile it, never edit it.
-7. **No `unsafe`** without a `// SAFETY:` comment explaining why it is sound,
-   and a mention in the report.
-8. **No `unwrap()`/`expect()` in non-test code** unless it is a true
-   invariant; then use `expect("why this cannot fail")`.
-9. **No `todo!()`, `unimplemented!()`, commented-out code or silent
-   fallbacks** left inside the task's scope. A case you cannot handle returns
-   a clear error.
-10. **No `println!`** outside `fx-cli` output; use `tracing`.
-11. **Docs:** every `pub` item has a doc comment. If behaviour differs from a
-    doc in `docs/`, the code is wrong — or stop and ask.
-12. **UI code** (`ui/`): plain ES modules, no frameworks, no bundler, no npm
-    dependencies. Follow the existing patterns (`el.js` `h()`, `state.js`
-    emitter, data-driven menus/dialogs). The UI must keep working in a plain
-    browser with the mock engine. New comments in English.
-13. Never commit `target/`, `third_party/`, `bench/data/`, scratch files.
-    Always commit `Cargo.lock`.
+## 2. The only rules
 
-## 4. Checks (all must pass)
+1. **It builds and the app starts.** Before each commit:
+   ```bash
+   cargo check --workspace --all-targets   # tests must still *compile*
+   cargo build -p fx-app                   # when fx-app, vendor/ or ui/ changed
+   ```
+   If an old test no longer compiles because a signature changed, fix the
+   call, the fastest way. You do not need to run `cargo test`.
+2. **Keep the architecture** — breaking these means a rewrite later, not a bug fix:
+   no buffer proportional to the document size (bands and tiles only), and
+   the render thread never blocks on disk, on `TileStore::get` or on the engine.
+3. **Do not break or rewrite what already works.** Add; do not refactor earlier
+   milestones' code. If you must change a shared API, change it minimally.
+4. **Mark every shortcut** with a `// FAST: <what is missing or hacky>` comment
+   (e.g. `// FAST: ignores 16-bit`, `// FAST: unwrap, errors not handled`).
+   HARDEN greps for them. `unwrap()`, `todo!()` for secondary cases, and
+   rough code are all fine as long as they carry this mark.
+5. **Vendored code** (`vendor/graphite/`): a change is marked
+   `// FOTOX PATCH: <why>`, so the vendor can still be updated.
+   `reference/` is read-only; never compile it.
+6. Never commit `target/`, `third_party/`, `bench/data/` or scratch files.
+   Commit `Cargo.lock`. A new crate is fine: add it to the root
+   `[workspace.dependencies]` and put one line in `DECISIONS.md`.
+7. **UI** (`ui/`): plain ES modules, no frameworks, no bundler, no npm. Copy
+   the existing patterns (`el.js` `h()`, data-driven menus/dialogs). Keep the
+   mock engine working enough that the UI still opens in a browser.
 
-```bash
-cargo fmt -p fx-tiles -p fx-core -p fx-protocol -p fx-color -p fx-io -p fx-render -p fx-ops -p fx-engine -p fx-cli -p fx-app -p xtask -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test                     # GPU tests skip themselves if no adapter exists
-cargo build -p fx-app          # when the task touches fx-app, vendor/ or ui/
-node ui/tools/check-data.mjs   # when the task touches ui/js/data
-```
+Running `cargo fmt` is automatic, so do it before committing. Nothing else
+about style is checked now.
 
-Performance tasks: measure in `--release` on the reference machine and put
-the numbers in the report.
+## 3. Useful facts
 
-## 5. When you finish
-
-1. Fill in the report (`docs/reports/<ID>.md`): what you did, files changed,
-   how you verified it (commands + results), measurements, deviations from
-   the card, open problems, suggestions.
-2. Tick the task's checkboxes if the card has any.
-3. Push the branch. **Do not merge and do not start the next task.** Tell Rob
-   the task is ready for review.
-
-## 6. When you are stuck or something seems wrong
-
-Stop — do not improvise around the spec — when:
-
-* the spec (card, docs, spec test) seems wrong or contradictory;
-* two different approaches have failed;
-* the task needs an architectural change or a new dependency not obviously
-  covered by the card;
-* a performance target looks unreachable after measuring.
-
-Write the problem in the report under **Blocked**: what you tried, what
-happened (exact errors), what you think the options are. Push, and tell Rob.
-Claude will answer or take the task over.
-
-## 7. Useful facts
-
-* Build the app: `cargo xtask run` (after M0-T02). CEF downloads on the first
+* Build the app: `cargo xtask run`. CEF downloads on the first
   `cargo build -p fx-app` into `third_party/cef/`.
+* CMake must be on `PATH` for cargo (`C:\Program Files\CMake\bin`), or
+  `cef-dll-sys` fails to build.
 * UI in dev builds is read from `./ui` at runtime: UI changes need only an
-  app restart, not a rebuild.
-* Debug the UI inside the app: set `GRAPHITE_BROWSER_DEBUG_PORT=9222`, open
+  app restart, not a rebuild. Browser-only UI: `cd ui && python tools/serve.py`.
+* Debug the UI inside the app: `GRAPHITE_BROWSER_DEBUG_PORT=9222`, then open
   `chrome://inspect` in Chrome.
 * Logs: `RUST_LOG=fx_engine=debug,fotox=debug` (the shell's binary crate is
   `fotox`, not `fx_app`); CEF logs: `GRAPHITE_BROWSER_LOG=info`.
-* CMake must be on `PATH` for cargo (`C:\Program Files\CMake\bin`), or
-  `cef-dll-sys` fails to build.
-* Browser-only UI work: `cd ui && python tools/serve.py`.
+* Code by Claude (tile store, `fx-render` programs, compositor, planner,
+  viewport pass) works; use its APIs rather than writing your own.
+
+## 4. Before fast mode (M0 – M6-T06)
+
+Those cards followed the full process (task branches, reports in
+`docs/reports/<ID>.md`, reviews in `docs/reviews/`, checks with clippy and
+`cargo test`). The old rules are in git history
+(`git show c4c133c:AGENTS.md`) and come back in HARDEN.
