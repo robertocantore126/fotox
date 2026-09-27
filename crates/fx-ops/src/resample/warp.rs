@@ -82,8 +82,19 @@ fn bernstein(t: f64) -> [f64; 4] {
 	[u * u * u, 3.0 * t * u * u, 3.0 * t * t * u, t * t * t]
 }
 
-/// The surface point `P(u, v)` of `patch` (destination document pixels).
+/// The surface point `P(u, v)` of `patch` (destination document pixels),
+/// through the homography after the surface if the patch has one (a point it
+/// sends to infinity is NaN, which no triangle contains).
 pub fn evaluate(patch: &BezierPatch, u: f64, v: f64) -> (f64, f64) {
+	let p = surface(patch, u, v);
+	match &patch.post {
+		Some(post) => fx_core::transform::project(post, p).unwrap_or((f64::NAN, f64::NAN)),
+		None => p,
+	}
+}
+
+/// The Bézier surface alone.
+fn surface(patch: &BezierPatch, u: f64, v: f64) -> (f64, f64) {
 	let bu = bernstein(u);
 	let bv = bernstein(v);
 	let mut p = (0.0, 0.0);

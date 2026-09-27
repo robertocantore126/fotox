@@ -5,7 +5,7 @@
 //! destination tile, and the local scale (how many source pixels a destination
 //! pixel covers) that picks the source mip level.
 
-use fx_core::Mapping;
+use fx_core::{BezierPatch, Mapping};
 
 use crate::resample::warp::{self, WarpGrid};
 
@@ -14,6 +14,9 @@ use crate::resample::warp::{self, WarpGrid};
 pub struct Transform {
 	mapping: Mapping,
 	grid: Option<WarpGrid>,
+	/// The inverse of a warp's homography before the patch (source pixels
+	/// from `src_rect`'s space).
+	pre_inverse: Option<[f64; 9]>,
 	/// `Mapping::Custom`'s displacement field (M11-T06).
 	field: Option<std::sync::Arc<fx_core::warp_map::WarpData>>,
 }
@@ -56,7 +59,27 @@ impl Transform {
 			},
 			_ => None,
 		};
-		Self { mapping, grid, field }
+		// A singular map before the patch sends everything to one line:
+		// nothing of the source can be found again, so nothing is covered.
+		let pre_inverse = match &mapping {
+			Mapping::Warp(BezierPatch { pre: Some(pre), .. }) => Some(fx_core::transform::invert3(pre).unwrap_or([f64::NAN; 9])),
+			_ => None,
+		};
+		Self {
+			mapping,
+			grid,
+			field,
+			pre_inverse,
+		}
+	}
+
+	/// A warp's source point of parameter `uv`.
+	fn warp_source(&self, src_rect: &[f64; 4], uv: (f64, f64)) -> Option<(f64, f64)> {
+		let q = warp::source_uv(src_rect, uv);
+		match &self.pre_inverse {
+			Some(m) => fx_core::transform::project(m, q),
+			None => Some(q),
+		}
 	}
 
 	/// Whether this is a warp (the sampler then uses per-tile triangle lists).
@@ -97,7 +120,7 @@ impl Transform {
 						grid.parameter_at(&all, dst)?
 					}
 				};
-				Some(warp::source_uv(&patch.src_rect, uv))
+				self.warp_source(&patch.src_rect, uv)
 			}
 			Mapping::Custom { src, dst: shift, .. } => {
 				let d = (dst.0 - shift[0], dst.1 - shift[1]);
@@ -179,11 +202,12 @@ impl Transform {
 				}
 				let mut bbox = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
 				for &i in &candidates {
-					let b = grid.triangles[i].source_bbox(&patch.src_rect);
-					bbox[0] = bbox[0].min(b[0]);
-					bbox[1] = bbox[1].min(b[1]);
-					bbox[2] = bbox[2].max(b[2]);
-					bbox[3] = bbox[3].max(b[3]);
+					// A homography keeps a triangle a triangle: its corners'
+					// box is its box.
+					for uv in &grid.triangles[i].uv {
+						let p = self.warp_source(&patch.src_rect, (uv[0], uv[1]))?;
+						bbox = [bbox[0].min(p.0), bbox[1].min(p.1), bbox[2].max(p.0), bbox[3].max(p.1)];
+					}
 				}
 				Some(bbox)
 			}

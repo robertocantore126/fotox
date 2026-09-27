@@ -263,3 +263,100 @@ fn canvas_size_moves_the_alpha_channels_with_the_content() {
 	assert_eq!(bytes[0], 0, "(0, 0) is new canvas");
 	assert_eq!(bytes[10 * 256 + 10], 255, "(10, 10) is the old (0, 0)");
 }
+
+/// An RGBA8 image's pixel `(x, y)`.
+fn rgba8(store: &TileStore, image: &TiledImage, x: u32, y: u32) -> [u8; 4] {
+	let t = fx_tiles::TILE_SIZE;
+	match image.slot(0, x / t, y / t) {
+		TileSlot::Empty => [0; 4],
+		TileSlot::Solid(v) => v.0.map(|c| (c >> 8) as u8),
+		TileSlot::Data(h) => {
+			let i = (((y % t) * t + x % t) * 4) as usize;
+			store.get(h).unwrap().bytes()[i..i + 4].try_into().unwrap()
+		}
+	}
+}
+
+/// Found while fixing R03's warps: Free Transform's Warp names its source
+/// rectangle in canvas pixels, so a layer that does not sit at the canvas
+/// origin must see it moved back by its offset. An identity warp over the
+/// layer's own bounds leaves an offset layer exactly where it was.
+#[test]
+fn an_identity_warp_leaves_an_offset_layer_alone() {
+	let store = store("warp-offset");
+	let mut d = doc(256, 256);
+	let mut tile = TileBuffer::zeroed(PixelFormat::Rgba8);
+	for (i, px) in tile.bytes_mut().chunks_exact_mut(4).enumerate() {
+		let x = i % fx_tiles::TILE_SIZE as usize;
+		px.copy_from_slice(if x < 32 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+	}
+	let mut image = TiledImage::new(64, 64, PixelFormat::Rgba8);
+	image.set_slot(0, 0, TileSlot::Data(store.insert(tile, TileClass::Authoritative)));
+	d.layers
+		.push(Arc::new(Layer::new(LayerId(1), "offset", LayerKind::Pixel { image, offset: (100, 60) })));
+	let bounds = [100.0, 60.0, 164.0, 124.0];
+	apply(
+		&mut d,
+		&store,
+		Command::Transform {
+			layer: LayerRef::Id(LayerId(1)),
+			mapping: Box::new(fx_core::Mapping::Warp(fx_core::BezierPatch::rect(bounds, bounds))),
+			filter: fx_core::Filter::Bilinear,
+		},
+	);
+	let LayerKind::Pixel { image, offset } = &d.layers[0].kind else {
+		panic!("a pixel layer")
+	};
+	assert_eq!(*offset, (100, 60));
+	assert_eq!(rgba8(&store, image, 10, 20), [255, 0, 0, 255], "the left half stays red");
+	assert_eq!(rgba8(&store, image, 50, 20), [0, 0, 255, 255], "the right half stays blue");
+}
+
+/// R03 follow-up: a warped Smart Object follows Perspective Crop (a homography
+/// after its surface), and a warp can go over a turned Smart Object (a
+/// homography before it). Every point of the surface still finds the source
+/// point it came from.
+#[test]
+fn a_warp_composes_with_a_homography_on_either_side() {
+	use fx_core::command::m12::compose;
+	use fx_core::{BezierPatch, Mapping};
+	use fx_ops::resample::Transform;
+	use fx_ops::resample::warp::evaluate;
+	let mut patch = BezierPatch::rect([40.0, 30.0, 240.0, 180.0], [40.0, 30.0, 240.0, 180.0]);
+	patch.set_point(1, 2, 190.0, 40.0);
+	patch.set_point(2, 1, 70.0, 150.0);
+	let source = |(u, v): (f64, f64)| (40.0 + 200.0 * u, 30.0 + 150.0 * v);
+	let samples: Vec<(f64, f64)> = (1..8)
+		.flat_map(|i| (1..8).map(move |j| (f64::from(i) / 8.0, f64::from(j) / 8.0 + 0.01)))
+		.collect();
+	let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 0.25 && (a.1 - b.1).abs() < 0.25;
+
+	let crop = Mapping::from_quad([0.0, 0.0, 300.0, 200.0], [(10.0, 5.0), (290.0, 20.0), (270.0, 190.0), (30.0, 180.0)]).unwrap();
+	assert!(matches!(crop, Mapping::Projective(_)));
+	let Some(Mapping::Warp(after)) = compose(crop, Mapping::Warp(patch)) else {
+		panic!("a homography after a warp is a warp")
+	};
+	assert!(after.post.is_some());
+	let t = Transform::new(Mapping::Warp(after));
+	for &uv in &samples {
+		let on_canvas = evaluate(&patch, uv.0, uv.1);
+		let d = crop.forward_point(on_canvas.0, on_canvas.1).unwrap();
+		let s = t.inverse_point(None, d).expect("covered");
+		assert!(close(s, source(uv)), "after: {uv:?} → {s:?}, want {:?}", source(uv));
+	}
+
+	let turn = Mapping::rotation_about(0.4, 150.0, 100.0);
+	let Some(Mapping::Warp(before)) = compose(Mapping::Warp(patch), turn) else {
+		panic!("a warp over a turn is a warp")
+	};
+	assert!(before.pre.is_some());
+	let t = Transform::new(Mapping::Warp(before));
+	for &uv in &samples {
+		let d = evaluate(&patch, uv.0, uv.1);
+		let s = t.inverse_point(None, d).expect("covered");
+		let turned = turn.forward_point(s.0, s.1).unwrap();
+		assert!(close(turned, source(uv)), "before: {uv:?} → {turned:?}, want {:?}", source(uv));
+	}
+	// A warp of a warp is still refused.
+	assert!(compose(Mapping::Warp(patch), Mapping::Warp(patch)).is_none());
+}

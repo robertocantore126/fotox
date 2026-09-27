@@ -137,7 +137,11 @@ impl Mapping {
 		match self {
 			Mapping::Affine(m) => m.iter().all(|v| v.is_finite()),
 			Mapping::Projective(m) => m.iter().all(|v| v.is_finite()),
-			Mapping::Warp(patch) => patch.points.iter().flatten().all(|v| v.is_finite()) && patch.src_rect.iter().all(|v| v.is_finite()),
+			Mapping::Warp(patch) => {
+				patch.points.iter().flatten().all(|v| v.is_finite())
+					&& patch.src_rect.iter().all(|v| v.is_finite())
+					&& patch.post.iter().chain(&patch.pre).flatten().all(|v| v.is_finite())
+			}
 			Mapping::Custom { src, dst, .. } => src.iter().chain(dst).all(|v| v.is_finite()),
 		}
 	}
@@ -151,10 +155,19 @@ impl Mapping {
 			Mapping::Projective([a, b, c, d, e, f, g, h, i]) => {
 				Mapping::Projective([a, b, c + a * dx + b * dy, d, e, f + d * dx + e * dy, g, h, i + g * dx + h * dy])
 			}
-			// A warp's surface is fixed; moving the source moves its rect.
+			// A warp's surface is fixed; the patch reads its parameters at
+			// `source + (dx, dy)`, so the rectangle moves back by `(dx, dy)`
+			// (or the map before it takes the translation first).
 			Mapping::Warp(mut patch) => {
-				patch.src_rect[0] += dx;
-				patch.src_rect[1] += dy;
+				match &mut patch.pre {
+					Some(pre) => *pre = mul3(pre, &[1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0, 1.0]),
+					None => {
+						patch.src_rect[0] -= dx;
+						patch.src_rect[1] -= dy;
+						patch.src_rect[2] -= dx;
+						patch.src_rect[3] -= dy;
+					}
+				}
 				Mapping::Warp(patch)
 			}
 			Mapping::Custom { id, src, dst } => Mapping::Custom {
@@ -175,9 +188,14 @@ impl Mapping {
 				Mapping::Projective([a + dx * g, b + dx * h, c + dx * i, d + dy * g, e + dy * h, f + dy * i, g, h, i])
 			}
 			Mapping::Warp(mut patch) => {
-				for point in &mut patch.points {
-					point[0] += dx;
-					point[1] += dy;
+				match &mut patch.post {
+					Some(post) => *post = mul3(&[1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0, 1.0], post),
+					None => {
+						for point in &mut patch.points {
+							point[0] += dx;
+							point[1] += dy;
+						}
+					}
 				}
 				Mapping::Warp(patch)
 			}
@@ -293,6 +311,57 @@ impl Mapping {
 	}
 }
 
+/// The row-major 3 × 3 matrix of an affine or projective mapping (on
+/// `(x, y, 1)`), `None` for a warp or a custom mapping.
+pub fn matrix3(mapping: &Mapping) -> Option<[f64; 9]> {
+	match *mapping {
+		Mapping::Affine([a, b, c, d, e, f]) => Some([a, c, e, b, d, f, 0.0, 0.0, 1.0]),
+		Mapping::Projective(m) => Some(m),
+		_ => None,
+	}
+}
+
+/// The row-major product `a · b` (`b` applied first).
+pub fn mul3(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
+	let mut m = [0.0; 9];
+	for r in 0..3 {
+		for c in 0..3 {
+			m[r * 3 + c] = (0..3).map(|k| a[r * 3 + k] * b[k * 3 + c]).sum();
+		}
+	}
+	m
+}
+
+/// The inverse of a 3 × 3 matrix, `None` when it is singular.
+pub fn invert3(m: &[f64; 9]) -> Option<[f64; 9]> {
+	let adj = [
+		m[4] * m[8] - m[5] * m[7],
+		m[2] * m[7] - m[1] * m[8],
+		m[1] * m[5] - m[2] * m[4],
+		m[5] * m[6] - m[3] * m[8],
+		m[0] * m[8] - m[2] * m[6],
+		m[2] * m[3] - m[0] * m[5],
+		m[3] * m[7] - m[4] * m[6],
+		m[1] * m[6] - m[0] * m[7],
+		m[0] * m[4] - m[1] * m[3],
+	];
+	let det = m[0] * adj[0] + m[1] * adj[3] + m[2] * adj[6];
+	if !det.is_finite() || det.abs() < 1e-18 {
+		return None;
+	}
+	Some(adj.map(|v| v / det))
+}
+
+/// Where the homography `m` sends `p`, `None` at or past infinity.
+pub fn project(m: &[f64; 9], p: (f64, f64)) -> Option<(f64, f64)> {
+	let w = m[6] * p.0 + m[7] * p.1 + m[8];
+	if !w.is_finite() || w.abs() < 1e-12 {
+		return None;
+	}
+	let q = ((m[0] * p.0 + m[1] * p.1 + m[2]) / w, (m[3] * p.0 + m[4] * p.1 + m[5]) / w);
+	(q.0.is_finite() && q.1.is_finite()).then_some(q)
+}
+
 /// The whole-pixel rectangle that contains the image of `rect` under
 /// `mapping`: the floor of the mapped box's top-left corner and its size, so
 /// `offset` + `size` cover every mapped pixel (M6-T02: rotating the canvas by
@@ -311,7 +380,16 @@ pub fn dest_rect(mapping: &Mapping, rect: [f64; 4]) -> Option<((i32, i32), (u32,
 		// A Bézier surface lies inside the convex hull of its control points
 		// (M6-T04's Warp): their box holds every mapped pixel. The source
 		// outside the patch's rectangle maps nowhere.
-		Mapping::Warp(patch) => patch.points.iter().for_each(|p| add((p[0], p[1]))),
+		// A homography after the surface maps the hull's corners (it keeps
+		// lines straight, so the hull of their images holds the surface).
+		Mapping::Warp(patch) => {
+			for p in &patch.points {
+				match &patch.post {
+					Some(post) => add(project(post, (p[0], p[1]))?),
+					None => add((p[0], p[1])),
+				}
+			}
+		}
 		// A mesh covers its destination vertices; a field moves the source
 		// rectangle by at most its largest displacement.
 		Mapping::Custom { id, src, dst } => match crate::warp_map::get(*id)?.as_ref() {
@@ -574,6 +652,16 @@ pub struct BezierPatch {
 	pub points: [[f64; 2]; 16],
 	/// The source rectangle `[x0, y0, x1, y1]` in source image pixels.
 	pub src_rect: [f64; 4],
+	/// A homography applied to the surface (row-major 3 × 3 on `(x, y, 1)`):
+	/// a projective canvas mapping (Perspective Crop) of a warped Smart
+	/// Object. `None` is the identity.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub post: Option<[f64; 9]>,
+	/// A homography from source pixels into `src_rect`'s space, applied
+	/// before the patch reads its parameters: a warp over a turned or
+	/// distorted Smart Object. `None` is the identity.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub pre: Option<[f64; 9]>,
 }
 
 impl BezierPatch {
@@ -596,7 +684,12 @@ impl BezierPatch {
 				points[i * 4 + j] = [dst[0] + u * (dst[2] - dst[0]), dst[1] + v * (dst[3] - dst[1])];
 			}
 		}
-		Self { points, src_rect }
+		Self {
+			points,
+			src_rect,
+			post: None,
+			pre: None,
+		}
 	}
 
 	/// Move one control point (Warp handles). `i`/`j` are `0..=3`.

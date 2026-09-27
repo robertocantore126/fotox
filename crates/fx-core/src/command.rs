@@ -5322,7 +5322,10 @@ mod tests {
 			panic!("a warp over an axis-aligned scale is a warp")
 		};
 		assert_eq!(over.src_rect, [-5.0, -5.0, 15.0, 0.0]);
-		assert!(m12::compose(Mapping::Warp(patch), Mapping::rotation_about(0.3, 0.0, 0.0)).is_none());
+		assert!(matches!(
+			m12::compose(Mapping::Warp(patch), Mapping::rotation_about(0.3, 0.0, 0.0)),
+			Some(Mapping::Warp(BezierPatch { pre: Some(_), .. }))
+		));
 		let custom = Mapping::Custom {
 			id: 1,
 			src: [0.0; 2],
