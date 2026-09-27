@@ -96,6 +96,84 @@ fn readers_survive_a_trim_thread_dropping_their_inputs() {
 	assert!(peak_evicted > 0, "the trim never dropped anything: the test did not test eviction");
 }
 
+/// Code review 2026-09-27 R06 follow-up: a Smart Object computes the source
+/// mips its tiles sample, not the source's whole pyramid. A 4096 × 4096
+/// source at 25 % on a 512 × 512 canvas shows its top-left quarter: drawing
+/// the canvas reads level 2 of that quarter only (and level 1 below it).
+/// Drawn again and again with a trim thread and a small budget, every draw
+/// completes.
+#[test]
+fn a_smart_object_computes_only_the_source_mips_it_samples() {
+	let mut config = TileStoreConfig::for_tests(dir("smart"));
+	config.background_trim = true;
+	let store = TileStore::new(config).unwrap();
+	let mut composite = TiledImage::new(4096, 4096, PixelFormat::Rgba8);
+	for ty in 0..16 {
+		for tx in 0..16 {
+			// Pixels where the canvas shows the source, one colour elsewhere.
+			let slot = if tx < 8 && ty < 8 {
+				let mut tile = TileBuffer::zeroed(PixelFormat::Rgba8);
+				for (i, px) in tile.bytes_mut().chunks_exact_mut(4).enumerate() {
+					px.copy_from_slice(&[(tx * 30) as u8, (ty * 30) as u8, (i % 251) as u8, 255]);
+				}
+				TileSlot::Data(store.insert(tile, TileClass::Authoritative))
+			} else {
+				TileSlot::Solid(fx_tiles::PixelValue::rgba16(0, 0, 65535, 65535))
+			};
+			composite.set_slot(tx, ty, slot);
+		}
+	}
+	let smart = fx_core::smart::SmartObject {
+		source: fx_core::smart::SmartSource {
+			doc: Arc::new(doc(4096, 4096)),
+			composite,
+			linked: None,
+			linked_mtime: None,
+			uid: 9,
+		},
+		transform: fx_core::Mapping::scale(0.25, 0.25),
+		filters: vec![],
+		filters_enabled: true,
+	};
+	let mut d = doc(512, 512);
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(1),
+		"smart",
+		LayerKind::Smart {
+			smart,
+			cache: TiledImage::derived(512, 512, PixelFormat::Rgba8),
+		},
+	)));
+	let tiles = [(0, 0), (1, 0), (0, 1), (1, 1)];
+	let mut luts = LutCache::default();
+	for round in 0..8 {
+		if let LayerKind::Smart { cache, .. } = &mut Arc::make_mut(&mut d.layers[0]).kind {
+			*cache = TiledImage::derived(512, 512, PixelFormat::Rgba8);
+		}
+		let rendered = fx_engine::derived::render_tiles(&mut d, &store, 0, &tiles, &mut luts).unwrap();
+		for tile in &rendered {
+			let pixels = tile.pixels.as_ref().unwrap_or_else(|| panic!("round {round}: tile {:?} is empty", tile.tile));
+			assert!(pixels.iter().all(|p| p[3] > 0.99), "round {round}: a hole in tile {:?}", tile.tile);
+		}
+	}
+	let LayerKind::Smart { smart, .. } = &d.layers[0].kind else { unreachable!() };
+	let source = &smart.source.composite;
+	let clean = |level: usize| {
+		let grid = source.grid(level);
+		(0..grid.rows())
+			.flat_map(|ty| (0..grid.cols()).map(move |tx| (tx, ty)))
+			.filter(|&(tx, ty)| !source.is_dirty(level, tx, ty))
+			.count()
+	};
+	// Level 2 is 4 × 4 tiles: the visible quarter is 2 × 2 of them, 3 × 3
+	// with the filter's apron; level 1 holds their children.
+	assert!((4..=9).contains(&clean(2)), "level 2: {} of 16 computed", clean(2));
+	assert!((16..=36).contains(&clean(1)), "level 1: {} of 64 computed", clean(1));
+	for level in 3..source.level_count() {
+		assert_eq!(clean(level), 0, "level {level} is never sampled");
+	}
+}
+
 /// R04 under contention: eight exports of eight colours to one path, all at
 /// once. Every one succeeds, the file left is one whole image (a single
 /// colour everywhere), and no temporary file is left behind.

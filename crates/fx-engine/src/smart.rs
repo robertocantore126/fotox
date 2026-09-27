@@ -3,16 +3,100 @@
 //! transform (M6-T01's sampler picks the source level from the scale), then
 //! run through the Smart Filters (M12-T03).
 //!
-//! FAST: the first draw makes every mip level of the composite valid (a
-//! one-off cost proportional to the source's tiles); Bicubic always.
+//! The source's mips are computed as the sampler reads them, and held until
+//! the batch is drawn (code review 2026-09-27 R06: the first draw used to make
+//! every mip level of the composite valid, a cost proportional to the whole
+//! source, and a mip the trim dropped before the sampler read it failed the
+//! draw). FAST: Bicubic always.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use fx_core::LayerKind;
+use fx_ops::neighbourhood::{LevelSource, TileRef};
 use fx_ops::resample::SourceInfo;
-use fx_tiles::{TileError, TileStore};
+use fx_tiles::{PixelFormat, TileError, TileSlot, TileStore, TiledImage};
 
-use crate::ops::ImageSource;
+/// How often a tile is recomputed when the trim drops it between being
+/// computed and being read.
+const MAX_RETRIES: usize = 4;
+
+/// The source composite as the sampler's [`LevelSource`]: a mip tile is
+/// computed when it is first read (from the level below, itself computed on
+/// demand), and every tile handed out is held until the draw ends.
+struct LazyMips<'a> {
+	image: Mutex<TiledImage>,
+	store: &'a TileStore,
+	format: PixelFormat,
+	held: Mutex<HashMap<(usize, u32, u32), Option<TileRef>>>,
+}
+
+impl<'a> LazyMips<'a> {
+	fn new(image: TiledImage, store: &'a TileStore) -> Self {
+		Self {
+			format: image.format(),
+			image: Mutex::new(image),
+			store,
+			held: Mutex::new(HashMap::new()),
+		}
+	}
+
+	/// The composite with the mips computed so far.
+	fn into_image(self) -> TiledImage {
+		self.image.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+	}
+
+	fn read(&self, level: usize, tx: u32, ty: u32) -> Result<Option<TileRef>, TileError> {
+		for _ in 0..MAX_RETRIES {
+			let slot = {
+				let mut image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+				if level == 0 {
+					image.slot(0, tx, ty).clone()
+				} else {
+					crate::mips::ensure_mip(&mut image, self.store, level, tx, ty)?
+				}
+			};
+			match slot {
+				TileSlot::Empty => return Ok(None),
+				TileSlot::Solid(value) => return Ok(Some(TileRef::Solid(value.0))),
+				TileSlot::Data(handle) => match self.store.get(&handle) {
+					Ok(buffer) => return Ok(Some(TileRef::Data(buffer))),
+					// Dropped between being computed and being read: again.
+					Err(TileError::Evicted) => continue,
+					Err(error) => return Err(error),
+				},
+			}
+		}
+		Err(TileError::Evicted)
+	}
+}
+
+impl LevelSource for LazyMips<'_> {
+	fn format(&self) -> PixelFormat {
+		self.format
+	}
+
+	fn tile(&self, level: usize, tx: i64, ty: i64) -> Result<Option<TileRef>, TileError> {
+		let (cols, rows) = {
+			let image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			if level >= image.level_count() {
+				return Ok(None);
+			}
+			let grid = image.grid(level);
+			(grid.cols(), grid.rows())
+		};
+		if tx < 0 || ty < 0 || tx >= i64::from(cols) || ty >= i64::from(rows) {
+			return Ok(None);
+		}
+		let key = (level, tx as u32, ty as u32);
+		if let Some(tile) = self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+			return Ok(tile.clone());
+		}
+		let tile = self.read(level, key.1, key.2)?;
+		self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, tile.clone());
+		Ok(tile)
+	}
+}
 
 /// Draw `tiles` (`(level, tx, ty)`) of Smart Object `id`.
 pub fn draw_smart_tiles(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, tiles: &[(usize, u32, u32)]) -> usize {
@@ -31,27 +115,11 @@ fn draw(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, ti
 	let LayerKind::Smart { smart, cache } = &mut layer.kind else {
 		return Ok(0);
 	};
-	// Every mip of the composite valid (they stay valid: the composite is
-	// immutable until the source changes).
-	let composite = &mut smart.source.composite;
-	let levels = composite.level_count();
-	for level in 1..levels {
-		let grid = composite.grid(level).clone();
-		for ty in 0..grid.rows() {
-			for tx in 0..grid.cols() {
-				let dropped = matches!(composite.slot(level, tx, ty), fx_tiles::TileSlot::Data(h) if store.is_evicted(h));
-				if composite.is_dirty(level, tx, ty) || dropped {
-					crate::mips::ensure_mip(composite, store, level, tx, ty)?;
-				}
-			}
-		}
-	}
-	let composite = composite.clone();
 	let source = SourceInfo {
-		size: (composite.width(), composite.height()),
-		levels,
+		size: (smart.source.composite.width(), smart.source.composite.height()),
+		levels: smart.source.composite.level_count(),
 	};
-	let view = ImageSource { image: &composite, store };
+	let view = LazyMips::new(smart.source.composite.clone(), store);
 	let mut by_level: HashMap<usize, Vec<(u32, u32)>> = HashMap::new();
 	for &(level, tx, ty) in tiles {
 		by_level.entry(level).or_default().push((tx, ty));
@@ -77,5 +145,7 @@ fn draw(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, ti
 			drawn += 1;
 		}
 	}
+	// The mips computed stay valid until the source changes: keep them.
+	smart.source.composite = view.into_image();
 	Ok(drawn)
 }
