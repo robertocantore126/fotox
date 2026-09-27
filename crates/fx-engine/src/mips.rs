@@ -17,6 +17,7 @@
 //! scheduling; `TiledImage` is cheap to clone).
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use fx_tiles::{ChildPixels, downsample_2x2};
 use fx_tiles::{TileBuffer, TileClass, TileError, TileSlot, TileStore, TiledImage};
@@ -47,14 +48,18 @@ pub fn ensure_mip(image: &mut TiledImage, store: &TileStore, level: usize, tx: u
 /// reads a clean one below it). Evicted tiles are left alone: they are
 /// recomputed when something asks for them.
 pub fn ensure_all_mips(image: &mut TiledImage, store: &TileStore) -> Result<(), TileError> {
+	// Each level is held until the next one has read it (see `compute_levels`).
+	let mut held: Vec<Arc<TileBuffer>> = Vec::new();
 	for level in 1..image.level_count() {
 		let tiles: Vec<(u32, u32)> = image.dirty_tiles(level).collect();
 		if tiles.is_empty() {
 			continue;
 		}
 		let results = compute_tiles(image, store, level, &tiles)?;
+		held = results.iter().filter_map(|(_, _, _, buffer)| buffer.clone()).collect();
 		commit(image, level, results);
 	}
+	drop(held);
 	Ok(())
 }
 
@@ -85,33 +90,42 @@ fn collect_needed(image: &TiledImage, store: &TileStore, level: usize, tx: u32, 
 }
 
 fn compute_levels(image: &mut TiledImage, store: &TileStore, needed: &[BTreeSet<(u32, u32)>]) -> Result<(), TileError> {
+	// The tiles of the level just computed are held until the level above has
+	// read them: under memory pressure the trim would otherwise drop them
+	// first, and the chain would never finish (code review 2026-09-27 R01).
+	let mut held: Vec<Arc<TileBuffer>> = Vec::new();
 	for (level, tiles) in needed.iter().enumerate().skip(1) {
 		if tiles.is_empty() {
 			continue;
 		}
 		let tiles: Vec<(u32, u32)> = tiles.iter().copied().collect();
 		let results = compute_tiles(image, store, level, &tiles)?;
+		held = results.iter().filter_map(|(_, _, _, buffer)| buffer.clone()).collect();
 		commit(image, level, results);
 	}
+	drop(held);
 	Ok(())
 }
 
+/// A computed mip tile, with its stored pixels (held by the caller).
+type Computed = (u32, u32, TileSlot, Option<Arc<TileBuffer>>);
+
 /// Compute `tiles` of `level` from level `level - 1`, in parallel.
-fn compute_tiles(image: &TiledImage, store: &TileStore, level: usize, tiles: &[(u32, u32)]) -> Result<Vec<(u32, u32, TileSlot)>, TileError> {
+fn compute_tiles(image: &TiledImage, store: &TileStore, level: usize, tiles: &[(u32, u32)]) -> Result<Vec<Computed>, TileError> {
 	tiles
 		.par_iter()
-		.map(|&(tx, ty)| compute_tile(image, store, level, tx, ty).map(|slot| (tx, ty, slot)))
+		.map(|&(tx, ty)| compute_tile(image, store, level, tx, ty).map(|(slot, buffer)| (tx, ty, slot, buffer)))
 		.collect()
 }
 
-fn commit(image: &mut TiledImage, level: usize, results: Vec<(u32, u32, TileSlot)>) {
-	for (tx, ty, slot) in results {
+fn commit(image: &mut TiledImage, level: usize, results: Vec<Computed>) {
+	for (tx, ty, slot, _) in results {
 		image.set_derived_slot(level, tx, ty, slot);
 	}
 }
 
 /// One mip tile from its four children. Uniform results cost no tile memory.
-fn compute_tile(image: &TiledImage, store: &TileStore, level: usize, tx: u32, ty: u32) -> Result<TileSlot, TileError> {
+fn compute_tile(image: &TiledImage, store: &TileStore, level: usize, tx: u32, ty: u32) -> Result<(TileSlot, Option<Arc<TileBuffer>>), TileError> {
 	let format = image.format();
 	let below = image.grid(level - 1);
 	// Keep the children's buffers alive while `ChildPixels` borrows them.
@@ -139,18 +153,21 @@ fn compute_tile(image: &TiledImage, store: &TileStore, level: usize, tx: u32, ty
 
 	// All four empty → empty; all four the same solid → that solid. No pixels.
 	match pixels {
-		[ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty] => return Ok(TileSlot::Empty),
+		[ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty] => return Ok((TileSlot::Empty, None)),
 		[ChildPixels::Solid(a), ChildPixels::Solid(b), ChildPixels::Solid(c), ChildPixels::Solid(d)] if a == b && b == c && c == d => {
-			return Ok(TileSlot::Solid(a));
+			return Ok((TileSlot::Solid(a), None));
 		}
 		_ => {}
 	}
 
 	let buffer = downsample_2x2(format, pixels);
 	Ok(match buffer.uniform_value() {
-		Some(v) if v.is_transparent(format) || (!format.has_alpha() && v.0[0] == 0) => TileSlot::Empty,
-		Some(v) => TileSlot::Solid(v),
-		None => TileSlot::Data(store.insert(buffer, TileClass::Derived)),
+		Some(v) if v.is_transparent(format) || (!format.has_alpha() && v.0[0] == 0) => (TileSlot::Empty, None),
+		Some(v) => (TileSlot::Solid(v), None),
+		None => {
+			let (handle, held) = store.insert_held(buffer, TileClass::Derived);
+			(TileSlot::Data(handle), Some(held))
+		}
 	})
 }
 

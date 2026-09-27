@@ -562,8 +562,17 @@ impl TileStore {
 	/// Never blocks on trimming: if RAM goes over budget, the background
 	/// thread is woken.
 	pub fn insert(&self, buffer: TileBuffer, class: TileClass) -> TileHandle {
+		self.insert_held(buffer, class).0
+	}
+
+	/// [`Self::insert`], also returning the stored pixels. While the caller
+	/// holds that `Arc`, the trim cannot drop the tile: a producer that stores
+	/// tiles for a consumer to read next (a mip level for the level above it)
+	/// holds them until they are read (code review 2026-09-27 R01).
+	pub fn insert_held(&self, buffer: TileBuffer, class: TileClass) -> (TileHandle, Arc<TileBuffer>) {
 		let id = TileId(NonZeroU64::new(self.0.next_id.fetch_add(1, Ordering::Relaxed)).expect("tile id overflow"));
 		let format = buffer.format();
+		let buffer = Arc::new(buffer);
 		self.0.stats.live_tiles.fetch_add(1, Ordering::Relaxed);
 		self.0.account_hot(format, true, true);
 		let entry = Arc::new(TileEntry {
@@ -571,7 +580,7 @@ impl TileStore {
 			format,
 			class,
 			copies: Mutex::new(Copies {
-				hot: Some(Arc::new(buffer)),
+				hot: Some(buffer.clone()),
 				..Default::default()
 			}),
 			last_use: AtomicU64::new(self.0.tick()),
@@ -581,7 +590,7 @@ impl TileStore {
 		if self.0.over_budget() {
 			self.0.signal.notify();
 		}
-		TileHandle(entry)
+		(TileHandle(entry), buffer)
 	}
 
 	/// Insert a tile that lives in an opened native file: no copy in RAM or on

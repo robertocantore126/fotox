@@ -103,27 +103,41 @@ pub struct Rendered {
 /// order of `tiles`.
 pub fn render_tiles(doc: &mut Document, store: &TileStore, level: usize, tiles: &[(u32, u32)], luts: &mut LutCache) -> Result<Vec<Rendered>, TileError> {
 	let mut done: HashMap<(u32, u32), Option<Vec<[f64; 4]>>> = HashMap::with_capacity(tiles.len());
-	let mut pending: Vec<(u32, u32)> = tiles.to_vec();
-	for _ in 0..MAX_ROUNDS {
-		if pending.is_empty() {
-			break;
+	// The whole batch in parallel. When memory is too short for the batch's
+	// inputs to stay until they are read, the trim keeps dropping some.
+	let (programs, mut lost) = match prepare(doc, store, level, tiles, luts) {
+		Ok(programs) => (tiles.iter().copied().zip(programs).collect::<Vec<_>>(), Vec::new()),
+		Err(TileError::Evicted) => (Vec::new(), tiles.to_vec()),
+		Err(error) => return Err(error),
+	};
+	let results: Vec<((u32, u32), Result<Option<Vec<[f64; 4]>>, TileError>)> =
+		programs.into_par_iter().map(|(tile, program)| (tile, render_pinned(&program, store))).collect();
+	for (tile, result) in results {
+		match result {
+			Ok(pixels) => {
+				done.insert(tile, pixels);
+			}
+			Err(TileError::Evicted) => lost.push(tile),
+			Err(error) => return Err(error),
 		}
-		let programs: Vec<((u32, u32), TileProgram)> = pending.iter().copied().zip(prepare(doc, store, level, &pending, luts)?).collect();
-		let results: Vec<((u32, u32), Result<Option<Vec<[f64; 4]>>, TileError>)> =
-			programs.into_par_iter().map(|(tile, program)| (tile, render_pinned(&program, store))).collect();
-		pending.clear();
-		for (tile, result) in results {
-			match result {
-				Ok(pixels) => {
-					done.insert(tile, pixels);
+	}
+	// An input was dropped before it was read: memory is short, and the
+	// batch's inputs do not fit at once. One tile at a time, each prepared
+	// right before it renders.
+	for tile in lost {
+		let mut pixels = None;
+		for _ in 0..MAX_ROUNDS {
+			let program = prepare(doc, store, level, &[tile], luts)?.remove(0);
+			match render_pinned(&program, store) {
+				Ok(rendered) => {
+					pixels = Some(rendered);
+					break;
 				}
-				Err(TileError::Evicted) => pending.push(tile),
+				Err(TileError::Evicted) => continue,
 				Err(error) => return Err(error),
 			}
 		}
-	}
-	if !pending.is_empty() {
-		return Err(TileError::Evicted);
+		done.insert(tile, pixels.ok_or(TileError::Evicted)?);
 	}
 	Ok(tiles
 		.iter()
