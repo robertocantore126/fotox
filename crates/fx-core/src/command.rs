@@ -3280,6 +3280,9 @@ fn resample_document(
 	filter: Filter,
 	store: &TileStore,
 ) -> Result<Vec<LayerId>, CommandError> {
+	// A homography cannot be kept on a shape or text layer's matrix: those
+	// become Smart Objects first (the history step restores them on failure).
+	let wrapped = canvas_space::wrap_for_projection(doc, &mapping, ops, store)?;
 	// Phase 1: every new image, while the document is still untouched.
 	let mut images = Vec::new();
 	let mut masks = Vec::new();
@@ -3336,6 +3339,7 @@ fn resample_document(
 	// instead of as pixels: a straighten or a resize keeps them sharp.
 	canvas_space::set_channels(doc, channels);
 	changed.extend(space.apply(doc));
+	changed.extend(wrapped);
 	if let Some((image, offset)) = selection {
 		doc.selection = Some(Selection { image, offset });
 	}

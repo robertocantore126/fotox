@@ -91,8 +91,9 @@ impl SpacePlan {
 				LayerKind::Shape { .. } | LayerKind::Text { .. } => {
 					let mut kind = layer.kind.clone();
 					if let Some((transform, cache)) = kind.derived_placement() {
-						// FAST: a projective canvas mapping (Perspective Crop)
-						// cannot be held by a matrix; the layer stays.
+						// A projective mapping cannot be held by a matrix: such
+						// a layer was wrapped in a Smart Object first
+						// (`wrap_for_projection`).
 						if let Some(moved) = mapping.then_affine(*transform) {
 							*transform = moved;
 						}
@@ -286,6 +287,56 @@ impl SpacePlan {
 		doc.comps = self.comps;
 		changed
 	}
+}
+
+/// Before a projective canvas mapping (Perspective Crop): every shape and
+/// text layer becomes a Smart Object around its own content, so the
+/// homography can be kept on it — an affine placement cannot hold one. The
+/// layer keeps its id, name, opacity, blend mode, masks and styles; its
+/// content, neutral (as Rasterize keeps it), becomes the embedded document at
+/// the old canvas size. Returns the layers wrapped; nothing for an affine
+/// mapping.
+pub(super) fn wrap_for_projection(doc: &mut Document, mapping: &Mapping, ops: &dyn PixelOps, store: &TileStore) -> Result<Vec<LayerId>, CommandError> {
+	if matches!(mapping, Mapping::Affine(_)) {
+		return Ok(Vec::new());
+	}
+	let ids: Vec<LayerId> = layer_ids(doc)
+		.into_iter()
+		.filter(|id| {
+			doc.layer(*id)
+				.is_some_and(|l| matches!(l.kind, LayerKind::Shape { .. } | LayerKind::Text { .. }))
+		})
+		.collect();
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let mut wrapped = Vec::with_capacity(ids.len());
+	for id in ids {
+		let content = content_alone(doc, id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+		let (next_id, counters) = doc.id_state();
+		let mut nested = Document::new(w, h, doc.color.clone(), doc.ppi).with_id_state(next_id, counters);
+		nested.layers = content.layers;
+		nested.selected = vec![id];
+		let composite = ops.composite(&nested, &[id], None, store)?;
+		let smart = crate::smart::SmartObject {
+			source: crate::smart::SmartSource {
+				doc: Arc::new(nested),
+				composite,
+				linked: None,
+				linked_mtime: None,
+				uid: crate::smart::new_uid(),
+			},
+			transform: Mapping::identity(),
+			filters: Vec::new(),
+			filters_enabled: true,
+		};
+		if let Some(layer) = doc.layer_mut(id) {
+			layer.kind = LayerKind::Smart {
+				smart,
+				cache: TiledImage::derived(w, h, format),
+			};
+			wrapped.push(id);
+		}
+	}
+	Ok(wrapped)
 }
 
 /// The alpha channels (canvas-origin grey images) after `f` moves each one.

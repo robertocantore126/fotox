@@ -360,3 +360,87 @@ fn a_warp_composes_with_a_homography_on_either_side() {
 	// A warp of a warp is still refused.
 	assert!(compose(Mapping::Warp(patch), Mapping::Warp(patch)).is_none());
 }
+
+/// Every pixel of a document's composite at level 0, premultiplied.
+fn composite_all(d: &mut Document, store: &TileStore) -> Vec<[f64; 4]> {
+	let t = fx_tiles::TILE_SIZE;
+	let (cols, rows) = (d.width.div_ceil(t), d.height.div_ceil(t));
+	let tiles: Vec<(u32, u32)> = (0..rows).flat_map(|ty| (0..cols).map(move |tx| (tx, ty))).collect();
+	let rendered = fx_engine::derived::render_tiles(d, store, 0, &tiles, &mut fx_render::adjust::LutCache::default()).unwrap();
+	let mut out = vec![[0.0; 4]; (d.width * d.height) as usize];
+	for r in rendered {
+		let Some(pixels) = r.pixels else { continue };
+		for y in 0..t {
+			for x in 0..t {
+				let (dx, dy) = (r.tile.0 * t + x, r.tile.1 * t + y);
+				if dx < d.width && dy < d.height {
+					out[(dy * d.width + dx) as usize] = pixels[(y * t + x) as usize];
+				}
+			}
+		}
+	}
+	out
+}
+
+/// R03 follow-up: Perspective Crop used to leave shape and text layers where
+/// they were. Their matrix cannot hold a homography, so they become Smart
+/// Objects around their own content, keeping their properties; the result
+/// matches the same layer rasterised first.
+#[test]
+fn perspective_crop_takes_shape_layers_along() {
+	let store = store("perspective-shape");
+	let make = || {
+		let mut d = doc(300, 200);
+		let mut layer = Layer::new(
+			LayerId(1),
+			"rect",
+			LayerKind::Shape {
+				shape: fx_core::vector::VectorShape::Rect {
+					w: 100.0,
+					h: 80.0,
+					radii: [0.0; 4],
+				},
+				fill: Some(fx_core::vector::Paint::Solid { rgba: [65535, 0, 0, 65535] }),
+				stroke: None,
+				transform: [1.0, 0.0, 0.0, 1.0, 100.0, 60.0],
+				cache: TiledImage::derived(300, 200, PixelFormat::Rgba8),
+			},
+		);
+		layer.opacity = 0.5;
+		d.layers.push(Arc::new(layer));
+		d
+	};
+	let crop = Command::PerspectiveCrop {
+		quad: [(20.0, 10.0), (280.0, 30.0), (260.0, 190.0), (40.0, 170.0)],
+		width: 300,
+		height: 200,
+	};
+	let mut shape = make();
+	apply(&mut shape, &store, crop.clone());
+	let layer = &shape.layers[0];
+	assert_eq!((layer.name.as_str(), layer.opacity), ("rect", 0.5), "the layer keeps its properties");
+	let LayerKind::Smart { smart, .. } = &layer.kind else {
+		panic!("a Smart Object, not {:?}", layer.kind)
+	};
+	assert!(matches!(smart.transform, fx_core::Mapping::Projective(_)));
+
+	let mut raster = make();
+	apply(
+		&mut raster,
+		&store,
+		Command::Rasterize {
+			layers: vec![LayerRef::Id(LayerId(1))],
+		},
+	);
+	apply(&mut raster, &store, crop);
+	let (a, b) = (composite_all(&mut shape, &store), composite_all(&mut raster, &store));
+	let diffs: Vec<f64> = a.iter().zip(&b).map(|(p, q)| (p[3] - q[3]).abs()).collect();
+	let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
+	let max = diffs.iter().copied().fold(0.0, f64::max);
+	let covered = a.iter().filter(|p| p[3] > 0.45).count();
+	assert!(covered > 5_000, "the shape is on the cropped canvas ({covered} px)");
+	assert!(
+		mean < 0.005 && max < 0.3,
+		"Smart Object and rasterised crops differ: mean {mean:.4}, max {max:.4}"
+	);
+}

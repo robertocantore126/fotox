@@ -275,6 +275,8 @@ pub(super) fn perspective_crop(
 		label: "Perspective Crop".into(),
 		pixels_changed,
 		props_changed,
+		// Shape and text layers may have become Smart Objects.
+		structure_changed: true,
 		..Default::default()
 	})
 }
