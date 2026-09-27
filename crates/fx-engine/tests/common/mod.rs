@@ -39,6 +39,9 @@ pub struct Harness {
 	pub seen: Arc<Mutex<Vec<Seen>>>,
 	/// The latest viewport frame (see [`Harness::frame_pixels`]).
 	pub last_frame: Arc<Mutex<Option<wgpu::Texture>>>,
+	/// When the latest viewport frame arrived (stress tests time how long the
+	/// view takes to settle).
+	pub last_frame_at: Arc<Mutex<Option<Instant>>>,
 	device: wgpu::Device,
 	queue: wgpu_sync::Queue,
 	/// One engine at a time per test binary: each allocates the reference
@@ -57,6 +60,8 @@ impl Harness {
 		let sink = seen.clone();
 		let last_frame = Arc::new(Mutex::new(None));
 		let frame_sink = last_frame.clone();
+		let last_frame_at = Arc::new(Mutex::new(None));
+		let frame_time_sink = last_frame_at.clone();
 		let engine = EngineHandle::spawn(device.clone(), queue.clone(), dir.join("scratch"), move |output| {
 			let item = match output {
 				EngineOutput::ToUi(frame) => match fx_protocol::decode::<EngineToUi>(&frame) {
@@ -68,6 +73,7 @@ impl Harness {
 				EngineOutput::Cursor(shape) => Seen::Cursor(shape),
 				EngineOutput::ViewportFrame(texture) => {
 					*frame_sink.lock().unwrap() = Some(texture);
+					*frame_time_sink.lock().unwrap() = Some(Instant::now());
 					Seen::Frame
 				}
 				_ => return,
@@ -80,6 +86,7 @@ impl Harness {
 			engine,
 			seen,
 			last_frame,
+			last_frame_at,
 			device,
 			queue,
 			_one_at_a_time: one_at_a_time,

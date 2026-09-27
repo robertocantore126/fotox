@@ -244,6 +244,8 @@ struct Engine {
 	thumbs_wanted: HashMap<(DocId, LayerId), u32>,
 	thumbs_last: HashMap<(DocId, LayerId), Instant>,
 	thumbs_due: HashMap<(DocId, LayerId), Instant>,
+	/// Where thumbnail renders wait (off the rayon pool: see `ThumbQueue`).
+	thumbs_queue: crate::thumbs::ThumbQueue<(DocId, LayerId)>,
 	/// The last mergeable edit: what it was, when, and how many undo steps
 	/// the document had right after it (so an intervening undo or edit
 	/// breaks the merge).
@@ -423,6 +425,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_wanted: HashMap::new(),
 		thumbs_last: HashMap::new(),
 		thumbs_due: HashMap::new(),
+		thumbs_queue: crate::thumbs::ThumbQueue::new(2),
 		last_edit: None,
 		ops: EngineOps::default(),
 		preview_latest: HashMap::new(),
@@ -2946,7 +2949,7 @@ impl Engine {
 		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.generation);
 		self.thumbs_last.insert((id, layer_id), Instant::now());
 		let (store, internal) = (self.store.clone(), self.internal.clone());
-		rayon::spawn(move || {
+		self.thumbs_queue.push((id, layer_id), move || {
 			let result = thumbs::render(source, w, h, size, &store);
 			let _ = internal.send(Internal::Thumbnail {
 				doc: id,

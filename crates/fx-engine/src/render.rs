@@ -189,7 +189,15 @@ pub(crate) fn run(ctx: RenderContext) {
 		let mut again = false;
 		let mut uploads = 0;
 		match &f.doc {
-			None => pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc),
+			None => {
+				// No document: let go of the last one's pixels (its snapshot and
+				// the programs holding its tiles), or closing the last document
+				// kept all of it in memory until another was drawn.
+				if let Some(pipeline) = tiles.as_mut() {
+					pipeline.forget_document();
+				}
+				pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc);
+			}
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
 				pipeline.compositor.set_hot_layer(f.hot_layer);
@@ -304,6 +312,15 @@ impl TilePipeline {
 			total_uploads: 0,
 			gpu_bytes,
 		}
+	}
+
+	/// Drop everything held for the document last drawn.
+	fn forget_document(&mut self) {
+		self.snapshot = None;
+		self.current = None;
+		self.ready.clear();
+		self.programs.clear();
+		self.mips_sent.clear();
 	}
 
 	/// Draw one frame of `doc`. Returns whether another frame should follow

@@ -444,3 +444,75 @@ fn copying_a_small_shape_on_a_huge_canvas_stays_bounded() {
 	assert!(stored <= 4, "only the tiles the rectangle touches hold pixels, got {stored}");
 	assert_eq!(alpha(&store, &content, (200, 200)), 255);
 }
+
+/// Thousands of thumbnail jobs queued at once (Undo with every layer's
+/// thumbnail wanted refreshes each). A job whose mips are dirty computes
+/// them with `par_iter`; queued with `rayon::spawn`, a worker waiting on it
+/// ran other queued jobs on the same stack, which waited in turn: the stack
+/// grew with the queue until it overflowed (scale.rs `thousands_of_layers`,
+/// 2000 layers, 2026-09-27: the process aborted). Through the engine's
+/// `ThumbQueue` every one renders.
+#[test]
+fn thousands_of_queued_thumbnails_do_not_overflow_a_worker_stack() {
+	use fx_engine::thumbs::{ThumbQueue, ThumbSource, render};
+	let mut config = TileStoreConfig::for_tests(dir("thumb-queue"));
+	config.hot_budget = 1 << 30;
+	config.warm_budget = 1 << 28;
+	let store = Arc::new(TileStore::new(config).unwrap());
+	// Every tile holds pixels; each clone has its own dirty mips.
+	let (w, h) = (4000, 3000);
+	let mut base = TiledImage::new(w, h, PixelFormat::Rgba8);
+	let mut buffer = TileBuffer::zeroed(PixelFormat::Rgba8);
+	for (i, b) in buffer.bytes_mut().iter_mut().enumerate() {
+		*b = (i * 7 % 251) as u8;
+	}
+	for ty in 0..h.div_ceil(256) {
+		for tx in 0..w.div_ceil(256) {
+			base.put_buffer(&store, tx, ty, buffer.clone());
+		}
+	}
+	let jobs = 3000;
+	let queue = ThumbQueue::new(2);
+	let (done, results) = std::sync::mpsc::channel();
+	for key in 0..jobs {
+		let (store, image, done) = (store.clone(), base.clone(), done.clone());
+		queue.push(key, move || {
+			let thumb = render(ThumbSource::Pixels { image, offset: (0, 0) }, w, h, 64, &store);
+			let _ = done.send(thumb.is_ok());
+		});
+	}
+	drop(done);
+	let ok = results.iter().take(jobs).filter(|ok| *ok).count();
+	assert_eq!(ok, jobs, "every thumbnail rendered");
+}
+
+/// A newer job for a layer whose thumbnail has not started replaces it: 20
+/// undos in a row render each thumbnail about once, not 20 times.
+#[test]
+fn a_waiting_thumbnail_job_is_replaced_not_repeated() {
+	let queue = fx_engine::thumbs::ThumbQueue::new(1);
+	let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+	let (done, results) = std::sync::mpsc::channel();
+	// Hold the one thread so the rest wait.
+	queue.push(u32::MAX, move || {
+		let _ = gate_rx.recv();
+	});
+	std::thread::sleep(std::time::Duration::from_millis(50));
+	for round in 0..20 {
+		for key in 0..5u32 {
+			let done = done.clone();
+			queue.push(key, move || {
+				let _ = done.send((key, round));
+			});
+		}
+	}
+	assert_eq!(queue.len(), 5, "one waiting job per key");
+	drop(done);
+	gate_tx.send(()).unwrap();
+	let ran: Vec<(u32, i32)> = results.iter().collect();
+	assert_eq!(
+		ran,
+		(0..5).map(|k| (k, 19)).collect::<Vec<_>>(),
+		"each key once, the newest job, in first-queued order"
+	);
+}

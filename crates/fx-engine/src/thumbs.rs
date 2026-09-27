@@ -4,8 +4,13 @@
 //! shows where it sits), fitted into a `size × size` box, RGBA8 straight.
 //! It is rendered from the deepest mip level that still has at least `size`
 //! pixels along the document's longer side, so only a handful of tiles are
-//! read whatever the document size. Runs on the rayon pool: it may read tiles
-//! from disk and compute missing mips (on its own copy of the image).
+//! read whatever the document size. Runs on a [`ThumbQueue`] thread, never
+//! as a job of the rayon pool: it may read tiles from disk and compute
+//! missing mips (on its own copy of the image, with `par_iter`).
+
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::sync::{Arc, Condvar, Mutex};
 
 use fx_core::LayerKind;
 use fx_core::vector::{Paint, StrokeStyle, VectorShape};
@@ -213,6 +218,115 @@ fn copy_tile(slot: &TileSlot, format: PixelFormat, store: &TileStore, tx: u32, t
 		}
 	}
 	Ok(())
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+struct QueueState<K> {
+	order: VecDeque<K>,
+	jobs: HashMap<K, Job>,
+	stop: bool,
+}
+
+struct QueueShared<K> {
+	state: Mutex<QueueState<K>>,
+	ready: Condvar,
+}
+
+/// Where thumbnail jobs wait: a few threads of their own, outside the rayon
+/// pool, and one job per key (a newer job for a key still waiting replaces
+/// it, keeping its place).
+///
+/// Not `rayon::spawn`: a thumbnail computing mips waits on a `par_iter`, and a
+/// rayon worker that waits runs other queued jobs on the same stack. With a
+/// thumbnail per layer queued at once (Undo refreshes every one the panel
+/// shows), those waited in turn and the stack grew with the queue until it
+/// overflowed: 2000 layers aborted the process (scale.rs, 2026-09-27). A
+/// thread outside the pool that calls `par_iter` just blocks.
+pub struct ThumbQueue<K> {
+	shared: Arc<QueueShared<K>>,
+	threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl<K: Hash + Eq + Clone + Send + 'static> ThumbQueue<K> {
+	pub fn new(threads: usize) -> Self {
+		let shared = Arc::new(QueueShared {
+			state: Mutex::new(QueueState {
+				order: VecDeque::new(),
+				jobs: HashMap::new(),
+				stop: false,
+			}),
+			ready: Condvar::new(),
+		});
+		let threads = (0..threads.max(1))
+			.filter_map(|i| {
+				let shared = shared.clone();
+				std::thread::Builder::new()
+					.name(format!("thumbnails-{i}"))
+					.spawn(move || Self::work(&shared))
+					.map_err(|error| tracing::error!("cannot start a thumbnail thread: {error}"))
+					.ok()
+			})
+			.collect();
+		Self { shared, threads }
+	}
+
+	/// Queue `job` under `key`, replacing a job for `key` that has not started.
+	pub fn push(&self, key: K, job: impl FnOnce() + Send + 'static) {
+		let mut state = self.shared.state.lock().expect("thumbnail queue poisoned");
+		if state.jobs.insert(key.clone(), Box::new(job)).is_none() {
+			state.order.push_back(key);
+		}
+		drop(state);
+		self.shared.ready.notify_one();
+	}
+
+	/// Jobs waiting (not started).
+	pub fn len(&self) -> usize {
+		self.shared.state.lock().expect("thumbnail queue poisoned").jobs.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.len() == 0
+	}
+
+	fn work(shared: &QueueShared<K>) {
+		loop {
+			let job = {
+				let mut state = shared.state.lock().expect("thumbnail queue poisoned");
+				loop {
+					if state.stop {
+						return;
+					}
+					if let Some(key) = state.order.pop_front() {
+						if let Some(job) = state.jobs.remove(&key) {
+							break job;
+						}
+						continue;
+					}
+					state = shared.ready.wait(state).expect("thumbnail queue poisoned");
+				}
+			};
+			// A panicking job must not take the thread (and every later
+			// thumbnail) with it.
+			if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+				tracing::error!("a thumbnail job panicked");
+			}
+		}
+	}
+}
+
+impl<K> Drop for ThumbQueue<K> {
+	fn drop(&mut self) {
+		if let Ok(mut state) = self.shared.state.lock() {
+			state.stop = true;
+			state.jobs.clear();
+		}
+		self.shared.ready.notify_all();
+		for thread in self.threads.drain(..) {
+			let _ = thread.join();
+		}
+	}
 }
 
 #[cfg(test)]
