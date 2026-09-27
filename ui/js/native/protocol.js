@@ -26,6 +26,8 @@ export const UI = Object.freeze({
   CLOSE_DOCUMENT_ANSWER: "close_document_answer",
   FILTER_PREVIEW: "filter_preview",
   FILTER_PREVIEW_CANCEL: "filter_preview_cancel",
+  ADJUSTMENT_PREVIEW: "adjustment_preview",
+  ADJUSTMENT_PREVIEW_END: "adjustment_preview_end",
   PROOF_SETUP: "proof_setup",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",

@@ -52,6 +52,10 @@ pub struct OpenDoc {
 	/// Bumped whenever the preview's pixels change (the render thread's
 	/// caches must not reuse tiles composited from the old preview).
 	pub preview_rev: u64,
+	/// An adjustment dialog's live value (code review 2026-09-27 R11): the
+	/// layer drawn with this adjustment, outside the history; shares
+	/// `preview_rev`.
+	pub adjustment_preview: Option<(LayerId, fx_core::Adjustment)>,
 	/// A Free Transform's live preview (M6-T04); shares `preview_rev`.
 	pub transform_preview: Option<crate::transform_preview::TransformPreview>,
 	/// A pixel job (filter, merge, flatten) is running on this document: its
@@ -129,6 +133,7 @@ impl OpenDoc {
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
+			adjustment_preview: None,
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -160,6 +165,7 @@ impl OpenDoc {
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
+			adjustment_preview: None,
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -229,6 +235,7 @@ impl OpenDoc {
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
+			adjustment_preview: None,
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -254,6 +261,13 @@ impl OpenDoc {
 					&& let LayerKind::Pixel { image, .. } = &mut layer.kind
 				{
 					*image = preview.image.clone();
+				}
+				// An adjustment dialog's value is on screen only.
+				if let Some((id, adjustment)) = &self.adjustment_preview
+					&& let Some(layer) = doc.layer_mut(*id)
+					&& let LayerKind::Adjustment(current) = &mut layer.kind
+				{
+					*current = adjustment.clone();
 				}
 				// So does a Free Transform's (M6-T04).
 				if let Some(preview) = &self.transform_preview {
@@ -523,5 +537,24 @@ mod tests {
 		assert!(!Arc::ptr_eq(&a, &b));
 		doc.doc.revision += 1;
 		assert_eq!(doc.snapshot().revision, 1);
+	}
+
+	#[test]
+	fn an_adjustment_preview_is_on_screen_only() {
+		let mut doc = OpenDoc::from_import(DocId(1), Path::new("a.png"), imported());
+		let id = doc.doc.allocate_layer_id();
+		doc.doc.layers.push(Arc::new(Layer::new(id, "Invert", LayerKind::Adjustment(fx_core::Adjustment::Invert))));
+		let shown = |doc: &mut OpenDoc| match &doc.snapshot().layer(id).unwrap().kind {
+			LayerKind::Adjustment(a) => a.clone(),
+			_ => unreachable!(),
+		};
+		assert_eq!(shown(&mut doc), fx_core::Adjustment::Invert);
+		doc.adjustment_preview = Some((id, fx_core::Adjustment::Posterize { levels: 3 }));
+		doc.preview_rev += 1;
+		assert_eq!(shown(&mut doc), fx_core::Adjustment::Posterize { levels: 3 });
+		assert!(matches!(doc.doc.layer(id).unwrap().kind, LayerKind::Adjustment(fx_core::Adjustment::Invert)), "the document is unchanged");
+		doc.adjustment_preview = None;
+		doc.preview_rev += 1;
+		assert_eq!(shown(&mut doc), fx_core::Adjustment::Invert);
 	}
 }

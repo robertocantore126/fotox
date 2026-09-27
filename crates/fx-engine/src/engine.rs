@@ -1246,6 +1246,25 @@ impl Engine {
 				self.cancel_preview(doc);
 				Changed::default()
 			}
+			UiToEngine::AdjustmentPreview { doc, layer, adjustment } => {
+				if let Some(open) = self.docs.get_mut(doc)
+					&& matches!(open.doc.layer(layer).map(|l| &l.kind), Some(LayerKind::Adjustment(_)))
+				{
+					open.adjustment_preview = Some((layer, adjustment));
+					open.preview_rev += 1;
+					self.request_frame();
+				}
+				Changed::default()
+			}
+			UiToEngine::AdjustmentPreviewEnd { doc } => {
+				if let Some(open) = self.docs.get_mut(doc)
+					&& open.adjustment_preview.take().is_some()
+				{
+					open.preview_rev += 1;
+					self.request_frame();
+				}
+				Changed::default()
+			}
 			UiToEngine::ToolOptions { tool, options } if tool == "_view" || tool == "_prefs" => {
 				// The View flags and the grid preferences (M7-T06).
 				self.settings.options.insert(tool, options);

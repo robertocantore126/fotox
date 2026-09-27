@@ -101,6 +101,19 @@ pub enum UiToEngine {
 	FilterPreviewCancel {
 		doc: DocId,
 	},
+	/// An adjustment dialog's live value: the adjustment layer `layer` is
+	/// drawn with `adjustment`, on screen only — no history step, no dirty
+	/// flag. OK sends `adjustment_preview_end` then the `set_adjustment`
+	/// command (one step); Cancel sends only the end.
+	AdjustmentPreview {
+		doc: DocId,
+		layer: LayerId,
+		adjustment: Adjustment,
+	},
+	/// Drop the adjustment preview.
+	AdjustmentPreviewEnd {
+		doc: DocId,
+	},
 	/// View ▸ Proof Setup (M4-T04): simulate the press of the CMYK profile at
 	/// `path` (one of `cmyk_profiles`), and turn Proof Colors on.
 	ProofSetup {

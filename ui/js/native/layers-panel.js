@@ -711,7 +711,8 @@ function requestThumbnails() {
 /* ------------------------------------------------------------------ adjustments (M2-T04 step 3) */
 
 // Dialog ↔ `Adjustment` mapping for the adjustments with a slider dialog.
-// Every change is sent live as `set_adjustment`; Cancel restores the original.
+// Every change is previewed live outside the history; OK commits one
+// `set_adjustment`, Cancel drops the preview (see `adjustmentSession`).
 const ADJUSTMENT_DIALOGS = {
   brightness_contrast: {
     dialog: "brightness-contrast",
@@ -819,6 +820,29 @@ const PER_CHANNEL_DIALOGS = {
   },
 };
 
+/**
+ * A live adjustment dialog as one transaction (code review 2026-09-27 R11):
+ * `show` previews a value on screen only (no history step, no dirty flag, the
+ * redo branch kept), `commit` adds one `set_adjustment` step — none when the
+ * value is unchanged — and `cancel` drops the preview. The document is the one
+ * the dialog was opened for.
+ */
+function adjustmentSession(l) {
+  const at = doc;
+  const original = l.adjustment;
+  const end = () => bridge.send({ type: UI.ADJUSTMENT_PREVIEW_END, doc: at });
+  return {
+    original,
+    show: (adjustment) => bridge.send({ type: UI.ADJUSTMENT_PREVIEW, doc: at, layer: l.id, adjustment }),
+    cancel: end,
+    commit: (adjustment) => {
+      end();
+      if (JSON.stringify(adjustment) === JSON.stringify(original)) return;
+      bridge.send({ type: UI.COMMAND, doc: at, command: { op: "set_adjustment", layer: ref(l.id), adjustment } });
+    },
+  };
+}
+
 function editAdjustment(l) {
   const adj = l.adjustment;
   if (!adj) return;
@@ -830,35 +854,34 @@ function editAdjustment(l) {
     toast(adj.kind === "invert" ? "Invert has no settings" : "This adjustment has no dialog yet");
     return;
   }
-  const original = adj;
-  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
+  const session = adjustmentSession(l);
   // "Preview" off shows the layer as it was; OK still applies the dialog's values.
-  const preview = (values) => set(values.Preview === false ? original : spec.fromValues(values));
+  const preview = (values) => session.show(values.Preview === false ? session.original : spec.fromValues(values));
   openDialog(spec.dialog, {
     title: `${l.name}`,
     values: spec.toValues(adj),
     onChange: preview,
-    onOk: (values) => set(spec.fromValues(values)),
-    onCancel: () => set(original),
+    onOk: (values) => session.commit(spec.fromValues(values)),
+    onCancel: session.cancel,
   });
 }
 
 async function editGradientMap(l) {
   const { gradientEditor, resolveSwatches } = await import("./gradients.js");
-  const original = l.adjustment;
+  const session = adjustmentSession(l);
+  const original = session.original;
   const work = {
     colors: (original.stops.length ? original.stops : GRADIENTS["Black, White"])
       .map((s) => ({ location: s.position, midpoint: 0.5, color: [...s.color] })),
     opacities: [], method: "perceptual",
   };
-  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
   const make = (values) => {
     const gradient = structuredClone(work);
     resolveSwatches(gradient);
     return { kind: "gradient_map", stops: gradient.colors.map((s) => ({ position: s.location, color: s.color })), reverse: !!values.Reverse };
   };
   let wrap;
-  const preview = (values) => set(values.Preview === false ? original : make(values));
+  const preview = (values) => session.show(values.Preview === false ? original : make(values));
   wrap = openDialog("gradient-map", {
     title: l.name,
     width: 460,
@@ -868,17 +891,17 @@ async function editGradientMap(l) {
       { type: "check", label: "Preview", on: true },
     ],
     onChange: preview,
-    onOk: (values) => set(make(values)),
-    onCancel: () => set(original),
+    onOk: (values) => session.commit(make(values)),
+    onCancel: session.cancel,
   });
 }
 
 function editPerChannel(l, spec) {
-  const original = l.adjustment;
+  const session = adjustmentSession(l);
+  const original = session.original;
   const parts = spec.parts(original).map((c) => JSON.parse(JSON.stringify(c)));
   let shown = spec.first || 0;
   let last = {};
-  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
   const current = () => spec.make(original, parts, last);
   last = spec.extra ? spec.extra(original) : {};
   openDialog(spec.dialog, {
@@ -893,10 +916,10 @@ function editPerChannel(l, spec) {
         return;
       }
       parts[shown] = spec.fromValues(values);
-      set(values.Preview === false ? original : current());
+      session.show(values.Preview === false ? original : current());
     },
-    onOk: () => set(current()),
-    onCancel: () => set(original),
+    onOk: () => session.commit(current()),
+    onCancel: session.cancel,
   });
 }
 
