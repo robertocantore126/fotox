@@ -131,3 +131,52 @@ fn free_transform_commits_one_step_and_escape_none() {
 
 	harness.engine.shutdown();
 }
+
+#[test]
+fn showing_another_layer_keeps_the_transform_box_and_its_pending_change() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-transform-visibility-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 300, 200)]));
+	let doc = opened(&harness);
+	let command = |command| harness.ui(UiToEngine::Command { doc, command });
+	command(fx_core::Command::DuplicateLayers {
+		layers: vec![fx_core::LayerRef::Active],
+	});
+	assert_eq!(last_step(&harness, doc), "Duplicate Layer");
+	command(fx_core::Command::SetLayerProps {
+		layer: fx_core::LayerRef::Active,
+		props: fx_core::command::LayerPropsPatch {
+			locked_position: Some(false),
+			..Default::default()
+		},
+	});
+	last_step(&harness, doc);
+	command(fx_core::Command::SetLayerProps {
+		layer: fx_core::LayerRef::Named("Background".into()),
+		props: fx_core::command::LayerPropsPatch {
+			visible: Some(false),
+			..Default::default()
+		},
+	});
+	last_step(&harness, doc);
+	action(&harness, "xf:free", serde_json::Value::Null);
+	harness.ui(UiToEngine::Key {
+		key: "Shift+ArrowRight".into(),
+	});
+	command(fx_core::Command::SetLayerProps {
+		layer: fx_core::LayerRef::Named("Background".into()),
+		props: fx_core::command::LayerPropsPatch {
+			visible: Some(true),
+			..Default::default()
+		},
+	});
+	last_step(&harness, doc);
+	harness.ui(UiToEngine::Key { key: "Enter".into() });
+	assert_eq!(last_step(&harness, doc), "Free Transform");
+	harness.engine.shutdown();
+}

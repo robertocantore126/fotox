@@ -10,13 +10,14 @@
 
 import { h, icon, clear, add } from "../el.js";
 import { openDropdown } from "../popup.js";
-import { openDialog } from "../dialogs.js";
+import { openDialog, dialogValues } from "../dialogs.js";
 import { state, setTool, emit } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
 import { pickFile } from "./brush-settings.js";
 import { openMenuPopup } from "../menu.js";
+import { layerStyleEffects, layerStyleItems } from "../data/menus.js";
 
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
@@ -122,6 +123,7 @@ let layersRoot = null;
 let historyRoot = null;
 let listEl = null;
 let spacerEl = null;
+const layerScroll = new Map(); // document id → the Layers list's user scroll position
 let dragId = null;
 let editNew = null;      // ids before a new adjustment layer: its dialog opens when it arrives
 
@@ -168,6 +170,7 @@ export function initNativePanels() {
   bridge.on(ENGINE.DOCUMENT_CLOSED, ({ doc: id }) => {
     histories.delete(id);
     historySource.delete(id);
+    layerScroll.delete(id);
     const prefix = `${id}:`;
     for (const map of [thumbs, thumbStamps, collapsed]) for (const key of [...map.keys()]) if (key.startsWith(prefix)) map.delete(key);
     for (const key of [...requested]) if (key.startsWith(prefix)) requested.delete(key);
@@ -326,13 +329,23 @@ function renderLayers() {
   // The virtualised list.
   listEl = h("div", { class: "plist nlist" });
   spacerEl = h("div", { class: "nlist-space" });
+  spacerEl.style.height = visibleRows().length * ROW_H + "px";
   listEl.append(spacerEl);
-  listEl.addEventListener("scroll", () => renderRows());
+  const currentList = listEl;
+  const currentDoc = doc;
+  listEl.addEventListener("scroll", () => {
+    if (currentList !== listEl) return;
+    layerScroll.set(currentDoc, currentList.scrollTop);
+    renderRows();
+  });
   listEl.addEventListener("dragover", (e) => { if (dragId != null) e.preventDefault(); });
   listEl.addEventListener("drop", (e) => dropOnList(e));
   layersRoot.append(listEl);
 
   layersRoot.append(h("div", { class: "pbar" },
+    // Layer styles (R2-10): the engine has had them since M6-T08, but this
+    // panel had no fx button, so they were only reachable from the menu bar.
+    barBtn("i-fx", "Add a layer style", (btn) => openMenuPopup(btn, layerStyleItems, {})),
     barBtn("i-mask", "Add layer mask (Alt: hide)", (btn, e) => {
       if (!a) return;
       if (a.has_mask) toast("The layer already has a mask");
@@ -363,7 +376,11 @@ function renderLayers() {
   ));
 
   // Rows need the list's height, known after layout.
-  requestAnimationFrame(() => renderRows());
+  requestAnimationFrame(() => {
+    if (currentList !== listEl) return;
+    currentList.scrollTop = layerScroll.get(currentDoc) || 0;
+    renderRows();
+  });
 }
 
 function renderRows() {
@@ -527,6 +544,7 @@ function layerContextMenu(l, e) {
   const pixel = l.kind === "pixel";
   const items = [
     item("Blending Options...", "dlg:blending-options"),
+    item("Layer Style", "", { sub: layerStyleEffects }),
     sep,
     item("Duplicate Layer", "layer:duplicate"),
     item("Delete Layer", "layer:delete"),
@@ -595,7 +613,10 @@ function rename(l, label) {
 /* drag and drop: above / below a row, or into a group (middle of the row) */
 
 function dropZone(e, el, l) {
-  const y = e.offsetY / el.offsetHeight;
+  // `offsetY` is measured from the child under the pointer (thumbnail,
+  // label, icon), not necessarily from this row. Use the row's own bounds.
+  const rect = el.getBoundingClientRect();
+  const y = (e.clientY - rect.top) / rect.height;
   if (l.kind === "group" && y > 0.3 && y < 0.7) return "into";
   return y < 0.5 ? "above" : "below";
 }
@@ -733,11 +754,6 @@ const ADJUSTMENT_DIALOGS = {
     toValues: (a) => ({ "Threshold Level:": a.level }),
     fromValues: (v) => ({ kind: "threshold", level: Math.min(255, Math.max(1, Math.round(v["Threshold Level:"]))) }),
   },
-  gradient_map: {
-    dialog: "gradient-map",
-    toValues: (a) => ({ "Gradient:": nameOf(GRADIENTS, a.stops) || "Black, White", Reverse: a.reverse }),
-    fromValues: (v) => ({ kind: "gradient_map", stops: GRADIENTS[v["Gradient:"]] || GRADIENTS["Black, White"], reverse: !!v.Reverse }),
-  },
   exposure: {
     dialog: "exposure",
     // The dialog's sliders are integers: offset in hundredths, gamma in hundredths.
@@ -808,6 +824,7 @@ function editAdjustment(l) {
   if (!adj) return;
   if (PER_CHANNEL_DIALOGS[adj.kind]) { editPerChannel(l, PER_CHANNEL_DIALOGS[adj.kind]); return; }
   if (adj.kind === "color_lookup") { pickLut(l.id); return; }
+  if (adj.kind === "gradient_map") { editGradientMap(l); return; }
   const spec = ADJUSTMENT_DIALOGS[adj.kind];
   if (!spec) {
     toast(adj.kind === "invert" ? "Invert has no settings" : "This adjustment has no dialog yet");
@@ -822,6 +839,36 @@ function editAdjustment(l) {
     values: spec.toValues(adj),
     onChange: preview,
     onOk: (values) => set(spec.fromValues(values)),
+    onCancel: () => set(original),
+  });
+}
+
+async function editGradientMap(l) {
+  const { gradientEditor, resolveSwatches } = await import("./gradients.js");
+  const original = l.adjustment;
+  const work = {
+    colors: (original.stops.length ? original.stops : GRADIENTS["Black, White"])
+      .map((s) => ({ location: s.position, midpoint: 0.5, color: [...s.color] })),
+    opacities: [], method: "perceptual",
+  };
+  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
+  const make = (values) => {
+    const gradient = structuredClone(work);
+    resolveSwatches(gradient);
+    return { kind: "gradient_map", stops: gradient.colors.map((s) => ({ position: s.location, color: s.color })), reverse: !!values.Reverse };
+  };
+  let wrap;
+  const preview = (values) => set(values.Preview === false ? original : make(values));
+  wrap = openDialog("gradient-map", {
+    title: l.name,
+    width: 460,
+    fields: [
+      { type: "element", el: gradientEditor(work, () => { if (wrap) preview(dialogValues(wrap)); }, { colorOnly: true }) },
+      { type: "check", label: "Reverse", on: original.reverse },
+      { type: "check", label: "Preview", on: true },
+    ],
+    onChange: preview,
+    onOk: (values) => set(make(values)),
     onCancel: () => set(original),
   });
 }

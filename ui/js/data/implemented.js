@@ -54,6 +54,7 @@ export const IMPLEMENTED = new Set([
   "dlg:gaussian-blur",
   "dlg:generative-fill",
   "dlg:gradient-editor",
+  "dlg:gradient-map",
   "dlg:guide-layout",
   "dlg:high-pass",
   "dlg:image-size",

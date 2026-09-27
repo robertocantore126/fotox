@@ -2598,9 +2598,11 @@ impl Engine {
 		self.end_stroke();
 		self.before_command(id, &command);
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
-		// Any other edit while a transform box is up drops the box (Photoshop
-		// greys everything else out; here the edit wins).
-		if matches!(self.transform, Some((doc, _)) if doc == id) && !matches!(command, Command::Transform { .. }) {
+		// A property change on another layer does not invalidate the pixels
+		// being transformed. Keep the box and its preview while that edit lands.
+		let other_layer_props = matches!((&self.transform, &command), (Some((doc, session)), Command::SetLayerProps { layer, .. })
+			if *doc == id && self.docs.get(id).and_then(|open| fx_core::command::resolve(&open.doc, layer).ok()).is_some_and(|target| target != session.layer));
+		if matches!(self.transform, Some((doc, _)) if doc == id) && !matches!(command, Command::Transform { .. }) && !other_layer_props {
 			self.end_transform(false);
 		}
 		let store = self.store.clone();

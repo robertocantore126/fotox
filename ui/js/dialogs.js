@@ -4,7 +4,7 @@
 import { h, icon, clear } from "./el.js";
 import { dialogDef } from "./data/dialogs.js";
 import { openDropdown, popupLayer } from "./popup.js";
-import { state, emit } from "./state.js";
+import { state, emit, setColors } from "./state.js";
 import { getDocCanvas } from "./canvas.js";
 
 let stack = [];
@@ -21,6 +21,12 @@ let stack = [];
 //             Don't Save / Cancel); each closes the dialog, then runs onClick
 export function openDialog(id, overrides = {}) {
   const def = { ...dialogDef(id), ...overrides };
+  if (id === "color-picker" && !def.onOk) {
+    def.fields = [{ type: "colorpicker", target: def.target }];
+    def.onOk = (values) => {
+      if (values.color) setColors(def.target === "bg" ? null : values.color, def.target === "bg" ? values.color : null);
+    };
+  }
   const fields = def.values ? withValues(def.fields || [], def.values) : def.fields || [];
   const body = h("div", { class: "dlg-body" });
   const cols = fields.some((f) => f.type === "col");
@@ -168,6 +174,8 @@ function readValues(grid) {
   });
   const curve = grid.querySelector(".curve-canvas");
   if (curve && curve.getPoints) values.curve = curve.getPoints();
+  const picker = grid.querySelector(".colorpicker");
+  if (picker && picker.getColor) values.color = picker.getColor();
   return values;
 }
 
@@ -264,7 +272,7 @@ function renderField(f) {
     case "matrix": return matrixField();
     case "histo": return histoField();
     case "curve": return curveField(f);
-    case "colorpicker": return colorPickerField();
+    case "colorpicker": return colorPickerField(f);
     // A DOM node a native module built (M8: the Gradient Editor, pattern picker).
     case "element": return f.el;
     case "gradientbar": return gradientBar();
@@ -595,24 +603,94 @@ function buttonClicked(btn, f) {
   if (!fields || !fields.classList.contains("live")) emit("mock", f.text);
 }
 
-function colorPickerField() {
+function colorPickerField(f) {
+  const clamp01 = (n) => Math.min(1, Math.max(0, n));
+  const parseHex = (value) => {
+    const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(value).trim());
+    if (!match) return null;
+    const digits = match[1].length === 3 ? [...match[1]].map((c) => c + c).join("") : match[1];
+    const n = parseInt(digits, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const toHex = (rgb) => "#" + rgb.map((n) => Math.round(n).toString(16).padStart(2, "0")).join("");
+  const toHsv = ([r, g, b]) => {
+    [r, g, b] = [r / 255, g / 255, b / 255];
+    const hi = Math.max(r, g, b), lo = Math.min(r, g, b), d = hi - lo;
+    let h = 0;
+    if (d) {
+      if (hi === r) h = ((g - b) / d) % 6;
+      else if (hi === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+    }
+    return [((h * 60) + 360) % 360, hi ? d / hi : 0, hi];
+  };
+  const toRgb = (h, s, v) => {
+    const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+    const parts = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+      : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+    return parts.map((n) => Math.round((n + m) * 255));
+  };
+
+  let [hueValue, saturation, brightness] = toHsv(parseHex(f.target === "bg" ? state.colors.bg : state.colors.fg) || [0, 0, 0]);
+  let current = "#000000";
   const wrap = h("div", { class: "colorpicker" });
-  const area = h("div", { class: "cp-area", onclick: moveMarker }, h("div", { class: "cp-marker", style: { left: "70%", top: "30%" } }));
-  const hue = h("div", { class: "cp-hue", onclick: moveMarker }, h("div", { class: "cp-hue-marker", style: { left: "18%" } }));
-  function moveMarker(e) {
-    const r = e.currentTarget.getBoundingClientRect();
-    const marker = e.currentTarget.querySelector("[class$=marker]");
-    if (!marker) return;
-    const x = ((e.clientX - r.left) / r.width) * 100;
-    const y = ((e.clientY - r.top) / r.height) * 100;
-    if (marker.classList.contains("cp-marker")) { marker.style.left = x + "%"; marker.style.top = y + "%"; }
-    else marker.style.left = x + "%";
-  }
-  wrap.append(area, hue,
-    h("div", { class: "cp-fields" },
-      ...[["R", "30"], ["G", "30"], ["B", "34"], ["H", "230"], ["S", "12"], ["B", "13"]].map(([k, v]) => h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: k }), h("input", { class: "dlg-input num", type: "text", value: v }))),
-      h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: "#" }), h("input", { class: "dlg-input", type: "text", value: "1E1E22" }))),
-    h("div", { class: "cp-swatches" }, ...["#1e1e22", "#ffffff", "#e26060", "#7ac74f", "#5b8df5", "#f5d442", "#8b5cf6", "#3fb6a8"].map((c) => h("span", { class: "swatch", style: { background: c } }))));
+  const marker = h("div", { class: "cp-marker" });
+  const hueMarker = h("div", { class: "cp-hue-marker" });
+  const area = h("div", { class: "cp-area" }, marker);
+  const hue = h("div", { class: "cp-hue" }, hueMarker);
+  const inputs = {};
+  const field = (key) => {
+    const input = h("input", { class: "dlg-input num", type: "text", inputmode: "numeric", "aria-label": key });
+    inputs[key] = input;
+    return h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: key }), input);
+  };
+  const fields = h("div", { class: "cp-fields" }, ...["R", "G", "B", "H", "S", "V"].map(field), field("#"));
+  const sync = () => {
+    const [r, g, b] = toRgb(hueValue, saturation, brightness);
+    current = toHex([r, g, b]);
+    inputs.R.value = String(r);
+    inputs.G.value = String(g);
+    inputs.B.value = String(b);
+    inputs.H.value = String(Math.round(hueValue));
+    inputs.S.value = String(Math.round(saturation * 100));
+    inputs.V.value = String(Math.round(brightness * 100));
+    inputs["#"].value = current.slice(1).toUpperCase();
+    marker.style.left = saturation * 100 + "%";
+    marker.style.top = (1 - brightness) * 100 + "%";
+    hueMarker.style.left = hueValue / 360 * 100 + "%";
+    area.style.background = `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent), hsl(${hueValue} 100% 50%)`;
+  };
+  const fromRgb = (rgb) => { [hueValue, saturation, brightness] = toHsv(rgb); sync(); };
+  const track = (el, changed) => {
+    const move = (e) => {
+      const r = el.getBoundingClientRect();
+      changed(clamp01((e.clientX - r.left) / r.width), clamp01((e.clientY - r.top) / r.height));
+      sync();
+    };
+    el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); move(e); });
+    el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) move(e); });
+  };
+  track(area, (x, y) => { saturation = x; brightness = 1 - y; });
+  track(hue, (x) => { hueValue = Math.min(359.999, x * 360); });
+  for (const key of ["R", "G", "B"]) inputs[key].addEventListener("change", () => {
+    const rgb = ["R", "G", "B"].map((k) => Math.min(255, Math.max(0, Number(inputs[k].value) || 0)));
+    fromRgb(rgb);
+  });
+  for (const key of ["H", "S", "V"]) inputs[key].addEventListener("change", () => {
+    hueValue = ((Number(inputs.H.value) || 0) % 360 + 360) % 360;
+    saturation = clamp01((Number(inputs.S.value) || 0) / 100);
+    brightness = clamp01((Number(inputs.V.value) || 0) / 100);
+    sync();
+  });
+  inputs["#"].addEventListener("change", () => {
+    const rgb = parseHex(inputs["#"].value);
+    if (rgb) fromRgb(rgb); else sync();
+  });
+  const swatches = h("div", { class: "cp-swatches" }, ...["#1e1e22", "#ffffff", "#e26060", "#7ac74f", "#5b8df5", "#f5d442", "#8b5cf6", "#3fb6a8"]
+    .map((c) => h("button", { class: "swatch", type: "button", style: { background: c }, "aria-label": c, onclick: () => fromRgb(parseHex(c)) })));
+  wrap.append(area, hue, fields, swatches);
+  wrap.getColor = () => current;
+  sync();
   return wrap;
 }
 

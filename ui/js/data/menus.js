@@ -15,6 +15,34 @@ const sub = (label, items, o = {}) => ({ label, sub: items, ...o });
 // helper per i sottomenu che contengono solo etichette
 const list = (names, prefix) => names.map((n) => it(n, "", prefix ? `${prefix}:${n}` : ""));
 
+// The Layer Style effects, in Photoshop's order. Exported because the Layers
+// panel's fx button and its layer context menu open the same entries (R2-10:
+// the panel had no entry point at all, so the styles were reachable only from
+// the menu bar).
+export const layerStyleEffects = [
+  it("Drop Shadow...", "", "dlg:style-drop-shadow"),
+  it("Inner Shadow...", "", "dlg:style-inner-shadow"),
+  it("Outer Glow...", "", "dlg:style-outer-glow"),
+  it("Inner Glow...", "", "dlg:style-inner-glow"),
+  it("Bevel & Emboss...", "", "dlg:style-bevel"),
+  it("Satin...", "", "dlg:style-satin"),
+  it("Color Overlay...", "", "dlg:style-color-overlay"),
+  it("Gradient Overlay...", "", "dlg:style-gradient-overlay"),
+  it("Pattern Overlay...", "", "dlg:style-pattern-overlay"),
+  it("Stroke...", "", "dlg:style-stroke"),
+];
+
+/** The whole Layer ▸ Layer Style submenu: the effects plus blending and copy. */
+export const layerStyleItems = [
+  it("Blending Options...", "", "dlg:blending-options"),
+  sep,
+  ...layerStyleEffects,
+  sep,
+  it("Copy Layer Style", "", "layer:copy-style"),
+  it("Paste Layer Style", "", "layer:paste-style"),
+  it("Clear Layer Style", "", "layer:clear-style"),
+];
+
 export const menus = [
   {
     id: "file", label: "File", items: [
@@ -281,24 +309,7 @@ export const menus = [
         it("Hidden Layers", "", "layer:delete-hidden"),
       ]),
       sep,
-      sub("Layer Style", [
-        it("Blending Options...", "", "dlg:blending-options"),
-        sep,
-        it("Drop Shadow...", "", "dlg:style-drop-shadow"),
-        it("Inner Shadow...", "", "dlg:style-inner-shadow"),
-        it("Outer Glow...", "", "dlg:style-outer-glow"),
-        it("Inner Glow...", "", "dlg:style-inner-glow"),
-        it("Bevel & Emboss...", "", "dlg:style-bevel"),
-        it("Satin...", "", "dlg:style-satin"),
-        it("Color Overlay...", "", "dlg:style-color-overlay"),
-        it("Gradient Overlay...", "", "dlg:style-gradient-overlay"),
-        it("Pattern Overlay...", "", "dlg:style-pattern-overlay"),
-        it("Stroke...", "", "dlg:style-stroke"),
-        sep,
-        it("Copy Layer Style", "", "layer:copy-style"),
-        it("Paste Layer Style", "", "layer:paste-style"),
-        it("Clear Layer Style", "", "layer:clear-style"),
-      ]),
+      sub("Layer Style", layerStyleItems),
       sub("Layer Mask", [
         it("Reveal All", "", "mask:reveal-all"),
         it("Hide All", "", "mask:hide-all"),

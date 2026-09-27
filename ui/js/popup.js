@@ -192,5 +192,18 @@ export function initPopupEngine() {
 
   window.addEventListener("resize", () => closeAll());
   window.addEventListener("blur", () => closeAll());
-  document.addEventListener("scroll", () => closeAll(), true);
+  // A scroll anywhere outside closes the popups (a menu must not stay glued to
+  // a panel that scrolled away) — but a scroll *inside* a popup is the popup's
+  // own scroller: a long drop-down list (the blend modes on the Layers panel)
+  // scrolls on the wheel, and this listener used to close the whole popup on
+  // the first notch, so its options below the fold could never be reached
+  // (R2-12).
+  document.addEventListener(
+    "scroll",
+    (e) => {
+      if (e.target instanceof Node && insidePopup(e.target)) return;
+      closeAll();
+    },
+    true,
+  );
 }
