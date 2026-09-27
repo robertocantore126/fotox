@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use fx_core::{Command, CommandContext, Document, LayerId, LayerKind, LayerRef, Mapping};
-use fx_tiles::{TILE_SIZE, TileSlot, TileStore};
+use fx_tiles::TileStore;
 
 use super::{DocPointer, Tool, ToolContext, ToolResult};
 use crate::{CursorShape, Modifiers, PointerKind};
@@ -58,7 +58,8 @@ impl Tool for MoveTool {
 	fn pointer(&mut self, ctx: &mut ToolContext<'_>, event: &DocPointer) -> ToolResult {
 		match event.kind {
 			PointerKind::Down => {
-				let auto = event.modifiers.ctrl || ctx.settings.bool(TOOL, "Auto-Select").unwrap_or(false);
+				// On unless the option bar says off (the app starts with it on).
+				let auto = event.modifiers.ctrl || ctx.settings.bool(TOOL, "Auto-Select").unwrap_or(true);
 				if auto {
 					let group = ctx.settings.string(TOOL, "Select").as_deref() == Some("Group");
 					match layer_at(ctx.doc, ctx.store, event.x, event.y, group) {
@@ -212,58 +213,32 @@ impl Tool for MoveTool {
 	}
 }
 
-/// The topmost visible layer whose pixel at `(x, y)` has alpha > 0, read
-/// from the layers' own level-0 tiles (never a composite). With `group`, the
-/// top-level group holding it.
+/// The topmost visible layer that shows a pixel at `(x, y)`: each layer is
+/// asked, top first, for its own pixel there through its masks
+/// ([`crate::derived::alpha_at`]), so text, shapes, Smart Objects and fill
+/// layers are picked like pixel layers (they used to be skipped unless their
+/// full-resolution tiles happened to be drawn), a masked-out area is not, and
+/// a layer inside a hidden group is not. Adjustment layers are never picked.
+/// With `group`, the top-level group holding the layer.
 pub fn layer_at(doc: &Document, store: &TileStore, x: f64, y: f64, group: bool) -> Option<LayerId> {
-	if x < 0.0 || y < 0.0 {
-		return None;
-	}
-	let (px, py) = (x.floor() as i64, y.floor() as i64);
-	let mut hit = None;
-	// `walk` is bottom → top: the last hit is the topmost one.
-	doc.walk(|layer, _| {
-		if !layer.visible {
-			return;
-		}
-		let (image, offset) = match &layer.kind {
-			LayerKind::Pixel { image, offset } => (image, (i64::from(offset.0), i64::from(offset.1))),
-			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => (cache, (0, 0)),
-			LayerKind::SolidFill { .. } => {
-				hit = Some(layer.id);
-				return;
+	fn candidates(layers: &[std::sync::Arc<fx_core::Layer>], hidden: bool, out: &mut Vec<LayerId>) {
+		for layer in layers {
+			let hidden = hidden || !layer.visible;
+			match &layer.kind {
+				LayerKind::Group { children, .. } => candidates(children, hidden, out),
+				LayerKind::Adjustment(_) => {}
+				_ if !hidden => out.push(layer.id),
+				_ => {}
 			}
-			_ => return,
-		};
-		let (ix, iy) = (px - offset.0, py - offset.1);
-		if ix < 0 || iy < 0 || ix >= i64::from(image.width()) || iy >= i64::from(image.height()) {
-			return;
 		}
-		let t = i64::from(TILE_SIZE);
-		let (tx, ty) = ((ix / t) as u32, (iy / t) as u32);
-		if image.is_derived() && image.is_dirty(0, tx, ty) {
-			return; // FAST: a shape tile never drawn at level 0 is not picked
-		}
-		let alpha = match image.slot(0, tx, ty) {
-			TileSlot::Empty => 0,
-			TileSlot::Solid(v) => v.0[3],
-			TileSlot::Data(handle) => match store.get(handle) {
-				Ok(buffer) => {
-					let i = ((iy % t) * t + ix % t) as usize;
-					match buffer.format() {
-						fx_tiles::PixelFormat::Rgba8 => u16::from(buffer.bytes()[i * 4 + 3]),
-						fx_tiles::PixelFormat::Rgba16 => buffer.as_u16()[i * 4 + 3],
-						_ => 0,
-					}
-				}
-				Err(_) => 0,
-			},
-		};
-		if alpha > 0 {
-			hit = Some(layer.id);
-		}
-	});
-	let id = hit?;
+	}
+	let mut list = Vec::new();
+	candidates(&doc.layers, false, &mut list);
+	// Bottom → top: the topmost hit is the last one.
+	let id = list
+		.into_iter()
+		.rev()
+		.find(|id| crate::derived::alpha_at(doc, store, *id, x, y) >= 0.5 / 255.0)?;
 	if group {
 		let path = doc.path_of(id)?;
 		let root = doc.layers.get(*path.first()?)?;

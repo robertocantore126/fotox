@@ -77,8 +77,11 @@ export function openDialog(id, overrides = {}) {
     h("div", { class: "modal-scrim", onclick: () => close() }),
     dlg);
   popupLayer().append(wrap);
-  stack.push({ wrap, id, onCancel: def.onCancel });
+  const entry = { wrap, id, onCancel: def.onCancel };
+  stack.push(entry);
   emit("overlays");
+  // A live Layer Style sidebar (see `wireStyleList`); the mock's otherwise.
+  if (def.styleList) wireStyleList(grid, def.styleList, () => close(entry, true));
 
   const rect = dlg.getBoundingClientRect();
   dlg.style.marginTop = Math.max(10, (window.innerHeight - rect.height) / 2 - 30) + "px";
@@ -729,10 +732,52 @@ function styleList(f) {
   for (const item of f.items || []) {
     list.append(h("div", {
       class: "style-picker-row" + (item === f.active || (item === "Blending Options: Default" && !f.active) ? " sel" : ""),
+      "data-item": item,
       onclick: (e) => { [...list.children].forEach((c) => c.classList.remove("sel")); e.currentTarget.classList.add("sel"); },
     }, item === "Styles" || item === "Blending Options: Default" ? null : h("span", { class: "style-picker-check" }, icon("i-check", "ic xs")), h("span", { text: item })));
   }
   return list;
+}
+
+/**
+ * Make the Layer Style sidebar real (`spec` from the app's style dialogs):
+ * each effect's box shows whether it is on for the layer and turns it on
+ * or off (`spec.onToggle(name, on)`); a click on a name switches to that
+ * page (`spec.onPick(name)`), keeping what was done on this one (`done`
+ * closes this page without cancelling). The mock-up's list showed every
+ * effect ticked and only moved the highlight.
+ */
+function wireStyleList(grid, spec, done) {
+  const list = grid.querySelector(".style-picker");
+  if (!list) return;
+  for (const old of [...list.children]) {
+    const name = old.dataset.item;
+    if (name === "Styles") { old.remove(); continue; } // style presets: not in the app
+    const row = old.cloneNode(true); // without the mock's listeners
+    old.replaceWith(row);
+    const box = row.querySelector(".style-picker-check");
+    if (box) {
+      box.classList.add("live");
+      const paint = () => {
+        clear(box);
+        if (spec.enabled[name]) box.append(icon("i-check", "ic xs"));
+        box.classList.toggle("on", !!spec.enabled[name]);
+        box.dataset.tip = spec.enabled[name] ? `Turn ${name} off` : `Turn ${name} on`;
+      };
+      paint();
+      box.addEventListener("click", (e) => {
+        e.stopPropagation();
+        spec.enabled[name] = !spec.enabled[name];
+        paint();
+        spec.onToggle(name, spec.enabled[name]);
+      });
+    }
+    row.addEventListener("click", () => {
+      if (row.classList.contains("sel")) return;
+      done();
+      spec.onPick(name);
+    });
+  }
 }
 
 function blendIfField(f) {

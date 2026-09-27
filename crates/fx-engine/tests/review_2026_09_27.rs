@@ -515,3 +515,101 @@ fn a_smart_object_previews_its_source_through_the_box() {
 	assert!(at(50, 20)[3] < 0.01, "nothing left where it was: {:?}", at(50, 20));
 	assert!(at(240, 190)[3] < 0.01, "and nothing past it: {:?}", at(240, 190));
 }
+
+/// Move ▸ Auto-Select (on by default): a click picks the topmost visible layer
+/// that shows a pixel there. Shapes and text were skipped unless their
+/// full-resolution tiles happened to be drawn, Smart Objects and fill layers
+/// always; masks and hidden groups were not taken into account.
+#[test]
+fn a_click_picks_the_topmost_layer_that_shows_a_pixel_there() {
+	let store = store("auto-select");
+	let mut d = doc(512, 512);
+	let solid = |rgba: [u16; 4]| {
+		let mut image = TiledImage::new(512, 512, PixelFormat::Rgba8);
+		for ty in 0..2 {
+			for tx in 0..2 {
+				image.set_slot(tx, ty, TileSlot::Solid(PixelValue(rgba)));
+			}
+		}
+		image
+	};
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(1),
+		"white",
+		LayerKind::Pixel {
+			image: solid([65535; 4]),
+			offset: (0, 0),
+		},
+	)));
+	// A shape whose cache was never drawn.
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(2),
+		"shape",
+		LayerKind::Shape {
+			shape: fx_core::vector::VectorShape::Rect {
+				w: 100.0,
+				h: 100.0,
+				radii: [0.0; 4],
+			},
+			fill: Some(fx_core::vector::Paint::Solid { rgba: [0, 0, 65535, 65535] }),
+			stroke: None,
+			transform: [1.0, 0.0, 0.0, 1.0, 50.0, 50.0],
+			cache: TiledImage::derived(512, 512, PixelFormat::Rgba8),
+		},
+	)));
+	// A Smart Object: a 64 × 64 red source placed at (300, 300).
+	let mut source = TiledImage::new(64, 64, PixelFormat::Rgba8);
+	source.set_slot(0, 0, TileSlot::Solid(PixelValue([65535, 0, 0, 65535])));
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(3),
+		"smart",
+		LayerKind::Smart {
+			smart: fx_core::smart::SmartObject {
+				source: fx_core::smart::SmartSource {
+					doc: Arc::new(doc(64, 64)),
+					composite: source,
+					linked: None,
+					linked_mtime: None,
+					uid: 5,
+				},
+				transform: fx_core::Mapping::translation(300.0, 300.0),
+				filters: vec![],
+				filters_enabled: true,
+			},
+			cache: TiledImage::derived(512, 512, PixelFormat::Rgba8),
+		},
+	)));
+	// A hidden group holding a fill that covers everything.
+	let mut group = Layer::new(
+		LayerId(4),
+		"hidden group",
+		LayerKind::Group {
+			expanded: true,
+			children: vec![Arc::new(Layer::new(LayerId(5), "fill", LayerKind::SolidFill { rgba: [0, 65535, 0, 65535] }))],
+		},
+	);
+	group.visible = false;
+	d.layers.push(Arc::new(group));
+	// On top: blue everywhere, but masked out everywhere.
+	let mut masked = Layer::new(
+		LayerId(6),
+		"masked",
+		LayerKind::Pixel {
+			image: solid([0, 0, 65535, 65535]),
+			offset: (0, 0),
+		},
+	);
+	masked.mask = Some(fx_core::Mask {
+		image: TiledImage::new(512, 512, PixelFormat::Gray8),
+		enabled: true,
+		linked: true,
+		outside_value: 0,
+	});
+	d.layers.push(Arc::new(masked));
+
+	let pick = |x: f64, y: f64| fx_engine::tools::move_tool::layer_at(&d, &store, x, y, false);
+	assert_eq!(pick(100.0, 100.0), Some(LayerId(2)), "the shape, never drawn");
+	assert_eq!(pick(330.0, 330.0), Some(LayerId(3)), "the Smart Object");
+	assert_eq!(pick(10.0, 10.0), Some(LayerId(1)), "below the masked-out layer and the hidden group");
+	assert_eq!(pick(600.0, 10.0), None, "outside the canvas");
+}

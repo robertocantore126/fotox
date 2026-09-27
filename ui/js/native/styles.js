@@ -6,7 +6,7 @@
 // repeated edits into one history step. Cancel sends the styles back as they
 // were.
 
-import { openDialog } from "../dialogs.js";
+import { closeTopDialog, openDialog } from "../dialogs.js";
 import { toast } from "../tooltip.js";
 import { activeLayerInfo, sendCommand } from "./layers-panel.js";
 import { hexToRgba16, rgba16ToHex } from "./tools.js";
@@ -92,62 +92,135 @@ export function isStyleDialog(id) {
   return id in EFFECTS || id === "blending-options" || id === "style-gradient-overlay" || id === "style-pattern-overlay";
 }
 
+/** The Layer Style sidebar's pages: display name → dialog id and styles field. */
+const PAGES = {
+  "Blending Options: Default": { dialog: "blending-options" },
+  "Drop Shadow": { dialog: "style-drop-shadow", field: "drop_shadow" },
+  "Inner Shadow": { dialog: "style-inner-shadow", field: "inner_shadow" },
+  "Outer Glow": { dialog: "style-outer-glow", field: "outer_glow" },
+  "Inner Glow": { dialog: "style-inner-glow", field: "inner_glow" },
+  "Bevel & Emboss": { dialog: "style-bevel", field: "bevel" },
+  "Satin": { dialog: "style-satin", field: "satin" },
+  "Color Overlay": { dialog: "style-color-overlay", field: "color_overlay" },
+  "Gradient Overlay": { dialog: "style-gradient-overlay", field: "gradient_overlay" },
+  "Pattern Overlay": { dialog: "style-pattern-overlay", field: "pattern_overlay" },
+  "Stroke": { dialog: "style-stroke", field: "stroke" },
+};
+const SIDEBAR = ["Styles", ...Object.keys(PAGES)];
+
+/**
+ * One Layer Style dialog, across its pages: the layer, the styles and
+ * blending as the dialog found them (Cancel goes back there, whatever page
+ * it is pressed on) and the styles as they are now (every page builds on
+ * them, so a toggle on one page is not undone by a slider on another).
+ */
+function session(layer) {
+  return {
+    layer,
+    start: layer.styles || null,
+    props: { opacity: layer.opacity, fill: layer.fill, blend: layer.blend },
+    styles: layer.styles || null,
+  };
+}
+
+function send(S, styles) {
+  S.styles = styles;
+  sendCommand({ op: "set_layer_style", layer: { id: S.layer.id }, styles });
+}
+
+function cancel(S) {
+  sendCommand({ op: "set_layer_style", layer: { id: S.layer.id }, styles: S.start });
+  sendCommand({ op: "set_layer_props", layer: { id: S.layer.id }, props: S.props });
+}
+
+/** The sidebar of page `active` (see dialogs.js `wireStyleList`). */
+function sidebar(S) {
+  const enabled = {};
+  for (const [name, page] of Object.entries(PAGES)) {
+    const e = page.field && S.styles && S.styles[page.field];
+    enabled[name] = !!e && e.enabled !== false;
+  }
+  return {
+    enabled,
+    onToggle: (name, on) => {
+      const { field, dialog } = PAGES[name];
+      const e = S.styles && S.styles[field];
+      if (e) send(S, { ...S.styles, [field]: { ...e, enabled: on } });
+      else if (on && EFFECTS[dialog]) send(S, { ...(S.styles || {}), [field]: { ...EFFECTS[dialog].defaults } });
+      // A new gradient or pattern overlay needs its settings: open its page.
+      else if (on) { closeTopDialog(); openPage(dialog, S); }
+    },
+    onPick: (name) => openPage(PAGES[name].dialog, S),
+  };
+}
+
 /** Open a live style dialog for the active layer. */
 export function openStyleDialog(id) {
   const layer = activeLayerInfo();
   if (!layer) { toast("Select a layer first"); return; }
   if (layer.kind === "group" || layer.kind === "adjustment") { toast("Layer styles need a pixel, shape, text or fill layer"); return; }
-  if (id === "blending-options") { blendingOptions(layer); return; }
-  if (id === "style-gradient-overlay") { gradientOverlay(layer); return; }
-  if (id === "style-pattern-overlay") { patternOverlay(layer); return; }
+  openPage(id, session(layer));
+}
+
+function openPage(id, S) {
+  if (id === "blending-options") { blendingOptions(S); return; }
+  if (id === "style-gradient-overlay") { gradientOverlay(S); return; }
+  if (id === "style-pattern-overlay") { patternOverlay(S); return; }
   const spec = EFFECTS[id];
-  const original = layer.styles || null;
-  const effect = (original && original[spec.field]) || spec.defaults;
-  const set = (styles) => sendCommand({ op: "set_layer_style", layer: { id: layer.id }, styles });
-  const withEffect = (values) => ({ ...(original || {}), [spec.field]: spec.fromValues(values, effect) });
+  const layer = S.layer;
+  // Opening an effect's page turns it on, as clicking its name does in Photoshop.
+  const effect = { ...((S.styles && S.styles[spec.field]) || spec.defaults), enabled: true };
+  const current = () => (S.styles && S.styles[spec.field]) || effect;
+  const withEffect = (values) => ({ ...(S.styles || {}), [spec.field]: spec.fromValues(values, current()) });
+  // Show the effect at once, as Photoshop does when the page opens.
+  send(S, withEffect(spec.toValues(effect)));
   openDialog(id, {
     title: `Layer Style — ${layer.name}`,
     values: spec.toValues(effect),
-    onChange: (values) => set(withEffect(values)),
-    onOk: (values) => set(withEffect(values)),
-    onCancel: () => set(original),
+    styleList: sidebar(S),
+    onChange: (values) => send(S, withEffect(values)),
+    onOk: (values) => send(S, withEffect(values)),
+    onCancel: () => cancel(S),
   });
-  // Show the effect at once, as Photoshop does when the dialog opens.
-  set(withEffect(spec.toValues(effect)));
 }
 
-function blendingOptions(layer) {
-  const original = { opacity: layer.opacity, fill: layer.fill, blend: layer.blend };
+function blendingOptions(S) {
+  const layer = S.layer;
   const set = (props) => sendCommand({ op: "set_layer_props", layer: { id: layer.id }, props });
   const from = (v) => ({ opacity: Math.min(1, Math.max(0, v["Opacity:"] / 100)), fill: Math.min(1, Math.max(0, v["Fill Opacity:"] / 100)), blend: blendId(v["Blend Mode:"]) });
   openDialog("blending-options", {
     title: `Layer Style — ${layer.name}`,
     values: { "Blend Mode:": blendLabel(layer.blend), "Opacity:": Math.round(layer.opacity * 100), "Fill Opacity:": Math.round(layer.fill * 100) },
+    styleList: sidebar(S),
     onChange: (v) => set(from(v)),
     onOk: (v) => set(from(v)),
-    onCancel: () => set(original),
+    onCancel: () => cancel(S),
   });
 }
 
 const GRADIENT_STYLES = ["Linear", "Radial", "Angle", "Reflected", "Diamond"];
 
 /** Gradient Overlay (M12-T04). FAST: applied on OK, no live update. */
-function gradientOverlay(layer) {
-  const original = layer.styles || null;
-  const old = original?.gradient_overlay;
+function gradientOverlay(S) {
+  const layer = S.layer;
+  const old = S.styles?.gradient_overlay;
   const work = old ? structuredClone(old.gradient.gradient) : currentGradientResolved();
   openDialog("style-gradient-overlay", {
     title: `Layer Style — ${layer.name}`,
-    width: 460,
+    width: 640,
     fields: [
-      { type: "blend", mode: blendLabel(old?.blend || "normal") },
-      { type: "range", label: "Opacity:", value: Math.round((old?.opacity ?? 1) * 100), min: 0, max: 100 },
-      { type: "element", el: gradientEditor(work) },
-      { type: "select", label: "Style:", options: GRADIENT_STYLES, value: old ? old.gradient.kind[0].toUpperCase() + old.gradient.kind.slice(1) : "Linear" },
-      { type: "num", label: "Angle:", value: old?.gradient.angle ?? 90, unit: "°", w: 60 },
-      { type: "num", label: "Scale:", value: old?.gradient.scale ?? 100, unit: "%", w: 60 },
-      { type: "check", label: "Reverse", value: old?.gradient.reverse ?? false },
+      { type: "stylelist", items: SIDEBAR, active: "Gradient Overlay" },
+      { type: "col", fields: [
+        { type: "blend", mode: blendLabel(old?.blend || "normal") },
+        { type: "range", label: "Opacity:", value: Math.round((old?.opacity ?? 1) * 100), min: 0, max: 100 },
+        { type: "element", el: gradientEditor(work) },
+        { type: "select", label: "Style:", options: GRADIENT_STYLES, value: old ? old.gradient.kind[0].toUpperCase() + old.gradient.kind.slice(1) : "Linear" },
+        { type: "num", label: "Angle:", value: old?.gradient.angle ?? 90, unit: "°", w: 60 },
+        { type: "num", label: "Scale:", value: old?.gradient.scale ?? 100, unit: "%", w: 60 },
+        { type: "check", label: "Reverse", value: old?.gradient.reverse ?? false },
+      ] },
     ],
+    styleList: sidebar(S),
     onOk: (v) => {
       resolveSwatches(work);
       const effect = {
@@ -157,28 +230,35 @@ function gradientOverlay(layer) {
           scale: Math.min(1000, Math.max(1, Number(v["Scale:"]) || 100)), reverse: !!v.Reverse, dither: true, offset: [0, 0],
         },
       };
-      sendCommand({ op: "set_layer_style", layer: { id: layer.id }, styles: { ...(original || {}), gradient_overlay: effect } });
+      send(S, { ...(S.styles || {}), gradient_overlay: effect });
     },
+    onCancel: () => cancel(S),
   });
 }
 
 /** Pattern Overlay (M12-T04). FAST: applied on OK. */
-function patternOverlay(layer) {
-  const original = layer.styles || null;
-  const old = original?.pattern_overlay;
+function patternOverlay(S) {
+  const layer = S.layer;
+  const old = S.styles?.pattern_overlay;
   const selected = { id: old ? old.pattern : currentPattern() };
   openDialog("style-pattern-overlay", {
     title: `Layer Style — ${layer.name}`,
+    width: 620,
     fields: [
-      { type: "blend", mode: blendLabel(old?.blend || "normal") },
-      { type: "range", label: "Opacity:", value: Math.round((old?.opacity ?? 1) * 100), min: 0, max: 100 },
-      { type: "element", el: patternList(selected) },
-      { type: "num", label: "Scale:", value: old?.scale ?? 100, unit: "%", w: 60 },
+      { type: "stylelist", items: SIDEBAR, active: "Pattern Overlay" },
+      { type: "col", fields: [
+        { type: "blend", mode: blendLabel(old?.blend || "normal") },
+        { type: "range", label: "Opacity:", value: Math.round((old?.opacity ?? 1) * 100), min: 0, max: 100 },
+        { type: "element", el: patternList(selected) },
+        { type: "num", label: "Scale:", value: old?.scale ?? 100, unit: "%", w: 60 },
+      ] },
     ],
+    styleList: sidebar(S),
     onOk: (v) => {
       if (selected.id == null) { toast("Pick a pattern (Edit ▸ Define Pattern first)"); return; }
       const effect = { enabled: true, blend: blendId(v["Blend Mode:"]), opacity: (Number(v["Opacity:"]) || 0) / 100, pattern: selected.id, scale: Math.min(1000, Math.max(1, Number(v["Scale:"]) || 100)) };
-      sendCommand({ op: "set_layer_style", layer: { id: layer.id }, styles: { ...(original || {}), pattern_overlay: effect } });
+      send(S, { ...(S.styles || {}), pattern_overlay: effect });
     },
+    onCancel: () => cancel(S),
   });
 }

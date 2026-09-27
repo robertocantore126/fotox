@@ -1789,7 +1789,8 @@ impl Engine {
 	/// The box Move ▸ Show Transform Controls draws (document pixels), when
 	/// that option is on, the Move tool is active and no transform is up.
 	fn transform_controls(&mut self, doc_id: DocId) -> Option<[f64; 4]> {
-		if self.transform.is_some() || self.settings.bool("move", "Show Transform Controls") != Some(true) {
+		// On unless the option bar says off (the app starts with it on).
+		if self.transform.is_some() || self.settings.bool("move", "Show Transform Controls") == Some(false) {
 			return None;
 		}
 		let open = self.docs.get(doc_id)?;

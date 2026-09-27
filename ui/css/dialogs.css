@@ -240,6 +240,10 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .style-picker-row:hover { background: #454545; }
 .style-picker-row.sel { background: var(--bg-popup-hi); color: #fff; }
 .style-picker-check { width: 14px; display: inline-grid; place-items: center; }
+/* The app's sidebar: a real box per effect, ticked when the effect is on. */
+.style-picker-check.live { width: 12px; height: 12px; margin-right: 6px; border: 1px solid #6a6a6a; border-radius: 2px; cursor: pointer; }
+.style-picker-check.live.on { border-color: var(--accent, #4c8dff); }
+.style-picker-check.live:hover { border-color: #aaa; }
 
 .blendif { display: flex; flex-direction: column; gap: 4px; }
 .blendif-row { display: flex; align-items: center; gap: 8px; }

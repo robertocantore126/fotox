@@ -13,9 +13,9 @@ export const optionBars = {
   _default: [{ type: "label", text: "No options for this tool" }],
 
   move: [
-    { type: "toggle", text: "Auto-Select", on: false },
+    { type: "toggle", text: "Auto-Select", on: true },
     { type: "select", key: "Select", options: ["Layer", "Group"], value: "Layer" },
-    { type: "toggle", text: "Show Transform Controls", on: false },
+    { type: "toggle", text: "Show Transform Controls", on: true },
     { type: "gap" },
     // Align / Distribute (M7-T04): the same actions as Layer ▸ Align.
     { type: "btngroup", icons: ["i-shape-rect", "i-props", "i-shape-rect"], titles: ["Align left edges", "Align horizontal centers", "Align right edges"], actions: ["align:left", "align:hcenter", "align:right"] },

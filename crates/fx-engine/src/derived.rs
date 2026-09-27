@@ -32,6 +32,36 @@ use rayon::prelude::*;
 /// dropped in between.
 const MAX_ROUNDS: usize = 8;
 
+/// The alpha (`0..=1`) layer `id` shows on its own at document point `(x, y)`:
+/// its content through its masks, at full opacity, Normal, without styles —
+/// what a click on the canvas picks (Move ▸ Auto-Select). The derived tiles
+/// of the one tile read (shape, text, Smart Object, fill) are drawn for it.
+pub fn alpha_at(doc: &Document, store: &TileStore, id: LayerId, x: f64, y: f64) -> f64 {
+	if !(x >= 0.0 && y >= 0.0 && x < f64::from(doc.width) && y < f64::from(doc.height)) {
+		return 0.0;
+	}
+	let Some(layer) = doc.layer(id) else { return 0.0 };
+	let mut layer = layer.clone();
+	layer.visible = true;
+	layer.opacity = 1.0;
+	layer.fill = 1.0;
+	layer.blend = fx_core::BlendMode::Normal;
+	layer.clipped = false;
+	layer.styles = None;
+	layer.effects = Vec::new();
+	let mut solo = doc.clone();
+	solo.layers = vec![Arc::new(layer)];
+	let t = fx_tiles::TILE_SIZE;
+	let (px, py) = (x as u32, y as u32);
+	match render_tiles(&mut solo, store, 0, &[(px / t, py / t)], &mut LutCache::default()) {
+		Ok(rendered) => rendered
+			.first()
+			.and_then(|r| r.pixels.as_ref())
+			.map_or(0.0, |p| p[((py % t) * t + px % t) as usize][3]),
+		Err(_) => 0.0,
+	}
+}
+
 /// Layer `id`'s own content (as Rasterize keeps it) as an ordinary stored
 /// image at the canvas origin: a shape or text layer drawn from its geometry
 /// tile by tile, into tiles the trim cannot drop (code review 2026-09-27
