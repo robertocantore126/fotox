@@ -30,7 +30,7 @@ use crate::ops::{FilterParams, PixelOps};
 use crate::pixels::Placed;
 use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
-use crate::text::{TextContent, TextRun};
+use crate::text::TextContent;
 use crate::transform::{Anchor9, Filter, Mapping, Permutation, dest_rect};
 use crate::vector::{Paint, StrokeStyle, VectorShape, document_box, grow_box};
 
@@ -2141,8 +2141,16 @@ fn assign_profile(doc: &mut Document, profile: &ColorProfile) -> Result<CommandE
 	})
 }
 
-/// `ConvertProfile` (M4-T03): the pixels of every pixel layer and the colour
-/// of every solid fill, converted; then the document's profile.
+/// `ConvertProfile` (M4-T03): every colour of the document converted, then
+/// the document's profile. Code review 2026-09-27 R10: the match over layer
+/// kinds is exhaustive, so a new kind must decide what it converts.
+///
+/// * pixels: pixel layers, Smart Object composites (and their nested
+///   documents), the document's patterns;
+/// * parameters: solid fills, shape paints, text runs, gradient fills, layer
+///   style colours, artboard backgrounds; derived caches are redrawn;
+/// * not converted: adjustment parameters (operations, not colours), masks
+///   and alpha channels (grey coverage).
 fn convert_profile(
 	doc: &mut Document,
 	profile: &ColorProfile,
@@ -2159,108 +2167,69 @@ fn convert_profile(
 		bpc,
 	};
 	// Compute everything first (all or nothing), then install.
-	let mut converted: Vec<(LayerId, LayerKind)> = Vec::new();
-	let mut failure = None;
-	doc.walk(|layer, _| {
-		if failure.is_some() {
-			return;
-		}
-		let kind = match &layer.kind {
-			LayerKind::Pixel { image, offset } => ops
-				.convert(image, &conversion, ctx.tiles)
-				.map(|image| LayerKind::Pixel { image, offset: *offset }),
-			LayerKind::SolidFill { rgba } => ops.convert_color(*rgba, &conversion).map(|rgba| LayerKind::SolidFill { rgba }),
-			// A shape's own colours convert with it; the cache is redrawn from
-			// the new geometry afterwards (M6-T06).
-			LayerKind::Shape {
-				shape,
-				fill,
-				stroke,
-				transform,
-				cache,
-			} => {
-				let fill = match fill {
-					Some(paint) => match ops.convert_color(paint.rgba(), &conversion) {
-						Ok(rgba) => Some(Paint::Solid { rgba }),
-						Err(error) => {
-							failure = Some(error);
-							return;
-						}
-					},
-					None => None,
-				};
-				let stroke = match stroke {
-					Some(style) => match ops.convert_color(style.paint.rgba(), &conversion) {
-						Ok(rgba) => Some(StrokeStyle {
-							paint: Paint::Solid { rgba },
-							..style.clone()
-						}),
-						Err(error) => {
-							failure = Some(error);
-							return;
-						}
-					},
-					None => None,
-				};
-				let mut cache = cache.clone();
-				cache.mark_all_dirty();
-				Ok(LayerKind::Shape {
-					shape: shape.clone(),
-					fill,
-					stroke,
-					transform: *transform,
-					cache,
-				})
-			}
-			// A text layer's runs carry its colours; they convert with the
-			// document and the cache is redrawn from them (M6-T07).
-			LayerKind::Text {
-				text,
-				runs,
-				frame,
-				align,
-				antialias,
-				transform,
-				warp,
-				cache,
-			} => {
-				let mut converted = Vec::with_capacity(runs.len());
-				for run in runs {
-					match ops.convert_color(run.color, &conversion) {
-						Ok(color) => converted.push(TextRun { color, ..run.clone() }),
-						Err(error) => {
-							failure = Some(error);
-							return;
-						}
-					}
-				}
-				let mut cache = cache.clone();
-				cache.mark_all_dirty();
-				Ok(LayerKind::Text {
-					text: text.clone(),
-					runs: converted,
-					frame: *frame,
-					align: *align,
-					antialias: *antialias,
-					transform: *transform,
-					warp: *warp,
-					cache,
-				})
-			}
-			_ => return,
+	let mut ids = Vec::new();
+	doc.walk(|layer, _| ids.push(layer.id));
+	let mut patches: Vec<(LayerId, Layer)> = Vec::with_capacity(ids.len());
+	for id in ids {
+		let layer = doc.layer(id).expect("walked layer exists");
+		// A group's children are converted on their own: patch only the
+		// group's own fields (a clone of the group would bring stale children).
+		let mut patched = if let LayerKind::Group { .. } = layer.kind {
+			let mut own = Layer::new(layer.id, String::new(), LayerKind::Group {
+				expanded: false,
+				children: Vec::new(),
+			});
+			own.styles = layer.styles.clone();
+			own.effects = layer.effects.clone();
+			own.artboard = layer.artboard.clone();
+			own
+		} else {
+			layer.clone()
 		};
-		match kind {
-			Ok(kind) => converted.push((layer.id, kind)),
-			Err(error) => failure = Some(error),
+		// Parameter colours: gathered, converted in one batch, written back.
+		let mut colors = Vec::new();
+		visit_layer_colors(&mut patched, &mut |c| colors.push(*c));
+		if !colors.is_empty() {
+			ops.convert_colors(&mut colors, &conversion)?;
+			let mut converted = colors.into_iter();
+			visit_layer_colors(&mut patched, &mut |c| *c = converted.next().expect("same walk"));
 		}
-	});
-	if let Some(error) = failure {
-		return Err(error);
+		match &mut patched.kind {
+			LayerKind::Pixel { image, .. } => *image = ops.convert(image, &conversion, ctx.tiles)?,
+			LayerKind::Smart { smart, cache } => {
+				smart.source.composite = ops.convert(&smart.source.composite, &conversion, ctx.tiles)?;
+				let mut nested = (*smart.source.doc).clone();
+				convert_profile(&mut nested, profile, intent, bpc, ctx)?;
+				smart.source.doc = Arc::new(nested);
+				cache.mark_all_dirty();
+			}
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => cache.mark_all_dirty(),
+			LayerKind::SolidFill { .. } | LayerKind::Adjustment(_) | LayerKind::Group { .. } => {}
+		}
+		for effect in &mut patched.effects {
+			effect.mark_all_dirty();
+		}
+		patches.push((id, patched));
 	}
-	let changed: Vec<LayerId> = converted.iter().map(|(id, _)| *id).collect();
-	for (id, kind) in converted {
-		doc.layer_mut(id).expect("walked layer exists").kind = kind;
+	let mut patterns = doc.patterns.clone();
+	for pattern in &mut patterns {
+		let mut pixels = (*pattern.pixels).clone();
+		ops.convert_colors(&mut pixels, &conversion)?;
+		// The id stays: layers and styles refer to the pattern by it.
+		pattern.pixels = Arc::new(pixels);
 	}
+	let mut changed = Vec::with_capacity(patches.len());
+	for (id, patched) in patches {
+		let layer = doc.layer_mut(id).expect("walked layer exists");
+		if !matches!(patched.kind, LayerKind::Group { .. }) {
+			layer.kind = patched.kind;
+		}
+		layer.styles = patched.styles;
+		layer.effects = patched.effects;
+		layer.artboard = patched.artboard;
+		changed.push(id);
+	}
+	doc.patterns = patterns;
 	doc.color.profile = profile.clone();
 	Ok(CommandEffect {
 		label: "Convert to Profile".into(),
@@ -2268,6 +2237,101 @@ fn convert_profile(
 		props_changed: doc.panel_order(),
 		..Default::default()
 	})
+}
+
+/// Every colour a layer's own parameters carry — its kind's, its styles',
+/// its artboard's — in a fixed order, as straight RGBA16 (a gradient stop's
+/// float RGB round-trips through it).
+fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
+	fn gradient(g: &mut crate::gradient::Gradient, f: &mut dyn FnMut(&mut [u16; 4])) {
+		for stop in &mut g.colors {
+			let mut c = [0, 0, 0, u16::MAX];
+			for i in 0..3 {
+				c[i] = (stop.color[i].clamp(0.0, 1.0) * 65535.0).round() as u16;
+			}
+			let before = c;
+			f(&mut c);
+			if c != before {
+				for i in 0..3 {
+					stop.color[i] = f32::from(c[i]) / 65535.0;
+				}
+			}
+		}
+	}
+	match &mut layer.kind {
+		LayerKind::SolidFill { rgba } => f(rgba),
+		LayerKind::Shape { fill, stroke, .. } => {
+			if let Some(Paint::Solid { rgba }) = fill {
+				f(rgba);
+			}
+			if let Some(StrokeStyle {
+				paint: Paint::Solid { rgba },
+				..
+			}) = stroke
+			{
+				f(rgba);
+			}
+		}
+		LayerKind::Text { runs, .. } => {
+			for run in runs {
+				f(&mut run.color);
+			}
+		}
+		LayerKind::FillLayer { content, .. } => match content {
+			crate::fill::FillLayer::Gradient(g) => gradient(&mut g.gradient, f),
+			// The pattern's pixels are converted with the document's patterns.
+			crate::fill::FillLayer::Pattern { .. } => {}
+		},
+		// Pixels (converted as images), groups (their children are walked on
+		// their own), adjustments (operations on whatever is below, not
+		// colours) and Smart Objects (their composite and nested document).
+		LayerKind::Pixel { .. } | LayerKind::Group { .. } | LayerKind::Adjustment(_) | LayerKind::Smart { .. } => {}
+	}
+	if let Some(styles) = &mut layer.styles {
+		let crate::styles::LayerStyles {
+			drop_shadow,
+			outer_glow,
+			inner_shadow,
+			color_overlay,
+			stroke,
+			bevel,
+			inner_glow,
+			satin,
+			gradient_overlay,
+			pattern_overlay: _,
+		} = styles;
+		if let Some(e) = drop_shadow {
+			f(&mut e.color);
+		}
+		if let Some(e) = outer_glow {
+			f(&mut e.color);
+		}
+		if let Some(e) = inner_shadow {
+			f(&mut e.color);
+		}
+		if let Some(e) = color_overlay {
+			f(&mut e.color);
+		}
+		if let Some(e) = stroke {
+			f(&mut e.color);
+		}
+		if let Some(e) = bevel {
+			f(&mut e.highlight_color);
+			f(&mut e.shadow_color);
+		}
+		if let Some(e) = inner_glow {
+			f(&mut e.color);
+		}
+		if let Some(e) = satin {
+			f(&mut e.color);
+		}
+		if let Some(e) = gradient_overlay {
+			gradient(&mut e.gradient.gradient, f);
+		}
+	}
+	if let Some(background) = layer.artboard.as_mut().and_then(|a| a.background.as_mut()) {
+		f(background);
+	}
 }
 
 fn delete_mask_effect(id: LayerId, pixels_changed: bool) -> CommandEffect {
@@ -5201,6 +5265,126 @@ mod tests {
 		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [300, 200, 100, 65535] }));
 		f.history.undo(&mut f.doc);
 		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998, "undo restores the profile");
+	}
+
+	/// Code review 2026-09-27 R10: Convert to Profile skipped gradient fills,
+	/// styles, artboards, patterns and Smart Objects while still changing the
+	/// document's profile. `FakeOps` "converts" by swapping red and blue.
+	#[test]
+	fn convert_to_profile_reaches_every_colour_bearing_kind() {
+		let mut f = Fixture::new();
+		f.ok(Command::AssignProfile {
+			profile: ColorProfile::AdobeRgb1998,
+		});
+		let c = [100, 200, 300, 65535];
+		let swapped = [300, 200, 100, 65535];
+		let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+		// A gradient fill.
+		let gradient_id = f.doc.allocate_layer_id();
+		let gradient = crate::gradient::GradientLayer {
+			gradient: crate::gradient::Gradient::two([0.25, 0.5, 0.75], [1.0, 0.0, 0.0]),
+			kind: crate::gradient::GradientKind::Linear,
+			angle: 0.0,
+			scale: 100.0,
+			reverse: false,
+			dither: false,
+			offset: (0.0, 0.0),
+		};
+		let gradient_layer = Layer::new(
+			gradient_id,
+			"Gradient",
+			LayerKind::FillLayer {
+				content: crate::fill::FillLayer::Gradient(gradient),
+				cache: TiledImage::derived(w, h, format),
+			},
+		);
+		// An artboard group with a drop shadow, holding a solid fill.
+		let child = f.doc.allocate_layer_id();
+		let group_id = f.doc.allocate_layer_id();
+		let mut group = Layer::new(
+			group_id,
+			"Artboard",
+			LayerKind::Group {
+				expanded: true,
+				children: vec![Arc::new(Layer::new(child, "Fill", LayerKind::SolidFill { rgba: c }))],
+			},
+		);
+		group.artboard = Some(crate::layer::Artboard {
+			rect: (0, 0, 10, 10),
+			background: Some(c),
+		});
+		group.styles = Some(crate::styles::LayerStyles {
+			drop_shadow: Some(crate::styles::DropShadow {
+				color: c,
+				..Default::default()
+			}),
+			..Default::default()
+		});
+		group.effects = crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+		// A Smart Object whose nested document has a solid fill.
+		let mut nested = Document::new(
+			10,
+			10,
+			DocumentColor {
+				depth: BitDepth::U16,
+				profile: ColorProfile::AdobeRgb1998,
+			},
+			72.0,
+		);
+		let nested_fill = nested.allocate_layer_id();
+		nested.layers.push(Arc::new(Layer::new(nested_fill, "Inner", LayerKind::SolidFill { rgba: c })));
+		let smart_id = f.doc.allocate_layer_id();
+		let smart = Layer::new(
+			smart_id,
+			"Smart",
+			LayerKind::Smart {
+				smart: crate::smart::SmartObject {
+					source: crate::smart::SmartSource {
+						doc: Arc::new(nested),
+						composite: TiledImage::new(10, 10, format),
+						linked: None,
+						linked_mtime: None,
+						uid: 1,
+					},
+					transform: Mapping::identity(),
+					filters: Vec::new(),
+					filters_enabled: true,
+				},
+				cache: TiledImage::derived(w, h, format),
+			},
+		);
+		f.doc.layers.extend([Arc::new(gradient_layer), Arc::new(group), Arc::new(smart)]);
+		f.doc.patterns.push(crate::pattern::Pattern::new("dots", 1, 1, vec![c]));
+		let pattern_id = f.doc.patterns[0].id;
+
+		f.ok_with_ops(Command::ConvertProfile {
+			profile: ColorProfile::Srgb,
+			intent: RenderingIntent::RelativeColorimetric,
+			bpc: true,
+		});
+		let LayerKind::FillLayer {
+			content: crate::fill::FillLayer::Gradient(g),
+			..
+		} = &f.doc.layer(gradient_id).unwrap().kind
+		else {
+			panic!("a gradient fill")
+		};
+		assert_eq!(g.gradient.colors[0].color, [0.75, 0.5, 0.25].map(|v: f32| f32::from((v * 65535.0).round() as u16) / 65535.0));
+		let group = f.doc.layer(group_id).unwrap();
+		assert_eq!(group.artboard.as_ref().unwrap().background, Some(swapped));
+		assert_eq!(group.styles.as_ref().unwrap().drop_shadow.as_ref().unwrap().color, swapped);
+		assert_eq!(group.effects.len(), crate::styles::EffectKind::ALL.len(), "the effect caches stay");
+		assert!(
+			matches!(f.doc.layer(child).unwrap().kind, LayerKind::SolidFill { rgba } if rgba == swapped),
+			"a group's child is converted once"
+		);
+		let LayerKind::Smart { smart, .. } = &f.doc.layer(smart_id).unwrap().kind else {
+			panic!("a smart object")
+		};
+		assert_eq!(smart.source.doc.color.profile, ColorProfile::Srgb);
+		assert!(matches!(smart.source.doc.layer(nested_fill).unwrap().kind, LayerKind::SolidFill { rgba } if rgba == swapped));
+		assert_eq!(f.doc.patterns[0].id, pattern_id, "layers refer to the pattern by id");
+		assert_eq!(f.doc.patterns[0].pixels[0], swapped);
 	}
 
 	// -----------------------------------------------------------------------

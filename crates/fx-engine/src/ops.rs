@@ -201,6 +201,14 @@ impl PixelOps for EngineOps {
 		Ok(px[0])
 	}
 
+	fn convert_colors(&self, colors: &mut [[u16; 4]], conversion: &Conversion<'_>) -> Result<(), CommandError> {
+		if colors.is_empty() {
+			return Ok(());
+		}
+		rgb_transform(conversion)?.apply(colors);
+		Ok(())
+	}
+
 	fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, anti_alias: bool, store: &TileStore) -> Result<Selection, CommandError> {
 		fx_ops::raster::rasterise(shape, size, depth, anti_alias, store)
 	}

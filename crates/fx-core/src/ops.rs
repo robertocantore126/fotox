@@ -191,6 +191,15 @@ pub trait PixelOps: Send + Sync {
 	/// One straight RGBA16 colour converted (solid fill layers).
 	fn convert_color(&self, rgba: [u16; 4], conversion: &Conversion<'_>) -> Result<[u16; 4], CommandError>;
 
+	/// Many straight RGBA16 colours converted in place (a layer's parameters,
+	/// a pattern's pixels). The engine builds one transform for all of them.
+	fn convert_colors(&self, colors: &mut [[u16; 4]], conversion: &Conversion<'_>) -> Result<(), CommandError> {
+		for color in colors {
+			*color = self.convert_color(*color, conversion)?;
+		}
+		Ok(())
+	}
+
 	/// Rasterise `shape` (document pixels, fractional coordinates allowed)
 	/// into a fresh selection coverage image (M5-T03). `anti_alias` off makes
 	/// coverage ≥ 0.5 opaque, 0 otherwise. The result selects nothing when the
