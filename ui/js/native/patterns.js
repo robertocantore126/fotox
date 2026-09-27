@@ -132,7 +132,7 @@ export function openPatternFillDialog(edit = false) {
     ],
     onOk: (v) => {
       if (selected.id == null) return;
-      const content = { fill: "pattern", pattern: selected.id, scale: Math.min(1000, Math.max(1, Number(v["Scale:"]) || 100)), angle: Number(v["Angle:"]) || 0 };
+      const content = { ...(old || {}), fill: "pattern", pattern: selected.id, scale: Math.min(1000, Math.max(1, Number(v["Scale:"]) || 100)), angle: Number(v["Angle:"]) || 0 };
       if (old) sendCommand({ op: "set_fill_layer", layer: { id: activeLayerId() }, content });
       else sendCommand({ op: "add_layer", layer: { fill: { content } }, name: null });
     },

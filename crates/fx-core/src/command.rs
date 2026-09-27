@@ -5292,6 +5292,132 @@ mod tests {
 
 	/// Code review 2026-09-27 R10: Convert to Profile skipped gradient fills,
 	/// styles, artboards, patterns and Smart Objects while still changing the
+	/// Code review 2026-09-27 R03: a Smart Object with a Free Transform warp
+	/// follows the canvas (an affine map of a Bézier patch is the patch of
+	/// its moved control points); a Liquify geometry is never kept.
+	#[test]
+	fn a_warped_smart_object_follows_the_canvas() {
+		use crate::transform::BezierPatch;
+		let mut patch = BezierPatch::identity(40, 20);
+		patch.set_point(1, 2, 31.0, 3.0);
+		let flip = Mapping::affine(-1.0, 0.0, 0.0, 1.0, 400.0, 0.0);
+		let Some(Mapping::Warp(moved)) = m12::compose(flip, Mapping::Warp(patch)) else {
+			panic!("a flip of a warp is a warp")
+		};
+		for (p, q) in patch.points.iter().zip(moved.points) {
+			assert_eq!(q, [400.0 - p[0], p[1]]);
+		}
+		assert_eq!(moved.src_rect, patch.src_rect);
+		// A warp after a scale and a move reads the pulled-back rectangle.
+		let Some(Mapping::Warp(over)) = m12::compose(Mapping::Warp(patch), Mapping::affine(2.0, 0.0, 0.0, 4.0, 10.0, 20.0)) else {
+			panic!("a warp over an axis-aligned scale is a warp")
+		};
+		assert_eq!(over.src_rect, [-5.0, -5.0, 15.0, 0.0]);
+		assert!(m12::compose(Mapping::Warp(patch), Mapping::rotation_about(0.3, 0.0, 0.0)).is_none());
+		let custom = Mapping::Custom {
+			id: 1,
+			src: [0.0; 2],
+			dst: [0.0; 2],
+		};
+		assert!(m12::compose(custom, Mapping::identity()).is_none());
+		assert!(m12::compose(Mapping::identity(), custom).is_none());
+
+		// Through the command: Flip Canvas moves the Smart Object's warp.
+		let mut f = Fixture::new();
+		let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+		let nested = Document::new(40, 20, f.doc.color.clone(), 72.0);
+		let id = f.doc.allocate_layer_id();
+		f.doc.layers.push(Arc::new(Layer::new(
+			id,
+			"Smart",
+			LayerKind::Smart {
+				smart: crate::smart::SmartObject {
+					source: crate::smart::SmartSource {
+						doc: Arc::new(nested),
+						composite: TiledImage::new(40, 20, format),
+						linked: None,
+						linked_mtime: None,
+						uid: 1,
+					},
+					transform: Mapping::Warp(patch),
+					filters: Vec::new(),
+					filters_enabled: true,
+				},
+				cache: TiledImage::derived(w, h, format),
+			},
+		)));
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		let LayerKind::Smart { smart, .. } = &f.doc.layer(id).expect("layer").kind else {
+			panic!("not a Smart Object")
+		};
+		assert_eq!(smart.transform, Mapping::Warp(moved));
+	}
+
+	/// Code review 2026-09-27 R03: a pattern fill follows flips, turns and
+	/// Canvas Size — the colour at every mapped point is the colour the point
+	/// had before.
+	#[test]
+	fn a_pattern_fill_follows_the_canvas() {
+		let mut f = Fixture::new();
+		let pixels: Vec<[u16; 4]> = (0..6u16).map(|i| [i * 10_000, 65_535 - i * 9_000, (i * 7_919) % 5 * 13_000, 65_535]).collect();
+		let pattern = crate::pattern::Pattern::new("P", 3, 2, pixels);
+		let pid = pattern.id;
+		f.doc.patterns.push(pattern);
+		let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+		let id = f.doc.allocate_layer_id();
+		f.doc.layers.push(Arc::new(Layer::new(
+			id,
+			"Pattern",
+			LayerKind::FillLayer {
+				content: crate::fill::FillLayer::Pattern {
+					pattern: pid,
+					scale: 170.0,
+					angle: 23.0,
+					origin: [0.0, 0.0],
+					mirror: false,
+				},
+				cache: TiledImage::derived(w, h, format),
+			},
+		)));
+		let color = |doc: &Document, (x, y): (f64, f64)| {
+			let LayerKind::FillLayer { content, .. } = &doc.layer(id).expect("layer").kind else {
+				panic!("not a fill layer")
+			};
+			content.color_at(None, doc.patterns.first(), x, y, 0, 0)
+		};
+		let points = [(10.3, 7.9), (200.5, 150.5), (399.2, 0.4), (123.0, 287.6), (57.7, 31.1)];
+		let mut expected: Vec<[f64; 4]> = points.iter().map(|p| color(&f.doc, *p)).collect();
+		// Each step: the command and where it sends a point of the canvas before.
+		let steps: Vec<(Command, Box<dyn Fn((f64, f64), (f64, f64)) -> (f64, f64)>)> = vec![
+			(Command::FlipCanvas { horizontal: true }, Box::new(|(x, y), (w, _)| (w - x, y))),
+			(Command::RotateCanvas { quarter_turns: 1 }, Box::new(|(x, y), (_, h)| (h - y, x))),
+			(Command::FlipCanvas { horizontal: false }, Box::new(|(x, y), (_, h)| (x, h - y))),
+			(
+				Command::CanvasSize {
+					width: 360,
+					height: 480,
+					anchor: Anchor9::Center,
+				},
+				Box::new(|(x, y), _| (x + 30.0, y + 40.0)),
+			),
+		];
+		let mut at: Vec<(f64, f64)> = points.to_vec();
+		for (command, map) in steps {
+			let size = (f64::from(f.doc.width), f64::from(f.doc.height));
+			f.ok_with_ops(command.clone());
+			for (i, p) in at.iter_mut().enumerate() {
+				*p = map(*p, size);
+				let got = color(&f.doc, *p);
+				assert!(
+					got.iter().zip(expected[i]).all(|(a, b)| (a - b).abs() < 1e-6),
+					"after {command:?}: point {i} at {p:?} is {got:?}, was {:?}",
+					expected[i]
+				);
+			}
+			expected = at.iter().map(|p| color(&f.doc, *p)).collect();
+		}
+	}
+
 	/// document's profile. `FakeOps` "converts" by swapping red and blue.
 	#[test]
 	fn convert_to_profile_reaches_every_colour_bearing_kind() {

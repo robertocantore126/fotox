@@ -109,13 +109,32 @@ impl SpacePlan {
 							g.angle = angle(g.angle);
 							crate::fill::FillLayer::Gradient(g)
 						}
-						// Anchored at the canvas origin with no offset of its
-						// own: only the turn and the scale can follow.
-						crate::fill::FillLayer::Pattern { pattern, scale: s, angle: a } => crate::fill::FillLayer::Pattern {
-							pattern: *pattern,
-							scale: s * scale,
-							angle: angle(*a),
-						},
+						// Pattern space → document space is `origin + M·p`; the
+						// canvas mapping `L·x + t` makes it `L·origin + t + L·M·p`
+						// (exact for turns, flips and uniform scales).
+						crate::fill::FillLayer::Pattern {
+							pattern,
+							scale: s,
+							angle: a,
+							origin,
+							mirror,
+						} => {
+							let (scale, angle, mirror) = match lin {
+								Some([la, lb, lc, ld]) => {
+									let [ma, mb, mc, md] = crate::fill::pattern_matrix(*s, *a, *mirror);
+									crate::fill::pattern_parameters([la * ma + lc * mb, lb * ma + ld * mb, la * mc + lc * md, lb * mc + ld * md])
+								}
+								None => (*s, *a, *mirror),
+							};
+							let origin = point(&mapping, (origin[0], origin[1]));
+							crate::fill::FillLayer::Pattern {
+								pattern: *pattern,
+								scale,
+								angle,
+								origin: [origin.0, origin.1],
+								mirror,
+							}
+						}
 					};
 					let mut cache = cache.clone();
 					cache.mark_all_dirty();

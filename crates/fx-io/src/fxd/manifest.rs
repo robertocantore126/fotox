@@ -506,6 +506,11 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.annotations = manifest.annotations.clone();
 	doc.work_path = manifest.work_path.clone();
 	doc.paths = manifest.paths.clone();
+	for state in manifest.comps.iter().flat_map(|c| &c.states) {
+		if let Some(mapping) = state.mapping {
+			check_stored_mapping(mapping)?;
+		}
+	}
 	doc.comps = manifest.comps.clone();
 	doc.active_comp = manifest.active_comp;
 	doc.slices = manifest.slices.clone();
@@ -579,6 +584,10 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			filters_enabled,
 		} => LayerKind::Smart {
 			smart: fx_core::smart::SmartObject {
+				transform: {
+					check_stored_mapping(*transform)?;
+					*transform
+				},
 				source: fx_core::smart::SmartSource {
 					doc: Arc::new(from_manifest(source, file, store)?),
 					composite: image_as(composite, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store)?,
@@ -586,7 +595,6 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 					linked_mtime: *linked_mtime,
 					uid: *uid,
 				},
-				transform: *transform,
 				filters: filters.clone(),
 				filters_enabled: *filters_enabled,
 			},
@@ -643,6 +651,21 @@ fn image_as(entry: &ImageEntry, formats: &[PixelFormat], file: &Arc<FxdFile>, st
 /// Check a stored image before anything is built from it: the file is
 /// untrusted, and `TiledImage` asserts on a zero size, a level or a tile
 /// outside its pyramid (code review 2026-09-27 R09).
+/// A Smart Object or layer-comp transform read from a file. A custom mapping
+/// names geometry in a session-only registry (`fx_core::warp_map`): an id in
+/// a file would pick up whatever this session registered under it.
+fn check_stored_mapping(mapping: fx_core::Mapping) -> Result<(), IoError> {
+	if matches!(mapping, fx_core::Mapping::Custom { .. }) {
+		return Err(IoError::Decode(
+			"a Smart Object transform names a Liquify or Puppet Warp geometry, which a file cannot hold".into(),
+		));
+	}
+	if !mapping.is_finite() {
+		return Err(IoError::Decode("a Smart Object transform is not finite".into()));
+	}
+	Ok(())
+}
+
 fn check_image_entry(entry: &ImageEntry) -> Result<(), IoError> {
 	if entry.width == 0 || entry.height == 0 {
 		return Err(IoError::Decode(format!("an image is {}×{} px", entry.width, entry.height)));
@@ -1477,5 +1500,21 @@ mod tests {
 		] {
 			assert!(check_image_entry(&bad).is_err(), "{why}");
 		}
+	}
+
+	/// A Liquify / Puppet Warp id means nothing outside the session that
+	/// registered it: a file naming one is refused.
+	#[test]
+	fn a_stored_custom_mapping_is_refused() {
+		use fx_core::Mapping;
+		assert!(super::check_stored_mapping(Mapping::identity()).is_ok());
+		assert!(super::check_stored_mapping(Mapping::Warp(fx_core::transform::BezierPatch::identity(10, 10))).is_ok());
+		let custom = Mapping::Custom {
+			id: 1,
+			src: [0.0; 2],
+			dst: [0.0; 2],
+		};
+		assert!(super::check_stored_mapping(custom).is_err());
+		assert!(super::check_stored_mapping(Mapping::Affine([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0])).is_err());
 	}
 }

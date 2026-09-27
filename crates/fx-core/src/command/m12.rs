@@ -3,9 +3,18 @@
 use super::*;
 use crate::smart::{SmartFilter, SmartObject, SmartSource, new_uid};
 
-/// `outer ∘ inner` for affine / projective mappings (`None` for a warp or a
-/// custom mesh: FAST, those are refused on a Smart Object).
+/// `outer ∘ inner`, when one mapping can hold it exactly: affine and
+/// projective mappings multiply; an affine map moves a warp's control points
+/// (a Bézier patch stays one under an affine map); a warp over an
+/// axis-aligned scale and translation takes them into its source rectangle.
+/// `None` otherwise: a projective map of a warp, a warp over a turn, and any
+/// custom mapping (Liquify, Puppet Warp: their geometry lives in a
+/// session-only registry of [`crate::warp_map::KEEP`] entries, so a Smart
+/// Object must not keep one).
 pub fn compose(outer: Mapping, inner: Mapping) -> Option<Mapping> {
+	if let Some(composed) = compose_warp(outer, inner) {
+		return composed;
+	}
 	fn matrix(m: Mapping) -> Option<[f64; 9]> {
 		match m {
 			Mapping::Affine([a, b, c, d, e, f]) => Some([a, c, e, b, d, f, 0.0, 0.0, 1.0]),
@@ -25,6 +34,34 @@ pub fn compose(outer: Mapping, inner: Mapping) -> Option<Mapping> {
 		return Some(Mapping::Affine([m[0] / s, m[3] / s, m[1] / s, m[4] / s, m[2] / s, m[5] / s]));
 	}
 	Some(Mapping::Projective(m))
+}
+
+/// [`compose`] when either side is not a matrix: `Some(result)` when that
+/// case is decided here, `None` for two matrices.
+fn compose_warp(outer: Mapping, inner: Mapping) -> Option<Option<Mapping>> {
+	let composed = match (outer, inner) {
+		(Mapping::Affine(_) | Mapping::Projective(_), Mapping::Affine(_) | Mapping::Projective(_)) => return None,
+		(Mapping::Custom { .. }, _) | (_, Mapping::Custom { .. }) => None,
+		(Mapping::Warp(mut patch), Mapping::Affine([a, b, c, d, e, f])) if b == 0.0 && c == 0.0 && a > 0.0 && d > 0.0 => {
+			// The patch reads its parameters from `src_rect`: the scale and
+			// translation first are the rectangle pulled back through them.
+			let r = patch.src_rect;
+			patch.src_rect = [(r[0] - e) / a, (r[1] - f) / d, (r[2] - e) / a, (r[3] - f) / d];
+			Some(Mapping::Warp(patch))
+		}
+		(Mapping::Affine(_), Mapping::Warp(mut patch)) => {
+			let mut moved = true;
+			for p in &mut patch.points {
+				match outer.forward_point(p[0], p[1]) {
+					Some(q) => *p = [q.0, q.1],
+					None => moved = false,
+				}
+			}
+			moved.then_some(Mapping::Warp(patch))
+		}
+		_ => None,
+	};
+	Some(composed)
 }
 
 /// A Smart Object layer around `source` (identity transform).

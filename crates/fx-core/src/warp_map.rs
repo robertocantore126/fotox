@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// How many registered geometries are kept.
-const KEEP: usize = 48;
+pub const KEEP: usize = 48;
 /// Nodes per chunk side of a displacement field.
 pub const CHUNK: i32 = 64;
 
