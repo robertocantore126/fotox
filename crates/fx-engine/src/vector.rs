@@ -60,9 +60,12 @@ pub(crate) fn slot_for(buffer: TileBuffer, format: PixelFormat, store: &TileStor
 /// shape layer of `doc`) that are still dirty, so a reader that looks at the
 /// document as a whole sees the shapes' pixels (M6-T06).
 ///
-/// The viewport only ever asks for the tiles it displays, but merge, flatten,
-/// crop, rotate, export, copy and rasterise read level 0 of layers the view may
-/// never have shown. Returns how many tiles were drawn.
+/// The viewport only ever asks for the tiles it displays. Whole-document
+/// readers (merge, flatten, export, copy, rasterise, pixel jobs) no longer
+/// call this: they composite through [`crate::derived`], which computes the
+/// derived tiles each output tile reads and holds them while it renders. What
+/// is left is a reader of one layer's raw cache (the Free Transform preview of
+/// a Smart Object). Returns how many tiles were drawn.
 ///
 /// Code review 2026-09-27 R06: tiles the trim dropped count as missing too,
 /// and the tiles are drawn [`PREPARE_BATCH`] at a time, each batch stored

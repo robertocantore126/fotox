@@ -2112,11 +2112,12 @@ impl Engine {
 				})),
 				clipboard,
 			};
+			// Commands that read level 0 of layers the view may not have drawn
+			// (merge, rasterise, Smart Objects, the AI jobs) composite through
+			// `crate::derived`, which computes the derived tiles each output
+			// tile reads as it goes (code review 2026-09-27 R06): nothing is
+			// prepared for the whole document first.
 			let mut after = before;
-			// These commands read level 0 of layers the view may not have drawn
-			// (M6-T06): fill in the derived tiles first — here, on the worker,
-			// in bounded batches (code review 2026-09-27 R06/R07).
-			vector::prepare_level0(&mut after, &store, None);
 			let mut ctx = CommandContext {
 				tiles: &store,
 				ops: Some(&ops),
@@ -3137,13 +3138,20 @@ impl Engine {
 		use fx_core::pixels::{Content, Placed, content_bounds};
 		let store = self.store.clone();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		vector::prepare_level0(&mut open.doc, &store, Some(ids));
 		let mut boxes: Vec<(LayerId, (i32, i32, i32, i32))> = Vec::new();
 		for &layer in ids {
 			let Some(l) = open.doc.layer(layer) else { continue };
+			// A shape or text layer: the pixels it draws, computed now.
+			let drawn;
 			let placed = match &l.kind {
 				LayerKind::Pixel { image, offset } => Placed { image, offset: *offset },
-				LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Placed { image: cache, offset: (0, 0) },
+				LayerKind::Shape { .. } | LayerKind::Text { .. } => match crate::derived::layer_content(&open.doc, &store, layer) {
+					Ok(image) => {
+						drawn = image;
+						Placed { image: &drawn, offset: (0, 0) }
+					}
+					Err(_) => continue,
+				},
 				_ => continue, // FAST: groups and fills are not aligned
 			};
 			if let Ok(Some(b)) = content_bounds(placed, Content::Opaque, &store) {
@@ -3260,8 +3268,6 @@ impl Engine {
 		if layers.is_empty() {
 			return;
 		}
-		let drawn = vector::prepare_level0(&mut doc.doc, &self.store, Some(&layers));
-		tracing::debug!("rasterising drew {drawn} level-0 shape tiles");
 		let refs: Vec<LayerRef> = layers.iter().map(|&id| LayerRef::Id(id)).collect();
 		self.command(doc_id, Command::Rasterize { layers: refs });
 	}
@@ -3657,19 +3663,23 @@ impl Engine {
 	/// nothing to copy (a toast says why).
 	fn copy_layer(&mut self, doc_id: DocId) -> bool {
 		let store = self.store.clone();
-		// A shape layer is copied as the pixels it draws (M6-T06).
-		if let Some(open) = self.docs.get_mut(doc_id) {
-			vector::prepare_level0(&mut open.doc, &store, None);
-		}
 		let result = {
 			let Some(open) = self.docs.get(doc_id) else { return false };
-			let Some((image, offset)) = crate::clipboard::active_pixels(&open.doc) else {
-				self.to_ui(&EngineToUi::Toast {
-					text: "Could not copy: the layer has no pixels".into(),
-				});
-				return false;
+			// A shape layer is copied as the pixels it draws (M6-T06).
+			let (image, offset) = match crate::clipboard::active_pixels(&open.doc, &store) {
+				Ok(Some(active)) => active,
+				Ok(None) => {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Could not copy: the layer has no pixels".into(),
+					});
+					return false;
+				}
+				Err(error) => {
+					self.to_ui(&EngineToUi::Error { text: error.to_string() });
+					return false;
+				}
 			};
-			crate::clipboard::copy_layer(image, offset, open.doc.selection.as_ref(), (open.doc.width, open.doc.height), &store)
+			crate::clipboard::copy_layer(&image, offset, open.doc.selection.as_ref(), (open.doc.width, open.doc.height), &store)
 		};
 		match result {
 			Ok(Some(clip)) => {

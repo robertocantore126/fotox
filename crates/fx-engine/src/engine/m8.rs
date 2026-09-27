@@ -122,9 +122,8 @@ impl Engine {
 	fn define_pattern(&mut self, from_selection: bool) {
 		let Some(doc_id) = self.docs.active_id() else { return };
 		let store = self.store.clone();
-		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		// FAST: draws every dirty level-0 shape tile, not only those in the rect.
-		crate::vector::prepare_level0(&mut open.doc, &store, None);
+		let Some(open) = self.docs.get(doc_id) else { return };
+		// The composite computes the derived tiles of the rectangle only.
 		let doc = open.doc.clone();
 		let (x0, y0, x1, y1) = match (&doc.selection, from_selection) {
 			(Some(selection), _) => match selection.canvas_bounds((doc.width, doc.height)) {

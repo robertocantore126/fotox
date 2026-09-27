@@ -1665,18 +1665,7 @@ fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) 
 	// baked in and then applied a second time).
 	let mut images = Vec::with_capacity(ids.len());
 	for &id in &ids {
-		let mut layer = doc.layer(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?.clone();
-		layer.visible = true;
-		layer.opacity = 1.0;
-		layer.fill = 1.0;
-		layer.blend = BlendMode::Normal;
-		layer.clipped = false;
-		layer.mask = None;
-		layer.vector_mask = None;
-		layer.styles = None;
-		layer.effects = Vec::new();
-		let mut solo = doc.clone();
-		solo.layers = vec![Arc::new(layer)];
+		let solo = content_alone(doc, id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
 		images.push((id, pixel_ops(ctx, "rasterising")?.composite(&solo, &[id], None, ctx.tiles)?));
 	}
 	let mut changed = Vec::with_capacity(ids.len());
@@ -1703,6 +1692,26 @@ fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) 
 // ---------------------------------------------------------------------------
 
 /// Resolve a [`LayerRef`] to an existing id.
+/// `doc` with layer `id` alone at the top level, visible, opaque, Normal,
+/// unclipped, without masks or styles: compositing it gives the layer's own
+/// content — what Rasterize keeps, and what Copy takes from a shape layer.
+/// `None` when there is no such layer.
+pub fn content_alone(doc: &Document, id: LayerId) -> Option<Document> {
+	let mut layer = doc.layer(id)?.clone();
+	layer.visible = true;
+	layer.opacity = 1.0;
+	layer.fill = 1.0;
+	layer.blend = BlendMode::Normal;
+	layer.clipped = false;
+	layer.mask = None;
+	layer.vector_mask = None;
+	layer.styles = None;
+	layer.effects = Vec::new();
+	let mut solo = doc.clone();
+	solo.layers = vec![Arc::new(layer)];
+	Some(solo)
+}
+
 pub fn resolve(doc: &Document, layer: &LayerRef) -> Result<LayerId, CommandError> {
 	let found = match layer {
 		LayerRef::Id(id) => doc.layer(*id).map(|l| l.id),

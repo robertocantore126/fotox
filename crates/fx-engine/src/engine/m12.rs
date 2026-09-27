@@ -7,7 +7,6 @@ use fx_protocol::{DocId, EngineToUi};
 
 use super::{Engine, Internal};
 use crate::documents::OpenDoc;
-use crate::vector;
 
 impl Engine {
 	pub(super) fn m12_action(&mut self, id: &str, args: &serde_json::Value) -> bool {
@@ -25,9 +24,6 @@ impl Engine {
 				true
 			}
 			"smart:rasterize" | "raster:smart" => {
-				if let Some(open) = self.docs.get_mut(doc_id) {
-					vector::prepare_level0(&mut open.doc, &self.store, None);
-				}
 				self.command(
 					doc_id,
 					Command::Rasterize {
@@ -270,9 +266,6 @@ impl Engine {
 			});
 			return;
 		}
-		if let Some(open) = self.docs.get_mut(doc_id) {
-			vector::prepare_level0(&mut open.doc, &self.store, None);
-		}
 		self.command(
 			doc_id,
 			Command::ConvertToSmartObject {
@@ -320,7 +313,6 @@ impl Engine {
 		let Some(&(parent, layer_id)) = self.smart_children.get(&child) else { return };
 		let store = self.store.clone();
 		let Some(open) = self.docs.get_mut(child) else { return };
-		vector::prepare_level0(&mut open.doc, &store, None);
 		let nested = open.doc.clone();
 		let roots: Vec<LayerId> = nested.layers.iter().map(|l| l.id).collect();
 		let composite = match crate::export::composite_layers(&nested, &roots, None, &store, None) {

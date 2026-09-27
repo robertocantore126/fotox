@@ -266,39 +266,103 @@ fn full_turns_and_double_flips_are_the_identity_for_every_part() {
 	assert_eq!((d.channels[0].image.width(), d.channels[0].image.height()), (300, 200));
 }
 
-/// R06 on a large canvas: a small shape on a 20 000 × 20 000 document. The
-/// whole-document preparation draws every level-0 tile of the shape's cache
-/// (6 241 of them) in bounded batches; the tiles away from the shape end up
-/// Empty and cost no memory. Prints the time.
-#[test]
-#[ignore = "large canvas: seconds; run with --ignored"]
-fn preparing_a_small_shape_on_a_huge_canvas_stays_bounded() {
-	let store = TileStore::new(TileStoreConfig::reference_machine(dir("huge"))).unwrap();
-	let mut d = doc(20_000, 20_000);
-	let shape = fx_core::vector::VectorShape::Rect {
-		w: 300.0,
-		h: 200.0,
-		radii: [0.0; 4],
-	};
-	let layer = Layer::new(
-		LayerId(1),
+/// A red `w × h` rectangle shape layer at `(x, y)` on a `size` canvas, never
+/// drawn: its cache is dirty everywhere.
+fn rect_layer(id: u64, size: (u32, u32), (x, y, w, h): (f64, f64, f64, f64)) -> Layer {
+	Layer::new(
+		LayerId(id),
 		"rect",
 		LayerKind::Shape {
-			shape,
+			shape: fx_core::vector::VectorShape::Rect { w, h, radii: [0.0; 4] },
 			fill: Some(fx_core::vector::Paint::Solid { rgba: [65535, 0, 0, 65535] }),
 			stroke: None,
-			transform: [1.0, 0.0, 0.0, 1.0, 100.0, 100.0],
-			cache: TiledImage::derived(20_000, 20_000, PixelFormat::Rgba8),
+			transform: [1.0, 0.0, 0.0, 1.0, x, y],
+			cache: TiledImage::derived(size.0, size.1, PixelFormat::Rgba8),
 		},
-	);
-	d.layers.push(Arc::new(layer));
+	)
+}
+
+/// The alpha of an RGBA8 image's pixel `(x, y)`.
+fn alpha(store: &TileStore, image: &TiledImage, (x, y): (u32, u32)) -> u8 {
+	let t = fx_tiles::TILE_SIZE;
+	match image.slot(0, x / t, y / t) {
+		TileSlot::Empty => 0,
+		TileSlot::Solid(v) => (v.0[3] >> 8) as u8,
+		TileSlot::Data(h) => store.get(h).unwrap().bytes()[(((y % t) * t + x % t) * 4 + 3) as usize],
+	}
+}
+
+/// Code review 2026-09-27 R06 follow-up: whole-document readers compute the
+/// shape tiles they read as they go. With a trim thread and a small budget, a
+/// copy and a merge of a shape layer the view never drew give the shape's
+/// pixels, and the document was not prepared first (its cache is still dirty
+/// everywhere).
+#[test]
+fn a_never_drawn_shape_is_copied_and_merged_from_its_geometry() {
+	let mut config = TileStoreConfig::for_tests(dir("lazy"));
+	config.background_trim = true;
+	let store = TileStore::new(config).unwrap();
+	let size = (1024, 768);
+	let mut d = doc(size.0, size.1);
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(1),
+		"under",
+		LayerKind::Pixel {
+			image: TiledImage::new(size.0, size.1, PixelFormat::Rgba8),
+			offset: (0, 0),
+		},
+	)));
+	d.layers.push(Arc::new(rect_layer(2, size, (266.0, 266.0, 300.0, 200.0))));
+	let (inside, outside) = ((300, 300), (50, 50));
+	for round in 0..8 {
+		let content = fx_engine::derived::layer_content(&d, &store, LayerId(2)).unwrap();
+		assert_eq!(alpha(&store, &content, inside), 255, "round {round}: the copy holds the shape");
+		assert_eq!(alpha(&store, &content, outside), 0, "round {round}: and nothing else");
+	}
+	let LayerKind::Shape { cache, .. } = &d.layer(LayerId(2)).unwrap().kind else {
+		unreachable!()
+	};
+	let tiles = cache.grid(0).cols() * cache.grid(0).rows();
+	assert_eq!(cache.dirty_tiles(0).count() as u32, tiles, "nothing was prepared on the document");
+
+	let ops = fx_engine::ops::EngineOps::default();
+	Command::MergeLayers {
+		layers: vec![fx_core::LayerRef::Id(LayerId(1)), fx_core::LayerRef::Id(LayerId(2))],
+	}
+	.apply(
+		&mut d,
+		&mut CommandContext {
+			tiles: &store,
+			ops: Some(&ops),
+		},
+	)
+	.unwrap();
+	assert_eq!(d.layers.len(), 1);
+	let LayerKind::Pixel { image, offset } = &d.layers[0].kind else {
+		panic!("merged into pixels")
+	};
+	let at = |(x, y): (u32, u32)| ((x as i32 - offset.0) as u32, (y as i32 - offset.1) as u32);
+	assert_eq!(alpha(&store, image, at(inside)), 255, "the merge holds the shape");
+	assert_eq!(alpha(&store, image, at(outside)), 0);
+}
+
+/// A 300 × 200 shape on a 20 000 × 20 000 canvas, never drawn, copied: the
+/// copy walks the 6 241 tiles of the canvas, drawing each shape tile as it
+/// reads it; the tiles away from the shape come out empty and cost no
+/// memory. Prints the time.
+#[test]
+#[ignore = "large canvas: seconds; run with --ignored"]
+fn copying_a_small_shape_on_a_huge_canvas_stays_bounded() {
+	let store = TileStore::new(TileStoreConfig::reference_machine(dir("huge"))).unwrap();
+	let size = (20_000, 20_000);
+	let mut d = doc(size.0, size.1);
+	d.layers.push(Arc::new(rect_layer(1, size, (100.0, 100.0, 300.0, 200.0))));
 	let started = Instant::now();
-	let drawn = fx_engine::vector::prepare_level0(&mut d, &store, None);
+	let content = fx_engine::derived::layer_content(&d, &store, LayerId(1)).unwrap();
 	let elapsed = started.elapsed();
-	let LayerKind::Shape { cache, .. } = &d.layers[0].kind else { unreachable!() };
-	let stored = cache.grid(0).non_empty().count();
+	let stored = content.grid(0).non_empty().count();
 	let hot = store.stats().hot_bytes;
-	eprintln!("drew {drawn} tiles in {elapsed:?}; {stored} are stored; {hot} hot bytes");
-	assert_eq!(drawn, 79 * 79);
+	eprintln!("copied in {elapsed:?}; {stored} tiles hold pixels; {hot} hot bytes");
 	assert!(stored <= 4, "only the tiles the rectangle touches hold pixels, got {stored}");
+	assert_eq!(alpha(&store, &content, (200, 200)), 255);
 }

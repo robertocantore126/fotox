@@ -32,6 +32,16 @@ use rayon::prelude::*;
 /// dropped in between.
 const MAX_ROUNDS: usize = 8;
 
+/// Layer `id`'s own content (as Rasterize keeps it) as an ordinary stored
+/// image at the canvas origin: a shape or text layer drawn from its geometry
+/// tile by tile, into tiles the trim cannot drop (code review 2026-09-27
+/// R01/R06: Copy and Align used to prepare the whole document's caches, then
+/// read the derived tiles raw).
+pub fn layer_content(doc: &Document, store: &TileStore, id: LayerId) -> Result<TiledImage, fx_core::CommandError> {
+	let solo = fx_core::command::content_alone(doc, id).ok_or(fx_core::CommandError::LayerNotFound(fx_core::LayerRef::Id(id)))?;
+	crate::export::composite_layers(&solo, &[id], None, store, None)
+}
+
 /// Compute every tile of `requests` in `doc`: mips (with the tiles below
 /// them), generated-layer caches, vector masks and effects. A request from
 /// an older snapshot (a layer or a tile the document no longer has) is
