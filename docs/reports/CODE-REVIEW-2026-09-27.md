@@ -35,10 +35,18 @@ Every finding was fixed and has a regression test that fails without the fix (ch
 | R11 | `708e368` | `adjustment_preview` / `adjustment_preview_end` messages: the dialog previews in the render snapshot only; OK adds one step (none if unchanged), Cancel adds none and keeps redo. | `harden_flow::an_adjustment_preview_keeps_history_and_redo`, `documents::tests::an_adjustment_preview_is_on_screen_only` |
 | R12 | `fb340da` | Pixel and vector masks multiply; when both vary, the op is nested in a group carrying the second mask (exact). | `program_tests::two_varying_masks_equal_their_product`, `pixel_and_vector_masks_multiply` |
 
+Follow-up (same branch), closing four of the items first left open:
+
+| Commit | Change | Test |
+|---|---|---|
+| `8bd6d11` | Pattern fills gain an origin and a mirror; the canvas mapping composes with the pattern's matrix, so Flip, Rotate, Canvas Size and Crop move the fill exactly (the earlier angle update also turned it the wrong way). `m12::compose` holds a Bézier warp under an affine map and over an axis-aligned scale; Liquify/Puppet geometry (a session-only registry) is never kept on a Smart Object, and an FXD naming one is refused. | `a_pattern_fill_follows_the_canvas`, `a_warped_smart_object_follows_the_canvas`, `a_stored_custom_mapping_is_refused` |
+| `ffe51fa` | No whole-document preparation before pixel jobs, Rasterize, Convert to Smart Object, Edit Contents save or Define Pattern: they composite through `derived`, which draws what each tile reads. Copy and Align take a shape's content from `derived::layer_content` (ordinary tiles, not the raw cache). | `a_never_drawn_shape_is_copied_and_merged_from_its_geometry`, `copying_a_small_shape_on_a_huge_canvas_stays_bounded` (ignored; 20 000² in 1.6 s, 4 tiles stored) |
+| `e4d1fe4` | A Smart Object's source mips are computed as the sampler reads them and held until the draw ends (the old whole-pyramid build also failed with `Evicted` under a busy trim). | `a_smart_object_computes_only_the_source_mips_it_samples` |
+
 Still open, deliberately:
 
-* R03 — a Smart Object with a Liquify/Puppet mesh refuses canvas geometry instead of following it; pattern fills cannot follow a flip or a translation (no offset of their own); shapes and text still stay put under Perspective Crop's projective mapping (as before).
-* R06/R07 — whole-document pixel jobs still prepare every derived tile before running (now on the worker, in bounded batches); a Smart Object still builds its whole source pyramid; under a hot budget smaller than the visible working set the viewport can keep re-requesting tiles. Large-canvas timings and peak memory were not measured in the app.
+* R03 — a Smart Object whose transform is a Bézier warp refuses Perspective Crop (a projective map of a Bézier patch is not one), and a warp over a turned Smart Object is refused by Free Transform; shapes and text stay put under Perspective Crop (as before). A Linear/Angle gradient fill cannot mirror its sweep under a flip.
+* R06/R07 — the Free Transform preview of a Smart Object still draws that layer's whole level-0 cache; `layer_content` walks every canvas tile (cheap for empty ones, 1.6 s at 20 000²); under a hot budget smaller than the visible working set the viewport can keep re-requesting tiles. Large-canvas timings and peak memory were not measured in the app.
 * R11 — the UI side (`ui/js/native/layers-panel.js`) was checked with `node --check` and `check-data.mjs` only; the dialogs need a native smoke test.
 * Design points 1–8 and the documentation inconsistencies below are untouched: they are decisions for Rob.
 
