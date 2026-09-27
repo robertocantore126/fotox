@@ -21,6 +21,17 @@ pub fn gpu() -> Option<(wgpu::Device, wgpu_sync::Queue)> {
 	.ok()
 }
 
+/// One layer-list frame as the engine sent it.
+#[derive(Clone, Copy, Debug)]
+pub struct LayersFrame {
+	/// `layers_patch` (else a full `layers`).
+	pub patch: bool,
+	/// Rows it carried.
+	pub rows: usize,
+	/// Encoded size.
+	pub bytes: usize,
+}
+
 /// What the engine said, decoded.
 #[derive(Debug)]
 pub enum Seen {
@@ -42,6 +53,8 @@ pub struct Harness {
 	/// When the latest viewport frame arrived (stress tests time how long the
 	/// view takes to settle).
 	pub last_frame_at: Arc<Mutex<Option<Instant>>>,
+	/// Every `layers` / `layers_patch` frame the engine sent, oldest first.
+	pub layer_frames: Arc<Mutex<Vec<LayersFrame>>>,
 	device: wgpu::Device,
 	queue: wgpu_sync::Queue,
 	/// One engine at a time per test binary: each allocates the reference
@@ -62,9 +75,56 @@ impl Harness {
 		let frame_sink = last_frame.clone();
 		let last_frame_at = Arc::new(Mutex::new(None));
 		let frame_time_sink = last_frame_at.clone();
+		let layer_frames = Arc::new(Mutex::new(Vec::new()));
+		let frames_sink = layer_frames.clone();
+		// The UI's copy of each document's layer list: `layers_patch` frames are
+		// applied to it and handed to the tests as the full `layers` message, as
+		// the Layers panel sees it. A patch against another list is an error.
+		let lists: Mutex<std::collections::HashMap<DocId, (u64, Vec<fx_protocol::LayerInfo>)>> = Mutex::default();
 		let engine = EngineHandle::spawn(device.clone(), queue.clone(), dir.join("scratch"), move |output| {
 			let item = match output {
 				EngineOutput::ToUi(frame) => match fx_protocol::decode::<EngineToUi>(&frame) {
+					Ok((EngineToUi::Layers { doc, revision, layers, seq }, _)) => {
+						frames_sink.lock().unwrap().push(LayersFrame {
+							patch: false,
+							rows: layers.len(),
+							bytes: frame.len(),
+						});
+						lists.lock().unwrap().insert(doc, (seq, layers.clone()));
+						Seen::Ui(EngineToUi::Layers { doc, revision, layers, seq })
+					}
+					Ok((
+						EngineToUi::LayersPatch {
+							doc,
+							revision,
+							seq,
+							base,
+							changed,
+						},
+						_,
+					)) => {
+						frames_sink.lock().unwrap().push(LayersFrame {
+							patch: true,
+							rows: changed.len(),
+							bytes: frame.len(),
+						});
+						let mut lists = lists.lock().unwrap();
+						match lists.get_mut(&doc) {
+							Some((held, layers)) if *held == base => {
+								fx_protocol::apply_layers_patch(layers, &changed);
+								*held = seq;
+								Seen::Ui(EngineToUi::Layers {
+									doc,
+									revision,
+									layers: layers.clone(),
+									seq,
+								})
+							}
+							held => Seen::Ui(EngineToUi::Error {
+								text: format!("layers_patch against list {base}, the UI holds {:?}", held.map(|h| h.0)),
+							}),
+						}
+					}
 					Ok((message, _)) => Seen::Ui(message),
 					Err(_) => return,
 				},
@@ -87,6 +147,7 @@ impl Harness {
 			seen,
 			last_frame,
 			last_frame_at,
+			layer_frames,
 			device,
 			queue,
 			_one_at_a_time: one_at_a_time,

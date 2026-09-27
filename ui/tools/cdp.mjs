@@ -109,6 +109,12 @@ export async function connect(port = PORT) {
             const m = decode(buffer).message;
             fx.seq += 1;
             fx.last[m.type] = m;
+            // Keep last.layers whole: a patch replaces the rows it carries.
+            const held = fx.last.layers;
+            if (m.type === "layers_patch" && held && held.doc === m.doc) {
+              const byId = new Map(m.changed.map((l) => [l.id, l]));
+              fx.last.layers = { ...held, revision: m.revision, seq: m.seq, layers: held.layers.map((l) => byId.get(l.id) || l) };
+            }
             fx.log.push({ seq: fx.seq, type: m.type });
             if (fx.log.length > 1000) fx.log.shift();
           } catch (_) { /* the UI reports malformed frames itself */ }

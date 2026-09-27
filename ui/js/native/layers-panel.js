@@ -119,6 +119,8 @@ let history = null;      // last `history` message of the active document
 const historySource = new Map(); // doc → the History Brush's source row (M8-T07)
 const histories = new Map(); // doc → history message
 
+let layersSeq = null;    // `seq` of the list `layers` holds (patches name it as `base`)
+let resyncing = false;   // a `request_layers` is on its way
 let layersRoot = null;
 let historyRoot = null;
 let listEl = null;
@@ -132,6 +134,8 @@ export function initNativePanels() {
   bridge.on(ENGINE.ACTIVE_DOCUMENT, ({ doc: id }) => {
     doc = id;
     layers = [];
+    layersSeq = null;
+    resyncing = false;
     tree = [];
     history = id == null ? null : histories.get(id) || null;
     editNew = null;
@@ -140,7 +144,29 @@ export function initNativePanels() {
   });
   bridge.on(ENGINE.LAYERS, (msg) => {
     if (msg.doc !== doc) return;
-    layers = msg.layers;
+    layersSeq = msg.seq ?? null;
+    resyncing = false;
+    showLayers(msg.layers);
+  });
+  // Only the rows an edit changed (a property, not the tree): the list this
+  // panel holds with those rows replaced. A patch against another list (one
+  // was missed) asks for the whole list again.
+  bridge.on(ENGINE.LAYERS_PATCH, (msg) => {
+    if (msg.doc !== doc) return;
+    if (msg.base !== layersSeq) {
+      if (!resyncing) {
+        resyncing = true;
+        bridge.send({ type: UI.REQUEST_LAYERS, doc });
+      }
+      return;
+    }
+    layersSeq = msg.seq;
+    if (!msg.changed.length) return;
+    const byId = new Map(msg.changed.map((l) => [l.id, l]));
+    showLayers(layers.map((l) => byId.get(l.id) || l));
+  });
+  function showLayers(list) {
+    layers = list;
     tree = buildTree(layers);
     for (const l of layers) {
       const key = `${doc}:${l.id}`;
@@ -154,7 +180,7 @@ export function initNativePanels() {
       editNew = null;
       if (added.adjustment.kind !== "invert") editAdjustment(added);
     }
-  });
+  }
   bridge.on(ENGINE.HISTORY_SOURCE, (msg) => {
     historySource.set(msg.doc, msg.state ?? 0);
     renderHistory();

@@ -11,7 +11,8 @@
 //!
 //! Knobs (environment):
 //! * `FOTOX_STRESS_LAYERS` — layers of `thousands_of_layers` (default 2000)
-//! * `FOTOX_STRESS_DEPTHS` — nesting depths of `deeply_nested_groups` (default `10,40,100,300`)
+//! * `FOTOX_STRESS_DEPTHS` — nesting depths of `deeply_nested_groups` (default `10,11`: 10 is the
+//!   limit, deeper is refused)
 //! * `FOTOX_STRESS_SIZE`   — side of `huge_canvas`, 16-bit (default 30000)
 //! * `FOTOX_STRESS_DOCS`   — documents of `many_documents` (default 10)
 //! * `FOTOX_STRESS_CSV=1`  — also append the rows to `bench/results.csv`
@@ -507,6 +508,7 @@ fn thousands_of_layers() {
 				doc,
 				revision: 0,
 				layers: list.clone(),
+				seq: 0,
 			})
 			.len();
 			layers_bytes.push((list.len(), bytes));
@@ -516,8 +518,16 @@ fn thousands_of_layers() {
 	p.record_series("add layer + select + fill + deselect (per layer)", &per_layer);
 	let list = p.layer_list(doc);
 	assert_eq!(list.len(), n + 1, "every layer arrived (plus Background)");
+	let sent = p.h.layer_frames.lock().unwrap().last().copied();
 	if let Some(&(count, bytes)) = layers_bytes.last() {
-		p.record(format!("layers message size at {count} layers"), bytes as f64 / 1024.0, "KiB");
+		p.record(format!("full layers message at {count} layers"), bytes as f64 / 1024.0, "KiB");
+	}
+	if let Some(frame) = sent {
+		p.record(
+			format!("last list frame of the build ({})", if frame.patch { "patch" } else { "full" }),
+			frame.bytes as f64 / 1024.0,
+			"KiB",
+		);
 	}
 	p.drain();
 	p.record_settle("view settles after the build", Instant::now() - Duration::from_millis(1));
@@ -660,7 +670,7 @@ fn thousands_of_layers() {
 #[ignore = "stress: run with --ignored --nocapture"]
 fn deeply_nested_groups() {
 	let depths: Vec<usize> = std::env::var("FOTOX_STRESS_DEPTHS")
-		.unwrap_or_else(|_| "10,40,100,300".into())
+		.unwrap_or_else(|_| "10,11".into())
 		.split(',')
 		.filter_map(|s| s.trim().parse().ok())
 		.collect();
@@ -680,8 +690,11 @@ fn deeply_nested_groups() {
 		p.step(doc, commands);
 		let pixel = p.layer_list(doc).iter().find(|l| l.name != "Background").map(|l| l.id).expect("the new layer");
 
+		// Groups nest at most MAX_GROUP_NESTING deep: past it, Group Layers is
+		// refused with an error and the document keeps its depth.
+		let allowed = depth.min(fx_core::MAX_GROUP_NESTING);
 		let mut per_level = Vec::new();
-		for _ in 0..depth {
+		for _ in 0..allowed {
 			per_level.push(p.step(
 				doc,
 				vec![Command::GroupLayers {
@@ -690,6 +703,23 @@ fn deeply_nested_groups() {
 				}],
 			));
 		}
+		if depth > allowed {
+			p.drain();
+			p.ui(UiToEngine::Command {
+				doc,
+				command: Command::GroupLayers {
+					layers: vec![LayerRef::Id(pixel)],
+					name: None,
+				},
+			});
+			let refused = p.until("the refusal", CEILING, |m| match m {
+				EngineToUi::Error { text } => Some(text.clone()),
+				EngineToUi::History { .. } => Some(String::new()),
+				_ => None,
+			});
+			assert!(refused.contains("at most"), "group {} levels deep refused: {refused:?}", allowed + 1);
+		}
+		let depth = allowed;
 		p.record_series("group one level deeper", &per_level);
 		std::thread::sleep(Duration::from_millis(200));
 		let list = p.layer_list(doc);
@@ -1012,6 +1042,7 @@ fn per_edit_costs_by_layer_count() {
 			doc: DocId(1),
 			revision: 0,
 			layers: list,
+			seq: 0,
 		};
 		let encode = time(&mut || {
 			std::hint::black_box(fx_protocol::encode_json(&message));
@@ -1023,10 +1054,39 @@ fn per_edit_costs_by_layer_count() {
 		let clone = time(&mut || {
 			std::hint::black_box(doc.clone());
 		});
+		// A property edit now sends a patch: diff against the list sent before,
+		// encode only the changed row, and the UI applies it.
+		let before = fx_engine::layers::layer_infos(&doc);
+		let mut after = before.clone();
+		let middle = after.len() / 2;
+		after[middle].visible = false;
+		let diff = time(&mut || {
+			std::hint::black_box(fx_protocol::layers_patch(&before, &after));
+		});
+		let changed = fx_protocol::layers_patch(&before, &after).expect("same tree");
+		let patch = fx_protocol::encode_json(&EngineToUi::LayersPatch {
+			doc: DocId(1),
+			revision: 0,
+			seq: 2,
+			base: 1,
+			changed,
+		});
+		let apply = time(&mut || {
+			let (message, _) = fx_protocol::decode::<EngineToUi>(&patch).unwrap();
+			if let EngineToUi::LayersPatch { changed, .. } = message {
+				let mut list = before.clone();
+				fx_protocol::apply_layers_patch(&mut list, &changed);
+				std::hint::black_box(list);
+			}
+		});
 		println!(
 			"  {:>5} layers: add+select+fill+deselect {execute:6.2} ms | layer_infos {infos:6.2} ms | encode {encode:6.2} ms | decode {decode:6.2} ms | doc clone {clone:6.3} ms | message {:6.0} KiB",
 			doc.layers.len(),
 			bytes.len() as f64 / 1024.0
+		);
+		println!(
+			"         property edit as a patch: diff {diff:6.2} ms | patch {:5.2} KiB | decode + apply {apply:6.2} ms",
+			patch.len() as f64 / 1024.0
 		);
 		// A fresh save of the whole document, as Save As does.
 		let path = dir.0.join(format!("per-edit-{target}.fxd"));

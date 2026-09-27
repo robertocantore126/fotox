@@ -83,6 +83,11 @@ pub enum UiToEngine {
 		doc: DocId,
 		zoom: f64,
 	},
+	/// Ask for the full layer list of `doc` again (answered with `Layers`):
+	/// the UI got a `LayersPatch` whose `base` is not the list it holds.
+	RequestLayers {
+		doc: DocId,
+	},
 	/// Ask for layer thumbnails (answered with binary `Thumbnail` frames).
 	RequestThumbnails {
 		doc: DocId,
@@ -303,11 +308,28 @@ pub enum EngineToUi {
 	ActiveDocument {
 		doc: Option<DocId>,
 	},
-	/// Full layer list. Sent after structure/props changes. Fine up to thousands of layers.
+	/// Full layer list: when a document becomes active, and after an edit
+	/// that added, removed, moved or regrouped layers. `seq` names this list
+	/// for the patches that follow it.
 	Layers {
 		doc: DocId,
 		revision: u64,
 		layers: Vec<LayerInfo>,
+		#[serde(default)]
+		seq: u64,
+	},
+	/// The list `base` (a `Layers` or `LayersPatch` `seq`) with the rows in
+	/// `changed` replaced, matched by id; ids, order and depth are the same.
+	/// Sent after an edit that only changed layers' properties, so a click in
+	/// a 5000-layer document does not resend (and re-parse) every row
+	/// (docs/reports/STRESS-2026-09-27.md O2). A UI holding another list asks
+	/// for the full one with `RequestLayers`.
+	LayersPatch {
+		doc: DocId,
+		revision: u64,
+		seq: u64,
+		base: u64,
+		changed: Vec<LayerInfo>,
 	},
 	History {
 		doc: DocId,
@@ -473,6 +495,26 @@ pub enum EngineToUi {
 		width: u32,
 		height: u32,
 	},
+}
+
+/// Apply a [`EngineToUi::LayersPatch`]'s `changed` rows to the list it was
+/// made against: each row replaces the one with its id. (The UI does the same
+/// in `layers-panel.js`.)
+pub fn apply_layers_patch(list: &mut [LayerInfo], changed: &[LayerInfo]) {
+	for row in changed {
+		if let Some(slot) = list.iter_mut().find(|l| l.id == row.id) {
+			*slot = row.clone();
+		}
+	}
+}
+
+/// What changed between two layer lists: `None` when ids, order or depth
+/// differ (send the full list), else the rows of `new` that differ from `old`.
+pub fn layers_patch(old: &[LayerInfo], new: &[LayerInfo]) -> Option<Vec<LayerInfo>> {
+	if old.len() != new.len() || old.iter().zip(new).any(|(a, b)| a.id != b.id || a.depth != b.depth) {
+		return None;
+	}
+	Some(old.iter().zip(new).filter(|(a, b)| a != b).map(|(_, b)| b.clone()).collect())
 }
 
 // ---------------------------------------------------------------------------

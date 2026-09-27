@@ -4,6 +4,12 @@ use crate::color::DocumentColor;
 use crate::layer::{Adjustment, Layer, LayerId, LayerKind};
 use crate::selection::Selection;
 
+/// Groups nest at most this deep, like Photoshop (Rob, 2026-09-27). Deeper
+/// trees also broke the `.fxd` manifest: its JSON reader refuses more than
+/// 128 levels, two per group, so a 60-deep document saved but never reopened
+/// (docs/reports/STRESS-2026-09-27.md O1).
+pub const MAX_GROUP_NESTING: usize = 10;
+
 /// An open image. Cheap to clone: see crate docs.
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -350,6 +356,19 @@ impl Document {
 	}
 
 	/// Visit every layer, depth first, bottom → top, with its depth.
+	/// How many groups deep the deepest group sits: 0 without groups, 1 for a
+	/// group at the root, 2 for a group inside it… Commands may not take it
+	/// past [`MAX_GROUP_NESTING`].
+	pub fn group_nesting(&self) -> usize {
+		let mut deepest = 0;
+		self.walk(|layer, depth| {
+			if matches!(layer.kind, LayerKind::Group { .. }) {
+				deepest = deepest.max(depth + 1);
+			}
+		});
+		deepest
+	}
+
 	pub fn walk(&self, mut visit: impl FnMut(&Layer, usize)) {
 		fn go(layers: &[Arc<Layer>], depth: usize, visit: &mut impl FnMut(&Layer, usize)) {
 			for layer in layers {

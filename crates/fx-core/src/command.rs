@@ -743,6 +743,7 @@ pub struct CommandContext<'a> {
 impl Command {
 	/// Apply to `doc`. On error `doc` is unchanged.
 	pub fn apply(&self, doc: &mut Document, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+		let nesting = doc.group_nesting();
 		let effect = match self {
 			Command::SelectLayers { layers } => select_layers(doc, layers),
 			Command::AddLayer { layer, name } => add_layer(doc, layer, name.as_deref()),
@@ -983,6 +984,17 @@ impl Command {
 			Command::SetLayerStyle { layer, styles } => set_layer_style(doc, layer, styles.clone()),
 			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
+		// One check for every command that can nest (Group, Move into a group,
+		// Paste, Duplicate…). A document already deeper, from an older file,
+		// can still be edited: only going deeper is refused. The caller
+		// (`History::execute`) puts the document back.
+		let after = doc.group_nesting();
+		if after > crate::document::MAX_GROUP_NESTING && after > nesting {
+			return Err(CommandError::NotAllowed(format!(
+				"groups can be nested at most {} levels deep",
+				crate::document::MAX_GROUP_NESTING
+			)));
+		}
 		doc.revision += 1;
 		Ok(effect)
 	}
@@ -4047,6 +4059,49 @@ mod tests {
 		let d = f.add_pixel("D");
 		assert_eq!(f.panel(), [g, d, c, b, a], "D and C are children of G, above B");
 		assert_eq!(f.child_ids(g), [b, c, d], "bottom → top");
+	}
+
+	/// Groups nest at most 10 deep (Photoshop's limit): Group Layers, a new
+	/// group inside the deepest one and a move into it are refused past it,
+	/// and the refused command leaves the document as it was.
+	#[test]
+	fn groups_nest_at_most_ten_levels_deep() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		for _ in 0..crate::document::MAX_GROUP_NESTING {
+			f.ok(Command::GroupLayers {
+				layers: vec![LayerRef::Id(a)],
+				name: None,
+			});
+		}
+		assert_eq!(f.doc.group_nesting(), 10);
+		let revision = f.doc.revision;
+		let error = f.fail(Command::GroupLayers {
+			layers: vec![LayerRef::Id(a)],
+			name: None,
+		});
+		assert!(error.to_string().contains("at most 10 levels"), "{error}");
+		assert_eq!(f.doc.group_nesting(), 10, "the refused group is not left behind");
+		assert_eq!(f.doc.revision, revision);
+		// A new group next to A, inside the deepest group, would be the 11th.
+		f.select(&[a]);
+		f.fail(Command::AddLayer {
+			layer: NewLayer::Group,
+			name: None,
+		});
+		// A group from the root moved into the deepest group: refused too.
+		let top = f.doc.layers[0].id;
+		f.select(&[top]);
+		let loose = f.add(NewLayer::Group, "loose");
+		let deepest = f.doc.panel_order().into_iter().rfind(|id| *id != a && *id != loose).expect("the deepest group");
+		f.fail(Command::MoveLayer {
+			layer: LayerRef::Id(loose),
+			parent: Some(LayerRef::Id(deepest)),
+			index: 0,
+		});
+		// Pixel layers inside the deepest group are fine.
+		f.select(&[a]);
+		f.add_pixel("B");
 	}
 
 	#[test]

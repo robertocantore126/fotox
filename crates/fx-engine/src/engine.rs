@@ -246,6 +246,10 @@ struct Engine {
 	thumbs_due: HashMap<(DocId, LayerId), Instant>,
 	/// Where thumbnail renders wait (off the rayon pool: see `ThumbQueue`).
 	thumbs_queue: crate::thumbs::ThumbQueue<(DocId, LayerId)>,
+	/// The layer list last sent for each document and its `seq`: an edit that
+	/// only changes properties sends a `LayersPatch` against it.
+	layers_sent: HashMap<DocId, (u64, Vec<fx_protocol::LayerInfo>)>,
+	layers_seq: u64,
 	/// The last mergeable edit: what it was, when, and how many undo steps
 	/// the document had right after it (so an intervening undo or edit
 	/// breaks the merge).
@@ -426,6 +430,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_last: HashMap::new(),
 		thumbs_due: HashMap::new(),
 		thumbs_queue: crate::thumbs::ThumbQueue::new(2),
+		layers_sent: HashMap::new(),
+		layers_seq: 0,
 		last_edit: None,
 		ops: EngineOps::default(),
 		preview_latest: HashMap::new(),
@@ -1241,6 +1247,10 @@ impl Engine {
 			}
 			UiToEngine::Redo { doc } => {
 				self.step_history(doc, true);
+				Changed::default()
+			}
+			UiToEngine::RequestLayers { doc } => {
+				self.send_layer_list(doc, true);
 				Changed::default()
 			}
 			UiToEngine::RequestThumbnails { doc, layers, size } => {
@@ -2571,6 +2581,7 @@ impl Engine {
 		new.proof_colors = old.proof_colors;
 		new.gamut_warning = old.gamut_warning;
 		*old = new;
+		self.layers_sent.remove(&id);
 		self.thumbs_wanted.retain(|(d, _), _| *d != id);
 		self.thumbs_last.retain(|(d, _), _| *d != id);
 		self.thumbs_due.retain(|(d, _), _| *d != id);
@@ -2587,6 +2598,7 @@ impl Engine {
 			self.end_transform(false);
 		}
 		if self.docs.close(id).is_some() {
+			self.layers_sent.remove(&id);
 			self.thumbs_wanted.retain(|(d, _), _| *d != id);
 			self.thumbs_last.retain(|(d, _), _| *d != id);
 			self.thumbs_due.retain(|(d, _), _| *d != id);
@@ -2869,11 +2881,6 @@ impl Engine {
 		// copy of it, and `zoom:fit` uses it.
 		let resized = doc.view.doc != (doc.doc.width, doc.doc.height);
 		doc.view.doc = (doc.doc.width, doc.doc.height);
-		let layers = EngineToUi::Layers {
-			doc: id,
-			revision: doc.doc.revision,
-			layers: layer_list(doc),
-		};
 		let history = EngineToUi::History {
 			doc: id,
 			labels: doc.history.labels().chain(doc.history.redo_labels()).map(str::to_owned).collect(),
@@ -2882,7 +2889,7 @@ impl Engine {
 			can_redo: doc.history.can_redo(),
 		};
 		let info = doc.info();
-		self.to_ui(&layers);
+		self.send_layer_list(id, false);
 		self.to_ui(&history);
 		if resized && self.docs.active_id() == Some(id) {
 			self.reactivate_tool();
@@ -3884,14 +3891,39 @@ impl Engine {
 	}
 
 	fn send_layers(&mut self) {
-		if let Some(doc) = self.docs.active_mut() {
-			let message = EngineToUi::Layers {
-				doc: doc.id,
-				revision: doc.doc.revision,
-				layers: layer_list(doc),
-			};
-			self.to_ui(&message);
+		if let Some(id) = self.docs.active_id() {
+			self.send_layer_list(id, true);
 		}
+	}
+
+	/// Send `id`'s layer list: only the rows that changed since the last one
+	/// sent when the tree kept its shape, else (or with `full`) all of it.
+	fn send_layer_list(&mut self, id: DocId, full: bool) {
+		let Some(doc) = self.docs.get(id) else { return };
+		let (revision, layers) = (doc.doc.revision, layer_list(doc));
+		self.layers_seq += 1;
+		let seq = self.layers_seq;
+		let patch = match self.layers_sent.get(&id) {
+			Some((base, old)) if !full => fx_protocol::layers_patch(old, &layers).map(|changed| (*base, changed)),
+			_ => None,
+		};
+		let message = match patch {
+			Some((base, changed)) => EngineToUi::LayersPatch {
+				doc: id,
+				revision,
+				seq,
+				base,
+				changed,
+			},
+			None => EngineToUi::Layers {
+				doc: id,
+				revision,
+				layers: layers.clone(),
+				seq,
+			},
+		};
+		self.layers_sent.insert(id, (seq, layers));
+		self.to_ui(&message);
 	}
 
 	/// The tiles a frame asked for (dirty or dropped mips, generated-layer

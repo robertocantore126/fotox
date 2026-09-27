@@ -31,6 +31,7 @@ export const UI = Object.freeze({
   PROOF_SETUP: "proof_setup",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
+  REQUEST_LAYERS: "request_layers",
   TOOL_OPTIONS: "tool_options",
   SET_COLORS: "set_colors",
   // A key the shortcut map did not consume, for the viewport tools (M5-T04):
@@ -53,6 +54,7 @@ export const ENGINE = Object.freeze({
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
+  LAYERS_PATCH: "layers_patch",
   HISTORY: "history",
   VIEW: "view",
   STATUS: "status",
