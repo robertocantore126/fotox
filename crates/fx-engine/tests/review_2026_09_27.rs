@@ -147,3 +147,124 @@ fn pixel_and_vector_masks_multiply() {
 	assert!((alpha(10, 10) - 0.5).abs() < 1e-3);
 	assert!(alpha(200, 200) < 1e-3);
 }
+
+/// R03: rotating the canvas turned pixels, pixel masks and shapes, but left
+/// vector masks, alpha channels, Smart Objects, paths and guides behind.
+/// Undo brings every part back.
+#[test]
+fn rotating_the_canvas_turns_the_whole_document() {
+	use fx_core::path::{Anchor, Path, Subpath};
+	let store = store("rotate");
+	let mut d = doc(20, 10);
+	let path = Path {
+		subpaths: vec![Subpath {
+			anchors: vec![Anchor::corner((1.0, 2.0)), Anchor::corner((5.0, 2.0)), Anchor::corner((5.0, 6.0))],
+			closed: true,
+			op: Default::default(),
+		}],
+	};
+	let mut fill = Layer::new(LayerId(1), "masked", LayerKind::SolidFill { rgba: [65535; 4] });
+	fill.vector_mask = Some(fx_core::layer::VectorMask {
+		path: path.clone(),
+		enabled: true,
+		feather: 0.0,
+		density: 1.0,
+		cache: TiledImage::derived(20, 10, PixelFormat::Gray8),
+	});
+	d.layers.push(Arc::new(fill));
+	let smart = fx_core::smart::SmartObject {
+		source: fx_core::smart::SmartSource {
+			doc: Arc::new(doc(20, 10)),
+			composite: TiledImage::new(20, 10, PixelFormat::Rgba8),
+			linked: None,
+			linked_mtime: None,
+			uid: 1,
+		},
+		transform: fx_core::Mapping::identity(),
+		filters: vec![],
+		filters_enabled: true,
+	};
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(2),
+		"smart",
+		LayerKind::Smart {
+			smart,
+			cache: TiledImage::derived(20, 10, PixelFormat::Rgba8),
+		},
+	)));
+	d.channels.push(fx_core::channel::Channel::new("alpha", TiledImage::new(20, 10, PixelFormat::Gray8)));
+	d.work_path = Some(path);
+	d.guides.push(fx_core::document::Guide { vertical: true, position: 4.0 });
+	d.annotations.samplers.push(fx_core::annotations::Sampler { x: 1.0, y: 2.0 });
+	let before = d.clone();
+
+	let ops = fx_engine::ops::EngineOps::default();
+	let mut history = fx_core::History::default();
+	history
+		.execute(
+			&mut d,
+			Command::RotateCanvas { quarter_turns: 1 },
+			&mut CommandContext {
+				tiles: &store,
+				ops: Some(&ops),
+			},
+		)
+		.unwrap();
+	// 90° clockwise on a 20 × 10 canvas: (x, y) → (10 − y, x).
+	assert_eq!((d.width, d.height), (10, 20));
+	let vm = d.layers[0].vector_mask.as_ref().unwrap();
+	assert_eq!((vm.cache.width(), vm.cache.height()), (10, 20), "the vector mask's cache");
+	assert_eq!(vm.path.subpaths[0].anchors[0].pos, (8.0, 1.0), "the vector mask's path");
+	assert_eq!((d.channels[0].image.width(), d.channels[0].image.height()), (10, 20), "the alpha channel");
+	let LayerKind::Smart { smart, cache } = &d.layers[1].kind else { unreachable!() };
+	assert_eq!((cache.width(), cache.height()), (10, 20), "the Smart Object's cache");
+	assert_eq!(smart.transform.forward_point(1.0, 2.0), Some((8.0, 1.0)), "the Smart Object's transform");
+	assert_eq!(d.work_path.as_ref().unwrap().subpaths[0].anchors[0].pos, (8.0, 1.0), "the work path");
+	assert_eq!(
+		d.guides[0],
+		fx_core::document::Guide {
+			vertical: false,
+			position: 4.0
+		},
+		"a vertical guide becomes horizontal"
+	);
+	assert_eq!((d.annotations.samplers[0].x, d.annotations.samplers[0].y), (8.0, 1.0));
+
+	assert!(history.undo(&mut d));
+	assert_eq!((d.width, d.height), (20, 10));
+	assert_eq!(d.work_path, before.work_path);
+	assert_eq!(d.guides, before.guides);
+	let vm = d.layers[0].vector_mask.as_ref().unwrap();
+	assert_eq!((vm.cache.width(), vm.cache.height(), vm.path.subpaths[0].anchors[0].pos), (20, 10, (1.0, 2.0)));
+}
+
+/// R03: Canvas Size moved pixel layers and shapes by their offsets but left
+/// the alpha channels where they were.
+#[test]
+fn canvas_size_moves_the_alpha_channels_with_the_content() {
+	let store = store("canvas-size");
+	let mut d = doc(20, 10);
+	let mut alpha = TiledImage::new(20, 10, PixelFormat::Gray8);
+	alpha.set_slot(0, 0, TileSlot::Solid(PixelValue([65535; 4])));
+	d.channels.push(fx_core::channel::Channel::new("alpha", alpha));
+	apply(
+		&mut d,
+		&store,
+		Command::CanvasSize {
+			width: 40,
+			height: 30,
+			anchor: fx_core::transform::Anchor9::Center,
+		},
+	);
+	assert_eq!((d.width, d.height), (40, 30));
+	// The content moved by (10, 10): the channel's (0, 0) tile now starts
+	// with 10 unselected pixels.
+	let channel = &d.channels[0].image;
+	let TileSlot::Data(handle) = channel.slot(0, 0, 0) else {
+		panic!("a partly selected tile, got {:?}", channel.slot(0, 0, 0))
+	};
+	let tile = store.get(handle).unwrap();
+	let bytes = tile.bytes();
+	assert_eq!(bytes[0], 0, "(0, 0) is new canvas");
+	assert_eq!(bytes[10 * 256 + 10], 255, "(10, 10) is the old (0, 0)");
+}

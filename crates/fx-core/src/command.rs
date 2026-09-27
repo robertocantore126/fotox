@@ -992,6 +992,7 @@ impl Command {
 // The commands
 // ---------------------------------------------------------------------------
 
+mod canvas_space;
 mod m10;
 pub mod m11;
 pub mod m12;
@@ -2690,41 +2691,33 @@ fn layer_ids(doc: &Document) -> Vec<LayerId> {
 fn set_canvas(doc: &mut Document, width: u32, height: u32) -> Vec<LayerId> {
 	doc.width = width;
 	doc.height = height;
-	let format = doc.color.depth.rgba_format();
+	let (format, gray) = (doc.color.depth.rgba_format(), crate::selection::gray_format(doc.color.depth));
 	let mut changed = Vec::new();
 	for id in layer_ids(doc) {
-		if let Some(layer) = doc.layer_mut(id)
-			&& let Some((_, cache)) = layer.kind.derived_placement()
-		{
-			if (cache.width(), cache.height()) == (width, height) {
-				continue;
+		let Some(layer) = doc.layer_mut(id) else { continue };
+		// Every canvas-sized derived cache (code review 2026-09-27 R03): the
+		// generated layers', vector masks' and layer-style effects'.
+		let mut caches: Vec<(&mut TiledImage, PixelFormat)> = Vec::new();
+		match &mut layer.kind {
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => {
+				caches.push((cache, format));
 			}
-			*cache = TiledImage::derived(width, height, format);
-			changed.push(id);
+			LayerKind::Pixel { .. } | LayerKind::Group { .. } | LayerKind::Adjustment(_) | LayerKind::SolidFill { .. } => {}
 		}
-	}
-	changed
-}
-
-/// Fold a canvas-level mapping into every generated layer's matrix (M6-T06/T07):
-/// a shape or a text layer is placed by a matrix, so the canvas turning,
-/// flipping or scaling turns, flips or scales it exactly, and nothing is
-/// resampled. Returns the layers that changed; a mapping that is not affine
-/// (which no canvas-level command produces) leaves them all alone.
-fn map_generated_layers(doc: &mut Document, mapping: Mapping) -> Vec<LayerId> {
-	let mut changed = Vec::new();
-	for id in layer_ids(doc) {
-		if let Some(layer) = doc.layer_mut(id)
-			&& let Some((transform, cache)) = layer.kind.derived_placement()
-		{
-			let Some(moved) = mapping.then_affine(*transform) else {
-				continue;
-			};
-			if moved == *transform {
-				continue;
+		if let Some(vm) = layer.vector_mask.as_mut() {
+			caches.push((&mut vm.cache, gray));
+		}
+		for effect in &mut layer.effects {
+			caches.push((effect, format));
+		}
+		let mut resized = false;
+		for (cache, format) in caches {
+			if (cache.width(), cache.height()) != (width, height) {
+				*cache = TiledImage::derived(width, height, format);
+				resized = true;
 			}
-			*transform = moved;
-			cache.mark_all_dirty();
+		}
+		if resized {
 			changed.push(id);
 		}
 	}
@@ -2807,6 +2800,12 @@ fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>)
 		Some(selection) => Some(ops.rotate(&selection.image, selection.offset, canvas, op, ctx.tiles)?),
 		None => None,
 	};
+	let channels = canvas_space::map_channels(doc, |image| {
+		let (image, at) = ops.rotate(image, (0, 0), canvas, op, ctx.tiles)?;
+		Ok(crate::pixels::place_at(&image, at, (0, 0), PixelValue::TRANSPARENT, ctx.tiles)?)
+	})?;
+	// Everything that is not pixels (shapes, text, Smart Objects, paths…).
+	let space = canvas_space::SpacePlan::new(doc, op.mapping(canvas), canvas, (dest_w, dest_h))?;
 	// Phase 2: commit.
 	let mut changed = Vec::new();
 	for (id, image, offset) in images {
@@ -2834,7 +2833,8 @@ fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>)
 	}
 	// Generated layers (shapes, M6-T06, and text, M6-T07) carry a transform,
 	// not pixels: they turn with the canvas without losing anything.
-	changed.extend(map_generated_layers(doc, op.mapping(canvas)));
+	canvas_space::set_channels(doc, channels);
+	changed.extend(space.apply(doc));
 	changed.extend(set_canvas(doc, dest_w, dest_h));
 	changed.sort_unstable();
 	changed.dedup();
@@ -2872,7 +2872,7 @@ fn rotate_canvas_arbitrary(doc: &mut Document, angle_deg: f64, filter: Filter, c
 		return Err(CommandError::NotAllowed("the rotated canvas has no bounding box".into()));
 	};
 	let mapping = turn.after_destination_translation(-f64::from(left), -f64::from(top));
-	let mut changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	let mut changed = resample_document(doc, ops, mapping, size, filter, ctx.tiles)?;
 	changed.extend(set_canvas(doc, size.0, size.1));
 	Ok(CommandEffect {
 		label: "Rotate Image".into(),
@@ -2892,7 +2892,7 @@ fn canvas_size(doc: &mut Document, width: u32, height: u32, anchor: Anchor9, sto
 		});
 	}
 	let (dx, dy) = anchor.offset((doc.width, doc.height), (width, height));
-	let (mut moved, masks) = shift_offsets(doc, dx, dy, store)?;
+	let (mut moved, masks) = shift_offsets(doc, dx, dy, (width, height), store)?;
 	moved.extend(set_canvas(doc, width, height));
 	Ok(CommandEffect {
 		label: "Canvas Size".into(),
@@ -2909,7 +2909,7 @@ fn canvas_size(doc: &mut Document, width: u32, height: u32, anchor: Anchor9, sto
 /// (unlinked, or on a group or an adjustment layer) has no offset to move: its
 /// pixels move instead, and what goes past the new origin is dropped. Returns
 /// the layers that moved and the layers whose mask pixels were moved.
-fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Result<(Vec<LayerId>, Vec<LayerId>), CommandError> {
+fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, new_size: (u32, u32), store: &TileStore) -> Result<(Vec<LayerId>, Vec<LayerId>), CommandError> {
 	let moved_offset = |offset: (i32, i32)| -> Result<(i32, i32), CommandError> { Ok((checked_offset(offset.0, dx)?, checked_offset(offset.1, dy)?)) };
 	// Validate every new offset before moving anything.
 	let mut moved = Vec::new();
@@ -2934,6 +2934,8 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Res
 		Some(selection) => Some(moved_offset(selection.offset)?),
 		None => None,
 	};
+	let channels = canvas_space::map_channels(doc, |image| Ok(crate::pixels::place_at(image, (dx, dy), (0, 0), PixelValue::TRANSPARENT, store)?))?;
+	let space = canvas_space::SpacePlan::new(doc, Mapping::translation(f64::from(dx), f64::from(dy)), (doc.width, doc.height), new_size)?;
 	// Commit.
 	for (id, offset) in &moved {
 		if let Some(layer) = doc.layer_mut(*id)
@@ -2950,7 +2952,8 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Res
 	}
 	// A shape or text layer has no offset to move: its matrix is translated
 	// instead (M6-T06/T07), which is the same thing without touching a tile.
-	let mut shapes = map_generated_layers(doc, Mapping::translation(f64::from(dx), f64::from(dy)));
+	canvas_space::set_channels(doc, channels);
+	let mut shapes = space.apply(doc);
 	let mut masks_moved = Vec::new();
 	for (id, image) in masks {
 		if let Some(layer) = doc.layer_mut(id)
@@ -2996,6 +2999,7 @@ fn clip_document(doc: &mut Document, rect: (i32, i32, u32, u32), store: &TileSto
 	};
 	let selection = doc.selection.as_ref().map(clip).transpose()?;
 	let reselect = doc.reselect.as_ref().map(clip).transpose()?;
+	let channels = canvas_space::map_channels(doc, |image| Ok(crate::pixels::clip_to_rect(Placed { image, offset: (0, 0) }, rect, store)?))?;
 	// Commit.
 	let mut changed = Vec::new();
 	for (id, image) in images {
@@ -3020,6 +3024,7 @@ fn clip_document(doc: &mut Document, rect: (i32, i32, u32, u32), store: &TileSto
 	if let (Some(selection), Some(image)) = (doc.reselect.as_mut(), reselect) {
 		selection.image = image;
 	}
+	canvas_space::set_channels(doc, channels);
 	Ok(changed)
 }
 
@@ -3178,7 +3183,7 @@ fn crop(doc: &mut Document, rect: (i32, i32, u32, u32), angle_deg: f64, delete_c
 		// straightened images unfold from there, and the ones that end up in
 		// the box are exactly the ones the user sees.
 		let mapping = Mapping::rotation_about(angle.to_radians(), cx, cy).after_destination_translation(-f64::from(rect.0), -f64::from(rect.1));
-		pixels_changed = resample_document(doc, ops, mapping, Filter::BicubicAutomatic, ctx.tiles)?;
+		pixels_changed = resample_document(doc, ops, mapping, (rect.2, rect.3), Filter::BicubicAutomatic, ctx.tiles)?;
 		if delete_cropped {
 			// The images are already in the box's frame: clip to the box.
 			pixels_changed.extend(clip_document(doc, (0, 0, rect.2, rect.3), ctx.tiles)?);
@@ -3187,7 +3192,7 @@ fn crop(doc: &mut Document, rect: (i32, i32, u32, u32), angle_deg: f64, delete_c
 		if delete_cropped {
 			pixels_changed = clip_document(doc, rect, ctx.tiles)?;
 		}
-		let (moved, masks) = shift_offsets(doc, -rect.0, -rect.1, ctx.tiles)?;
+		let (moved, masks) = shift_offsets(doc, -rect.0, -rect.1, (rect.2, rect.3), ctx.tiles)?;
 		props_changed = moved;
 		pixels_changed.extend(masks);
 	}
@@ -3238,7 +3243,7 @@ fn image_size(
 	};
 	let ops = pixel_ops(ctx, "Image Size")?;
 	let mapping = Mapping::scale(f64::from(width) / f64::from(doc.width), f64::from(height) / f64::from(doc.height));
-	let mut changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	let mut changed = resample_document(doc, ops, mapping, (width, height), filter, ctx.tiles)?;
 	changed.extend(set_canvas(doc, width, height));
 	doc.ppi = ppi;
 	Ok(CommandEffect {
@@ -3253,7 +3258,14 @@ fn image_size(
 /// rotation). Every image's size and offset come from its mapped bounding box,
 /// so the layout scales with the canvas. Returns the layers that changed; the
 /// caller sets the document's new size.
-fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, filter: Filter, store: &TileStore) -> Result<Vec<LayerId>, CommandError> {
+fn resample_document(
+	doc: &mut Document,
+	ops: &dyn PixelOps,
+	mapping: Mapping,
+	new_size: (u32, u32),
+	filter: Filter,
+	store: &TileStore,
+) -> Result<Vec<LayerId>, CommandError> {
 	// Phase 1: every new image, while the document is still untouched.
 	let mut images = Vec::new();
 	let mut masks = Vec::new();
@@ -3282,6 +3294,11 @@ fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, f
 		Some(selection) => Some(resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?),
 		None => None,
 	};
+	let channels = canvas_space::map_channels(doc, |image| {
+		let (image, at) = resample_placed(ops, image, (0, 0), mapping, filter, store)?;
+		Ok(crate::pixels::place_at(&image, at, (0, 0), PixelValue::TRANSPARENT, store)?)
+	})?;
+	let space = canvas_space::SpacePlan::new(doc, mapping, (doc.width, doc.height), new_size)?;
 	// Phase 2: commit.
 	let mut changed = Vec::new();
 	for (id, (image, offset)) in images {
@@ -3303,7 +3320,8 @@ fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, f
 	}
 	// Generated layers (M6-T06/T07) go through the same mapping as a matrix
 	// instead of as pixels: a straighten or a resize keeps them sharp.
-	changed.extend(map_generated_layers(doc, mapping));
+	canvas_space::set_channels(doc, channels);
+	changed.extend(space.apply(doc));
 	if let Some((image, offset)) = selection {
 		doc.selection = Some(Selection { image, offset });
 	}

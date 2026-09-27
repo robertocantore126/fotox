@@ -1,0 +1,278 @@
+//! Canvas-level geometry for everything that is not a layer's pixel image
+//! (code review 2026-09-27 R03). Rotate, flip, Canvas Size, Crop, Image Size
+//! and Perspective Crop move the pixels themselves; this module moves the rest
+//! of the document with them, so a mixed document turns as one.
+//!
+//! What follows the canvas mapping:
+//! * shape and text matrices, Smart Object transforms (composed);
+//! * vector-mask paths, the work path and saved paths;
+//! * gradient fills (centre and angle), pattern fills (angle, for turns);
+//! * artboard and slice rectangles (their mapped bounding box);
+//! * notes, count markers and colour samplers;
+//! * guides, when they stay horizontal or vertical (an arbitrary turn leaves
+//!   them where they were);
+//! * layer comps' matrices and Smart Object transforms; a comp's pixel-layer
+//!   offset follows a whole-pixel translation and is forgotten otherwise (the
+//!   pixels it placed were rewritten).
+//!
+//! Every derived cache these touch is marked dirty; [`set_canvas`] then gives
+//! each canvas-sized cache the new size. Alpha channels are pixels and are
+//! moved by the raster helpers, like masks at the canvas origin.
+
+use super::*;
+
+/// The document's non-pixel geometry after a canvas mapping, computed while
+/// the document is untouched (phase 1) and installed with the pixels (phase 2).
+pub(super) struct SpacePlan {
+	layers: Vec<LayerPatch>,
+	guides: Vec<crate::document::Guide>,
+	work_path: Option<crate::path::Path>,
+	paths: Vec<crate::path::NamedPath>,
+	slices: Vec<crate::comps::Slice>,
+	annotations: crate::annotations::Annotations,
+	comps: Vec<crate::comps::LayerComp>,
+}
+
+struct LayerPatch {
+	id: LayerId,
+	/// A generated layer's new kind (shape, text, fill, Smart Object).
+	kind: Option<LayerKind>,
+	vector_mask: Option<crate::layer::VectorMask>,
+	artboard: Option<crate::layer::Artboard>,
+}
+
+/// Where `mapping` sends a point; a point it cannot evaluate stays.
+fn point(mapping: &Mapping, p: (f64, f64)) -> (f64, f64) {
+	mapping.forward_point(p.0, p.1).unwrap_or(p)
+}
+
+/// The linear part of an affine mapping.
+fn linear(mapping: &Mapping) -> Option<[f64; 4]> {
+	match mapping {
+		Mapping::Affine([a, b, c, d, _, _]) => Some([*a, *b, *c, *d]),
+		_ => None,
+	}
+}
+
+/// A rectangle's mapped bounding box.
+fn rect(mapping: &Mapping, r: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {
+	let box_ = [f64::from(r.0), f64::from(r.1), f64::from(r.0) + f64::from(r.2), f64::from(r.1) + f64::from(r.3)];
+	match dest_rect(mapping, box_) {
+		Some(((x, y), (w, h))) => (x, y, w, h),
+		None => r,
+	}
+}
+
+impl SpacePlan {
+	/// The plan for `mapping` (old canvas pixels → new canvas pixels), where
+	/// the old canvas is `old` and the new one `new`.
+	pub(super) fn new(doc: &Document, mapping: Mapping, old: (u32, u32), new: (u32, u32)) -> Result<Self, CommandError> {
+		let lin = linear(&mapping);
+		let scale = lin.map_or(1.0, |[a, b, c, d]| (a * d - b * c).abs().sqrt());
+		// A direction (y down) turned by the mapping, as Photoshop's
+		// counter-clockwise angle in degrees.
+		let angle = |degrees: f64| -> f64 {
+			let Some([a, b, c, d]) = lin else { return degrees };
+			let (s, co) = degrees.to_radians().sin_cos();
+			let (x, y) = (co, -s);
+			let (x2, y2) = (a * x + c * y, b * x + d * y);
+			(-y2).atan2(x2).to_degrees()
+		};
+		let old_centre = (f64::from(old.0) / 2.0, f64::from(old.1) / 2.0);
+		let new_centre = (f64::from(new.0) / 2.0, f64::from(new.1) / 2.0);
+		let map_path = |p: &crate::path::Path| p.map(|q| point(&mapping, q));
+
+		let mut layers = Vec::new();
+		for id in layer_ids(doc) {
+			let layer = doc.layer(id).expect("walked layer exists");
+			// Exhaustive: a new layer kind must decide how it follows the canvas.
+			let kind = match &layer.kind {
+				LayerKind::Pixel { .. } | LayerKind::Group { .. } | LayerKind::Adjustment(_) | LayerKind::SolidFill { .. } => None,
+				LayerKind::Shape { .. } | LayerKind::Text { .. } => {
+					let mut kind = layer.kind.clone();
+					if let Some((transform, cache)) = kind.derived_placement() {
+						// FAST: a projective canvas mapping (Perspective Crop)
+						// cannot be held by a matrix; the layer stays.
+						if let Some(moved) = mapping.then_affine(*transform) {
+							*transform = moved;
+						}
+						cache.mark_all_dirty();
+					}
+					Some(kind)
+				}
+				LayerKind::FillLayer { content, cache } => {
+					let content = match content {
+						crate::fill::FillLayer::Gradient(g) => {
+							let mut g = g.clone();
+							let c = point(&mapping, (old_centre.0 + g.offset.0, old_centre.1 + g.offset.1));
+							g.offset = (c.0 - new_centre.0, c.1 - new_centre.1);
+							g.angle = angle(g.angle);
+							crate::fill::FillLayer::Gradient(g)
+						}
+						// Anchored at the canvas origin with no offset of its
+						// own: only the turn and the scale can follow.
+						crate::fill::FillLayer::Pattern { pattern, scale: s, angle: a } => crate::fill::FillLayer::Pattern {
+							pattern: *pattern,
+							scale: s * scale,
+							angle: angle(*a),
+						},
+					};
+					let mut cache = cache.clone();
+					cache.mark_all_dirty();
+					Some(LayerKind::FillLayer { content, cache })
+				}
+				LayerKind::Smart { smart, cache } => {
+					let Some(transform) = m12::compose(mapping, smart.transform) else {
+						return Err(CommandError::NotAllowed(format!(
+							"the Smart Object \"{}\" has a warp that cannot follow the canvas; rasterise it first",
+							layer.name
+						)));
+					};
+					let mut smart = smart.clone();
+					smart.transform = transform;
+					let mut cache = cache.clone();
+					cache.mark_all_dirty();
+					Some(LayerKind::Smart { smart, cache })
+				}
+			};
+			let vector_mask = layer.vector_mask.as_ref().map(|vm| {
+				let mut vm = vm.clone();
+				vm.path = map_path(&vm.path);
+				vm.feather *= scale;
+				vm.cache.mark_all_dirty();
+				vm
+			});
+			let artboard = layer.artboard.as_ref().map(|a| crate::layer::Artboard {
+				rect: rect(&mapping, a.rect),
+				background: a.background,
+			});
+			layers.push(LayerPatch {
+				id,
+				kind,
+				vector_mask,
+				artboard,
+			});
+		}
+
+		let guides = doc
+			.guides
+			.iter()
+			.map(|g| {
+				let Some([a, b, c, d]) = lin else { return *g };
+				let flat = |v: f64| v.abs() < 1e-9;
+				let (p, direction) = if g.vertical { ((g.position, 0.0), (c, d)) } else { ((0.0, g.position), (a, b)) };
+				let q = point(&mapping, p);
+				if flat(direction.0) {
+					crate::document::Guide { vertical: true, position: q.0 }
+				} else if flat(direction.1) {
+					crate::document::Guide { vertical: false, position: q.1 }
+				} else {
+					*g
+				}
+			})
+			.collect();
+
+		let mut annotations = doc.annotations.clone();
+		for note in &mut annotations.notes {
+			(note.x, note.y) = point(&mapping, (note.x, note.y));
+		}
+		for group in &mut annotations.counts {
+			for p in &mut group.points {
+				*p = point(&mapping, *p);
+			}
+		}
+		for sampler in &mut annotations.samplers {
+			(sampler.x, sampler.y) = point(&mapping, (sampler.x, sampler.y));
+		}
+
+		let whole_translation = match mapping {
+			Mapping::Affine([a, b, c, d, e, f]) if (a, b, c, d) == (1.0, 0.0, 0.0, 1.0) && e.fract() == 0.0 && f.fract() == 0.0 => Some((e as i32, f as i32)),
+			_ => None,
+		};
+		let mut comps = doc.comps.clone();
+		for comp in &mut comps {
+			for state in &mut comp.states {
+				state.offset = match (state.offset, whole_translation) {
+					(Some((x, y)), Some((dx, dy))) => Some((x.saturating_add(dx), y.saturating_add(dy))),
+					_ => None,
+				};
+				if let Some(m) = state.matrix {
+					state.matrix = mapping.then_affine(m).or(Some(m));
+				}
+				if let Some(m) = state.mapping {
+					state.mapping = m12::compose(mapping, m).or(Some(m));
+				}
+			}
+		}
+
+		Ok(Self {
+			layers,
+			guides,
+			work_path: doc.work_path.as_ref().map(map_path),
+			paths: doc
+				.paths
+				.iter()
+				.map(|p| crate::path::NamedPath {
+					name: p.name.clone(),
+					path: map_path(&p.path),
+				})
+				.collect(),
+			slices: doc
+				.slices
+				.iter()
+				.map(|s| crate::comps::Slice {
+					name: s.name.clone(),
+					rect: rect(&mapping, s.rect),
+				})
+				.collect(),
+			annotations,
+			comps,
+		})
+	}
+
+	/// Install the plan. Returns the layers whose geometry changed.
+	pub(super) fn apply(self, doc: &mut Document) -> Vec<LayerId> {
+		let mut changed = Vec::new();
+		for patch in self.layers {
+			let Some(layer) = doc.layer_mut(patch.id) else { continue };
+			let mut touched = false;
+			if let Some(kind) = patch.kind {
+				layer.kind = kind;
+				touched = true;
+			}
+			if patch.vector_mask.is_some() {
+				layer.vector_mask = patch.vector_mask;
+				touched = true;
+			}
+			if patch.artboard.is_some() {
+				layer.artboard = patch.artboard;
+				touched = true;
+			}
+			if touched {
+				changed.push(patch.id);
+			}
+		}
+		doc.guides = self.guides;
+		doc.work_path = self.work_path;
+		doc.paths = self.paths;
+		doc.slices = self.slices;
+		doc.annotations = self.annotations;
+		doc.comps = self.comps;
+		changed
+	}
+}
+
+/// The alpha channels (canvas-origin grey images) after `f` moves each one.
+pub(super) fn map_channels(
+	doc: &Document,
+	mut f: impl FnMut(&TiledImage) -> Result<TiledImage, CommandError>,
+) -> Result<Vec<TiledImage>, CommandError> {
+	doc.channels.iter().map(|c| f(&c.image)).collect()
+}
+
+/// Install [`map_channels`]'s result.
+pub(super) fn set_channels(doc: &mut Document, images: Vec<TiledImage>) {
+	for (channel, image) in doc.channels.iter_mut().zip(images) {
+		channel.image = image;
+	}
+}
