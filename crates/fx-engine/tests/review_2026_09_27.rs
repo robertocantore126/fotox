@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use fx_core::{BitDepth, ColorProfile, Command, CommandContext, Document, DocumentColor, Layer, LayerId, LayerKind, LayerRef};
-use fx_tiles::{PixelFormat, PixelValue, TileSlot, TileStore, TileStoreConfig, TiledImage};
+use fx_tiles::{PixelFormat, PixelValue, TileBuffer, TileClass, TileSlot, TileStore, TileStoreConfig, TiledImage};
 
 fn doc(w: u32, h: u32) -> Document {
 	Document::new(
@@ -91,4 +91,59 @@ fn a_vector_masked_background_keeps_the_alpha_channel() {
 	});
 	d.layers.push(Arc::new(layer));
 	assert!(!fx_engine::export::opaque_background(&d, &store));
+}
+
+/// A grey 256 × 256 tile: 255 where `keep(x, y)`, else 0.
+fn gray_tile(store: &TileStore, keep: impl Fn(usize, usize) -> bool) -> TileSlot {
+	let mut tile = TileBuffer::zeroed(PixelFormat::Gray8);
+	for (i, v) in tile.bytes_mut().iter_mut().enumerate() {
+		*v = if keep(i % 256, i / 256) { 255 } else { 0 };
+	}
+	TileSlot::Data(store.insert(tile, TileClass::Authoritative))
+}
+
+/// R12: with a pixel mask enabled, the vector mask was ignored. The two
+/// multiply: the fill shows only where both reveal it.
+#[test]
+fn pixel_and_vector_masks_multiply() {
+	let store = store("two-masks");
+	let mut d = doc(256, 256);
+	let mut layer = Layer::new(LayerId(1), "fill", LayerKind::SolidFill { rgba: [65535; 4] });
+	// Pixel mask: the left half. Vector mask: the top half.
+	let mut mask = TiledImage::new(256, 256, PixelFormat::Gray8);
+	mask.set_slot(0, 0, gray_tile(&store, |x, _| x < 128));
+	layer.mask = Some(fx_core::Mask {
+		image: mask,
+		enabled: true,
+		linked: true,
+		outside_value: 0,
+	});
+	let mut cache = TiledImage::derived(256, 256, PixelFormat::Gray8);
+	cache.set_derived_slot(0, 0, 0, gray_tile(&store, |_, y| y < 128));
+	layer.vector_mask = Some(fx_core::layer::VectorMask {
+		path: fx_core::path::Path::default(),
+		enabled: true,
+		feather: 0.0,
+		density: 1.0,
+		cache,
+	});
+	d.layers.push(Arc::new(layer));
+	let alpha = |x: usize, y: usize| composite_pixel(&d, &store, y * 256 + x)[3];
+	assert!((alpha(10, 10) - 1.0).abs() < 1e-3, "both masks reveal");
+	assert!(alpha(200, 10) < 1e-3, "the pixel mask hides");
+	assert!(alpha(10, 200) < 1e-3, "the vector mask hides");
+	assert!(alpha(200, 200) < 1e-3, "both hide");
+
+	// A constant vector mask (density 50 %, the whole tile outside the path:
+	// the cache holds 1 − density) scales the varying pixel mask.
+	let mut layer = (*d.layers[0]).clone();
+	let vm = layer.vector_mask.as_mut().unwrap();
+	vm.density = 0.5;
+	vm.cache = TiledImage::derived(256, 256, PixelFormat::Gray8);
+	vm.cache.set_derived_slot(0, 0, 0, TileSlot::Solid(PixelValue([32768; 4])));
+	d.layers[0] = Arc::new(layer);
+	let alpha = |x: usize, y: usize| composite_pixel(&d, &store, y * 256 + x)[3];
+	assert!((alpha(10, 200) - 0.5).abs() < 1e-3, "{}", alpha(10, 200));
+	assert!((alpha(10, 10) - 0.5).abs() < 1e-3);
+	assert!(alpha(200, 200) < 1e-3);
 }

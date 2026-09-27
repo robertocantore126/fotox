@@ -220,3 +220,60 @@ fn masks_modulate_alpha() {
 	let a = 16384.0 / 65535.0;
 	assert!(close(px(&out, 200, 0), [a, 0.0, 0.0, a]));
 }
+
+/// Code review 2026-09-27 R12: a pixel mask and a vector mask both varying
+/// in a tile render exactly like one mask holding their product, whatever the
+/// blend mode, for a layer and for isolated and pass-through groups.
+#[test]
+fn two_varying_masks_equal_their_product() {
+	let store = store();
+	let m1 = |x: u32, y: u32| hash16(x, y, 71);
+	let m2 = |x: u32, y: u32| hash16(x / 3, y / 3, 83);
+	let product = |x: u32, y: u32| ((u32::from(m1(x, y)) * u32::from(m2(x, y)) + 32767) / 65535) as u16;
+	for (group, blend) in [
+		(false, BlendMode::Normal),
+		(false, BlendMode::Multiply),
+		(false, BlendMode::Overlay),
+		(false, BlendMode::Color),
+		(true, BlendMode::PassThrough),
+		(true, BlendMode::Screen),
+	] {
+		let build_doc = |two_masks: bool| {
+			let mut doc = doc(512, 256);
+			let bottom = busy_layer(&mut doc, &store, 11);
+			let mut top = busy_layer(&mut doc, &store, 22);
+			if group {
+				top = crate::testing::group(&mut doc, blend, vec![top]);
+			} else {
+				top.blend = blend;
+			}
+			top.opacity = 0.8;
+			if two_masks {
+				top.mask = Some(mask(&doc, &store, &m1));
+				let flat = image(&store, doc.width, doc.height, fx_tiles::PixelFormat::Gray16, &|x, y| [m2(x, y), 0, 0, 0]);
+				let mut cache = fx_tiles::TiledImage::derived(doc.width, doc.height, fx_tiles::PixelFormat::Gray16);
+				for tx in 0..2 {
+					cache.set_derived_slot(0, tx, 0, flat.slot(0, tx, 0).clone());
+				}
+				top.vector_mask = Some(fx_core::VectorMask {
+					path: fx_core::path::Path::default(),
+					enabled: true,
+					feather: 0.0,
+					density: 1.0,
+					cache,
+				});
+			} else {
+				top.mask = Some(mask(&doc, &store, &product));
+			}
+			doc.layers.push(Arc::new(bottom));
+			doc.layers.push(Arc::new(top));
+			doc
+		};
+		let (two, one) = (build_doc(true), build_doc(false));
+		for tx in 0..2 {
+			let (a, b) = (render(&two, &store, tx, 0), render(&one, &store, tx, 0));
+			let worst = a.iter().zip(&b).flat_map(|(p, q)| p.iter().zip(q).map(|(x, y)| (x - y).abs())).fold(0.0, f64::max);
+			assert!(worst < 1e-4, "group={group} {blend:?} tile {tx}: max difference {worst}");
+		}
+	}
+}
