@@ -106,3 +106,162 @@ fn shapes_and_styles_added_after_an_edit_reach_the_screen() {
 	let styled = frame_color_at(&harness, view, (150.0, 150.0), red);
 	assert!(styled.is_ok(), "the layer style never reached the screen: {:?}", styled.unwrap_err());
 }
+
+fn pointer(kind: fx_engine::PointerKind, x: f64, y: f64, buttons: u8) -> fx_engine::EngineInput {
+	fx_engine::EngineInput::Pointer(fx_engine::PointerInput {
+		kind,
+		x,
+		y,
+		pressure: 1.0,
+		tilt_x: 0.0,
+		tilt_y: 0.0,
+		buttons,
+		modifiers: fx_engine::Modifiers::default(),
+		time_us: 0,
+	})
+}
+
+/// Free Transform on a layer: a drag inside moves the box, a click away from
+/// it commits (the box used to rotate on any press outside it and stay up).
+#[test]
+fn a_free_transform_drag_moves_the_layer_and_a_click_away_commits_it() {
+	use fx_engine::PointerKind::{Down, Move, Up};
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-render-flow-xf-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.ui(UiToEngine::Action {
+		id: "doc:new".into(),
+		args: serde_json::json!({ "width": 800, "height": 600, "ppi": 72, "depth": 8, "background": "white" }),
+	});
+	let doc = harness.wait("the document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentOpened { info }) => Some(info.doc),
+		_ => None,
+	});
+	let view = harness.wait("the document's view", |s| match s {
+		Seen::Ui(EngineToUi::View {
+			doc: of,
+			zoom,
+			center_x,
+			center_y,
+			..
+		}) if *of == doc => Some((*zoom, *center_x, *center_y)),
+		_ => None,
+	});
+	assert_eq!(view, (1.0, 400.0, 300.0), "the viewport shows the document 1:1");
+	command(
+		&harness,
+		doc,
+		serde_json::json!({ "op": "add_layer", "name": null, "layer": { "shape": {
+			"shape": { "kind": "rect", "w": 200.0, "h": 200.0, "radii": [0.0, 0.0, 0.0, 0.0] },
+			"fill": { "kind": "solid", "rgba": [0, 0, 65535, 65535] },
+			"stroke": null,
+			"transform": [1.0, 0.0, 0.0, 1.0, 100.0, 100.0]
+		} } }),
+	);
+	command(&harness, doc, serde_json::json!({ "op": "rasterize", "layers": ["active"] }));
+	harness.wait("the rasterised layer", |s| match s {
+		Seen::Ui(EngineToUi::Layers { layers, .. }) if layers.len() == 2 && layers.iter().all(|l| l.kind == fx_protocol::LayerInfoKind::Pixel) => Some(()),
+		_ => None,
+	});
+	harness.ui(UiToEngine::Action {
+		id: "xf:free".into(),
+		args: serde_json::Value::Null,
+	});
+	harness.wait("the transform box", |s| match s {
+		Seen::Ui(EngineToUi::TransformBox { up: true, .. }) => Some(()),
+		_ => None,
+	});
+	// 1:1 and centred: viewport pixels are document pixels. Drag the box by
+	// (+100, +50) from inside.
+	for event in [
+		pointer(Move, 200.0, 200.0, 0),
+		pointer(Down, 200.0, 200.0, 1),
+		pointer(Move, 250.0, 225.0, 1),
+		pointer(Move, 300.0, 250.0, 1),
+		pointer(Up, 300.0, 250.0, 0),
+		// Far from the box: commits.
+		pointer(Move, 700.0, 550.0, 0),
+		pointer(Down, 700.0, 550.0, 1),
+		pointer(Up, 700.0, 550.0, 0),
+	] {
+		harness.engine.send(event);
+	}
+	harness.wait("the box to close", |s| match s {
+		Seen::Ui(EngineToUi::TransformBox { up: false, .. }) => Some(()),
+		_ => None,
+	});
+	let blue = |p: [u8; 4]| p[2] > 200 && p[0] < 40 && p[1] < 40;
+	let white = |p: [u8; 4]| p[0] > 240 && p[1] > 240 && p[2] > 240;
+	let moved = frame_color_at(&harness, view, (350.0, 300.0), blue);
+	assert!(moved.is_ok(), "the layer did not move: {:?} at its new place", moved.unwrap_err());
+	assert!(
+		frame_color_at(&harness, view, (150.0, 150.0), white).is_ok(),
+		"nothing is left at its old place"
+	);
+}
+
+/// Code review 2026-09-27 R11: an adjustment dialog's value is on screen while
+/// the dialog is open (outside the history), and gone when it closes.
+#[test]
+fn an_adjustment_preview_reaches_the_screen_and_leaves_it() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-render-flow-adj-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.ui(UiToEngine::Action {
+		id: "doc:new".into(),
+		args: serde_json::json!({ "width": 800, "height": 600, "ppi": 72, "depth": 8, "background": "white" }),
+	});
+	let doc = harness.wait("the document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentOpened { info }) => Some(info.doc),
+		_ => None,
+	});
+	let view = harness.wait("the document's view", |s| match s {
+		Seen::Ui(EngineToUi::View {
+			doc: of,
+			zoom,
+			center_x,
+			center_y,
+			..
+		}) if *of == doc => Some((*zoom, *center_x, *center_y)),
+		_ => None,
+	});
+	let levels = |out_white: f64| {
+		let channels: Vec<serde_json::Value> = (0..4)
+			.map(|i| {
+				let out = if i == 0 { out_white } else { 1.0 };
+				serde_json::json!({ "in_black": 0.0, "in_white": 1.0, "gamma": 1.0, "out_black": 0.0, "out_white": out })
+			})
+			.collect();
+		serde_json::json!({ "kind": "levels", "channels": channels })
+	};
+	command(
+		&harness,
+		doc,
+		serde_json::json!({ "op": "add_layer", "name": null, "layer": { "adjustment": levels(1.0) } }),
+	);
+	let layer = harness.wait("the Levels layer", |s| match s {
+		Seen::Ui(EngineToUi::Layers { layers, .. }) if layers.len() == 2 => Some(layers[0].id),
+		_ => None,
+	});
+	let white = |p: [u8; 4]| p[0] > 240 && p[1] > 240 && p[2] > 240;
+	let black = |p: [u8; 4]| p[0] < 16 && p[1] < 16 && p[2] < 16;
+	assert!(frame_color_at(&harness, view, (400.0, 300.0), white).is_ok(), "the neutral Levels leaves white");
+	harness.ui(UiToEngine::AdjustmentPreview {
+		doc,
+		layer,
+		adjustment: serde_json::from_value(levels(0.0)).unwrap(),
+	});
+	let shown = frame_color_at(&harness, view, (400.0, 300.0), black);
+	assert!(shown.is_ok(), "the preview never reached the screen: {:?}", shown.unwrap_err());
+	harness.ui(UiToEngine::AdjustmentPreviewEnd { doc });
+	let gone = frame_color_at(&harness, view, (400.0, 300.0), white);
+	assert!(gone.is_ok(), "the preview stayed on screen: {:?}", gone.unwrap_err());
+}

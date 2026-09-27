@@ -306,9 +306,20 @@ const renderers = {
     for (const [ic, label] of mock.adjustments) {
       grid.append(h("button", {
         class: "adj-btn", type: "button", "data-tip": label,
-        onclick: () => emit("ask-dialog", label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")),
+        // In the app: a new adjustment layer with its live dialog, as the
+        // Layers panel's menu makes it (these buttons used to open mock
+        // dialogs that changed nothing).
+        onclick: () => {
+          if (bridge.isNative) {
+            if (!nativePanels.newAdjustmentLayer(`${label}...`) && !nativePanels.newAdjustmentLayer(label)) emit("mock", label);
+            return;
+          }
+          emit("ask-dialog", label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
+        },
       }, icon(ic, "ic")));
     }
+    // The presets below are mock-ups: the app shows only what works.
+    if (bridge.isNative) return h("div", {}, h("div", { class: "pblock-title", text: "Adjustment layers" }), grid);
     return h("div", {}, h("div", { class: "pblock-title", text: "Adjustment layers" }), grid,
       h("div", { class: "pblock-title", text: "Presets" }),
       h("div", { class: "plist" }, ["Brightness/Contrast 1", "Levels 1", "Curves 1"].map((n) => listRow({ label: n, thumb: h("span", { class: "pthumb adj" }, icon("i-adjust", "ic sm")) }))),
