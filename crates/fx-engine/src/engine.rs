@@ -3917,7 +3917,11 @@ impl Engine {
 	fn start_derived(&mut self, work: MipWork) {
 		let store = self.store.clone();
 		let Some(open) = self.docs.get(work.doc) else { return };
-		if (open.doc.revision, open.generation) != (work.revision, work.generation) {
+		// The render thread names its snapshot by `render_generation` (the
+		// content generation and the preview's), not by `generation`: comparing
+		// the two dropped every request after the first edit, so shapes, text
+		// and styles never drew until the document was reopened.
+		if (open.doc.revision, open.render_generation()) != (work.revision, work.generation) {
 			// The document changed meanwhile; the next frame asks again.
 			return;
 		}
@@ -3959,7 +3963,7 @@ impl Engine {
 		self.derived_running = false;
 		let store = self.store.clone();
 		if let Some(open) = self.docs.get_mut(doc) {
-			if open.generation == generation {
+			if open.render_generation() == generation {
 				crate::derived::merge(&mut open.doc, computed, layers, &store);
 				// Held until the next batch lands: the frame this one answers
 				// composites them first (the previous batch is let go).

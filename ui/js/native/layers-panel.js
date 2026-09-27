@@ -338,8 +338,6 @@ function renderLayers() {
     layerScroll.set(currentDoc, currentList.scrollTop);
     renderRows();
   });
-  listEl.addEventListener("dragover", (e) => { if (dragId != null) e.preventDefault(); });
-  listEl.addEventListener("drop", (e) => dropOnList(e));
   layersRoot.append(listEl);
 
   layersRoot.append(h("div", { class: "pbar" },
@@ -401,7 +399,7 @@ function row(i, v) {
   const el = h("div", {
     class: "plist-row nrow" + (l.selected ? " sel" : "") + (l.visible ? "" : " hidden-layer"),
     style: { top: v * ROW_H + "px", height: ROW_H + "px", paddingLeft: 4 + l.depth * 14 + "px" },
-    draggable: "true", "data-id": String(l.id),
+    "data-id": String(l.id),
   });
 
   const eye = h("button", {
@@ -498,25 +496,9 @@ function row(i, v) {
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
     l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
 
-  el.addEventListener("click", (e) => select(l, e));
+  el.addEventListener("click", (e) => { if (!swallowClick) select(l, e); });
   el.addEventListener("contextmenu", (e) => layerContextMenu(l, e));
-  el.addEventListener("dragstart", (e) => { dragId = l.id; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(l.id)); });
-  el.addEventListener("dragend", () => { dragId = null; clearDropMarks(); });
-  el.addEventListener("dragover", (e) => {
-    if (dragId == null) return;
-    e.preventDefault();
-    e.stopPropagation();
-    clearDropMarks();
-    el.classList.add("drop-" + dropZone(e, el, l));
-  });
-  el.addEventListener("drop", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const zone = dropZone(e, el, l);
-    clearDropMarks();
-    moveTo(dragId, i, zone);
-    dragId = null;
-  });
+  el.addEventListener("pointerdown", (e) => beginRowDrag(e, l));
   return el;
 }
 
@@ -610,7 +592,69 @@ function rename(l, label) {
   input.addEventListener("blur", () => finish(true));
 }
 
-/* drag and drop: above / below a row, or into a group (middle of the row) */
+/* drag and drop: above / below a row, or into a group (middle of the row)
+
+   Pointer events, not HTML5 drag and drop: the UI runs in off-screen CEF,
+   whose host does not implement `StartDragging`, so every HTML5 drag was
+   cancelled the moment it started and layers could not be reordered. */
+
+const DRAG_THRESHOLD = 4; // px before a press on a row becomes a drag
+let swallowClick = false;  // the click that ends a drag is not a selection
+
+function beginRowDrag(e, l) {
+  if (e.button !== 0) return;
+  // Buttons, inputs and the name editor inside a row keep their own presses.
+  if (e.target.closest("button, input, select, textarea, [contenteditable]")) return;
+  const start = { x: e.clientX, y: e.clientY };
+  let dragging = false;
+  const rowAt = (x, y) => {
+    const r = document.elementFromPoint(x, y)?.closest(".nrow");
+    return r && listEl && listEl.contains(r) ? r : null;
+  };
+  const move = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD) return;
+      dragging = true;
+      dragId = l.id;
+      document.body.classList.add("layer-dragging");
+    }
+    // Near the list's edges, scroll it.
+    const box = listEl.getBoundingClientRect();
+    if (ev.clientY < box.top + 16) listEl.scrollTop -= ROW_H / 2;
+    else if (ev.clientY > box.bottom - 16) listEl.scrollTop += ROW_H / 2;
+    clearDropMarks();
+    const r = rowAt(ev.clientX, ev.clientY);
+    const target = r && layers.find((x) => String(x.id) === r.dataset.id);
+    if (target) r.classList.add("drop-" + dropZone(ev, r, target));
+  };
+  const end = (ev) => {
+    window.removeEventListener("pointermove", move, true);
+    window.removeEventListener("pointerup", end, true);
+    window.removeEventListener("pointercancel", end, true);
+    document.body.classList.remove("layer-dragging");
+    if (!dragging) return;
+    swallowClick = true;
+    setTimeout(() => { swallowClick = false; }, 0);
+    clearDropMarks();
+    const id = dragId;
+    dragId = null;
+    if (ev.type === "pointercancel") return;
+    const r = rowAt(ev.clientX, ev.clientY);
+    const target = r && layers.findIndex((x) => String(x.id) === r.dataset.id);
+    if (r && target >= 0) {
+      moveTo(id, target, dropZone(ev, r, layers[target]));
+      return;
+    }
+    // Below the last row: the bottom of the root list.
+    const box = listEl.getBoundingClientRect();
+    if (ev.clientX >= box.left && ev.clientX <= box.right && ev.clientY >= box.top && ev.clientY <= box.bottom) {
+      send({ op: "move_layer", layer: ref(id), parent: null, index: 0 });
+    }
+  };
+  window.addEventListener("pointermove", move, true);
+  window.addEventListener("pointerup", end, true);
+  window.addEventListener("pointercancel", end, true);
+}
 
 function dropZone(e, el, l) {
   // `offsetY` is measured from the child under the pointer (thumbnail,
@@ -644,15 +688,6 @@ function moveTo(id, targetRow, zone) {
     if (src.parent === parent && src.index < tree[targetRow].index) index -= 1;
   }
   send({ op: "move_layer", layer: ref(id), parent: parent == null ? null : ref(parent), index });
-}
-
-function dropOnList(e) {
-  // Dropped below the last row: bottom of the root list.
-  e.preventDefault();
-  if (dragId == null) return;
-  send({ op: "move_layer", layer: ref(dragId), parent: null, index: 0 });
-  dragId = null;
-  clearDropMarks();
 }
 
 /* opacity / fill: typed value, or scrub by dragging the label */

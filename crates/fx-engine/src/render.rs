@@ -94,8 +94,8 @@ pub(crate) enum RenderRequest {
 pub(crate) struct MipWork {
 	pub doc: DocId,
 	pub revision: u64,
-	/// The content generation of the snapshot that asked (undo winds the
-	/// revision back; the generation never repeats).
+	/// The snapshot that asked, as `OpenDoc::render_generation` names it (undo
+	/// winds the revision back; the generation never repeats).
 	pub generation: u64,
 	pub requests: Vec<TileRequest>,
 }
@@ -543,7 +543,8 @@ fn create_viewport_texture(device: &wgpu::Device, viewport: ViewportSize) -> wgp
 		sample_count: 1,
 		dimension: wgpu::TextureDimension::D2,
 		format: VIEWPORT_FORMAT,
-		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+		// COPY_SRC: tests read the frame back (what the user would see).
+		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
 		view_formats: &[],
 	})
 }

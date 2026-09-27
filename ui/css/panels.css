@@ -339,6 +339,7 @@
 .plist-row.nrow.drop-above { box-shadow: inset 0 2px 0 var(--accent); }
 .plist-row.nrow.drop-below { box-shadow: inset 0 -2px 0 var(--accent); }
 .plist-row.nrow.drop-into { outline: 1px solid var(--accent); outline-offset: -1px; }
+body.layer-dragging, body.layer-dragging * { cursor: grabbing !important; }
 .plist-row.undone { color: var(--text-off); }
 .pempty { padding: 12px 8px; color: var(--text-off); font-size: 12px; }
 .plock-btn:disabled, .pf-input:disabled { opacity: 0.45; }
