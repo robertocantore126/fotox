@@ -198,6 +198,10 @@ pub struct GradientFill {
 	/// Use the opacity stops (off = opaque everywhere).
 	#[serde(default = "yes")]
 	pub transparency: bool,
+	/// The Angle sweep runs clockwise on screen instead of counter-clockwise
+	/// (a gradient fill after a flipped canvas).
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub mirror: bool,
 }
 
 fn yes() -> bool {
@@ -233,7 +237,8 @@ impl GradientFill {
 					let base = dy.atan2(dx);
 					let a = py.atan2(px) - base;
 					// Photoshop sweeps counter-clockwise on screen (VERIFY).
-					(-a).rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU
+					let a = if self.mirror { a } else { -a };
+					a.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU
 				}
 			}
 		};
@@ -280,6 +285,10 @@ pub struct GradientLayer {
 	/// Offset of the centre from the canvas centre, document pixels.
 	#[serde(default)]
 	pub offset: (f64, f64),
+	/// The Angle style sweeps the other way (code review 2026-09-27 R03: a
+	/// flipped canvas mirrors the fill; the other styles are symmetric).
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub mirror: bool,
 }
 
 impl GradientLayer {
@@ -302,6 +311,7 @@ impl GradientLayer {
 			reverse: self.reverse,
 			dither: self.dither,
 			transparency: true,
+			mirror: self.mirror,
 		}
 	}
 }

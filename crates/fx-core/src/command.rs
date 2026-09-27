@@ -5369,6 +5369,76 @@ mod tests {
 		assert_eq!(smart.transform, Mapping::Warp(moved));
 	}
 
+	/// Code review 2026-09-27 R03: a gradient fill of every style follows
+	/// flips and turns — the colour at every mapped point is the colour the
+	/// point had before (the Angle style's sweep is mirrored by a flip).
+	#[test]
+	fn a_gradient_fill_follows_flips_and_turns() {
+		use crate::gradient::GradientKind;
+		for kind in [
+			GradientKind::Linear,
+			GradientKind::Radial,
+			GradientKind::Angle,
+			GradientKind::Reflected,
+			GradientKind::Diamond,
+		] {
+			let mut f = Fixture::new();
+			let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+			let id = f.doc.allocate_layer_id();
+			let gradient = crate::gradient::GradientLayer {
+				gradient: crate::gradient::Gradient::two([0.1, 0.8, 0.3], [0.9, 0.2, 0.6]),
+				kind,
+				angle: 30.0,
+				scale: 60.0,
+				reverse: false,
+				dither: false,
+				offset: (40.0, -25.0),
+				mirror: false,
+			};
+			f.doc.layers.push(Arc::new(Layer::new(
+				id,
+				"Gradient",
+				LayerKind::FillLayer {
+					content: crate::fill::FillLayer::Gradient(gradient),
+					cache: TiledImage::derived(w, h, format),
+				},
+			)));
+			let color = |doc: &Document, (x, y): (f64, f64)| {
+				let LayerKind::FillLayer {
+					content: crate::fill::FillLayer::Gradient(g),
+					..
+				} = &doc.layer(id).expect("layer").kind
+				else {
+					panic!("not a gradient fill")
+				};
+				g.placed((doc.width, doc.height)).color_at_point(x, y, 0, 0)
+			};
+			// Away from the Angle style's seam, where either side is right.
+			let points = [(250.5, 160.5), (310.2, 90.7), (180.4, 120.1), (120.9, 250.3), (330.3, 200.8)];
+			let steps: Vec<(Command, Box<dyn Fn((f64, f64), (f64, f64)) -> (f64, f64)>)> = vec![
+				(Command::FlipCanvas { horizontal: true }, Box::new(|(x, y), (w, _)| (w - x, y))),
+				(Command::RotateCanvas { quarter_turns: 1 }, Box::new(|(x, y), (_, h)| (h - y, x))),
+				(Command::FlipCanvas { horizontal: false }, Box::new(|(x, y), (_, h)| (x, h - y))),
+			];
+			let mut at: Vec<(f64, f64)> = points.to_vec();
+			let mut expected: Vec<[f64; 4]> = at.iter().map(|p| color(&f.doc, *p)).collect();
+			for (command, map) in steps {
+				let size = (f64::from(f.doc.width), f64::from(f.doc.height));
+				f.ok_with_ops(command.clone());
+				for (i, p) in at.iter_mut().enumerate() {
+					*p = map(*p, size);
+					let got = color(&f.doc, *p);
+					assert!(
+						got.iter().zip(expected[i]).all(|(a, b)| (a - b).abs() < 1e-6),
+						"{kind:?} after {command:?}: point {i} at {p:?} is {got:?}, was {:?}",
+						expected[i]
+					);
+				}
+				expected = at.iter().map(|p| color(&f.doc, *p)).collect();
+			}
+		}
+	}
+
 	/// Code review 2026-09-27 R03: a pattern fill follows flips, turns and
 	/// Canvas Size — the colour at every mapped point is the colour the point
 	/// had before.
@@ -5454,6 +5524,7 @@ mod tests {
 			reverse: false,
 			dither: false,
 			offset: (0.0, 0.0),
+			mirror: false,
 		};
 		let gradient_layer = Layer::new(
 			gradient_id,

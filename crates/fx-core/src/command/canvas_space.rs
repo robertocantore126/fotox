@@ -108,6 +108,10 @@ impl SpacePlan {
 							let c = point(&mapping, (old_centre.0 + g.offset.0, old_centre.1 + g.offset.1));
 							g.offset = (c.0 - new_centre.0, c.1 - new_centre.1);
 							g.angle = angle(g.angle);
+							// A reflection turns the Angle style's sweep around.
+							if lin.is_some_and(|[a, b, c, d]| a * d - b * c < 0.0) {
+								g.mirror = !g.mirror;
+							}
 							crate::fill::FillLayer::Gradient(g)
 						}
 						// Pattern space → document space is `origin + M·p`; the

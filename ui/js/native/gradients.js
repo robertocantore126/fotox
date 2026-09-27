@@ -159,6 +159,9 @@ export function openGradientFillDialog(edit = false) {
     ],
     onOk: (v) => {
       const content = {
+        // Keep what the dialog does not show (the centre's offset, the
+        // mirror a flipped canvas set).
+        ...(old || {}),
         fill: "gradient",
         gradient: work,
         kind: String(v["Style:"] || "Linear").toLowerCase(),
@@ -166,7 +169,7 @@ export function openGradientFillDialog(edit = false) {
         scale: Math.min(1000, Math.max(1, Number(v["Scale:"]) || 100)),
         reverse: !!v.Reverse,
         dither: v.Dither !== false,
-        offset: [0, 0],
+        offset: old ? old.offset : [0, 0],
       };
       resolveSwatches(content.gradient);
       if (old) sendCommand({ op: "set_fill_layer", layer: { id: activeLayerId() }, content });
