@@ -4,8 +4,11 @@
 //! it); this module only converts and encodes. Peak memory is one band of
 //! [`EXPORT_BAND_ROWS`] rows, whatever the image height.
 //!
-//! The file is written as `<name>.part` next to the target and renamed at the
-//! end, so a failed or cancelled export never destroys an existing file.
+//! The file is written as `<name>.<job>.part` next to the target and renamed
+//! at the end, so a failed or cancelled export never destroys an existing file.
+//! Each export holds a process-wide lease on its target for the whole write
+//! and rename: two exports to one path run one after the other, and the one
+//! that acquires the lease last is the file left on disk.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -101,6 +104,7 @@ pub fn export_image(path: &Path, width: u32, height: u32, options: ExportOptions
 	if options.cmyk.is_some() && options.format != ExportFormat::Tiff {
 		return Err(IoError::Unsupported("CMYK export writes TIFF files".into()));
 	}
+	let _lease = crate::fxd::PathWriteLock::acquire(path);
 	let part = part_path(path);
 	let result = write(&part, width, height, &options, render, progress);
 	match result {
@@ -115,9 +119,13 @@ pub fn export_image(path: &Path, width: u32, height: u32, options: ExportOptions
 	}
 }
 
+/// A temporary name no other export (in this or another process) uses, so a
+/// job only ever writes, renames or deletes its own file.
 fn part_path(path: &Path) -> PathBuf {
+	static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+	let job = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-	name.push(".part");
+	name.push(format!(".{}-{job}.part", std::process::id()));
 	path.with_file_name(name)
 }
 
@@ -434,7 +442,12 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(calls, 3, "one progress call per band");
-		assert!(!part_path(&path).exists(), "the .part file is renamed");
+		let leftovers = std::fs::read_dir(path.parent().unwrap())
+			.unwrap()
+			.filter_map(|e| e.ok())
+			.filter(|e| e.file_name().to_string_lossy().starts_with(&*path.file_name().unwrap().to_string_lossy()) && e.file_name().to_string_lossy().ends_with(".part"))
+			.count();
+		assert_eq!(leftovers, 0, "the .part file is renamed");
 
 		let store = store();
 		let imported = import_file(&path, &store, &mut |_| true).unwrap();
@@ -610,5 +623,66 @@ mod tests {
 		};
 		let result = export_image(&dir().join("no.png"), W, H, options, &mut renderer(), &mut |_| true);
 		assert!(matches!(result, Err(IoError::Unsupported(_))));
+	}
+
+	/// Code review 2026-09-27 R04: export A pauses inside its first band while
+	/// export B to the same file runs. B must not share A's temporary file, and
+	/// the file left on disk must be one whole image (the later export's).
+	#[test]
+	fn overlapping_exports_to_one_path_do_not_mix() {
+		let path = dir().join("collision.png");
+		let options = ExportOptions {
+			format: ExportFormat::Png,
+			bits: 8,
+			alpha: true,
+			ppi: 72.0,
+			quality: 90,
+			chroma: JpegChroma::Full,
+			icc: None,
+			cmyk: None,
+		};
+		let (started_tx, started_rx) = std::sync::mpsc::channel();
+		let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+		let (path_a, options_a) = (path.clone(), options.clone());
+		let a = std::thread::spawn(move || {
+			export_image(
+				&path_a,
+				8,
+				8,
+				options_a,
+				&mut |_, _, out| {
+					started_tx.send(()).unwrap();
+					go_rx.recv().unwrap();
+					out.fill([65535, 0, 0, 65535]);
+					Ok(())
+				},
+				&mut |_| true,
+			)
+		});
+		started_rx.recv().unwrap();
+		let b = std::thread::spawn({
+			let path = path.clone();
+			move || {
+				export_image(
+					&path,
+					8,
+					8,
+					options,
+					&mut |_, _, out| {
+						out.fill([0, 0, 65535, 65535]);
+						Ok(())
+					},
+					&mut |_| true,
+				)
+			}
+		});
+		// B waits for A's lease; let A finish, then B.
+		std::thread::sleep(std::time::Duration::from_millis(50));
+		go_tx.send(()).unwrap();
+		a.join().unwrap().unwrap();
+		b.join().unwrap().unwrap();
+		let store = store();
+		let imported = import_file(&path, &store, &mut |_| true).unwrap();
+		assert_eq!(pixel(&imported.image, &store, 3, 3), [0, 0, 255, 255], "B ran last and its file is whole");
 	}
 }

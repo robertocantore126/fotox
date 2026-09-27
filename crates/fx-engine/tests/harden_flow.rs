@@ -93,3 +93,54 @@ fn saving_during_a_stroke_commits_it_first() {
 	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 260.0, 220.0, 0)));
 	harness.engine.shutdown();
 }
+
+/// Wait for a Layers message of `doc` with `n` layers; returns `n`.
+fn layer_count(harness: &Harness, doc: DocId, n: usize) -> usize {
+	harness.wait(&format!("{n} layers"), |s| match s {
+		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == doc && layers.len() == n => Some(n),
+		_ => None,
+	})
+}
+
+/// Code review 2026-09-27 R05: open A, edit to B, save B, edit to C, Revert.
+/// Revert used to undo the whole history (back to A, not the saved B) and
+/// call the result clean.
+#[test]
+fn revert_reloads_the_saved_file_not_the_history_start() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-harden-revert-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 300, 200)]));
+	let doc = opened(&harness);
+	let new_layer = || {
+		harness.ui(UiToEngine::Action {
+			id: "layer:new".into(),
+			args: serde_json::Value::Null,
+		})
+	};
+	new_layer();
+	layer_count(&harness, doc, 2);
+	let path = dir.join("b.fxd");
+	harness.engine.send(EngineInput::SaveAs { doc, path: path.clone() });
+	harness.wait("the saved document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentChanged { info }) if info.doc == doc && !info.dirty => Some(()),
+		_ => None,
+	});
+	new_layer();
+	layer_count(&harness, doc, 3);
+	harness.ui(UiToEngine::Action {
+		id: "doc:revert".into(),
+		args: serde_json::Value::Null,
+	});
+	// Reverted to the saved B, not the opened A.
+	layer_count(&harness, doc, 2);
+	harness.wait("a clean document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentChanged { info }) if info.doc == doc && !info.dirty => Some(()),
+		_ => None,
+	});
+	harness.engine.shutdown();
+}

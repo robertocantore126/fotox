@@ -10,6 +10,7 @@ pub mod save;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use container::PathWriteLock;
 pub use container::{ChunkKind, ChunkRef, Codec, Footer, FxdFile, FxdWriter, TilePayload, parse_tile_payload};
 pub use open::{OpenedFxd, open};
 pub use save::{SaveReport, SaveRequest, SaveTarget, SavedFxd, needs_compaction, save};

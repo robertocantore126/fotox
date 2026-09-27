@@ -93,6 +93,17 @@ fn suggested_fxd_name(name: &str) -> String {
 /// samples each time.
 const DISPLAY_LUT_CACHE: usize = 4;
 
+/// What an opened file becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenAs {
+	/// A new document tab.
+	New,
+	/// A layer placed into this document (M7-T03).
+	Place(DocId),
+	/// File ▸ Revert: this document's new content.
+	Revert(DocId),
+}
+
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
 	/// Import progress, 0..=1.
@@ -102,8 +113,8 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
-		/// Place into this document instead of opening (M7-T03).
-		place: Option<DocId>,
+		/// A new document, a layer placed into one (M7-T03), or a revert.
+		target: OpenAs,
 	},
 	/// An export finished or failed (M3).
 	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
@@ -112,6 +123,7 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<Box<OpenedFxd>, IoError>,
+		target: OpenAs,
 	},
 	/// A save finished; `Ok` carries the reopened file (M3-T06).
 	Saved {
@@ -506,7 +518,7 @@ impl Engine {
 			}
 			EngineInput::Open(paths) => {
 				for path in paths {
-					self.open(path, None);
+					self.open(path, OpenAs::New);
 				}
 				Changed::default()
 			}
@@ -515,7 +527,7 @@ impl Engine {
 				for path in paths {
 					// FAST: a placed .fxd opens instead of being flattened into a layer.
 					let place = target.filter(|_| !is_fxd(&path));
-					self.open(path, place);
+					self.open(path, place.map_or(OpenAs::New, OpenAs::Place));
 				}
 				Changed::default()
 			}
@@ -1168,7 +1180,7 @@ impl Engine {
 				}
 				if let Some(index) = id.strip_prefix("doc:open-recent:") {
 					if let Some(path) = index.parse::<usize>().ok().and_then(|i| self.prefs.recent().get(i).cloned()) {
-						self.open(path, None);
+						self.open(path, OpenAs::New);
 					}
 					return Changed::default();
 				}
@@ -1490,7 +1502,7 @@ impl Engine {
 
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
-	fn open(&mut self, path: PathBuf, place: Option<DocId>) {
+	fn open(&mut self, path: PathBuf, target: OpenAs) {
 		// Brush and pattern files go to their libraries (M8-T01/T06).
 		if self.open_resource(&path) {
 			return;
@@ -1524,26 +1536,32 @@ impl Engine {
 			};
 			// A native `.fxd` opens lazily, reading only the manifest (M3-T05);
 			// every other file imports band by band.
+			// A decoder panic (a malformed file) must still complete the task.
+			let panicked = |panic: Box<dyn std::any::Any + Send>| IoError::Decode(format!("import worker panicked: {}", panic_text(&*panic)));
 			if is_fxd(&path) {
 				let _ = internal.send(Internal::Progress {
 					task,
 					label: format!("{label}: reading the manifest"),
 					fraction: 0.5,
 				});
-				let result = fxd::open(&path, &store).map(Box::new);
-				let _ = internal.send(Internal::OpenedFxd { task, path, result });
+				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fxd::open(&path, &store).map(Box::new)))
+					.unwrap_or_else(|panic| Err(panicked(panic)));
+				let _ = internal.send(Internal::OpenedFxd { task, path, result, target });
 				return;
 			}
-			let result = fx_io::import_file(&path, &store, &mut report).and_then(|mut imported| {
-				let _ = internal.send(Internal::Progress {
-					task,
-					label: format!("{label}: building previews"),
-					fraction: 0.9,
-				});
-				mips::ensure_all_mips(&mut imported.image, &store)?;
-				Ok(imported)
-			});
-			let _ = internal.send(Internal::Imported { task, path, result, place });
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				fx_io::import_file(&path, &store, &mut report).and_then(|mut imported| {
+					let _ = internal.send(Internal::Progress {
+						task,
+						label: format!("{label}: building previews"),
+						fraction: 0.9,
+					});
+					mips::ensure_all_mips(&mut imported.image, &store)?;
+					Ok(imported)
+				})
+			}))
+			.unwrap_or_else(|panic| Err(panicked(panic)));
+			let _ = internal.send(Internal::Imported { task, path, result, target });
 		});
 		if let Err(error) = spawned {
 			self.to_ui(&EngineToUi::ProgressDone { task });
@@ -2229,12 +2247,16 @@ impl Engine {
 				}
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
-			Internal::Imported { task, path, result, place } => {
+			Internal::Imported { task, path, result, target } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
-				if let (Some(doc), Ok(imported)) = (place, &result)
+				if let (OpenAs::Place(doc), Ok(imported)) = (target, &result)
 					&& self.docs.get(doc).is_some()
 				{
 					self.place_imported(doc, &path, imported.image.clone());
+					return;
+				}
+				if let OpenAs::Revert(doc) = target {
+					self.finish_revert(doc, &path, result.map(|imported| OpenDoc::from_import(doc, &path, imported)));
 					return;
 				}
 				match result {
@@ -2261,8 +2283,12 @@ impl Engine {
 					}
 				}
 			}
-			Internal::OpenedFxd { task, path, result } => {
+			Internal::OpenedFxd { task, path, result, target } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let OpenAs::Revert(doc) = target {
+					self.finish_revert(doc, &path, result.map(|opened| OpenDoc::from_fxd(doc, &path, *opened)));
+					return;
+				}
 				match result {
 					Ok(opened) => {
 						self.commit_live_edits();
@@ -2303,6 +2329,7 @@ impl Engine {
 						let saved = self.docs.get_mut(doc).map(|open| {
 							open.file = Some(file);
 							open.path = Some(path.clone());
+							open.source = Some(path.clone());
 							open.dirty = open.generation != generation;
 							open.name = path
 								.file_name()
@@ -2439,6 +2466,74 @@ impl Engine {
 				self.window_close_pending = false;
 				(self.output)(EngineOutput::MayClose(true));
 			}
+		}
+	}
+
+	/// File ▸ Revert: reload the file this document was opened from or last
+	/// saved to. Undoing the history is not the same thing: saving keeps the
+	/// history, and the history holds only the last N steps.
+	fn revert(&mut self, id: DocId) {
+		self.commit_live_edits();
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let refusal = if let Some(job) = &open.busy {
+			Some(format!("Wait until {job} is finished before reverting"))
+		} else if open.saving {
+			Some("Wait until the save is finished before reverting".into())
+		} else if open.source.is_none() {
+			Some("This document has never been saved: there is nothing to revert to".into())
+		} else {
+			None
+		};
+		if let Some(text) = refusal {
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
+		if !open.dirty {
+			return;
+		}
+		let source = open.source.clone().expect("checked above");
+		// No edit may land while the file loads: it would be thrown away.
+		open.busy = Some("Revert".into());
+		self.open(source, OpenAs::Revert(id));
+	}
+
+	/// The reloaded content of a revert replaces the document in its tab.
+	fn finish_revert(&mut self, id: DocId, path: &std::path::Path, result: Result<OpenDoc, IoError>) {
+		let Some(old) = self.docs.get_mut(id) else { return };
+		old.busy = None;
+		let mut new = match result {
+			Ok(new) => new,
+			Err(IoError::Cancelled) => return,
+			Err(error) => {
+				tracing::warn!("cannot revert to {}: {error}", path.display());
+				self.to_ui(&EngineToUi::Error {
+					text: format!("Could not revert to {}: {error}", path.display()),
+				});
+				return;
+			}
+		};
+		if matches!(self.transform, Some((doc, _)) if doc == id) {
+			self.end_transform(false);
+		}
+		let Some(old) = self.docs.get_mut(id) else { return };
+		new.doc.fit_levels();
+		// The tab keeps its view and proof settings; the render thread's
+		// caches must never see an old generation number again.
+		new.view = old.view.clone();
+		new.generation = old.generation + 1;
+		new.preview_rev = old.preview_rev + 1;
+		new.name = old.name.clone();
+		new.proof = old.proof.take();
+		new.proof_colors = old.proof_colors;
+		new.gamut_warning = old.gamut_warning;
+		*old = new;
+		self.thumbs_wanted.retain(|(d, _), _| *d != id);
+		self.thumbs_last.retain(|(d, _), _| *d != id);
+		self.thumbs_due.retain(|(d, _), _| *d != id);
+		tracing::info!("reverted {id:?} to {}", path.display());
+		self.after_edit(id, true);
+		if self.docs.active_id() == Some(id) {
+			self.after_active_change();
 		}
 	}
 
@@ -3468,14 +3563,7 @@ impl Engine {
 			}
 			// File ▸ Revert (M7-T05). FAST: every history step is undone, which is
 			// the opened state as long as the history kept every step.
-			"doc:revert" => {
-				if let Some(open) = self.docs.get_mut(doc_id) {
-					while open.history.undo(&mut open.doc) {}
-					open.dirty = false;
-					open.changed();
-				}
-				self.after_edit(doc_id, true);
-			}
+			"doc:revert" => self.revert(doc_id),
 			"mask:reveal-sel" | "mask:hide-sel" => {
 				let fill = if id == "mask:hide-sel" {
 					MaskFill::HideSelection

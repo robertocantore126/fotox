@@ -44,6 +44,9 @@ pub struct OpenDoc {
 	pub file: Option<Arc<FxdFile>>,
 	/// The `.fxd`'s path (the Save target while `file` is set).
 	pub path: Option<PathBuf>,
+	/// What File ▸ Revert reloads: the file this document was opened from or
+	/// last saved to. `None` for a new document never saved.
+	pub source: Option<PathBuf>,
 	/// A filter dialog's live preview (M4-T05).
 	pub preview: Option<crate::filters::FilterPreview>,
 	/// Bumped whenever the preview's pixels change (the render thread's
@@ -122,6 +125,7 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: None,
 			path: None,
+			source: Some(path.to_path_buf()),
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
@@ -152,6 +156,7 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: None,
 			path: None,
+			source: None,
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
@@ -220,6 +225,7 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: Some(opened.file),
 			path: Some(path.to_path_buf()),
+			source: Some(path.to_path_buf()),
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
