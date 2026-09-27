@@ -245,11 +245,27 @@ impl TileRequest {
 ///
 /// Errors with the list of dirty mip tiles if any input is not computed yet.
 pub fn build_program(doc: &Document, level: usize, tx: u32, ty: u32, luts: &mut dyn FnMut(&Adjustment) -> Arc<Lut>) -> Result<TileProgram, Vec<TileRequest>> {
+	build_program_checked(doc, level, tx, ty, luts, &|_| false)
+}
+
+/// [`build_program`] that also asks for the derived tiles `evicted` says the
+/// store dropped (`TileStore::is_evicted`): such a tile is clean in its image
+/// but has no pixels left, and only its producer can bring it back (code
+/// review 2026-09-27 R01). The render thread builds its programs this way.
+pub fn build_program_checked(
+	doc: &Document,
+	level: usize,
+	tx: u32,
+	ty: u32,
+	luts: &mut dyn FnMut(&Adjustment) -> Arc<Lut>,
+	evicted: &dyn Fn(&fx_tiles::TileHandle) -> bool,
+) -> Result<TileProgram, Vec<TileRequest>> {
 	let mut builder = Builder {
 		level,
 		origin: (tx as i64 * TILE_SIZE as i64, ty as i64 * TILE_SIZE as i64),
 		missing: Vec::new(),
 		luts,
+		evicted,
 		global_light: doc.global_light,
 	};
 	let ops = builder.list(&doc.layers);
@@ -276,6 +292,7 @@ struct Builder<'a> {
 	origin: (i64, i64),
 	missing: Vec<TileRequest>,
 	luts: &'a mut dyn FnMut(&Adjustment) -> Arc<Lut>,
+	evicted: &'a dyn Fn(&fx_tiles::TileHandle) -> bool,
 	global_light: f64,
 }
 
@@ -308,7 +325,11 @@ enum MaskEval {
 	Constant(f32),
 	/// `factor` (the constant one of the two, if any) folds into alpha;
 	/// `second` is set when both masks vary here.
-	Varying { factor: f32, mask: MaskRef, second: Option<MaskRef> },
+	Varying {
+		factor: f32,
+		mask: MaskRef,
+		second: Option<MaskRef>,
+	},
 }
 
 /// What an op carries after its masks: alpha with the constant part folded
@@ -467,7 +488,10 @@ impl Builder<'_> {
 						let mut ops = Vec::with_capacity(inner.len() + 2);
 						ops.push(Op::BeginPassThrough);
 						ops.extend(inner);
-						ops.push(Op::EndPassThrough { alpha: 1.0, mask: Some(second) });
+						ops.push(Op::EndPassThrough {
+							alpha: 1.0,
+							mask: Some(second),
+						});
 						ops
 					}
 					Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
@@ -739,11 +763,9 @@ impl Builder<'_> {
 			(Single::Hidden, _) | (_, Single::Hidden) => MaskEval::Hidden,
 			(Single::Constant(a), Single::Constant(b)) if a * b <= 0.0 => MaskEval::Hidden,
 			(Single::Constant(a), Single::Constant(b)) => MaskEval::Constant(a * b),
-			(Single::Constant(factor), Single::Varying(mask)) | (Single::Varying(mask), Single::Constant(factor)) => MaskEval::Varying {
-				factor,
-				mask,
-				second: None,
-			},
+			(Single::Constant(factor), Single::Varying(mask)) | (Single::Varying(mask), Single::Constant(factor)) => {
+				MaskEval::Varying { factor, mask, second: None }
+			}
 			(Single::Varying(mask), Single::Varying(second)) => MaskEval::Varying {
 				factor: 1.0,
 				mask,
@@ -847,7 +869,8 @@ impl Builder<'_> {
 				return QuadSlot::Outside;
 			}
 			let (gx, gy) = (gx as u32, gy as u32);
-			if image.is_dirty(level, gx, gy) {
+			let dropped = matches!(image.slot(level, gx, gy), TileSlot::Data(h) if h.class() == fx_tiles::TileClass::Derived && (self.evicted)(h));
+			if image.is_dirty(level, gx, gy) || dropped {
 				dirty = true;
 				self.missing.push(match source {
 					SourceTile::Mip { mask } => TileRequest::Mip(MipRequest {

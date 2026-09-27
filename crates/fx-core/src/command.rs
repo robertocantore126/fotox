@@ -2176,10 +2176,14 @@ fn convert_profile(
 		// A group's children are converted on their own: patch only the
 		// group's own fields (a clone of the group would bring stale children).
 		let mut patched = if let LayerKind::Group { .. } = layer.kind {
-			let mut own = Layer::new(layer.id, String::new(), LayerKind::Group {
-				expanded: false,
-				children: Vec::new(),
-			});
+			let mut own = Layer::new(
+				layer.id,
+				String::new(),
+				LayerKind::Group {
+					expanded: false,
+					children: Vec::new(),
+				},
+			);
 			own.styles = layer.styles.clone();
 			own.effects = layer.effects.clone();
 			own.artboard = layer.artboard.clone();
@@ -2266,8 +2270,7 @@ fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
 				f(rgba);
 			}
 			if let Some(StrokeStyle {
-				paint: Paint::Solid { rgba },
-				..
+				paint: Paint::Solid { rgba }, ..
 			}) = stroke
 			{
 				f(rgba);
@@ -2934,7 +2937,9 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, new_size: (u32, u32), sto
 		Some(selection) => Some(moved_offset(selection.offset)?),
 		None => None,
 	};
-	let channels = canvas_space::map_channels(doc, |image| Ok(crate::pixels::place_at(image, (dx, dy), (0, 0), PixelValue::TRANSPARENT, store)?))?;
+	let channels = canvas_space::map_channels(doc, |image| {
+		Ok(crate::pixels::place_at(image, (dx, dy), (0, 0), PixelValue::TRANSPARENT, store)?)
+	})?;
 	let space = canvas_space::SpacePlan::new(doc, Mapping::translation(f64::from(dx), f64::from(dy)), (doc.width, doc.height), new_size)?;
 	// Commit.
 	for (id, offset) in &moved {
@@ -5387,7 +5392,10 @@ mod tests {
 		else {
 			panic!("a gradient fill")
 		};
-		assert_eq!(g.gradient.colors[0].color, [0.75, 0.5, 0.25].map(|v: f32| f32::from((v * 65535.0).round() as u16) / 65535.0));
+		assert_eq!(
+			g.gradient.colors[0].color,
+			[0.75, 0.5, 0.25].map(|v: f32| f32::from((v * 65535.0).round() as u16) / 65535.0)
+		);
 		let group = f.doc.layer(group_id).unwrap();
 		assert_eq!(group.artboard.as_ref().unwrap().background, Some(swapped));
 		assert_eq!(group.styles.as_ref().unwrap().drop_shadow.as_ref().unwrap().color, swapped);

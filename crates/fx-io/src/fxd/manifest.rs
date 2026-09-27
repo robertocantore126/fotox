@@ -510,7 +510,10 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.active_comp = manifest.active_comp;
 	doc.slices = manifest.slices.clone();
 	for entry in &manifest.channels {
-		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_as(&entry.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?);
+		let mut channel = fx_core::channel::Channel::new(
+			entry.name.clone(),
+			image_as(&entry.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?,
+		);
 		channel.color = entry.color;
 		channel.opacity = entry.opacity;
 		doc.channels.push(channel);
@@ -665,7 +668,10 @@ fn check_image_entry(entry: &ImageEntry) -> Result<(), IoError> {
 		for slot in &level.slots {
 			let (SlotEntry::Solid { tx, ty, .. } | SlotEntry::Tile { tx, ty, .. }) = *slot;
 			if tx >= cols || ty >= rows {
-				return Err(IoError::Decode(format!("tile ({tx}, {ty}) outside the {cols}×{rows} grid of level {}", level.level)));
+				return Err(IoError::Decode(format!(
+					"tile ({tx}, {ty}) outside the {cols}×{rows} grid of level {}",
+					level.level
+				)));
 			}
 		}
 	}

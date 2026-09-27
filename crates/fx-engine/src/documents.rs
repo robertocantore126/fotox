@@ -543,7 +543,9 @@ mod tests {
 	fn an_adjustment_preview_is_on_screen_only() {
 		let mut doc = OpenDoc::from_import(DocId(1), Path::new("a.png"), imported());
 		let id = doc.doc.allocate_layer_id();
-		doc.doc.layers.push(Arc::new(Layer::new(id, "Invert", LayerKind::Adjustment(fx_core::Adjustment::Invert))));
+		doc.doc
+			.layers
+			.push(Arc::new(Layer::new(id, "Invert", LayerKind::Adjustment(fx_core::Adjustment::Invert))));
 		let shown = |doc: &mut OpenDoc| match &doc.snapshot().layer(id).unwrap().kind {
 			LayerKind::Adjustment(a) => a.clone(),
 			_ => unreachable!(),
@@ -552,7 +554,10 @@ mod tests {
 		doc.adjustment_preview = Some((id, fx_core::Adjustment::Posterize { levels: 3 }));
 		doc.preview_rev += 1;
 		assert_eq!(shown(&mut doc), fx_core::Adjustment::Posterize { levels: 3 });
-		assert!(matches!(doc.doc.layer(id).unwrap().kind, LayerKind::Adjustment(fx_core::Adjustment::Invert)), "the document is unchanged");
+		assert!(
+			matches!(doc.doc.layer(id).unwrap().kind, LayerKind::Adjustment(fx_core::Adjustment::Invert)),
+			"the document is unchanged"
+		);
 		doc.adjustment_preview = None;
 		doc.preview_rev += 1;
 		assert_eq!(shown(&mut doc), fx_core::Adjustment::Invert);

@@ -27,15 +27,7 @@ fn store(name: &str) -> TileStore {
 
 fn apply(d: &mut Document, store: &TileStore, command: Command) {
 	let ops = fx_engine::ops::EngineOps::default();
-	command
-		.apply(
-			d,
-			&mut CommandContext {
-				tiles: store,
-				ops: Some(&ops),
-			},
-		)
-		.unwrap();
+	command.apply(d, &mut CommandContext { tiles: store, ops: Some(&ops) }).unwrap();
 }
 
 /// The composite's pixel `i` of tile (0, 0) at level 0, premultiplied.
@@ -192,7 +184,8 @@ fn rotating_the_canvas_turns_the_whole_document() {
 			cache: TiledImage::derived(20, 10, PixelFormat::Rgba8),
 		},
 	)));
-	d.channels.push(fx_core::channel::Channel::new("alpha", TiledImage::new(20, 10, PixelFormat::Gray8)));
+	d.channels
+		.push(fx_core::channel::Channel::new("alpha", TiledImage::new(20, 10, PixelFormat::Gray8)));
 	d.work_path = Some(path);
 	d.guides.push(fx_core::document::Guide { vertical: true, position: 4.0 });
 	d.annotations.samplers.push(fx_core::annotations::Sampler { x: 1.0, y: 2.0 });
@@ -216,7 +209,9 @@ fn rotating_the_canvas_turns_the_whole_document() {
 	assert_eq!((vm.cache.width(), vm.cache.height()), (10, 20), "the vector mask's cache");
 	assert_eq!(vm.path.subpaths[0].anchors[0].pos, (8.0, 1.0), "the vector mask's path");
 	assert_eq!((d.channels[0].image.width(), d.channels[0].image.height()), (10, 20), "the alpha channel");
-	let LayerKind::Smart { smart, cache } = &d.layers[1].kind else { unreachable!() };
+	let LayerKind::Smart { smart, cache } = &d.layers[1].kind else {
+		unreachable!()
+	};
 	assert_eq!((cache.width(), cache.height()), (10, 20), "the Smart Object's cache");
 	assert_eq!(smart.transform.forward_point(1.0, 2.0), Some((8.0, 1.0)), "the Smart Object's transform");
 	assert_eq!(d.work_path.as_ref().unwrap().subpaths[0].anchors[0].pos, (8.0, 1.0), "the work path");

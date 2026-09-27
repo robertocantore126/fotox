@@ -445,7 +445,9 @@ mod tests {
 		let leftovers = std::fs::read_dir(path.parent().unwrap())
 			.unwrap()
 			.filter_map(|e| e.ok())
-			.filter(|e| e.file_name().to_string_lossy().starts_with(&*path.file_name().unwrap().to_string_lossy()) && e.file_name().to_string_lossy().ends_with(".part"))
+			.filter(|e| {
+				e.file_name().to_string_lossy().starts_with(&*path.file_name().unwrap().to_string_lossy()) && e.file_name().to_string_lossy().ends_with(".part")
+			})
 			.count();
 		assert_eq!(leftovers, 0, "the .part file is renamed");
 

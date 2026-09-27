@@ -63,45 +63,59 @@ pub(crate) fn slot_for(buffer: TileBuffer, format: PixelFormat, store: &TileStor
 /// The viewport only ever asks for the tiles it displays, but merge, flatten,
 /// crop, rotate, export, copy and rasterise read level 0 of layers the view may
 /// never have shown. Returns how many tiles were drawn.
+///
+/// Code review 2026-09-27 R06: tiles the trim dropped count as missing too,
+/// and the tiles are drawn [`PREPARE_BATCH`] at a time, each batch stored
+/// before the next is drawn, so the pixels in flight stay bounded whatever
+/// the canvas size (a batch of raw tiles used to be the whole canvas).
 pub fn prepare_level0(doc: &mut fx_core::Document, store: &TileStore, layers: Option<&[fx_core::LayerId]>) -> usize {
+	let stale = |image: &fx_tiles::TiledImage| -> Vec<(u32, u32)> {
+		let grid = image.grid(0);
+		let mut out = Vec::new();
+		for ty in 0..grid.rows() {
+			for tx in 0..grid.cols() {
+				if image.is_dirty(0, tx, ty) || matches!(image.slot(0, tx, ty), TileSlot::Data(h) if store.is_evicted(h)) {
+					out.push((tx, ty));
+				}
+			}
+		}
+		out
+	};
 	let mut requests: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-	doc.walk(|layer, _| {
-		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
-			return;
-		}
-		if let Some(cache) = layer.kind.derived_cache() {
-			requests.extend(cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, 0, tx, ty)));
-		}
-	});
-	let mut drawn = if requests.is_empty() { 0 } else { draw_requests(doc, store, &requests) };
-	// Vector masks (M10-T06; artboards, M12-T07) are derived tiles too.
 	let mut masks: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-	doc.walk(|layer, _| {
-		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
-			return;
-		}
-		if let Some(vm) = &layer.vector_mask {
-			masks.extend(vm.cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, 0, tx, ty)));
-		}
-	});
-	if !masks.is_empty() {
-		drawn += draw_vector_mask_requests(doc, store, &masks);
-	}
-	// Layer-style effects (M6-T08) are derived tiles too.
 	let mut effects: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
 	doc.walk(|layer, _| {
 		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
 			return;
 		}
+		if let Some(cache) = layer.kind.derived_cache() {
+			requests.extend(stale(cache).into_iter().map(|(tx, ty)| (layer.id, 0, tx, ty)));
+		}
+		// Vector masks (M10-T06; artboards, M12-T07) are derived tiles too.
+		if let Some(vm) = &layer.vector_mask {
+			masks.extend(stale(&vm.cache).into_iter().map(|(tx, ty)| (layer.id, 0, tx, ty)));
+		}
+		// Layer-style effects (M6-T08) are derived tiles too.
 		for (i, cache) in layer.effects.iter().enumerate() {
-			effects.extend(cache.dirty_tiles(0).map(|(tx, ty)| (layer.id, i as u8, 0, tx, ty)));
+			effects.extend(stale(cache).into_iter().map(|(tx, ty)| (layer.id, i as u8, 0, tx, ty)));
 		}
 	});
-	if !effects.is_empty() {
-		drawn += crate::effects::draw_effect_requests(doc, store, &effects);
+	let mut drawn = 0;
+	for batch in requests.chunks(PREPARE_BATCH) {
+		drawn += draw_requests(doc, store, batch);
+	}
+	for batch in masks.chunks(PREPARE_BATCH) {
+		drawn += draw_vector_mask_requests(doc, store, batch);
+	}
+	// Effects read the layer's own tiles, drawn above.
+	for batch in effects.chunks(PREPARE_BATCH) {
+		drawn += crate::effects::draw_effect_requests(doc, store, batch);
 	}
 	drawn
 }
+
+/// Tiles [`prepare_level0`] draws before storing them and drawing more.
+pub const PREPARE_BATCH: usize = 64;
 
 /// Every shape tile of `requests`, grouped by the layer it belongs to: one
 /// parallel batch per layer. Returns how many tiles were drawn.
@@ -290,10 +304,12 @@ mod tests {
 	}
 
 	#[test]
-	fn a_whole_document_reader_needs_the_shape_tiles_first() {
+	fn a_whole_document_reader_draws_the_shape_tiles_it_reads() {
 		// Merge, flatten, crop, export and rasterise all read level 0 of layers
 		// the viewport may never have shown, and a shape layer's tiles are only
-		// drawn when something asks for them (M6-T06).
+		// drawn when something asks for them (M6-T06). The composite draws the
+		// ones it reads itself, batch by batch (code review 2026-09-27 R06): no
+		// whole-document preparation first.
 		let store = store();
 		let mut doc = document();
 		let id = rect_layer(&mut doc, &store);
@@ -301,12 +317,12 @@ mod tests {
 			progress: None,
 			clipboard: Default::default(),
 		};
-		let error = ops.composite(&doc, &[id], None, &store).expect_err("a fresh shape has no tiles to compose yet");
-		assert!(error.to_string().contains("tiles are missing"), "{error}");
-
-		let drawn = prepare_level0(&mut doc, &store, None);
-		assert_eq!(drawn, 4, "400 × 300 is 2 × 2 tiles and a new cache is dirty everywhere");
-		let image = ops.composite(&doc, &[id], None, &store).expect("the shape composites now");
+		let image = ops.composite(&doc, &[id], None, &store).expect("a fresh shape composites");
+		assert_eq!(
+			prepare_level0(&mut doc, &store, None),
+			4,
+			"the composite drew on its own copy: 2 × 2 tiles are still dirty here"
+		);
 		assert_eq!(pixel(&image, &store, 50, 50), [65_535, 0, 0, 65_535], "the rect's first pixel is the fill");
 		assert_eq!(pixel(&image, &store, 149, 99), [65_535, 0, 0, 65_535], "and its last one");
 		assert_eq!(pixel(&image, &store, 150, 99), [0; 4], "the pixel after it is empty");

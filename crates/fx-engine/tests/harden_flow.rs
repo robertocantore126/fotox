@@ -167,7 +167,9 @@ fn an_adjustment_preview_keeps_history_and_redo() {
 		},
 	});
 	let adjustment = harness.wait("the adjustment layer", |s| match s {
-		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == doc => layers.iter().find(|l| l.kind == fx_protocol::LayerInfoKind::Adjustment).map(|l| l.id),
+		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == doc => {
+			layers.iter().find(|l| l.kind == fx_protocol::LayerInfoKind::Adjustment).map(|l| l.id)
+		}
 		_ => None,
 	});
 	harness.ui(UiToEngine::Action {

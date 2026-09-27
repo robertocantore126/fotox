@@ -272,7 +272,11 @@ fn two_varying_masks_equal_their_product() {
 		let (two, one) = (build_doc(true), build_doc(false));
 		for tx in 0..2 {
 			let (a, b) = (render(&two, &store, tx, 0), render(&one, &store, tx, 0));
-			let worst = a.iter().zip(&b).flat_map(|(p, q)| p.iter().zip(q).map(|(x, y)| (x - y).abs())).fold(0.0, f64::max);
+			let worst = a
+				.iter()
+				.zip(&b)
+				.flat_map(|(p, q)| p.iter().zip(q).map(|(x, y)| (x - y).abs()))
+				.fold(0.0, f64::max);
 			assert!(worst < 1e-4, "group={group} {blend:?} tile {tx}: max difference {worst}");
 		}
 	}

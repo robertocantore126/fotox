@@ -160,12 +160,19 @@ impl SpacePlan {
 			.map(|g| {
 				let Some([a, b, c, d]) = lin else { return *g };
 				let flat = |v: f64| v.abs() < 1e-9;
-				let (p, direction) = if g.vertical { ((g.position, 0.0), (c, d)) } else { ((0.0, g.position), (a, b)) };
+				let (p, direction) = if g.vertical {
+					((g.position, 0.0), (c, d))
+				} else {
+					((0.0, g.position), (a, b))
+				};
 				let q = point(&mapping, p);
 				if flat(direction.0) {
 					crate::document::Guide { vertical: true, position: q.0 }
 				} else if flat(direction.1) {
-					crate::document::Guide { vertical: false, position: q.1 }
+					crate::document::Guide {
+						vertical: false,
+						position: q.1,
+					}
 				} else {
 					*g
 				}
@@ -263,10 +270,7 @@ impl SpacePlan {
 }
 
 /// The alpha channels (canvas-origin grey images) after `f` moves each one.
-pub(super) fn map_channels(
-	doc: &Document,
-	mut f: impl FnMut(&TiledImage) -> Result<TiledImage, CommandError>,
-) -> Result<Vec<TiledImage>, CommandError> {
+pub(super) fn map_channels(doc: &Document, mut f: impl FnMut(&TiledImage) -> Result<TiledImage, CommandError>) -> Result<Vec<TiledImage>, CommandError> {
 	doc.channels.iter().map(|c| f(&c.image)).collect()
 }
 

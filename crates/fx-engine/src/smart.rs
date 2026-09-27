@@ -39,7 +39,8 @@ fn draw(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, ti
 		let grid = composite.grid(level).clone();
 		for ty in 0..grid.rows() {
 			for tx in 0..grid.cols() {
-				if composite.is_dirty(level, tx, ty) {
+				let dropped = matches!(composite.slot(level, tx, ty), fx_tiles::TileSlot::Data(h) if store.is_evicted(h));
+				if composite.is_dirty(level, tx, ty) || dropped {
 					crate::mips::ensure_mip(composite, store, level, tx, ty)?;
 				}
 			}

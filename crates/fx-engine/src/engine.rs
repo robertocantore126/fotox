@@ -178,6 +178,15 @@ pub(crate) enum Internal {
 	},
 	/// An AI job finished (M13).
 	Ai(Box<m13::AiDone>),
+	/// A derived-tile job finished (code review 2026-09-27 R07): `computed`
+	/// is the worker's copy of document `doc` at content `generation`, with
+	/// the tiles the frame asked for, for the layers `layers`.
+	Derived {
+		doc: DocId,
+		generation: u64,
+		computed: Box<Document>,
+		layers: std::collections::HashSet<LayerId>,
+	},
 }
 
 /// The eight handles of a box `[x0, y0, x1, y1]`: corners and edge middles.
@@ -203,6 +212,7 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::PixelJobDone { .. } => "internal pixel job done",
 		Internal::Thumbnail { .. } => "internal thumbnail",
 		Internal::Ai(_) => "internal ai done",
+		Internal::Derived { .. } => "internal derived tiles",
 	}
 }
 
@@ -259,6 +269,11 @@ struct Engine {
 	m13: m13::State,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
+	/// A derived-tile job is running (code review 2026-09-27 R07): one at a
+	/// time. Frame requests that arrive meanwhile wait here, merged per
+	/// document; a newer content generation replaces an older one's.
+	derived_running: bool,
+	derived_waiting: HashMap<DocId, MipWork>,
 	/// The window is closing: after each dirty document is answered, ask about
 	/// the next one (M3-T06).
 	window_close_pending: bool,
@@ -431,6 +446,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		smart_children: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
+		derived_running: false,
+		derived_waiting: HashMap::new(),
 	};
 
 	loop {
@@ -1599,10 +1616,9 @@ impl Engine {
 			});
 			return;
 		};
-		// A snapshot: editing may go on while the export runs. Shape layers
-		// are rasterised from their geometry, so their level-0 tiles are
-		// drawn first (M6-T06).
-		vector::prepare_level0(&mut open.doc, &self.store, None);
+		// A snapshot: editing may go on while the export runs. The export
+		// computes the derived tiles it reads (shapes, text, effects) row by
+		// row on its own copy (code review 2026-09-27 R06/R07).
 		let doc = open.doc.clone();
 		if let Err(error) = crate::export::options_for(&doc, &path, false) {
 			self.to_ui(&EngineToUi::Error {
@@ -2073,9 +2089,6 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let label = pixel_job_label(&command);
 		open.busy = Some(label.clone());
-		// These commands read level 0 of layers the view may not have drawn
-		// (M6-T06): fill in the shape tiles before the snapshot is taken.
-		vector::prepare_level0(&mut open.doc, &self.store, None);
 		let before = open.doc.clone();
 		self.next_task += 1;
 		let task = self.next_task;
@@ -2100,6 +2113,10 @@ impl Engine {
 				clipboard,
 			};
 			let mut after = before;
+			// These commands read level 0 of layers the view may not have drawn
+			// (M6-T06): fill in the derived tiles first — here, on the worker,
+			// in bounded batches (code review 2026-09-27 R06/R07).
+			vector::prepare_level0(&mut after, &store, None);
 			let mut ctx = CommandContext {
 				tiles: &store,
 				ops: Some(&ops),
@@ -2207,6 +2224,12 @@ impl Engine {
 			Internal::Ai(done) => self.ai_done(*done),
 			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
 			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
+			Internal::Derived {
+				doc,
+				generation,
+				computed,
+				layers,
+			} => self.derived_done(doc, generation, &computed, &layers),
 			Internal::Exported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
@@ -3860,67 +3883,81 @@ impl Engine {
 		}
 	}
 
-	/// Compute the dirty mip tiles a frame asked for, then redraw. Mips are
-	/// derived data: no undo step, no revision bump (only a new snapshot).
+	/// The tiles a frame asked for (dirty or dropped mips, generated-layer
+	/// caches, vector masks, effects). Derived data: no undo step, no revision
+	/// bump, only a new snapshot. They are computed on a worker, on a copy of
+	/// the document, one job at a time (code review 2026-09-27 R07: computing
+	/// them here kept input, tool changes and new commands waiting).
 	fn compute_mips(&mut self, work: MipWork) {
+		if self.derived_running {
+			match self.derived_waiting.get_mut(&work.doc) {
+				Some(waiting) if (waiting.revision, waiting.generation) == (work.revision, work.generation) => {
+					for request in work.requests {
+						if !waiting.requests.contains(&request) {
+							waiting.requests.push(request);
+						}
+					}
+				}
+				_ => {
+					self.derived_waiting.insert(work.doc, work);
+				}
+			}
+			return;
+		}
+		self.start_derived(work);
+	}
+
+	fn start_derived(&mut self, work: MipWork) {
 		let store = self.store.clone();
-		let Some(doc) = self.docs.get_mut(work.doc) else { return };
-		if doc.doc.revision != work.revision {
+		let Some(open) = self.docs.get(work.doc) else { return };
+		if (open.doc.revision, open.generation) != (work.revision, work.generation) {
 			// The document changed meanwhile; the next frame asks again.
 			return;
 		}
-		let mut shape_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-		let mut mask_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-		let mut effect_tiles: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
-		for request in &work.requests {
-			match request {
-				TileRequest::Mip(request) => {
-					let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
-					let image = if request.mask {
-						match layer.mask.as_mut() {
-							Some(mask) => &mut mask.image,
-							None => continue,
-						}
-					} else {
-						match &mut layer.kind {
-							fx_core::LayerKind::Pixel { image, .. } => image,
-							_ => continue,
-						}
-					};
-					// A request from a snapshot the document no longer matches.
-					let grid_has = |image: &fx_tiles::TiledImage| {
-						request.level < image.level_count() && {
-							let grid = image.grid(request.level);
-							request.x < grid.cols() && request.y < grid.rows()
-						}
-					};
-					if !grid_has(image) {
-						continue;
-					}
-					if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
-						tracing::warn!("mip {request:?} failed: {error}");
-					}
-				}
-				// Shape tiles are drawn from the geometry, all levels alike
-				// (M6-T06); collect them and draw one parallel batch per layer.
-				TileRequest::Vector(request) if request.vector_mask => mask_tiles.push((request.layer, request.level, request.x, request.y)),
-				TileRequest::Vector(request) => shape_tiles.push((request.layer, request.level, request.x, request.y)),
-				TileRequest::Effect(request) => effect_tiles.push((request.layer, request.effect, request.level, request.x, request.y)),
+		let mut computed = open.doc.clone();
+		let (doc, generation) = (work.doc, work.generation);
+		let layers: std::collections::HashSet<LayerId> = work.requests.iter().map(TileRequest::layer).collect();
+		let internal = self.internal.clone();
+		let requests = work.requests;
+		let spawned = std::thread::Builder::new().name("derived-tiles".into()).spawn(move || {
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::derived::fulfil(&mut computed, &store, &requests)));
+			if let Err(panic) = result {
+				tracing::warn!("derived tiles panicked: {}", panic_text(&*panic));
+			}
+			let _ = internal.send(Internal::Derived {
+				doc,
+				generation,
+				computed: Box::new(computed),
+				layers,
+			});
+		});
+		match spawned {
+			Ok(_) => self.derived_running = true,
+			Err(error) => tracing::warn!("cannot start the derived-tile job: {error}"),
+		}
+	}
+
+	/// A derived-tile job finished: install what is still current, then start
+	/// the next waiting one.
+	fn derived_done(&mut self, doc: DocId, generation: u64, computed: &Document, layers: &std::collections::HashSet<LayerId>) {
+		self.derived_running = false;
+		let store = self.store.clone();
+		if let Some(open) = self.docs.get_mut(doc) {
+			if open.generation == generation {
+				crate::derived::merge(&mut open.doc, computed, layers, &store);
+			}
+			// Always a new snapshot: the render thread asks again for whatever
+			// is still missing (a stale job installed nothing).
+			open.invalidate_snapshot();
+			if self.docs.active_id() == Some(doc) {
+				self.request_frame();
 			}
 		}
-		if !shape_tiles.is_empty() {
-			vector::draw_requests(&mut doc.doc, &store, &shape_tiles);
-		}
-		// Vector masks (M10-T06).
-		if !mask_tiles.is_empty() {
-			vector::draw_vector_mask_requests(&mut doc.doc, &store, &mask_tiles);
-		}
-		if !effect_tiles.is_empty() {
-			crate::effects::draw_effect_requests(&mut doc.doc, &store, &effect_tiles);
-		}
-		doc.invalidate_snapshot();
-		if self.docs.active_id() == Some(work.doc) {
-			self.request_frame();
+		let next = self.derived_waiting.keys().next().copied();
+		if let Some(next) = next
+			&& let Some(work) = self.derived_waiting.remove(&next)
+		{
+			self.start_derived(work);
 		}
 	}
 

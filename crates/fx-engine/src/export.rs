@@ -12,8 +12,6 @@ use fx_io::export::{EXPORT_BAND_ROWS, ExportFormat, ExportOptions, JpegChroma, e
 use fx_io::{IoError, Progress};
 use fx_render::adjust::LutCache;
 use fx_render::blend::unpremultiply;
-use fx_render::build_program;
-use fx_render::reference::render_tile;
 use fx_tiles::{PixelFormat, TILE_SIZE, TileSlot, TileStore};
 use rayon::prelude::*;
 
@@ -127,26 +125,31 @@ pub fn apply_choice(
 	Ok(options)
 }
 
-/// Composite `doc` and write it to `path`.
+/// Composite `doc` and write it to `path`. Each row of tiles computes the
+/// derived tiles it reads (shapes, text, effects…) on the export's own copy
+/// of the document, so nothing has to be prepared for the whole document
+/// first (code review 2026-09-27 R06/R07).
 pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: ExportOptions, progress: Progress<'_>) -> Result<(), IoError> {
+	let mut doc = doc.clone();
+	let (doc_width, doc_height) = (doc.width, doc.height);
 	let tiles_x = doc.width.div_ceil(TILE_SIZE);
 	let width = doc.width as usize;
 	let mut luts = LutCache::default();
-	let fetch = |h: &fx_tiles::TileHandle| store.get(h).expect("tile of a live document");
 	let mut render = |y: u32, rows: u32, out: &mut [[u16; 4]]| -> Result<(), IoError> {
 		let ty = y / TILE_SIZE;
-		// Programs are cheap and need the LUT cache: build them first, render in parallel.
-		let programs = (0..tiles_x)
-			.map(|tx| build_program(doc, 0, tx, ty, &mut |a| luts.get(a)))
-			.collect::<Result<Vec<_>, _>>()
-			.map_err(|_| IoError::Decode("full-resolution tiles are missing".into()))?;
-		let tiles: Vec<_> = programs.par_iter().map(|p| render_tile(p, &fetch)).collect();
-		for (tx, tile) in tiles.iter().enumerate() {
+		let tiles: Vec<(u32, u32)> = (0..tiles_x).map(|tx| (tx, ty)).collect();
+		let rendered =
+			crate::derived::render_tiles(&mut doc, store, 0, &tiles, &mut luts).map_err(|e| IoError::Decode(format!("the document's tiles: {e}")))?;
+		for (tx, tile) in rendered.iter().enumerate() {
 			let x0 = tx * TILE_SIZE as usize;
 			let cols = (TILE_SIZE as usize).min(width - x0);
 			for row in 0..rows as usize {
-				let src = &tile[row * TILE_SIZE as usize..][..cols];
 				let dst = &mut out[row * width + x0..][..cols];
+				let Some(pixels) = &tile.pixels else {
+					dst.fill([0; 4]);
+					continue;
+				};
+				let src = &pixels[row * TILE_SIZE as usize..][..cols];
 				for (d, &p) in dst.iter_mut().zip(src) {
 					let rgb = unpremultiply(p);
 					*d = [to_u16(rgb[0]), to_u16(rgb[1]), to_u16(rgb[2]), to_u16(p[3])];
@@ -155,7 +158,7 @@ pub fn export_document(doc: &Document, store: &TileStore, path: &Path, options: 
 		}
 		Ok(())
 	};
-	export_image(path, doc.width, doc.height, options, &mut render, progress)
+	export_image(path, doc_width, doc_height, options, &mut render, progress)
 }
 
 /// Composite the canvas rectangle `rect` (`x, y, w, h`) of `doc` and write
@@ -178,25 +181,26 @@ pub fn export_region(
 	}
 	let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
 	let (tx0, tx1) = (x0 / t, (x1 - 1) / t);
+	let mut doc = doc.clone();
 	let mut luts = LutCache::default();
-	let fetch = |handle: &fx_tiles::TileHandle| store.get(handle).expect("tile of a live document");
-	let mut row: Option<(i64, Vec<Vec<[f64; 4]>>)> = None;
+	let mut row: Option<(i64, Vec<crate::derived::Rendered>)> = None;
 	let mut render = |y: u32, rows: u32, out: &mut [[u16; 4]]| -> Result<(), IoError> {
 		for r in 0..rows {
 			let dy = y0 + i64::from(y + r);
 			let ty = dy / t;
 			if row.as_ref().is_none_or(|(cached, _)| *cached != ty) {
-				let programs = (tx0..=tx1)
-					.map(|tx| build_program(doc, 0, tx as u32, ty as u32, &mut |a| luts.get(a)))
-					.collect::<Result<Vec<_>, _>>()
-					.map_err(|_| IoError::Decode("full-resolution tiles are missing".into()))?;
-				let tiles: Vec<Vec<[f64; 4]>> = programs.par_iter().map(|p| render_tile(p, &fetch)).collect();
-				row = Some((ty, tiles));
+				let tiles: Vec<(u32, u32)> = (tx0..=tx1).map(|tx| (tx as u32, ty as u32)).collect();
+				let rendered =
+					crate::derived::render_tiles(&mut doc, store, 0, &tiles, &mut luts).map_err(|e| IoError::Decode(format!("the document's tiles: {e}")))?;
+				row = Some((ty, rendered));
 			}
 			let (_, tiles) = row.as_ref().expect("filled above");
 			for x in 0..i64::from(w) {
 				let dx = x0 + x;
-				let p = tiles[(dx / t - tx0) as usize][((dy % t) * t + dx % t) as usize];
+				let p = tiles[(dx / t - tx0) as usize]
+					.pixels
+					.as_ref()
+					.map_or([0.0; 4], |px| px[((dy % t) * t + dx % t) as usize]);
 				let rgb = unpremultiply(p);
 				out[(r as usize) * w as usize + x as usize] = [to_u16(rgb[0]), to_u16(rgb[1]), to_u16(rgb[2]), to_u16(p[3])];
 			}
@@ -229,7 +233,6 @@ pub fn composite_layers(
 	let format = doc.color.depth.rgba_format();
 	let (cols, rows) = (doc.width.div_ceil(TILE_SIZE), doc.height.div_ceil(TILE_SIZE));
 	let mut luts = LutCache::default();
-	let fetch = |h: &fx_tiles::TileHandle| store.get(h).expect("tile of a live document");
 	let bg = background.map(|c| c.map(|v| f64::from(v) / 65535.0));
 	let mut image = fx_tiles::TiledImage::new(doc.width, doc.height, format);
 	let total = (cols as usize * rows as usize).max(1);
@@ -237,18 +240,17 @@ pub fn composite_layers(
 	for ty in 0..rows {
 		for start in (0..cols).step_by(COMPOSITE_BATCH as usize) {
 			let end = (start + COMPOSITE_BATCH).min(cols);
-			let mut programs = Vec::with_capacity((end - start) as usize);
-			for tx in start..end {
-				let program = build_program(&sub, 0, tx, ty, &mut |a| luts.get(a))
-					.map_err(|_| fx_core::CommandError::NotAllowed("full-resolution tiles are missing".into()))?;
-				if background.is_some() || !program.is_empty() {
-					programs.push(((tx, ty), program));
-				}
-			}
-			let tiles: Vec<((u32, u32), fx_tiles::TileBuffer)> = programs
-				.par_iter()
-				.map(|(pos, program)| {
-					let pixels = render_tile(program, &fetch);
+			let batch: Vec<(u32, u32)> = (start..end).map(|tx| (tx, ty)).collect();
+			// Each batch computes the derived tiles it reads on `sub`, a copy
+			// (code review 2026-09-27 R06): nothing is prepared up front.
+			let rendered = crate::derived::render_tiles(&mut sub, store, 0, &batch, &mut luts)
+				.map_err(|e| fx_core::CommandError::NotAllowed(format!("the document's tiles: {e}")))?;
+			let tiles: Vec<((u32, u32), fx_tiles::TileBuffer)> = rendered
+				.into_par_iter()
+				.filter(|r| background.is_some() || r.pixels.is_some())
+				.map(|r| {
+					let pos = r.tile;
+					let pixels = r.pixels.unwrap_or_else(|| vec![[0.0; 4]; fx_tiles::TILE_PIXELS]);
 					let mut tile = fx_tiles::TileBuffer::zeroed(format);
 					for (i, &p) in pixels.iter().enumerate() {
 						let p = match bg {
@@ -267,7 +269,7 @@ pub fn composite_layers(
 							}
 						}
 					}
-					(*pos, tile)
+					(pos, tile)
 				})
 				.collect();
 			for ((tx, ty), tile) in tiles {

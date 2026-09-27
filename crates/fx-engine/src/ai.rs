@@ -19,9 +19,7 @@ use fx_core::Document;
 use fx_core::select_ops::{ModelKind, ModelMask};
 use fx_render::adjust::LutCache;
 use fx_render::blend::unpremultiply;
-use fx_render::build_program;
 use fx_render::program::TileRequest;
-use fx_render::reference::render_tile;
 use fx_tiles::{TILE_SIZE, TileStore};
 
 /// The composite at the mip level whose long side is at most `max_side`:
@@ -42,42 +40,7 @@ impl Working {
 
 /// Serve the tiles a program is missing (the frame loop's work, inline).
 pub fn serve(doc: &mut Document, store: &TileStore, requests: &[TileRequest]) {
-	let mut shapes = Vec::new();
-	let mut masks = Vec::new();
-	let mut effects = Vec::new();
-	for request in requests {
-		match request {
-			TileRequest::Mip(r) => {
-				let Some(layer) = doc.layer_mut(r.layer) else { continue };
-				let image = if r.mask {
-					match layer.mask.as_mut() {
-						Some(mask) => &mut mask.image,
-						None => continue,
-					}
-				} else {
-					match &mut layer.kind {
-						fx_core::LayerKind::Pixel { image, .. } => image,
-						_ => continue,
-					}
-				};
-				if let Err(error) = crate::mips::ensure_mip(image, store, r.level, r.x, r.y) {
-					tracing::warn!("mip {r:?} failed: {error}");
-				}
-			}
-			TileRequest::Vector(r) if r.vector_mask => masks.push((r.layer, r.level, r.x, r.y)),
-			TileRequest::Vector(r) => shapes.push((r.layer, r.level, r.x, r.y)),
-			TileRequest::Effect(r) => effects.push((r.layer, r.effect, r.level, r.x, r.y)),
-		}
-	}
-	if !shapes.is_empty() {
-		crate::vector::draw_requests(doc, store, &shapes);
-	}
-	if !masks.is_empty() {
-		crate::vector::draw_vector_mask_requests(doc, store, &masks);
-	}
-	if !effects.is_empty() {
-		crate::effects::draw_effect_requests(doc, store, &effects);
-	}
+	crate::derived::fulfil(doc, store, requests);
 }
 
 /// Read the composite at a working resolution (M13-T01): the number of tiles
@@ -112,21 +75,20 @@ pub fn composite_rect(doc: &mut Document, store: &TileStore, level: usize, rect:
 		return Ok(pixels);
 	}
 	let mut luts = LutCache::default();
+	let mut tiles = Vec::new();
 	for ty in cy0.div_euclid(t)..=(cy1 - 1).div_euclid(t) {
 		for tx in cx0.div_euclid(t)..=(cx1 - 1).div_euclid(t) {
-			let mut program = None;
-			for _ in 0..4 {
-				match build_program(doc, level, tx as u32, ty as u32, &mut |a| luts.get(a)) {
-					Ok(p) => {
-						program = Some(p);
-						break;
-					}
-					Err(requests) => serve(doc, store, &requests),
-				}
-			}
-			let program = program.ok_or_else(|| "the document's tiles could not be prepared".to_owned())?;
-			let fetch = |handle: &fx_tiles::TileHandle| store.get(handle).expect("tile of a live document");
-			let tile = render_tile(&program, &fetch);
+			tiles.push((tx as u32, ty as u32));
+		}
+	}
+	// Code review 2026-09-27 R01: the derived inputs are computed (again, if
+	// the trim dropped them) and held while each tile renders.
+	let rendered =
+		crate::derived::render_tiles(doc, store, level, &tiles, &mut luts).map_err(|e| format!("the document's tiles could not be prepared: {e}"))?;
+	for tile in rendered {
+		let (tx, ty) = (i64::from(tile.tile.0), i64::from(tile.tile.1));
+		{
+			let Some(tile) = tile.pixels else { continue };
 			for py in 0..t {
 				let y = ty * t + py;
 				if y < cy0 || y >= cy1 {

@@ -31,7 +31,7 @@ use fx_render::adjust::LutCache;
 use fx_render::gpu::{CompositorConfig, GpuCompositor, TileOutcome, ViewportRenderer};
 use fx_render::overlay::tessellate;
 use fx_render::{
-	FramePlan, Overlay, TestPatternRenderer, TileKey, TileProgram, TileRequest, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame,
+	FramePlan, Overlay, TestPatternRenderer, TileKey, TileProgram, TileRequest, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program_checked, plan_frame,
 };
 use fx_tiles::{TILE_SIZE, TileId, TileStore};
 
@@ -94,6 +94,9 @@ pub(crate) enum RenderRequest {
 pub(crate) struct MipWork {
 	pub doc: DocId,
 	pub revision: u64,
+	/// The content generation of the snapshot that asked (undo winds the
+	/// revision back; the generation never repeats).
+	pub generation: u64,
 	pub requests: Vec<TileRequest>,
 }
 
@@ -372,7 +375,10 @@ impl TilePipeline {
 		for key in keys {
 			if !self.programs.contains_key(&key) {
 				let luts = &mut self.luts;
-				match build_program(doc, key.level, key.tx, key.ty, &mut |a| luts.get(a)) {
+				let store = &ctx.store;
+				// A derived tile the store dropped is asked for again, like a
+				// dirty one (code review 2026-09-27 R01).
+				match build_program_checked(doc, key.level, key.tx, key.ty, &mut |a| luts.get(a), &|h| store.is_evicted(h)) {
 					Ok(program) => {
 						self.programs.insert(key, program);
 					}
@@ -393,6 +399,7 @@ impl TilePipeline {
 			&& let Err(crossbeam_channel::SendError(work)) = ctx.mips.send(MipWork {
 				doc: id,
 				revision: doc.revision,
+				generation,
 				requests: mips,
 			}) {
 			for m in &work.requests {
@@ -419,6 +426,15 @@ impl TilePipeline {
 						budget_spent = true;
 					}
 					for handle in missing {
+						// Dropped for good (a derived tile under memory
+						// pressure): loading cannot bring it back. Forget the
+						// program that points at it; the next frame builds a new
+						// one, which asks the engine to recompute the tile.
+						if ctx.store.is_evicted(&handle) {
+							self.programs.remove(&key);
+							budget_spent = true;
+							continue;
+						}
 						self.load(ctx, handle);
 					}
 				}

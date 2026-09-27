@@ -692,6 +692,14 @@ impl TileStore {
 		handle.0.copies.try_lock().is_some_and(|c| c.hot.is_some())
 	}
 
+	/// True if the store holds no copy of the tile any more: a derived tile
+	/// the trim dropped. [`Self::get`] reports [`TileError::Evicted`]; only
+	/// recomputing it from its source brings it back (code review 2026-09-27
+	/// R01).
+	pub fn is_evicted(&self, handle: &TileHandle) -> bool {
+		handle.0.copies.lock().is_empty()
+	}
+
 	/// Bring RAM usage back under budget:
 	/// 1. least-recently-used hot **derived** tiles → dropped (`Evicted`);
 	/// 2. least-recently-used hot **authoritative** tiles → LZ4 (`warm`), or

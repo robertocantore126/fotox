@@ -153,8 +153,14 @@ fn read_alpha(doc: &mut Document, store: &TileStore, id: LayerId, level: usize, 
 			tiles.push((gx as u32, gy as u32));
 		}
 	}
-	// Bring missing tiles up to date.
-	let dirty: Vec<(u32, u32)> = tiles.iter().copied().filter(|&(gx, gy)| image.is_dirty(level, gx, gy)).collect();
+	// Bring missing tiles up to date: dirty ones, and derived ones the trim
+	// dropped (code review 2026-09-27 R01; read as transparent, they would
+	// bake a hole into the effect).
+	let dirty: Vec<(u32, u32)> = tiles
+		.iter()
+		.copied()
+		.filter(|&(gx, gy)| image.is_dirty(level, gx, gy) || matches!(image.slot(level, gx, gy), TileSlot::Data(h) if store.is_evicted(h)))
+		.collect();
 	if !dirty.is_empty() {
 		if derived {
 			let requests: Vec<_> = dirty.iter().map(|&(gx, gy)| (id, level, gx, gy)).collect();

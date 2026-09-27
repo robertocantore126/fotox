@@ -5,7 +5,7 @@ use std::sync::Arc;
 use fx_core::{Command, LayerId, LayerKind, LayerRef};
 use fx_protocol::{DocId, EngineToUi};
 
-use super::Engine;
+use super::{Engine, Internal};
 use crate::documents::OpenDoc;
 use crate::vector;
 
@@ -406,8 +406,9 @@ impl Engine {
 		});
 	}
 
-	/// Write every slice (user and auto, D-087) or every artboard as PNG.
-	/// FAST: runs on the engine thread (no progress bar); PNG only.
+	/// Write every slice (user and auto, D-087) or every artboard as PNG, on
+	/// a worker with a progress bar (code review 2026-09-27 R07: compositing,
+	/// encoding and writing used to run on the engine thread). PNG only.
 	fn export_regions(&mut self, doc_id: DocId, slices: bool) {
 		let store = self.store.clone();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
@@ -417,7 +418,7 @@ impl Engine {
 			});
 			return;
 		};
-		vector::prepare_level0(&mut open.doc, &store, None);
+		// Each region computes the derived tiles it reads on its own copy.
 		let doc = open.doc.clone();
 		let stem = path.file_stem().map_or_else(|| "export".to_owned(), |s| s.to_string_lossy().into_owned());
 		let dir = path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
@@ -447,23 +448,39 @@ impl Engine {
 			self.to_ui(&EngineToUi::Error { text: error.to_string() });
 			return;
 		}
-		let mut written = 0;
-		for (name, rect) in regions {
-			let target = folder.join(&name);
-			let result = crate::export::options_for(&doc, &target, false)
-				.and_then(|options| crate::export::export_region(&doc, &store, &target, options, rect, &mut |_| true));
-			match result {
-				Ok(()) => written += 1,
-				Err(error) => {
-					self.to_ui(&EngineToUi::Error {
-						text: format!("{name}: {error}"),
-					});
-					return;
-				}
-			}
-		}
-		self.to_ui(&EngineToUi::Toast {
-			text: format!("{written} files written to {}", folder.display()),
+		self.next_task += 1;
+		let task = self.next_task;
+		let label = if slices { "Exporting slices" } else { "Exporting artboards" }.to_owned();
+		self.to_ui(&EngineToUi::Progress {
+			task,
+			label: label.clone(),
+			fraction: 0.0,
 		});
+		let internal = self.internal.clone();
+		let spawned = std::thread::Builder::new().name(format!("export-regions-{task}")).spawn(move || {
+			let total = regions.len();
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), fx_io::IoError> {
+				for (i, (name, rect)) in regions.into_iter().enumerate() {
+					let target = folder.join(&name);
+					crate::export::options_for(&doc, &target, false)
+						.and_then(|options| crate::export::export_region(&doc, &store, &target, options, rect, &mut |_| true))
+						.map_err(|error| fx_io::IoError::Decode(format!("{name}: {error}")))?;
+					let _ = internal.send(Internal::Progress {
+						task,
+						label: label.clone(),
+						fraction: (i + 1) as f32 / total as f32,
+					});
+				}
+				Ok(())
+			}))
+			.unwrap_or_else(|panic| Err(fx_io::IoError::Decode(format!("export worker panicked: {}", super::panic_text(&*panic)))));
+			let _ = internal.send(Internal::Exported { task, path: folder, result });
+		});
+		if let Err(error) = spawned {
+			self.to_ui(&EngineToUi::ProgressDone { task });
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Cannot start the export: {error}"),
+			});
+		}
 	}
 }
