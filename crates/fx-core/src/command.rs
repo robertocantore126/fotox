@@ -1642,7 +1642,8 @@ fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: 
 }
 
 /// `Rasterize` (M6-T06): turn a generated layer into the pixels it drew.
-/// The layer keeps its id, name, place, opacity, blend mode and mask.
+/// The layer keeps its id, name, place, opacity, fill, blend mode, clipping,
+/// masks and styles, none of which are baked into the pixels.
 fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	if layers.is_empty() {
 		return Err(CommandError::NotAllowed("no layers to rasterise".into()));
@@ -1656,20 +1657,26 @@ fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) 
 			_ => {}
 		}
 	}
-	// Composite each layer alone, with its own opacity, fill and blend mode
-	// neutralised: those stay on the layer (Photoshop keeps them too).
-	let mut flat = doc.clone();
-	for &id in &ids {
-		if let Some(layer) = flat.layer_mut(id) {
-			layer.visible = true;
-			layer.opacity = 1.0;
-			layer.fill = 1.0;
-			layer.blend = BlendMode::Normal;
-		}
-	}
+	// Composite each layer's own content alone: everything that stays attached
+	// to the layer and applies again when the new pixels render — opacity,
+	// fill, blend mode, both masks, styles, clipping — is left out, and so are
+	// the enclosing groups (code review 2026-09-27 R02: a 50 % mask used to be
+	// baked in and then applied a second time).
 	let mut images = Vec::with_capacity(ids.len());
 	for &id in &ids {
-		images.push((id, pixel_ops(ctx, "rasterising")?.composite(&flat, &[id], None, ctx.tiles)?));
+		let mut layer = doc.layer(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?.clone();
+		layer.visible = true;
+		layer.opacity = 1.0;
+		layer.fill = 1.0;
+		layer.blend = BlendMode::Normal;
+		layer.clipped = false;
+		layer.mask = None;
+		layer.vector_mask = None;
+		layer.styles = None;
+		layer.effects = Vec::new();
+		let mut solo = doc.clone();
+		solo.layers = vec![Arc::new(layer)];
+		images.push((id, pixel_ops(ctx, "rasterising")?.composite(&solo, &[id], None, ctx.tiles)?));
 	}
 	let mut changed = Vec::with_capacity(ids.len());
 	for (id, image) in images {
