@@ -74,3 +74,21 @@ fn rasterize_does_not_apply_a_mask_twice() {
 	let after = composite_pixel(&d, &store, 0)[3];
 	assert!((before - after).abs() < 0.01, "alpha before {before:.4}, after {after:.4}");
 }
+
+/// R08: an enabled vector mask can hide an opaque fill, but the automatic
+/// export options called the document opaque and flattened it onto white.
+#[test]
+fn a_vector_masked_background_keeps_the_alpha_channel() {
+	let store = store("export-alpha");
+	let mut d = doc(20, 10);
+	let mut layer = Layer::new(LayerId(1), "masked", LayerKind::SolidFill { rgba: [65535; 4] });
+	layer.vector_mask = Some(fx_core::layer::VectorMask {
+		path: fx_core::path::Path::default(),
+		enabled: true,
+		feather: 0.0,
+		density: 1.0,
+		cache: TiledImage::new(20, 10, PixelFormat::Gray8),
+	});
+	d.layers.push(Arc::new(layer));
+	assert!(!fx_engine::export::opaque_background(&d, &store));
+}

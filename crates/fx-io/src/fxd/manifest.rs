@@ -510,7 +510,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.active_comp = manifest.active_comp;
 	doc.slices = manifest.slices.clone();
 	for entry in &manifest.channels {
-		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_from_entry(&entry.image, file, store)?);
+		let mut channel = fx_core::channel::Channel::new(entry.name.clone(), image_as(&entry.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?);
 		channel.color = entry.color;
 		channel.opacity = entry.opacity;
 		doc.channels.push(channel);
@@ -525,7 +525,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, size: (u32, u32), format: PixelFormat) -> Result<Arc<Layer>, IoError> {
 	let kind = match &entry.kind {
 		LayerKindEntry::Pixel { offset, image } => LayerKind::Pixel {
-			image: image_from_entry(image, file, store)?,
+			image: image_as(image, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store)?,
 			offset: *offset,
 		},
 		LayerKindEntry::Group { expanded, children } => LayerKind::Group {
@@ -578,7 +578,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			smart: fx_core::smart::SmartObject {
 				source: fx_core::smart::SmartSource {
 					doc: Arc::new(from_manifest(source, file, store)?),
-					composite: image_from_entry(composite, file, store)?,
+					composite: image_as(composite, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store)?,
 					linked: linked.clone(),
 					linked_mtime: *linked_mtime,
 					uid: *uid,
@@ -618,7 +618,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 	}
 	layer.mask = match &entry.mask {
 		Some(mask) => Some(Mask {
-			image: image_from_entry(&mask.image, file, store)?,
+			image: image_as(&mask.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?,
 			enabled: mask.enabled,
 			linked: mask.linked,
 			outside_value: mask.outside_value,
@@ -628,9 +628,54 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 	Ok(Arc::new(layer))
 }
 
+/// [`image_from_entry`] for an image whose role allows only `formats` (a
+/// layer's pixels are RGBA, a mask or channel grey).
+fn image_as(entry: &ImageEntry, formats: &[PixelFormat], file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
+	if !formats.contains(&entry.format) {
+		return Err(IoError::Decode(format!("an image is {:?}, expected one of {formats:?}", entry.format)));
+	}
+	image_from_entry(entry, file, store)
+}
+
+/// Check a stored image before anything is built from it: the file is
+/// untrusted, and `TiledImage` asserts on a zero size, a level or a tile
+/// outside its pyramid (code review 2026-09-27 R09).
+fn check_image_entry(entry: &ImageEntry) -> Result<(), IoError> {
+	if entry.width == 0 || entry.height == 0 {
+		return Err(IoError::Decode(format!("an image is {}×{} px", entry.width, entry.height)));
+	}
+	if u64::from(entry.width) > crate::MAX_SIDE || u64::from(entry.height) > crate::MAX_SIDE {
+		return Err(IoError::TooLarge {
+			width: entry.width.into(),
+			height: entry.height.into(),
+		});
+	}
+	let levels = fx_tiles::level_count_for(entry.width, entry.height);
+	for level in &entry.levels {
+		let index = level.level as usize;
+		if index >= levels {
+			return Err(IoError::Decode(format!(
+				"level {} of a {}×{} image (it has {levels})",
+				level.level, entry.width, entry.height
+			)));
+		}
+		let div = 1u32 << index;
+		let cols = entry.width.div_ceil(div).div_ceil(fx_tiles::TILE_SIZE);
+		let rows = entry.height.div_ceil(div).div_ceil(fx_tiles::TILE_SIZE);
+		for slot in &level.slots {
+			let (SlotEntry::Solid { tx, ty, .. } | SlotEntry::Tile { tx, ty, .. }) = *slot;
+			if tx >= cols || ty >= rows {
+				return Err(IoError::Decode(format!("tile ({tx}, {ty}) outside the {cols}×{rows} grid of level {}", level.level)));
+			}
+		}
+	}
+	Ok(())
+}
+
 /// Rebuild one `TiledImage` from its manifest entry, with backed tiles.
 /// Public so the opener can rebuild the composite preview the same way.
 pub fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
+	check_image_entry(entry)?;
 	let mut image = TiledImage::new(entry.width, entry.height, entry.format);
 	for level in &entry.levels {
 		let derived = level.level != 0;
@@ -1397,5 +1442,34 @@ mod tests {
 		let json = br#"{"fill":1.0,"a":[{"fill":2,"x":"fill","fill":{"fill":3}}],"fill_x":"\"fill\""}"#;
 		let out = String::from_utf8(super::rename_second_fill(json)).unwrap();
 		assert_eq!(out, r#"{"fill":1.0,"a":[{"fill":2,"x":"fill","shape_fill":{"fill":3}}],"fill_x":"\"fill\""}"#);
+	}
+
+	/// Code review 2026-09-27 R09: a nested image's size, levels and tile
+	/// coordinates come from the file; bad ones are errors, not panics.
+	#[test]
+	fn malformed_nested_images_are_refused_before_construction() {
+		use super::{ImageEntry, LevelEntry, check_image_entry};
+		let entry = |width, height, level, tx, ty| ImageEntry {
+			width,
+			height,
+			format: PixelFormat::Rgba8,
+			levels: vec![LevelEntry {
+				level,
+				derived: level != 0,
+				slots: vec![SlotEntry::Solid { tx, ty, value: [0; 4] }],
+			}],
+		};
+		assert!(check_image_entry(&entry(600, 300, 0, 2, 1)).is_ok());
+		assert!(check_image_entry(&entry(600, 300, 1, 1, 0)).is_ok());
+		for (bad, why) in [
+			(entry(0, 10, 0, 0, 0), "zero width"),
+			(entry(600, 300, 0, 3, 0), "tile column outside level 0"),
+			(entry(600, 300, 0, 0, 2), "tile row outside level 0"),
+			(entry(600, 300, 1, 2, 0), "tile outside level 1"),
+			(entry(600, 300, 3, 0, 0), "a level the pyramid does not have"),
+			(entry(400_000, 10, 0, 0, 0), "wider than MAX_SIDE"),
+		] {
+			assert!(check_image_entry(&bad).is_err(), "{why}");
+		}
 	}
 }

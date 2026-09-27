@@ -52,9 +52,13 @@ pub fn options_for(doc: &Document, path: &Path, opaque: bool) -> Result<ExportOp
 /// root layer covers the canvas with opaque pixels at full opacity, no mask.
 /// Every layer above then keeps alpha at 1 (source-over and source-atop both
 /// do, whatever the blend mode). Reads that layer's tiles once, in parallel.
+///
+/// Anything that cannot be proven opaque keeps the alpha channel: an
+/// unneeded alpha channel costs a few bytes, a wrong "opaque" flattens
+/// transparency onto white for good (code review 2026-09-27 R08).
 pub fn opaque_background(doc: &Document, store: &TileStore) -> bool {
 	let Some(bottom) = doc.layers.iter().find(|l| l.visible) else { return false };
-	if bottom.opacity < 1.0 || bottom.fill < 1.0 || bottom.mask.is_some() {
+	if bottom.opacity < 1.0 || bottom.fill < 1.0 || bottom.mask.is_some() || bottom.vector_mask.is_some() || bottom.clipped {
 		return false;
 	}
 	let image = match &bottom.kind {
