@@ -444,3 +444,74 @@ fn perspective_crop_takes_shape_layers_along() {
 		"Smart Object and rasterised crops differ: mean {mean:.4}, max {max:.4}"
 	);
 }
+
+/// Follow-up: Free Transform's preview of a Smart Object is what the command
+/// will make of it (its source through the box's mapping composed with its
+/// transform), the snapshot shows it (the layer used to stay still until the
+/// commit), and nothing is drawn up front: no mip of the source is built
+/// before a preview reads it.
+#[test]
+fn a_smart_object_previews_its_source_through_the_box() {
+	use fx_engine::transform_preview::{Prepared, PreviewJob, TransformPreview};
+	let store = store("smart-preview");
+	let mut composite = TiledImage::new(1024, 1024, PixelFormat::Rgba8);
+	composite.set_slot(0, 0, TileSlot::Solid(PixelValue([65535, 0, 0, 65535])));
+	let mut d = doc(512, 512);
+	d.layers.push(Arc::new(Layer::new(
+		LayerId(1),
+		"smart",
+		LayerKind::Smart {
+			smart: fx_core::smart::SmartObject {
+				source: fx_core::smart::SmartSource {
+					doc: Arc::new(doc(1024, 1024)),
+					composite,
+					linked: None,
+					linked_mtime: None,
+					uid: 11,
+				},
+				transform: fx_core::Mapping::scale(0.5, 0.5),
+				filters: vec![],
+				filters_enabled: true,
+			},
+			cache: TiledImage::derived(512, 512, PixelFormat::Rgba8),
+		},
+	)));
+	let prepared = Arc::new(Prepared::new(&d, LayerId(1), &store).unwrap().expect("something to move"));
+	assert!(prepared.placement.is_some(), "previewed from the source");
+	{
+		let source = prepared.source.lock().unwrap();
+		assert!(source.is_dirty(1, 0, 0), "no mip is built up front");
+	}
+	let job = PreviewJob {
+		request: 1,
+		latest: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+		prepared: prepared.clone(),
+		mapping: fx_core::Mapping::translation(100.0, 50.0),
+		filter: fx_core::Filter::Bilinear,
+		coarser: false,
+		view: fx_render::ViewTransform {
+			zoom: 1.0,
+			center_x: 256.0,
+			center_y: 256.0,
+			rotation: 0.0,
+		},
+		viewport: fx_render::ViewportSize { width: 512, height: 512 },
+		canvas: (512, 512),
+	};
+	let shown = job.run(&store).unwrap().expect("a preview");
+	let preview = TransformPreview {
+		layer: LayerId(1),
+		prepared: Some(prepared),
+		shown: Some(shown),
+		request: 1,
+	};
+	let mut snapshot = d.clone();
+	preview.apply(&mut snapshot);
+	let pixels = composite_all(&mut snapshot, &store);
+	// The source's red tile (256 px) at 50 %, moved by (100, 50): canvas
+	// (100..228, 50..178).
+	let at = |x: u32, y: u32| pixels[(y * 512 + x) as usize];
+	assert!(at(150, 80)[3] > 0.99 && at(150, 80)[0] > 0.99, "moved and shown: {:?}", at(150, 80));
+	assert!(at(50, 20)[3] < 0.01, "nothing left where it was: {:?}", at(50, 20));
+	assert!(at(240, 190)[3] < 0.01, "and nothing past it: {:?}", at(240, 190));
+}

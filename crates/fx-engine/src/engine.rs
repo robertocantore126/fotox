@@ -34,7 +34,7 @@ use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSetting
 use crate::trace;
 use crate::transform_preview::{Prepared, PreviewJob as TransformJob, TransformPreview};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips, vector};
+use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -186,6 +186,8 @@ pub(crate) enum Internal {
 		generation: u64,
 		computed: Box<Document>,
 		layers: std::collections::HashSet<LayerId>,
+		/// The requested tiles' pixels, held until the frame has read them.
+		held: Vec<Arc<fx_tiles::TileBuffer>>,
 	},
 }
 
@@ -1757,12 +1759,6 @@ impl Engine {
 			}
 		};
 		self.end_stroke();
-		// A Smart Object's preview reads its level-0 cache (M12-T01).
-		if let Some(open) = self.docs.get_mut(doc_id)
-			&& open.doc.layer(layer_id).is_some_and(|l| matches!(l.kind, LayerKind::Smart { .. }))
-		{
-			vector::prepare_level0(&mut open.doc, &self.store, Some(&[layer_id]));
-		}
 		let mut session = free_transform::Session::new(layer_id, rect, mode, filter);
 		session.custom = custom;
 		let status = session.status();
@@ -1773,7 +1769,7 @@ impl Engine {
 			shown: None,
 			request: 0,
 		});
-		// Cut the source out and make its mips valid, off the engine thread.
+		// Cut the source out, off the engine thread.
 		let doc = open.doc.clone();
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		rayon::spawn(move || {
@@ -2230,7 +2226,8 @@ impl Engine {
 				generation,
 				computed,
 				layers,
-			} => self.derived_done(doc, generation, &computed, &layers),
+				held,
+			} => self.derived_done(doc, generation, &computed, &layers, held),
 			Internal::Exported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
@@ -3934,11 +3931,13 @@ impl Engine {
 			if let Err(panic) = result {
 				tracing::warn!("derived tiles panicked: {}", panic_text(&*panic));
 			}
+			let held = crate::derived::hold(&computed, &store, &requests);
 			let _ = internal.send(Internal::Derived {
 				doc,
 				generation,
 				computed: Box::new(computed),
 				layers,
+				held,
 			});
 		});
 		match spawned {
@@ -3949,12 +3948,22 @@ impl Engine {
 
 	/// A derived-tile job finished: install what is still current, then start
 	/// the next waiting one.
-	fn derived_done(&mut self, doc: DocId, generation: u64, computed: &Document, layers: &std::collections::HashSet<LayerId>) {
+	fn derived_done(
+		&mut self,
+		doc: DocId,
+		generation: u64,
+		computed: &Document,
+		layers: &std::collections::HashSet<LayerId>,
+		held: Vec<Arc<fx_tiles::TileBuffer>>,
+	) {
 		self.derived_running = false;
 		let store = self.store.clone();
 		if let Some(open) = self.docs.get_mut(doc) {
 			if open.generation == generation {
 				crate::derived::merge(&mut open.doc, computed, layers, &store);
+				// Held until the next batch lands: the frame this one answers
+				// composites them first (the previous batch is let go).
+				open.derived_held = held;
 			}
 			// Always a new snapshot: the render thread asks again for whatever
 			// is still missing (a stale job installed nothing).

@@ -56,6 +56,11 @@ pub struct OpenDoc {
 	/// layer drawn with this adjustment, outside the history; shares
 	/// `preview_rev`.
 	pub adjustment_preview: Option<(LayerId, fx_core::Adjustment)>,
+	/// The last derived-tile batch's pixels, held until the frame that asked
+	/// for them has composited them (code review 2026-09-27 R01: under a hot
+	/// budget smaller than the screen, the trim used to drop part of a batch
+	/// before its frame, which asked for it again).
+	pub derived_held: Vec<std::sync::Arc<fx_tiles::TileBuffer>>,
 	/// A Free Transform's live preview (M6-T04); shares `preview_rev`.
 	pub transform_preview: Option<crate::transform_preview::TransformPreview>,
 	/// A pixel job (filter, merge, flatten) is running on this document: its
@@ -134,6 +139,7 @@ impl OpenDoc {
 			preview_rev: 0,
 			transform_preview: None,
 			adjustment_preview: None,
+			derived_held: Vec::new(),
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -166,6 +172,7 @@ impl OpenDoc {
 			preview_rev: 0,
 			transform_preview: None,
 			adjustment_preview: None,
+			derived_held: Vec::new(),
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -236,6 +243,7 @@ impl OpenDoc {
 			preview_rev: 0,
 			transform_preview: None,
 			adjustment_preview: None,
+			derived_held: Vec::new(),
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,

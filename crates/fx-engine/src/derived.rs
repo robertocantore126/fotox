@@ -223,6 +223,38 @@ fn derived_images(layer: &Layer) -> Vec<&TiledImage> {
 	out
 }
 
+/// The stored pixels of the tiles `requests` named, as `doc` now holds them
+/// (every derived image of the layer at that level and position: a small
+/// superset). The engine keeps them until the frame that asked has read them,
+/// so the trim cannot drop a batch between its computation and its first use
+/// when the hot budget is smaller than what is on screen.
+pub fn hold(doc: &Document, store: &TileStore, requests: &[TileRequest]) -> Vec<Arc<TileBuffer>> {
+	let mut out = Vec::new();
+	for request in requests {
+		let (level, x, y) = match request {
+			TileRequest::Mip(r) => (r.level, r.x, r.y),
+			TileRequest::Vector(r) => (r.level, r.x, r.y),
+			TileRequest::Effect(r) => (r.level, r.x, r.y),
+		};
+		let Some(layer) = doc.layer(request.layer()) else { continue };
+		for image in derived_images(layer) {
+			if level >= image.level_count() {
+				continue;
+			}
+			let grid = image.grid(level);
+			if x >= grid.cols() || y >= grid.rows() {
+				continue;
+			}
+			if let TileSlot::Data(handle) = image.slot(level, x, y)
+				&& let Ok(buffer) = store.get(handle)
+			{
+				out.push(buffer);
+			}
+		}
+	}
+	out
+}
+
 /// [`derived_images`], mutably (the same order).
 fn derived_images_mut(layer: &mut Layer) -> Vec<&mut TiledImage> {
 	let mut out = Vec::new();
@@ -319,6 +351,61 @@ mod tests {
 			},
 			72.0,
 		)
+	}
+
+	/// A frame's batch under a zero hot budget: a trim right after the batch
+	/// is computed spares it while it is held (the frame has not read it yet)
+	/// and drops it once it is let go.
+	#[test]
+	fn a_held_batch_survives_the_trim_until_it_is_let_go() {
+		let dir = std::env::temp_dir().join(format!("fx-engine-derived-hold-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let mut config = TileStoreConfig::for_tests(dir);
+		config.hot_budget = 0;
+		let store = TileStore::new(config).unwrap();
+		let mut d = doc(512, 512);
+		let shape = fx_core::vector::VectorShape::Ellipse { w: 300.0, h: 200.0 };
+		d.layers.push(Arc::new(Layer::new(
+			LayerId(1),
+			"ellipse",
+			LayerKind::Shape {
+				shape,
+				fill: Some(fx_core::vector::Paint::Solid { rgba: [65535, 0, 0, 65535] }),
+				stroke: None,
+				transform: [1.0, 0.0, 0.0, 1.0, 100.0, 100.0],
+				cache: TiledImage::derived(512, 512, PixelFormat::Rgba8),
+			},
+		)));
+		let requests: Vec<TileRequest> = [(0, 0), (1, 0), (0, 1), (1, 1)]
+			.into_iter()
+			.map(|(x, y)| {
+				TileRequest::Vector(fx_render::program::VectorRequest {
+					layer: LayerId(1),
+					level: 0,
+					x,
+					y,
+					vector_mask: false,
+				})
+			})
+			.collect();
+		fulfil(&mut d, &store, &requests);
+		let held = hold(&d, &store, &requests);
+		assert!(!held.is_empty(), "the ellipse's tiles hold pixels");
+		let LayerKind::Shape { cache, .. } = &d.layers[0].kind else { unreachable!() };
+		let data: Vec<fx_tiles::TileHandle> = cache
+			.grid(0)
+			.non_empty()
+			.filter_map(|(_, _, slot)| match slot {
+				TileSlot::Data(h) => Some(h.clone()),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(data.len(), held.len());
+		store.trim();
+		assert!(data.iter().all(|h| !store.is_evicted(h)), "a held batch stays");
+		drop(held);
+		store.trim();
+		assert!(data.iter().all(|h| store.is_evicted(h)), "a batch let go is dropped");
 	}
 
 	/// A 512 × 512 pixel layer whose level-1 mip was computed, then dropped by

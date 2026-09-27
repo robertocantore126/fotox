@@ -16,11 +16,12 @@
 //! *copy* of the document's images and commits the results (M1-T07 wires the
 //! scheduling; `TiledImage` is cheap to clone).
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
+use fx_ops::neighbourhood::{LevelSource, TileRef};
 use fx_tiles::{ChildPixels, downsample_2x2};
-use fx_tiles::{TileBuffer, TileClass, TileError, TileSlot, TileStore, TiledImage};
+use fx_tiles::{PixelFormat, TileBuffer, TileClass, TileError, TileSlot, TileStore, TiledImage};
 use rayon::prelude::*;
 
 /// How often [`ensure_mip`] restarts when a tile it just computed from is
@@ -61,6 +62,86 @@ pub fn ensure_all_mips(image: &mut TiledImage, store: &TileStore) -> Result<(), 
 	}
 	drop(held);
 	Ok(())
+}
+
+/// How often a tile is recomputed when the trim drops it between being
+/// computed and being read.
+const LAZY_RETRIES: usize = 4;
+
+/// An image as the sampler's [`LevelSource`], its mips computed as they are
+/// read (code review 2026-09-27 R06): a mip tile is computed when it is first
+/// asked for (from the level below, itself computed on demand) into the
+/// shared `image`, where it stays for later readers, and every tile handed
+/// out is held by this reader until it is dropped — so the trim cannot take
+/// a tile between its computation and its use.
+pub struct LazyMips<'a> {
+	image: &'a Mutex<TiledImage>,
+	store: &'a TileStore,
+	format: PixelFormat,
+	held: Mutex<HashMap<(usize, u32, u32), Option<TileRef>>>,
+}
+
+impl<'a> LazyMips<'a> {
+	pub fn new(image: &'a Mutex<TiledImage>, store: &'a TileStore) -> Self {
+		let format = image.lock().unwrap_or_else(std::sync::PoisonError::into_inner).format();
+		Self {
+			format,
+			image,
+			store,
+			held: Mutex::new(HashMap::new()),
+		}
+	}
+
+	fn read(&self, level: usize, tx: u32, ty: u32) -> Result<Option<TileRef>, TileError> {
+		for _ in 0..LAZY_RETRIES {
+			let slot = {
+				let mut image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+				if level == 0 {
+					image.slot(0, tx, ty).clone()
+				} else {
+					ensure_mip(&mut image, self.store, level, tx, ty)?
+				}
+			};
+			match slot {
+				TileSlot::Empty => return Ok(None),
+				TileSlot::Solid(value) => return Ok(Some(TileRef::Solid(value.0))),
+				TileSlot::Data(handle) => match self.store.get(&handle) {
+					Ok(buffer) => return Ok(Some(TileRef::Data(buffer))),
+					// Dropped between being computed and being read: again.
+					Err(TileError::Evicted) => continue,
+					Err(error) => return Err(error),
+				},
+			}
+		}
+		Err(TileError::Evicted)
+	}
+}
+
+impl LevelSource for LazyMips<'_> {
+	fn format(&self) -> PixelFormat {
+		self.format
+	}
+
+	fn tile(&self, level: usize, tx: i64, ty: i64) -> Result<Option<TileRef>, TileError> {
+		let (cols, rows) = {
+			let image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			if level >= image.level_count() {
+				return Ok(None);
+			}
+			let grid = image.grid(level);
+			(grid.cols(), grid.rows())
+		};
+		if tx < 0 || ty < 0 || tx >= i64::from(cols) || ty >= i64::from(rows) {
+			return Ok(None);
+		}
+		let key = (level, tx as u32, ty as u32);
+		if let Some(tile) = self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+			return Ok(tile.clone());
+		}
+		let tile = self.read(level, key.1, key.2)?;
+		self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, tile.clone());
+		Ok(tile)
+	}
 }
 
 /// Whether mip tile `(level, tx, ty)` has to be (re)computed before use.

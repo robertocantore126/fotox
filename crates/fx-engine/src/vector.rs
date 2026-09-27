@@ -56,70 +56,6 @@ pub(crate) fn slot_for(buffer: TileBuffer, format: PixelFormat, store: &TileStor
 	}
 }
 
-/// Draw the level-0 tiles of the shape layers in `layers` (`None` means every
-/// shape layer of `doc`) that are still dirty, so a reader that looks at the
-/// document as a whole sees the shapes' pixels (M6-T06).
-///
-/// The viewport only ever asks for the tiles it displays. Whole-document
-/// readers (merge, flatten, export, copy, rasterise, pixel jobs) no longer
-/// call this: they composite through [`crate::derived`], which computes the
-/// derived tiles each output tile reads and holds them while it renders. What
-/// is left is a reader of one layer's raw cache (the Free Transform preview of
-/// a Smart Object). Returns how many tiles were drawn.
-///
-/// Code review 2026-09-27 R06: tiles the trim dropped count as missing too,
-/// and the tiles are drawn [`PREPARE_BATCH`] at a time, each batch stored
-/// before the next is drawn, so the pixels in flight stay bounded whatever
-/// the canvas size (a batch of raw tiles used to be the whole canvas).
-pub fn prepare_level0(doc: &mut fx_core::Document, store: &TileStore, layers: Option<&[fx_core::LayerId]>) -> usize {
-	let stale = |image: &fx_tiles::TiledImage| -> Vec<(u32, u32)> {
-		let grid = image.grid(0);
-		let mut out = Vec::new();
-		for ty in 0..grid.rows() {
-			for tx in 0..grid.cols() {
-				if image.is_dirty(0, tx, ty) || matches!(image.slot(0, tx, ty), TileSlot::Data(h) if store.is_evicted(h)) {
-					out.push((tx, ty));
-				}
-			}
-		}
-		out
-	};
-	let mut requests: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-	let mut masks: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-	let mut effects: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
-	doc.walk(|layer, _| {
-		if layers.is_some_and(|ids| !ids.contains(&layer.id)) {
-			return;
-		}
-		if let Some(cache) = layer.kind.derived_cache() {
-			requests.extend(stale(cache).into_iter().map(|(tx, ty)| (layer.id, 0, tx, ty)));
-		}
-		// Vector masks (M10-T06; artboards, M12-T07) are derived tiles too.
-		if let Some(vm) = &layer.vector_mask {
-			masks.extend(stale(&vm.cache).into_iter().map(|(tx, ty)| (layer.id, 0, tx, ty)));
-		}
-		// Layer-style effects (M6-T08) are derived tiles too.
-		for (i, cache) in layer.effects.iter().enumerate() {
-			effects.extend(stale(cache).into_iter().map(|(tx, ty)| (layer.id, i as u8, 0, tx, ty)));
-		}
-	});
-	let mut drawn = 0;
-	for batch in requests.chunks(PREPARE_BATCH) {
-		drawn += draw_requests(doc, store, batch);
-	}
-	for batch in masks.chunks(PREPARE_BATCH) {
-		drawn += draw_vector_mask_requests(doc, store, batch);
-	}
-	// Effects read the layer's own tiles, drawn above.
-	for batch in effects.chunks(PREPARE_BATCH) {
-		drawn += crate::effects::draw_effect_requests(doc, store, batch);
-	}
-	drawn
-}
-
-/// Tiles [`prepare_level0`] draws before storing them and drawing more.
-pub const PREPARE_BATCH: usize = 64;
-
 /// Every shape tile of `requests`, grouped by the layer it belongs to: one
 /// parallel batch per layer. Returns how many tiles were drawn.
 ///
@@ -322,7 +258,7 @@ mod tests {
 		};
 		let image = ops.composite(&doc, &[id], None, &store).expect("a fresh shape composites");
 		assert_eq!(
-			prepare_level0(&mut doc, &store, None),
+			dirty_level0(&doc, id),
 			4,
 			"the composite drew on its own copy: 2 × 2 tiles are still dirty here"
 		);
@@ -333,32 +269,11 @@ mod tests {
 		assert_eq!(pixel(&image, &store, 10, 10), [0; 4], "as is the rest of the canvas");
 	}
 
-	#[test]
-	fn preparing_one_layer_leaves_the_others_dirty() {
-		let store = store();
-		let mut doc = document();
-		let first = rect_layer(&mut doc, &store);
-		let second = rect_layer(&mut doc, &store);
-		assert_ne!(first, second);
-		assert_eq!(prepare_level0(&mut doc, &store, Some(&[second])), 4, "the named layer is drawn");
-		assert_eq!(dirty_level0(&doc, first), 4, "the other one is not");
-		assert_eq!(dirty_level0(&doc, second), 0);
-	}
-
 	/// How many level-0 tiles of a shape layer still have to be drawn.
 	fn dirty_level0(doc: &Document, id: fx_core::LayerId) -> usize {
 		match doc.layer(id).map(|layer| &layer.kind) {
 			Some(LayerKind::Shape { cache, .. }) => cache.dirty_tiles(0).count(),
 			other => panic!("not a shape layer: {other:?}"),
 		}
-	}
-
-	#[test]
-	fn drawing_the_same_tiles_twice_is_a_no_op() {
-		let store = store();
-		let mut doc = document();
-		rect_layer(&mut doc, &store);
-		assert_eq!(prepare_level0(&mut doc, &store, None), 4);
-		assert_eq!(prepare_level0(&mut doc, &store, None), 0, "nothing is dirty any more");
 	}
 }
