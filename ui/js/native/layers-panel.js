@@ -380,7 +380,12 @@ function renderLayers() {
   layersRoot.append(h("div", { class: "pbar" },
     // Layer styles (R2-10): the engine has had them since M6-T08, but this
     // panel had no fx button, so they were only reachable from the menu bar.
-    barBtn("i-fx", "Add a layer style", (btn) => openMenuPopup(btn, layerStyleItems, {})),
+    barBtn("i-fx", "Add a layer style", (btn) => {
+      // The engine refuses styles on groups and adjustments (FAST): say so
+      // here instead of opening a dialog that cannot apply.
+      if (a && !canHaveStyles(a)) toast("Layer styles work on pixel, shape, text, fill and Smart Object layers (not on groups yet)");
+      else openMenuPopup(btn, layerStyleItems, {});
+    }),
     barBtn("i-mask", "Add layer mask (Alt: hide)", (btn, e) => {
       if (!a) return;
       if (a.has_mask) toast("The layer already has a mask");
@@ -561,9 +566,10 @@ function layerContextMenu(l, e) {
   const item = (label, a, o = {}) => ({ label, a, ...o });
   const sep = { sep: true };
   const pixel = l.kind === "pixel";
+  const styled = canHaveStyles(l);
   const items = [
-    item("Blending Options...", "dlg:blending-options"),
-    item("Layer Style", "", { sub: layerStyleEffects }),
+    item("Blending Options...", "dlg:blending-options", { dis: !styled }),
+    item("Layer Style", "", { sub: layerStyleEffects, dis: !styled }),
     sep,
     item("Duplicate Layer", "layer:duplicate"),
     item("Delete Layer", "layer:delete"),
@@ -757,6 +763,9 @@ function percentField(label, a, prop) {
   });
   return h("span", { class: "pf-fieldwrap" }, lab, input, h("span", { class: "pf-unit", text: "%" }));
 }
+
+/** Whether the engine takes layer styles on `l` (`set_layer_style`). */
+const canHaveStyles = (l) => l.kind !== "group" && l.kind !== "adjustment";
 
 /** A list height the user dragged, remembered across sessions (px). */
 function savedHeight(key, fallback) {
