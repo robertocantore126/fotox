@@ -146,6 +146,9 @@ function readValues(grid) {
     // A colour field (M6-T08 style dialogs): its hex box.
     const chip = line.querySelector(".dlg-color");
     if (chip) set(key, line.querySelector("input.dlg-input").value);
+    // A plain text field (`textField`): its text.
+    const text = !chip && line.querySelector(':scope > input.dlg-input[type="text"]:not(.num)');
+    if (text) set(key, text.value);
   });
   grid.querySelectorAll(".dlg-checkline").forEach((line) => {
     const box = line.querySelector(".dlg-check");

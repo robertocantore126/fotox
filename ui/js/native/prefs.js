@@ -129,13 +129,19 @@ export function openPrefsDialog(id) {
     });
     return;
   }
-  // General / Performance (FAST: one page; the scratch folder is shown, not edited).
+  // General / Performance (FAST: one page). The scratch folder is where tiles
+  // go when the memory budget is full: a fast local disk with room (an
+  // existing folder; empty = %LOCALAPPDATA%\Fotox\scratch).
   openDialog(id, {
     title: "Preferences — Performance",
     fields: [
       { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? 4096, w: 80 },
-      { type: "label", text: `Scratch folder: ${prefs.scratch_dir || "default"} — applies at the next start` },
+      { type: "text", label: "Scratch Folder:", value: prefs.scratch_dir || "", width: 260 },
+      { type: "label", text: "The scratch folder must exist; it applies at the next start." },
     ],
-    onOk: (v) => set({ memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 4096)) }),
+    onOk: (v) => set({
+      memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 4096)),
+      scratch_dir: String(v["Scratch Folder:"] ?? "").trim(),
+    }),
   });
 }
