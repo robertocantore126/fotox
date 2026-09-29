@@ -168,6 +168,21 @@ pub enum Command {
 		dx: i32,
 		dy: i32,
 	},
+	/// The Move tool with a pixel selection: the selected pixels of the active
+	/// layer (and the selection with them) move by whole pixels. `copy`
+	/// (Alt+drag) leaves the original pixels in place instead of a hole.
+	/// Labelled "Move" / "Duplicate Pixels".
+	MovePixels {
+		dx: i32,
+		dy: i32,
+		copy: bool,
+	},
+	/// Several commands as one history step named `label`, all or nothing
+	/// (the Move tool's Alt+drag: Duplicate, then Move, undone at once).
+	Sequence {
+		commands: Vec<Command>,
+		label: String,
+	},
 	/// Align / Distribute (M7-T04): each layer by its own amount, one step
 	/// named `label`.
 	MoveEach {
@@ -754,6 +769,20 @@ impl Command {
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
 			Command::OffsetLayers { layers, dx, dy } => offset_layers(doc, layers, *dx, *dy),
+			Command::MovePixels { dx, dy, copy } => move_pixels(doc, *dx, *dy, *copy, ctx),
+			Command::Sequence { commands, label } => {
+				let mut all = CommandEffect {
+					label: label.clone(),
+					..Default::default()
+				};
+				for command in commands {
+					let effect = command.apply(doc, ctx)?;
+					all.pixels_changed.extend(effect.pixels_changed);
+					all.props_changed.extend(effect.props_changed);
+					all.structure_changed |= effect.structure_changed;
+				}
+				Ok(all)
+			}
 			Command::SetGuides { guides, label } => {
 				if guides.iter().any(|g| !g.position.is_finite()) {
 					return Err(CommandError::InvalidValue {
@@ -1288,14 +1317,49 @@ fn set_layer_props(doc: &mut Document, layer: &LayerRef, props: &LayerPropsPatch
 		target.locked_position = v;
 	}
 	Ok(CommandEffect {
-		label: "Layer Properties".into(),
+		label: props_label(props).into(),
 		props_changed: vec![id],
 		..Default::default()
 	})
 }
 
+/// The History label of a property patch: what changed, like Photoshop's
+/// "Blending Change" / "Master Opacity Change" (close, not claimed exact),
+/// instead of one "Layer Properties" for everything. Several fields at once
+/// (a Layer Style dialog's blending page) keep the generic label.
+fn props_label(props: &LayerPropsPatch) -> &'static str {
+	let LayerPropsPatch {
+		name,
+		visible,
+		opacity,
+		fill,
+		blend,
+		clipped,
+		locked_pixels,
+		locked_transparency,
+		locked_position,
+	} = props;
+	let locks = locked_pixels.is_some() || locked_transparency.is_some() || locked_position.is_some();
+	let fields = [name.is_some(), visible.is_some(), opacity.is_some(), fill.is_some(), blend.is_some(), clipped.is_some(), locks];
+	if fields.iter().filter(|&&f| f).count() != 1 {
+		return "Layer Properties";
+	}
+	match () {
+		_ if name.is_some() => "Rename Layer",
+		_ if *visible == Some(true) => "Show Layer",
+		_ if visible.is_some() => "Hide Layer",
+		_ if opacity.is_some() => "Opacity Change",
+		_ if fill.is_some() => "Fill Opacity Change",
+		_ if blend.is_some() => "Blending Change",
+		_ if *clipped == Some(true) => "Create Clipping Mask",
+		_ if clipped.is_some() => "Release Clipping Mask",
+		_ => "Lock Change",
+	}
+}
+
 fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Result<CommandEffect, CommandError> {
 	let id = resolve(doc, layer)?;
+	let position_locked = doc.locks(id).position;
 	let target = doc.layer_mut(id).expect("resolved id exists");
 	// Only pixel layers have an offset at all; a linked mask follows it (the
 	// renderer places a linked mask at the layer's offset, an unlinked one at
@@ -1304,7 +1368,7 @@ fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Resul
 	let LayerKind::Pixel { offset, .. } = &mut target.kind else {
 		return Err(CommandError::NotAllowed("only pixel layers have an offset".into()));
 	};
-	if target.locked_position {
+	if position_locked {
 		return Err(CommandError::Locked(id));
 	}
 	// All or nothing: compute both axes before writing either.
@@ -1345,7 +1409,7 @@ fn offset_layers(doc: &mut Document, layers: &[LayerRef], dx: i32, dy: i32) -> R
 		}
 	}
 	for &id in &ids {
-		if doc.layer(id).is_some_and(|l| l.locked_position) {
+		if doc.locks(id).position {
 			return Err(CommandError::Locked(id));
 		}
 	}
@@ -1358,6 +1422,16 @@ fn offset_layers(doc: &mut Document, layers: &[LayerRef], dx: i32, dy: i32) -> R
 			LayerKind::Shape { transform, cache, .. } | LayerKind::Text { transform, cache, .. } => {
 				transform[4] += f64::from(dx);
 				transform[5] += f64::from(dy);
+				cache.mark_all_dirty();
+			}
+			// A Smart Object is placed by its transform (it used to be skipped:
+			// Auto-Select could pick one, the drop recorded a "Move", nothing moved).
+			LayerKind::Smart { smart, cache } => {
+				let shift = Mapping::translation(f64::from(dx), f64::from(dy));
+				let Some(moved) = m12::compose(shift, smart.transform) else {
+					return Err(CommandError::NotAllowed("this Smart Object's warp cannot be moved; rasterise it first".into()));
+				};
+				smart.transform = moved;
 				cache.mark_all_dirty();
 			}
 			_ => {}
@@ -2053,10 +2127,10 @@ fn scale_alpha8(alpha: u8, mask: u16) -> u8 {
 fn apply_filter(doc: &mut Document, layer: &LayerRef, filter: &FilterParams, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	filter.validate()?;
 	let id = resolve(doc, layer)?;
-	let target = doc.layer(id).expect("resolved id exists");
-	if target.locked_pixels {
+	if doc.locks(id).pixels {
 		return Err(CommandError::Locked(id));
 	}
+	let target = doc.layer(id).expect("resolved id exists");
 	let LayerKind::Pixel { image, offset } = &target.kind else {
 		return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
 	};
@@ -2512,10 +2586,10 @@ fn magic_wand(doc: &mut Document, params: &WandParams, mode: SelectMode, ctx: &m
 /// pixels and layers without pixels are refused.
 fn pixel_target(doc: &Document, layer: &LayerRef) -> Result<(LayerId, TiledImage, (i32, i32)), CommandError> {
 	let id = resolve(doc, layer)?;
-	let target = doc.layer(id).expect("resolved id exists");
-	if target.locked_pixels {
+	if doc.locks(id).pixels {
 		return Err(CommandError::Locked(id));
 	}
+	let target = doc.layer(id).expect("resolved id exists");
 	match &target.kind {
 		LayerKind::Pixel { image, offset } => Ok((id, image.clone(), *offset)),
 		_ => Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into())),
@@ -2547,7 +2621,7 @@ fn fill(
 		});
 	}
 	let (id, image, offset) = pixel_target(doc, layer)?;
-	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let locked_alpha = doc.locks(id).transparency;
 	let spec = crate::pixels::FillSpec {
 		color,
 		mode,
@@ -2632,10 +2706,10 @@ fn stroke(
 		return Err(CommandError::NotAllowed("a stroke needs at least one sample".into()));
 	}
 	let id = resolve(doc, layer)?;
-	let layer = doc.layer(id).expect("resolved id exists");
-	if layer.locked_pixels {
+	if doc.locks(id).pixels {
 		return Err(CommandError::Locked(id));
 	}
+	let layer = doc.layer(id).expect("resolved id exists");
 	match target {
 		StrokeTarget::Pixels if !matches!(layer.kind, LayerKind::Pixel { .. }) => {
 			return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
@@ -3086,6 +3160,34 @@ fn tight(image: &TiledImage, offset: (i32, i32), store: &TileStore) -> Result<Op
 
 /// Edit ▸ Free Transform and the Transform submenu (M6-T04).
 fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filter: Filter, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	transform_pixels(doc, layer, mapping, filter, false, ctx)
+}
+
+/// The Move tool's pixel move and nudge ([`Command::MovePixels`]).
+fn move_pixels(doc: &mut Document, dx: i32, dy: i32, copy: bool, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if doc.selection.is_none() {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	}
+	let id = resolve(doc, &LayerRef::Active)?;
+	if !matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Pixel { .. })) {
+		return Err(CommandError::NotAllowed("selected pixels can be moved on a pixel layer only".into()));
+	}
+	let mapping = Mapping::translation(f64::from(dx), f64::from(dy));
+	let mut effect = transform_pixels(doc, &LayerRef::Id(id), mapping, Filter::Nearest, copy, ctx)?;
+	effect.label = if copy { "Duplicate Pixels".into() } else { "Move".into() };
+	Ok(effect)
+}
+
+/// Free Transform's body. With a selection, `keep_source` leaves the lifted
+/// pixels in place too (a copy) instead of a hole.
+fn transform_pixels(
+	doc: &mut Document,
+	layer: &LayerRef,
+	mapping: Mapping,
+	filter: Filter,
+	keep_source: bool,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
 	if !mapping.is_finite() {
 		return Err(CommandError::InvalidValue {
 			field: "mapping",
@@ -3104,7 +3206,8 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 	let LayerKind::Pixel { image, offset } = &target.kind else {
 		return Err(CommandError::NotAllowed("only a pixel layer can be transformed".into()));
 	};
-	if target.locked_position || target.locked_pixels {
+	let locks = doc.locks(id);
+	if locks.position || locks.pixels {
 		return Err(CommandError::Locked(id));
 	}
 	let offset = *offset;
@@ -3136,7 +3239,11 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 			let lifted = crate::pixels::extract(placed, Some(selection), canvas, store)?;
 			let at = (x0 as i32, y0 as i32);
 			let lifted = crate::pixels::place_in(&lifted, offset, at, Some((x1 - x0, y1 - y0)), fx_tiles::PixelValue::TRANSPARENT, store)?;
-			let hole = crate::pixels::clear(placed, selection, canvas, store)?;
+			let hole = if keep_source {
+				image.clone()
+			} else {
+				crate::pixels::clear(placed, selection, canvas, store)?
+			};
 			let (moved, moved_at) = resample_placed(ops, &lifted, at, mapping, filter, store)?;
 			let (merged, merged_at) = crate::pixels::over(
 				Placed { image: &hole, offset },
@@ -4767,6 +4874,108 @@ mod tests {
 		});
 		assert!(matches!(error, CommandError::Locked(id) if id == a), "{error:?}");
 		assert_eq!(f.pixel(a).1, (0, 0), "the lock held");
+	}
+
+	/// A group's locks cover its children (Rob, 2026-09-29): a child of a
+	/// locked group refuses to move, and tools ignore it.
+	#[test]
+	fn a_group_lock_covers_its_children() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		let g = f.group("G");
+		f.ok(Command::MoveLayer {
+			layer: LayerRef::Id(a),
+			parent: Some(LayerRef::Id(g)),
+			index: 0,
+		});
+		assert!(!f.doc.tool_ignored(a));
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(g),
+			props: LayerPropsPatch {
+				locked_pixels: Some(true),
+				locked_position: Some(true),
+				..Default::default()
+			},
+		});
+		assert!(f.doc.locks(a).all() && f.doc.tool_ignored(a), "{:?}", f.doc.locks(a));
+		let error = f.fail(Command::OffsetLayers {
+			layers: vec![LayerRef::Id(a)],
+			dx: 1,
+			dy: 0,
+		});
+		assert!(matches!(error, CommandError::Locked(id) if id == a), "{error:?}");
+		// Hidden groups hide their children from tools too.
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(g),
+			props: LayerPropsPatch {
+				locked_pixels: Some(false),
+				locked_position: Some(false),
+				visible: Some(false),
+				..Default::default()
+			},
+		});
+		assert!(!f.doc.locks(a).any() && !f.doc.shown(a) && f.doc.tool_ignored(a));
+	}
+
+	/// The Move tool's Alt+drag: one step, all or nothing.
+	#[test]
+	fn a_sequence_is_one_step_and_all_or_nothing() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		let steps = f.history.labels().count();
+		let duplicate_and_move = || Command::Sequence {
+			commands: vec![
+				Command::DuplicateLayers {
+					layers: vec![LayerRef::Id(a)],
+				},
+				Command::OffsetLayers {
+					layers: Vec::new(),
+					dx: 5,
+					dy: 0,
+				},
+			],
+			label: "Duplicate and Move".into(),
+		};
+		f.ok(duplicate_and_move());
+		assert_eq!(f.history.labels().count(), steps + 1);
+		assert_eq!(f.history.labels().last(), Some("Duplicate and Move"));
+		let copy = f.doc.active_layer().unwrap();
+		assert_eq!((f.pixel(a).1, f.pixel(copy).1), ((0, 0), (5, 0)));
+		// The move fails (the copy of a position-locked layer is locked too):
+		// the duplicate made before it is rolled back.
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(a),
+			props: LayerPropsPatch {
+				locked_position: Some(true),
+				..Default::default()
+			},
+		});
+		let layers = f.order().len();
+		f.fail(duplicate_and_move());
+		assert_eq!(f.order().len(), layers, "the duplicate was rolled back");
+	}
+
+	#[test]
+	fn property_steps_say_what_changed() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		let label = |f: &mut Fixture, props: LayerPropsPatch| {
+			f.ok(Command::SetLayerProps {
+				layer: LayerRef::Id(a),
+				props,
+			})
+			.label
+		};
+		assert_eq!(label(&mut f, LayerPropsPatch { blend: Some(BlendMode::Screen), ..Default::default() }), "Blending Change");
+		assert_eq!(label(&mut f, LayerPropsPatch { opacity: Some(0.5), ..Default::default() }), "Opacity Change");
+		assert_eq!(label(&mut f, LayerPropsPatch { visible: Some(false), ..Default::default() }), "Hide Layer");
+		let lock_all = LayerPropsPatch {
+			locked_pixels: Some(true),
+			locked_position: Some(true),
+			locked_transparency: Some(true),
+			..Default::default()
+		};
+		assert_eq!(label(&mut f, lock_all), "Lock Change");
 	}
 
 	#[test]

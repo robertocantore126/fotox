@@ -131,8 +131,9 @@ fn find_arc(layers: &[Arc<Layer>], id: LayerId) -> Option<Arc<Layer>> {
 /// Free Transform of a Smart Object (M12-T01): only the transform changes.
 pub(super) fn transform_smart(doc: &mut Document, id: LayerId, mapping: Mapping) -> Result<CommandEffect, CommandError> {
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let position_locked = doc.locks(id).position;
 	let layer = doc.layer_mut(id).expect("resolved");
-	if layer.locked_position {
+	if position_locked {
 		return Err(CommandError::Locked(id));
 	}
 	let LayerKind::Smart { smart, cache } = &mut layer.kind else {

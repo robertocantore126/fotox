@@ -75,7 +75,7 @@ pub fn prepare(doc: &Document, layer: LayerId, target: StrokeTarget, tool: &Stro
 		image,
 		offset,
 		selection: doc.selection.clone(),
-		lock_alpha: target == StrokeTarget::Pixels && found.locked_transparency,
+		lock_alpha: target == StrokeTarget::Pixels && doc.locks(layer).transparency,
 		source,
 	})
 }

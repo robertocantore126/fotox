@@ -320,6 +320,14 @@ function renderLayers() {
   }
   const a = active();
   const locks = !!a;
+  // The lock buttons read the active layer and set every selected one
+  // (one history step), like Photoshop.
+  const setLocks = (patch) => {
+    const ids = selectedIds().length ? selectedIds() : [a.id];
+    const commands = ids.map((id) => ({ op: "set_layer_props", layer: ref(id), props: patch }));
+    send(commands.length === 1 ? commands[0] : { op: "sequence", commands, label: "Lock Change" });
+  };
+  const allLocked = !!a && a.locked_pixels && a.locked_position;
 
   // Blend mode, opacity, fill of the active layer.
   const modeBtn = h("button", {
@@ -342,12 +350,14 @@ function renderLayers() {
   layersRoot.append(h("div", { class: "phead-row" },
     h("span", { class: "plock-row" },
       h("span", { class: "pf-label", text: "Lock:" }),
-      lockBtn("i-grid", "Lock transparent pixels", a && a.locked_transparency, locks, () => setProps(a.id, { locked_transparency: !a.locked_transparency })),
-      lockBtn("i-image", "Lock image pixels", a && a.locked_pixels, locks, () => setProps(a.id, { locked_pixels: !a.locked_pixels })),
-      lockBtn("i-layers", "Lock position", a && a.locked_position, locks, () => setProps(a.id, { locked_position: !a.locked_position })),
-      lockBtn("i-lock", "Lock all", a && a.locked_pixels && a.locked_position, locks, () => {
-        const on = !(a.locked_pixels && a.locked_position);
-        setProps(a.id, { locked_pixels: on, locked_position: on });
+      lockBtn("i-grid", "Lock transparent pixels", a && a.locked_transparency, locks, () => setLocks({ locked_transparency: !a.locked_transparency })),
+      lockBtn("i-image", "Lock image pixels", a && a.locked_pixels, locks, () => setLocks({ locked_pixels: !a.locked_pixels })),
+      lockBtn("i-layers", "Lock position", a && a.locked_position, locks, () => setLocks({ locked_position: !a.locked_position })),
+      // Lock All: canvas tools then click through the layer as if it were
+      // hidden; the Layers panel is the way back to it.
+      lockBtn("i-lock", "Lock all (tools skip the layer)", allLocked, locks, () => {
+        const on = !allLocked;
+        setLocks({ locked_pixels: on, locked_position: on, locked_transparency: on });
       })),
     h("span", { class: "pbar-gap" }),
     percentField("Fill:", a, "fill")));
@@ -364,7 +374,8 @@ function renderLayers() {
     layerScroll.set(currentDoc, currentList.scrollTop);
     renderRows();
   });
-  layersRoot.append(listEl);
+  listEl.style.height = savedHeight("layers", 260) + "px";
+  layersRoot.append(listEl, resizeGrip(listEl, "layers", 90, 1400, () => renderRows()));
 
   layersRoot.append(h("div", { class: "pbar" },
     // Layer styles (R2-10): the engine has had them since M6-T08, but this
@@ -520,7 +531,7 @@ function row(i, v) {
     name,
     filters,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
-    l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
+    lockMark(l)]);
 
   el.addEventListener("click", (e) => { if (!swallowClick) select(l, e); });
   el.addEventListener("contextmenu", (e) => layerContextMenu(l, e));
@@ -745,6 +756,54 @@ function percentField(label, a, prop) {
     document.addEventListener("mouseup", up);
   });
   return h("span", { class: "pf-fieldwrap" }, lab, input, h("span", { class: "pf-unit", text: "%" }));
+}
+
+/** A list height the user dragged, remembered across sessions (px). */
+function savedHeight(key, fallback) {
+  try {
+    const v = Number(localStorage.getItem("fotox.height." + key));
+    return v > 0 ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** A thin bar under `list` that resizes it vertically and remembers the height. */
+function resizeGrip(list, key, min, max, onResize) {
+  const grip = h("div", { class: "plist-grip", "data-tip": "Drag to resize" });
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const start = e.clientY;
+    const from = list.getBoundingClientRect().height;
+    const move = (m) => {
+      const height = Math.round(Math.min(max, Math.max(min, from + m.clientY - start)));
+      list.style.height = height + "px";
+      onResize?.();
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      try { localStorage.setItem("fotox.height." + key, String(Math.round(list.getBoundingClientRect().height))); } catch { /* storage off: session only */ }
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+  return grip;
+}
+
+/**
+ * The row's lock icon, as in Photoshop: solid for Lock All (tools skip the
+ * layer), hollow for a partial lock or one that comes from a locked group.
+ */
+function lockMark(l) {
+  const full = l.locked_pixels && l.locked_position;
+  if (full) return h("span", { class: "nlock", "data-tip": "Locked: tools skip this layer" }, icon("i-lock", "ic xs"));
+  if (l.locked || l.locked_by_group) {
+    const tip = l.locked_by_group && !l.locked ? "Locked by its group" : "Partly locked";
+    return h("span", { class: "nlock partial", "data-tip": tip }, icon("i-lock", "ic xs"));
+  }
+  return null;
 }
 
 function lockBtn(ic, tip, on, enabled, fn) {
@@ -998,7 +1057,10 @@ export function historyPanel() {
 function renderHistory() {
   if (!historyRoot) return;
   clear(historyRoot);
-  const list = h("div", { class: "plist" });
+  // Compact rows, about seven of them by default (Rob, 2026-09-29: the panel
+  // took space the Layers panel needs); the grip under it resizes it.
+  const list = h("div", { class: "plist hlist" });
+  list.style.height = savedHeight("history", 150) + "px";
   if (doc == null) {
     list.append(h("div", { class: "pempty", text: "No document." }));
   } else {
@@ -1021,7 +1083,7 @@ function renderHistory() {
       list.append(r);
     });
   }
-  historyRoot.append(list, h("div", { class: "pbar" },
+  historyRoot.append(list, resizeGrip(list, "history", 60, 600), h("div", { class: "pbar" },
     barBtn("i-undo", "Step backward (Ctrl+Z)", () => jump(-1)),
     barBtn("i-redo", "Step forward (Ctrl+Shift+Z)", () => jump(1)),
   ));

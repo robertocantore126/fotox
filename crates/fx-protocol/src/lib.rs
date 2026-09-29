@@ -249,6 +249,9 @@ pub struct LayerInfo {
 	pub edit_mask: bool,
 	#[serde(default)]
 	pub locked_position: bool,
+	/// A group holding the layer has a lock, which covers the layer too.
+	#[serde(default)]
+	pub locked_by_group: bool,
 	pub expanded: bool,
 	pub selected: bool,
 	/// Parameters of an adjustment layer (for its dialog / Properties).

@@ -340,7 +340,7 @@ pub(super) fn content_aware_fill(
 	let label = "Content-Aware Fill";
 	match output {
 		FillOutput::Current => {
-			if doc.layer(id).expect("resolved").locked_pixels {
+			if doc.locks(id).pixels {
 				return Err(CommandError::Locked(id));
 			}
 			let Some((new, new_offset)) = patch_fill_layer(&image, offset, canvas, &selection, None, None, seed, ops, ctx.tiles)? else {

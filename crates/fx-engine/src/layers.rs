@@ -25,20 +25,26 @@ use fx_protocol::{LayerInfo, LayerInfoKind};
 /// ever allocated.
 pub fn layer_infos(doc: &Document) -> Vec<LayerInfo> {
 	let mut out = Vec::new();
-	flatten(&doc.layers, 0, &doc.selected, &mut out);
+	flatten(&doc.layers, 0, &doc.selected, false, &mut out);
 	out
 }
 
 /// Append `layers` (bottom → top) top-first, then recurse into groups.
-fn flatten(layers: &[Arc<Layer>], depth: u32, selected: &[LayerId], out: &mut Vec<LayerInfo>) {
+/// `group_locked`: a group above has a lock (it covers these layers).
+fn flatten(layers: &[Arc<Layer>], depth: u32, selected: &[LayerId], group_locked: bool, out: &mut Vec<LayerInfo>) {
 	for layer in layers.iter().rev() {
-		out.push(layer_info(layer, depth, selected.contains(&layer.id)));
+		let mut info = layer_info(layer, depth, selected.contains(&layer.id));
+		info.locked_by_group = group_locked;
+		out.push(info);
 		if let LayerKind::Group { children, .. } = &layer.kind {
-			flatten(children, depth + 1, selected, out);
+			let locked = group_locked || layer.locked_pixels || layer.locked_position || layer.locked_transparency;
+			flatten(children, depth + 1, selected, locked, out);
 		}
 	}
 }
 
+/// One row; `locked_by_group` is filled in by [`flatten`], which knows the
+/// groups above.
 fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 	LayerInfo {
 		id: layer.id,
@@ -60,6 +66,7 @@ fn layer_info(layer: &Layer, depth: u32, selected: bool) -> LayerInfo {
 		locked_transparency: layer.locked_transparency,
 		edit_mask: false,
 		locked_position: layer.locked_position,
+		locked_by_group: false,
 		// Only groups can collapse; for anything else the flag means nothing.
 		expanded: matches!(&layer.kind, LayerKind::Group { expanded: true, .. }),
 		selected,

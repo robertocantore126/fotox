@@ -32,34 +32,69 @@ use rayon::prelude::*;
 /// dropped in between.
 const MAX_ROUNDS: usize = 8;
 
-/// The alpha (`0..=1`) layer `id` shows on its own at document point `(x, y)`:
-/// its content through its masks, at full opacity, Normal, without styles —
-/// what a click on the canvas picks (Move ▸ Auto-Select). The derived tiles
-/// of the one tile read (shape, text, Smart Object, fill) are drawn for it.
+/// The alpha (`0..=1`) layer `id` shows at document point `(x, y)`, as far
+/// as picking goes (Move ▸ Auto-Select): its content through its masks, times
+/// its opacity and its groups' opacity and masks, inside its clipping base
+/// when it is clipped. Blend modes and layer styles are left out: a click
+/// picks a layer by its content, not by its drop shadow. The derived tiles of
+/// the one tile read (shape, text, Smart Object, fill) are drawn for it.
 pub fn alpha_at(doc: &Document, store: &TileStore, id: LayerId, x: f64, y: f64) -> f64 {
 	if !(x >= 0.0 && y >= 0.0 && x < f64::from(doc.width) && y < f64::from(doc.height)) {
 		return 0.0;
 	}
-	let Some(layer) = doc.layer(id) else { return 0.0 };
-	let mut layer = layer.clone();
-	layer.visible = true;
-	layer.opacity = 1.0;
-	layer.fill = 1.0;
-	layer.blend = fx_core::BlendMode::Normal;
-	layer.clipped = false;
-	layer.styles = None;
-	layer.effects = Vec::new();
+	let chain = doc.with_ancestors(id);
+	let Some((layer, groups)) = chain.split_first() else { return 0.0 };
+	let mut solo_layer = (*layer).clone();
+	solo_layer.visible = true;
+	solo_layer.fill = 1.0;
+	solo_layer.blend = fx_core::BlendMode::Normal;
+	solo_layer.clipped = false;
+	solo_layer.styles = None;
+	solo_layer.effects = Vec::new();
+	// The groups around it, each holding only the next one in: their masks
+	// and opacity apply, nothing else of theirs.
+	let mut inner = Arc::new(solo_layer);
+	for group in groups {
+		let mut g = (*group).clone();
+		g.visible = true;
+		g.styles = None;
+		g.effects = Vec::new();
+		g.clipped = false;
+		if let LayerKind::Group { children, .. } = &mut g.kind {
+			*children = vec![inner];
+		}
+		inner = Arc::new(g);
+	}
 	let mut solo = doc.clone();
-	solo.layers = vec![Arc::new(layer)];
+	solo.layers = vec![inner];
 	let t = fx_tiles::TILE_SIZE;
 	let (px, py) = (x as u32, y as u32);
-	match render_tiles(&mut solo, store, 0, &[(px / t, py / t)], &mut LutCache::default()) {
+	let alpha = match render_tiles(&mut solo, store, 0, &[(px / t, py / t)], &mut LutCache::default()) {
 		Ok(rendered) => rendered
 			.first()
 			.and_then(|r| r.pixels.as_ref())
 			.map_or(0.0, |p| p[((py % t) * t + px % t) as usize][3]),
 		Err(_) => 0.0,
+	};
+	if layer.clipped && alpha > 0.0 {
+		return match clipping_base(doc, id) {
+			Some(base) => alpha * alpha_at(doc, store, base, x, y),
+			None => alpha,
+		};
 	}
+	alpha
+}
+
+/// The layer a clipped layer is clipped to: the first unclipped one below it
+/// among its siblings.
+fn clipping_base(doc: &Document, id: LayerId) -> Option<LayerId> {
+	let path = doc.path_of(id)?;
+	let (&index, parents) = path.split_last()?;
+	let mut siblings: &[Arc<Layer>] = &doc.layers;
+	for &i in parents {
+		siblings = siblings.get(i)?.children()?;
+	}
+	siblings[..index].iter().rev().find(|l| !l.clipped).map(|l| l.id)
 }
 
 /// Layer `id`'s own content (as Rasterize keeps it) as an ordinary stored

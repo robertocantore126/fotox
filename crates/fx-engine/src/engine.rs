@@ -336,8 +336,13 @@ enum EditKey {
 	Shape(LayerRef, [bool; 4]),
 	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
 	Style(LayerRef),
-	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running total.
-	Move,
+	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running
+	/// total. Nudges name their layers and drags do not (empty list), so a
+	/// drag never folds into the nudge before it, and a nudge of other layers
+	/// never undoes the last one's.
+	Move(Vec<LayerRef>),
+	/// Arrow nudges of selected pixels (running total, like `Move`).
+	MovePixels,
 }
 
 impl EditKey {
@@ -372,7 +377,8 @@ impl EditKey {
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
 			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
-			Command::OffsetLayers { layers, .. } if layers.is_empty() => Some(Self::Move),
+			Command::OffsetLayers { layers, .. } if !layers.is_empty() => Some(Self::Move(layers.clone())),
+			Command::MovePixels { copy: false, .. } => Some(Self::MovePixels),
 			Command::SetShape {
 				layer,
 				shape,
@@ -973,7 +979,7 @@ impl Engine {
 					});
 					return;
 				};
-				if open.doc.layer(layer).is_some_and(|l| l.locked_pixels) {
+				if open.doc.locks(layer).pixels {
 					self.to_ui(&EngineToUi::Toast {
 						text: "Could not paint: the layer's pixels are locked".into(),
 					});
@@ -1750,7 +1756,7 @@ impl Engine {
 		let Some(layer_id) = open.doc.active_layer() else { return };
 		let refusal = match open.doc.layer(layer_id) {
 			Some(layer) if !matches!(layer.kind, LayerKind::Pixel { .. } | LayerKind::Smart { .. }) => Some("Free Transform works on a pixel layer"),
-			Some(layer) if layer.locked_position || layer.locked_pixels => Some("The layer is locked"),
+			Some(_) if open.doc.locks(layer_id).position || open.doc.locks(layer_id).pixels => Some("The layer is locked"),
 			None => Some("Select a layer to transform"),
 			_ => None,
 		};

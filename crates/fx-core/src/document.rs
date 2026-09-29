@@ -10,6 +10,27 @@ use crate::selection::Selection;
 /// (docs/reports/STRESS-2026-09-27.md O1).
 pub const MAX_GROUP_NESTING: usize = 10;
 
+/// The locks in force on a layer, its groups' included ([`Document::locks`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Locks {
+	pub pixels: bool,
+	pub position: bool,
+	pub transparency: bool,
+}
+
+impl Locks {
+	/// Lock All. Pixels + position is enough: with the pixels locked, the
+	/// transparency lock has nothing left to protect (and files saved before
+	/// Lock All also set the transparency lock have only these two).
+	pub fn all(self) -> bool {
+		self.pixels && self.position
+	}
+
+	pub fn any(self) -> bool {
+		self.pixels || self.position || self.transparency
+	}
+}
+
 /// An open image. Cheap to clone: see crate docs.
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -367,6 +388,47 @@ impl Document {
 			}
 		});
 		deepest
+	}
+
+	/// The layer followed by the groups holding it, innermost first.
+	pub fn with_ancestors(&self, id: LayerId) -> Vec<&Layer> {
+		let Some(path) = self.path_of(id) else { return Vec::new() };
+		let mut out = Vec::with_capacity(path.len());
+		let mut layers: &[Arc<Layer>] = &self.layers;
+		for &i in &path {
+			let layer = &layers[i];
+			out.push(layer.as_ref());
+			layers = layer.children().unwrap_or(&[]);
+		}
+		out.reverse();
+		out
+	}
+
+	/// The locks that hold for `id`: its own, plus every lock of a group it
+	/// is inside (a group's lock covers its children, as in Photoshop).
+	pub fn locks(&self, id: LayerId) -> Locks {
+		self.with_ancestors(id).into_iter().fold(Locks::default(), |acc, l| Locks {
+			pixels: acc.pixels || l.locked_pixels,
+			position: acc.position || l.locked_position,
+			transparency: acc.transparency || l.locked_transparency,
+		})
+	}
+
+	/// Whether the layer and every group holding it are visible.
+	pub fn shown(&self, id: LayerId) -> bool {
+		let chain = self.with_ancestors(id);
+		!chain.is_empty() && chain.iter().all(|l| l.visible)
+	}
+
+	/// Whether canvas tools must act as if the layer were not there: it is
+	/// hidden, or fully locked (Lock All, its own or a group's). A fully
+	/// locked layer still renders; the Layers panel is the only way to reach
+	/// it (to unlock it, rename it, change its blend…) — Rob, 2026-09-29.
+	///
+	/// Sampling tools (Eyedropper, Sample All Layers) deliberately do not use
+	/// this: they read the composite as the eye sees it, locked layers included.
+	pub fn tool_ignored(&self, id: LayerId) -> bool {
+		!self.shown(id) || self.locks(id).all()
 	}
 
 	pub fn walk(&self, mut visit: impl FnMut(&Layer, usize)) {
