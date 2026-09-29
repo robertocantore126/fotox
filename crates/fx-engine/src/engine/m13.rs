@@ -35,8 +35,9 @@ const WORKING: u32 = 1024;
 pub(super) struct State {
 	/// The running AI job's task and cancel flag.
 	cancel: Option<(u64, Arc<AtomicBool>)>,
-	/// EfficientSAM's embedding: document, content generation, embedding.
-	embedding: Option<(DocId, u64, Arc<ai::Embedding>)>,
+	/// EfficientSAM's embedding: document, content generation, the canvas
+	/// area it covers (`None` = the whole document), embedding.
+	embedding: Option<(DocId, u64, Option<(i64, i64, i64, i64)>, Arc<ai::Embedding>)>,
 }
 
 /// What a finished AI job hands back to the engine thread.
@@ -51,6 +52,7 @@ pub(crate) enum AiResult {
 	/// An Object Selection whose embedding was computed on the way.
 	Object {
 		generation: u64,
+		area: Option<(i64, i64, i64, i64)>,
 		embedding: Arc<ai::Embedding>,
 		command: Command,
 	},
@@ -284,11 +286,12 @@ impl Engine {
 			}
 			Ok(AiResult::Object {
 				generation,
+				area,
 				embedding,
 				command,
 			}) => {
 				if let Some(doc) = done.doc {
-					self.m13.embedding = Some((doc, generation, embedding));
+					self.m13.embedding = Some((doc, generation, area, embedding));
 					self.command(doc, command);
 				}
 			}
@@ -342,7 +345,10 @@ impl Engine {
 	}
 
 	/// The Object Selection tool (T04): EfficientSAM's decoder on the cached
-	/// embedding, or the encoder first when the content changed.
+	/// embedding, or the encoder first when the content changed. A box is
+	/// read as a crop around it at up to full resolution
+	/// ([`ai::object_crop`]); clicks alone find the object on the whole
+	/// document, then read it again as a crop ([`ai::click_refine`]).
 	fn object_select(&mut self, doc_id: DocId, boxed: Option<[f64; 4]>, points: Vec<((f64, f64), bool)>, mode: SelectMode) {
 		if !self.ai_ready(&fx_ai::models::EFFICIENT_SAM, "The Object Selection tool") {
 			return;
@@ -350,8 +356,9 @@ impl Engine {
 		let store = self.store.clone();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		let generation = open.generation;
+		let area = boxed.map(|b| ai::object_crop(b, (open.doc.width, open.doc.height)));
 		let cached = match &self.m13.embedding {
-			Some((d, g, e)) if *d == doc_id && *g == generation => Some(e.clone()),
+			Some((d, g, a, e)) if *d == doc_id && *g == generation && *a == area => Some(e.clone()),
 			_ => None,
 		};
 		let make = move |mask| Command::SelectBy {
@@ -359,14 +366,23 @@ impl Engine {
 			mode,
 		};
 		match cached {
-			Some(embedding) => self.start_ai(Some(doc_id), "Object Selection".into(), move |_| {
-				let mask = ai::sam_mask(&embedding, boxed, &points).map_err(|e| e.to_string())?;
-				Ok(AiResult::Command(make(mask)))
-			}),
+			Some(embedding) => {
+				let mut document = open.doc.clone();
+				self.start_ai(Some(doc_id), "Object Selection".into(), move |_| {
+					let mut mask = ai::sam_mask(&embedding, boxed, &points).map_err(|e| e.to_string())?;
+					if boxed.is_none() {
+						mask = ai::click_refine(&mut document, &store, mask, &points, WORKING)?;
+					}
+					Ok(AiResult::Command(make(mask)))
+				});
+			}
 			None => {
 				let mut document = open.doc.clone();
 				self.start_ai(Some(doc_id), "Object Selection".into(), move |progress| {
-					let work = ai::working_composite(&mut document, &store, WORKING)?;
+					let work = match area {
+						Some(rect) => ai::working_crop(&mut document, &store, rect, WORKING)?,
+						None => ai::working_composite(&mut document, &store, WORKING)?,
+					};
 					if !progress(0.1) {
 						return Err(fx_ai::AiError::Cancelled.to_string());
 					}
@@ -374,9 +390,13 @@ impl Engine {
 					if !progress(0.8) {
 						return Err(fx_ai::AiError::Cancelled.to_string());
 					}
-					let mask = ai::sam_mask(&embedding, boxed, &points).map_err(|e| e.to_string())?;
+					let mut mask = ai::sam_mask(&embedding, boxed, &points).map_err(|e| e.to_string())?;
+					if boxed.is_none() {
+						mask = ai::click_refine(&mut document, &store, mask, &points, WORKING)?;
+					}
 					Ok(AiResult::Object {
 						generation,
+						area,
 						embedding,
 						command: make(mask),
 					})
