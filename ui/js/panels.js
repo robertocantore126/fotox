@@ -14,6 +14,7 @@ import * as nativeChannels from "./native/channels-panel.js";
 import * as nativeInfo from "./native/info-panel.js";
 import * as nativePaths from "./native/paths-panel.js";
 import * as nativeComps from "./native/comps-panel.js";
+import * as nativeColor from "./native/color-panel.js";
 
 /** Properties ▸ Quick Actions the app runs (M13-T02): label → action. */
 const QUICK = { "Remove background": "ai:remove-bg", "Select subject": "ai:subject" };
@@ -158,32 +159,8 @@ function layerThumb(kind, color) {
 
 const renderers = {
   color() {
-    const wrap = h("div", { class: "pcolor" });
-    const swatchStack = h("div", { class: "swatch-stack" });
-    const fg = h("button", { class: "big-swatch fg", type: "button", "data-tip": "Foreground colour", style: { background: state.colors.fg }, onclick: () => emit("ask-dialog", "color-picker") });
-    const bg = h("button", { class: "big-swatch bg", type: "button", "data-tip": "Background colour", style: { background: state.colors.bg }, onclick: () => emit("ask-dialog", "color-picker") });
-    swatchStack.append(bg, fg);
-    wrap.append(swatchStack, h("div", { class: "spectrum" }));
-
-    const rgbRow = (label, val) => {
-      const input = h("input", { class: "pf-num", type: "text", value: val });
-      const slider = h("input", { class: "pminirange", type: "range", min: 0, max: 255, value: val });
-      slider.addEventListener("input", () => { input.value = slider.value; });
-      return h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: label }), input, slider);
-    };
-    const hex = h("input", { class: "pf-num hex", type: "text", value: "#1E1E22" });
-    wrap.append(
-      h("div", { class: "pcolor-fields" },
-        rgbRow("R", "30"), rgbRow("G", "30"), rgbRow("B", "34"),
-        h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: "#" }), hex),
-      ),
-      bar([
-        barBtn("i-link", "Link to current colour layer"),
-        barBtn("i-plus", "Add to swatches", () => emit("mock", "Added to swatches")),
-        barBtn("i-menu", "Colour panel menu"),
-      ]),
-    );
-    return wrap;
+    // The live panel works without the engine too (it edits `state.colors`).
+    return nativeColor.colorPanel();
   },
 
   swatches() {
