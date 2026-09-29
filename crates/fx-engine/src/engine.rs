@@ -980,8 +980,9 @@ impl Engine {
 					return;
 				};
 				if open.doc.locks(layer).pixels {
+					let name = open.doc.layer(layer).map_or_else(|| "the layer".to_owned(), |l| l.name.clone());
 					self.to_ui(&EngineToUi::Toast {
-						text: "Could not paint: the layer's pixels are locked".into(),
+						text: format!("Could not paint: “{name}” is locked (or its group is); unlock it in the Layers panel"),
 					});
 					return;
 				}
