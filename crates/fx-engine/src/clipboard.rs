@@ -29,16 +29,15 @@ pub fn copy_layer(
 	Ok(Some(ClipboardImage { image: taken, offset, bounds }))
 }
 
-/// The active pixel layer of `doc`: its image and offset. A shape layer counts
-/// as pixels too — its cache is the tiles it drew (M6-T06) — which is what the
-/// caller wants once [`crate::vector::prepare_level0`] has brought them up to
-/// date.
-pub fn active_pixels(doc: &Document) -> Option<(&TiledImage, (i32, i32))> {
-	let id = doc.active_layer()?;
-	match &doc.layer(id)?.kind {
-		LayerKind::Pixel { image, offset } => Some((image, *offset)),
-		LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Some((cache, (0, 0))),
-		_ => None,
+/// The active pixel layer of `doc`: its image and offset. A shape or text
+/// layer counts as pixels too (M6-T06): the pixels it draws, computed now
+/// ([`crate::derived::layer_content`]).
+pub fn active_pixels(doc: &Document, store: &TileStore) -> Result<Option<(TiledImage, (i32, i32))>, fx_core::CommandError> {
+	let Some(id) = doc.active_layer() else { return Ok(None) };
+	match doc.layer(id).map(|l| &l.kind) {
+		Some(LayerKind::Pixel { image, offset }) => Ok(Some((image.clone(), *offset))),
+		Some(LayerKind::Shape { .. } | LayerKind::Text { .. }) => crate::derived::layer_content(doc, store, id).map(|image| Some((image, (0, 0)))),
+		_ => Ok(None),
 	}
 }
 

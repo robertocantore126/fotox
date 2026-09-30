@@ -23,6 +23,9 @@ pub struct OpenDoc {
 	pub history: History,
 	pub view: ViewState,
 	pub dirty: bool,
+	/// The Global Light the UI last got (`DocumentOpened`/`DocumentChanged`):
+	/// a change to it is reported even by an edit that changes no pixels.
+	pub ui_light: f64,
 	/// A save worker owns a snapshot of this document. A second save must not
 	/// start until its completion is applied, or two snapshots can race.
 	pub saving: bool,
@@ -44,11 +47,23 @@ pub struct OpenDoc {
 	pub file: Option<Arc<FxdFile>>,
 	/// The `.fxd`'s path (the Save target while `file` is set).
 	pub path: Option<PathBuf>,
+	/// What File ▸ Revert reloads: the file this document was opened from or
+	/// last saved to. `None` for a new document never saved.
+	pub source: Option<PathBuf>,
 	/// A filter dialog's live preview (M4-T05).
 	pub preview: Option<crate::filters::FilterPreview>,
 	/// Bumped whenever the preview's pixels change (the render thread's
 	/// caches must not reuse tiles composited from the old preview).
 	pub preview_rev: u64,
+	/// An adjustment dialog's live value (code review 2026-09-27 R11): the
+	/// layer drawn with this adjustment, outside the history; shares
+	/// `preview_rev`.
+	pub adjustment_preview: Option<(LayerId, fx_core::Adjustment)>,
+	/// The last derived-tile batch's pixels, held until the frame that asked
+	/// for them has composited them (code review 2026-09-27 R01: under a hot
+	/// budget smaller than the screen, the trim used to drop part of a batch
+	/// before its frame, which asked for it again).
+	pub derived_held: Vec<std::sync::Arc<fx_tiles::TileBuffer>>,
 	/// A Free Transform's live preview (M6-T04); shares `preview_rev`.
 	pub transform_preview: Option<crate::transform_preview::TransformPreview>,
 	/// A pixel job (filter, merge, flatten) is running on this document: its
@@ -115,6 +130,7 @@ impl OpenDoc {
 			view,
 			dirty: false,
 			saving: false,
+			ui_light: 0.0,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -122,9 +138,12 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: None,
 			path: None,
+			source: Some(path.to_path_buf()),
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
+			adjustment_preview: None,
+			derived_held: Vec::new(),
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -145,6 +164,7 @@ impl OpenDoc {
 			view,
 			dirty: false,
 			saving: false,
+			ui_light: 0.0,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -152,9 +172,12 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: None,
 			path: None,
+			source: None,
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
+			adjustment_preview: None,
+			derived_held: Vec::new(),
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -213,6 +236,7 @@ impl OpenDoc {
 			view,
 			dirty: false,
 			saving: false,
+			ui_light: 0.0,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -220,9 +244,12 @@ impl OpenDoc {
 			snapshot_stale: false,
 			file: Some(opened.file),
 			path: Some(path.to_path_buf()),
+			source: Some(path.to_path_buf()),
 			preview: None,
 			preview_rev: 0,
 			transform_preview: None,
+			adjustment_preview: None,
+			derived_held: Vec::new(),
 			busy: None,
 			snapshot_key: (0, 0),
 			proof: None,
@@ -248,6 +275,13 @@ impl OpenDoc {
 					&& let LayerKind::Pixel { image, .. } = &mut layer.kind
 				{
 					*image = preview.image.clone();
+				}
+				// An adjustment dialog's value is on screen only.
+				if let Some((id, adjustment)) = &self.adjustment_preview
+					&& let Some(layer) = doc.layer_mut(*id)
+					&& let LayerKind::Adjustment(current) = &mut layer.kind
+				{
+					*current = adjustment.clone();
 				}
 				// So does a Free Transform's (M6-T04).
 				if let Some(preview) = &self.transform_preview {
@@ -338,6 +372,7 @@ impl OpenDoc {
 			profile_name: profile_name(&self.doc.color.profile),
 			ppi: self.doc.ppi,
 			dirty: self.dirty,
+			global_light: self.doc.global_light,
 		}
 	}
 }
@@ -377,6 +412,7 @@ impl Documents {
 		// A file's layers can be smaller than its canvas (a PSD's, a pasted
 		// layer saved in an .fxd): give them the canvas's mip levels.
 		doc.doc.fit_levels();
+		doc.ui_light = doc.doc.global_light;
 		self.active = Some(doc.id);
 		self.docs.push(doc);
 	}
@@ -517,5 +553,29 @@ mod tests {
 		assert!(!Arc::ptr_eq(&a, &b));
 		doc.doc.revision += 1;
 		assert_eq!(doc.snapshot().revision, 1);
+	}
+
+	#[test]
+	fn an_adjustment_preview_is_on_screen_only() {
+		let mut doc = OpenDoc::from_import(DocId(1), Path::new("a.png"), imported());
+		let id = doc.doc.allocate_layer_id();
+		doc.doc
+			.layers
+			.push(Arc::new(Layer::new(id, "Invert", LayerKind::Adjustment(fx_core::Adjustment::Invert))));
+		let shown = |doc: &mut OpenDoc| match &doc.snapshot().layer(id).unwrap().kind {
+			LayerKind::Adjustment(a) => a.clone(),
+			_ => unreachable!(),
+		};
+		assert_eq!(shown(&mut doc), fx_core::Adjustment::Invert);
+		doc.adjustment_preview = Some((id, fx_core::Adjustment::Posterize { levels: 3 }));
+		doc.preview_rev += 1;
+		assert_eq!(shown(&mut doc), fx_core::Adjustment::Posterize { levels: 3 });
+		assert!(
+			matches!(doc.doc.layer(id).unwrap().kind, LayerKind::Adjustment(fx_core::Adjustment::Invert)),
+			"the document is unchanged"
+		);
+		doc.adjustment_preview = None;
+		doc.preview_rev += 1;
+		assert_eq!(shown(&mut doc), fx_core::Adjustment::Invert);
 	}
 }

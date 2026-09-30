@@ -13,7 +13,7 @@ use fx_core::{Command, SelectMode, SelectionShape};
 use fx_render::{Overlay, OverlayItem, OverlayStyle};
 
 use crate::tools::{DocPointer, OutlineDrag, Tool, ToolContext, ToolResult, mode_at_press, nudge_outline, selection_mode, selection_shape_options};
-use crate::view::BUTTON_LEFT;
+use crate::view::{BUTTON_LEFT, BUTTON_RIGHT};
 use crate::{CursorShape, Modifiers, PointerKind};
 
 /// Freehand samples closer together than this many *screen* pixels are
@@ -47,6 +47,8 @@ pub struct Lasso {
 	hover: (f64, f64),
 	/// Whether the button is down (freehand only).
 	dragging: bool,
+	/// Right-click freezes the open path until the next left press.
+	paused: bool,
 	/// The selection mode the first press chose.
 	mode: SelectMode,
 	/// The last press: `(time_us, position)`, for the double-click test.
@@ -67,6 +69,7 @@ impl Lasso {
 			points: Vec::new(),
 			hover: (0.0, 0.0),
 			dragging: false,
+			paused: false,
 			mode: SelectMode::Replace,
 			last_press: None,
 			straight: false,
@@ -78,6 +81,8 @@ impl Lasso {
 	fn close(&mut self, ctx: &ToolContext<'_>) -> ToolResult {
 		let points = std::mem::take(&mut self.points);
 		self.dragging = false;
+		self.paused = false;
+		self.straight = false;
 		self.last_press = None;
 		if points.len() < 3 {
 			return ToolResult {
@@ -104,6 +109,8 @@ impl Lasso {
 		let replace = self.mode == SelectMode::Replace;
 		self.points.clear();
 		self.dragging = false;
+		self.paused = false;
+		self.straight = false;
 		self.last_press = None;
 		ToolResult {
 			command: replace.then_some(Command::Deselect),
@@ -116,6 +123,8 @@ impl Lasso {
 	fn cancel(&mut self) -> ToolResult {
 		self.points.clear();
 		self.dragging = false;
+		self.paused = false;
+		self.straight = false;
 		self.last_press = None;
 		ToolResult {
 			redraw: true,
@@ -148,7 +157,39 @@ impl Tool for Lasso {
 	fn pointer(&mut self, ctx: &mut ToolContext<'_>, event: &DocPointer) -> ToolResult {
 		self.hover = (event.x, event.y);
 		match event.kind {
+			PointerKind::Down if event.buttons & BUTTON_RIGHT != 0 && !self.points.is_empty() => {
+				// Keep exactly the traced path; the pointer may now pan or zoom
+				// without extending the rubber band or closing the selection.
+				if self.kind == Kind::Freehand && self.dragging {
+					self.sample(ctx, (event.x, event.y));
+				}
+				self.dragging = false;
+				self.straight = false;
+				self.paused = true;
+				self.last_press = None;
+				ToolResult {
+					redraw: true,
+					..Default::default()
+				}
+			}
 			PointerKind::Down if event.buttons & BUTTON_LEFT != 0 => {
+				if self.paused {
+					self.paused = false;
+					self.last_press = None;
+					if self.kind == Kind::Freehand {
+						self.dragging = true;
+						self.sample(ctx, (event.x, event.y));
+						return ToolResult {
+							redraw: true,
+							..Default::default()
+						};
+					}
+					self.points.push((event.x, event.y));
+					return ToolResult {
+						redraw: true,
+						..Default::default()
+					};
+				}
 				// A double-click closes the polygon (Photoshop); `DocPointer`
 				// has no click count, so the two presses are compared here.
 				let double = self
@@ -320,7 +361,7 @@ impl Tool for Lasso {
 		let mut points = self.points.clone();
 		// The live segment from the last click to the pointer: the polygonal
 		// lasso's rubber band.
-		if (self.kind == Kind::Polygonal || self.straight) && points.last() != Some(&self.hover) {
+		if !self.paused && (self.kind == Kind::Polygonal || self.straight) && points.last() != Some(&self.hover) {
 			points.push(self.hover);
 		}
 		Some(Overlay {
@@ -362,6 +403,72 @@ mod tests {
 		let down = f.pointer(tool, PointerKind::Down, x, y, Modifiers::default());
 		f.pointer(tool, PointerKind::Up, x, y, Modifiers::default());
 		down
+	}
+
+	fn right_click(f: &mut Fixture, tool: &mut Lasso, x: f64, y: f64) -> ToolResult {
+		f.time_us += 1_000_000;
+		let event = DocPointer {
+			kind: PointerKind::Down,
+			x,
+			y,
+			pressure: 1.0,
+			tilt_x: 0.0,
+			tilt_y: 0.0,
+			buttons: BUTTON_RIGHT,
+			modifiers: Modifiers::default(),
+			time_us: f.time_us,
+		};
+		let mut ctx = ToolContext {
+			doc: &mut f.doc,
+			store: &f.store,
+			ops: &f.ops,
+			settings: &f.settings,
+			view: f.view,
+			mask_target: false,
+		};
+		tool.pointer(&mut ctx, &event)
+	}
+
+	#[test]
+	fn right_click_pauses_a_freehand_path_until_the_next_left_press() {
+		let (mut f, mut tool) = freehand(1.0);
+		f.pointer(&mut tool, PointerKind::Down, 10.0, 10.0, Modifiers::default());
+		f.pointer(&mut tool, PointerKind::Move, 60.0, 10.0, Modifiers::default());
+		assert!(right_click(&mut f, &mut tool, 60.0, 60.0).command.is_none());
+		f.pointer(&mut tool, PointerKind::Up, 60.0, 60.0, Modifiers::default());
+		f.pointer(&mut tool, PointerKind::Move, 100.0, 100.0, Modifiers::default());
+		let (points, closed, _) = polyline(tool.overlay().as_ref().unwrap());
+		assert_eq!(points, [(10.0, 10.0), (60.0, 10.0), (60.0, 60.0)]);
+		assert!(!closed, "a paused path has no closing edge");
+		f.pointer(&mut tool, PointerKind::Down, 60.0, 60.0, Modifiers::default());
+		f.pointer(&mut tool, PointerKind::Move, 10.0, 60.0, Modifiers::default());
+		let (shape, ..) = selection(f.pointer(&mut tool, PointerKind::Up, 10.0, 60.0, Modifiers::default()));
+		assert_eq!(
+			shape,
+			SelectionShape::Polygon {
+				points: vec![(10.0, 10.0), (60.0, 10.0), (60.0, 60.0), (10.0, 60.0)]
+			}
+		);
+	}
+
+	#[test]
+	fn right_click_pauses_a_polygon_without_a_rubber_band() {
+		let (mut f, mut tool) = polygonal(1.0);
+		click(&mut f, &mut tool, 10.0, 10.0);
+		click(&mut f, &mut tool, 100.0, 10.0);
+		right_click(&mut f, &mut tool, 100.0, 10.0);
+		f.pointer(&mut tool, PointerKind::Move, 200.0, 200.0, Modifiers::default());
+		let (points, closed, _) = polyline(tool.overlay().as_ref().unwrap());
+		assert_eq!(points, [(10.0, 10.0), (100.0, 10.0)]);
+		assert!(!closed);
+		click(&mut f, &mut tool, 100.0, 100.0);
+		let (shape, ..) = selection(f.key(&mut tool, "Enter"));
+		assert_eq!(
+			shape,
+			SelectionShape::Polygon {
+				points: vec![(10.0, 10.0), (100.0, 10.0), (100.0, 100.0)]
+			}
+		);
 	}
 
 	#[test]

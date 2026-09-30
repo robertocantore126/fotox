@@ -34,7 +34,7 @@ use crate::tools::{ColorTarget, DocPointer, ToolContext, ToolResult, ToolSetting
 use crate::trace;
 use crate::transform_preview::{Prepared, PreviewJob as TransformJob, TransformPreview};
 use crate::view::{Changed, VIRTUAL_DOC, ViewState};
-use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips, vector};
+use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, PointerKind, filters, layers, mips};
 
 /// `view` messages to the UI are throttled to this interval (60 Hz).
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -93,6 +93,17 @@ fn suggested_fxd_name(name: &str) -> String {
 /// samples each time.
 const DISPLAY_LUT_CACHE: usize = 4;
 
+/// What an opened file becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenAs {
+	/// A new document tab.
+	New,
+	/// A layer placed into this document (M7-T03).
+	Place(DocId),
+	/// File ▸ Revert: this document's new content.
+	Revert(DocId),
+}
+
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
 	/// Import progress, 0..=1.
@@ -102,8 +113,8 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<ImportedImage, IoError>,
-		/// Place into this document instead of opening (M7-T03).
-		place: Option<DocId>,
+		/// A new document, a layer placed into one (M7-T03), or a revert.
+		target: OpenAs,
 	},
 	/// An export finished or failed (M3).
 	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
@@ -112,6 +123,16 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		result: Result<Box<OpenedFxd>, IoError>,
+		target: OpenAs,
+	},
+	/// An `overview:request` finished: the header and its picture.
+	Overview(Box<(EngineToUi, Vec<u8>)>),
+	/// A `.fxd` placed into `doc`: its flattened composite.
+	PlacedFxd {
+		task: u64,
+		path: PathBuf,
+		doc: DocId,
+		result: Result<fx_tiles::TiledImage, String>,
 	},
 	/// A save finished; `Ok` carries the reopened file (M3-T06).
 	Saved {
@@ -166,6 +187,17 @@ pub(crate) enum Internal {
 	},
 	/// An AI job finished (M13).
 	Ai(Box<m13::AiDone>),
+	/// A derived-tile job finished (code review 2026-09-27 R07): `computed`
+	/// is the worker's copy of document `doc` at content `generation`, with
+	/// the tiles the frame asked for, for the layers `layers`.
+	Derived {
+		doc: DocId,
+		generation: u64,
+		computed: Box<Document>,
+		layers: std::collections::HashSet<LayerId>,
+		/// The requested tiles' pixels, held until the frame has read them.
+		held: Vec<Arc<fx_tiles::TileBuffer>>,
+	},
 }
 
 /// The eight handles of a box `[x0, y0, x1, y1]`: corners and edge middles.
@@ -181,6 +213,8 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::Imported { .. } => "internal imported",
 		Internal::Exported { .. } => "internal exported",
 		Internal::OpenedFxd { .. } => "internal opened fxd",
+		Internal::PlacedFxd { .. } => "internal placed fxd",
+		Internal::Overview(_) => "internal overview",
 		Internal::Saved { .. } => "internal saved",
 		Internal::Copied { .. } => "internal copied",
 		Internal::B3Built { .. } => "internal b3 built",
@@ -191,6 +225,7 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::PixelJobDone { .. } => "internal pixel job done",
 		Internal::Thumbnail { .. } => "internal thumbnail",
 		Internal::Ai(_) => "internal ai done",
+		Internal::Derived { .. } => "internal derived tiles",
 	}
 }
 
@@ -220,6 +255,12 @@ struct Engine {
 	thumbs_wanted: HashMap<(DocId, LayerId), u32>,
 	thumbs_last: HashMap<(DocId, LayerId), Instant>,
 	thumbs_due: HashMap<(DocId, LayerId), Instant>,
+	/// Where thumbnail renders wait (off the rayon pool: see `ThumbQueue`).
+	thumbs_queue: crate::thumbs::ThumbQueue<(DocId, LayerId)>,
+	/// The layer list last sent for each document and its `seq`: an edit that
+	/// only changes properties sends a `LayersPatch` against it.
+	layers_sent: HashMap<DocId, (u64, Vec<fx_protocol::LayerInfo>)>,
+	layers_seq: u64,
 	/// The last mergeable edit: what it was, when, and how many undo steps
 	/// the document had right after it (so an intervening undo or edit
 	/// breaks the merge).
@@ -247,6 +288,11 @@ struct Engine {
 	m13: m13::State,
 	/// A document waiting to be closed once its save finishes (M3-T06).
 	pending_close: Option<DocId>,
+	/// A derived-tile job is running (code review 2026-09-27 R07): one at a
+	/// time. Frame requests that arrive meanwhile wait here, merged per
+	/// document; a newer content generation replaces an older one's.
+	derived_running: bool,
+	derived_waiting: HashMap<DocId, MipWork>,
 	/// The window is closing: after each dirty document is answered, ask about
 	/// the next one (M3-T06).
 	window_close_pending: bool,
@@ -271,6 +317,12 @@ struct Engine {
 	transform_latest: Arc<AtomicU64>,
 	/// When a drag's coarse preview is refined at the view level.
 	transform_refine: Option<Instant>,
+	/// A Place in progress: the document and its history length before the
+	/// place, so cancelling the Free Transform box removes the placed layer.
+	placing: Option<(DocId, usize)>,
+	/// A filter dialog's live preview over a Smart Object: the document, the
+	/// layer and the history length to undo back to.
+	smart_preview: Option<(DocId, LayerId, usize)>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
 	/// Pointer moves since the last traced input (the recorder counts them).
@@ -301,8 +353,15 @@ enum EditKey {
 	Shape(LayerRef, [bool; 4]),
 	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
 	Style(LayerRef),
-	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running total.
-	Move,
+	/// `set_global_light`: an Angle drag in a style dialog.
+	GlobalLight,
+	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running
+	/// total. Nudges name their layers and drags do not (empty list), so a
+	/// drag never folds into the nudge before it, and a nudge of other layers
+	/// never undoes the last one's.
+	Move(Vec<LayerRef>),
+	/// Arrow nudges of selected pixels (running total, like `Move`).
+	MovePixels,
 }
 
 impl EditKey {
@@ -337,7 +396,9 @@ impl EditKey {
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
 			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
-			Command::OffsetLayers { layers, .. } if layers.is_empty() => Some(Self::Move),
+			Command::SetGlobalLight { .. } => Some(Self::GlobalLight),
+			Command::OffsetLayers { layers, .. } if !layers.is_empty() => Some(Self::Move(layers.clone())),
+			Command::MovePixels { copy: false, .. } => Some(Self::MovePixels),
 			Command::SetShape {
 				layer,
 				shape,
@@ -394,6 +455,9 @@ pub(crate) fn run(ctx: EngineContext) {
 		thumbs_wanted: HashMap::new(),
 		thumbs_last: HashMap::new(),
 		thumbs_due: HashMap::new(),
+		thumbs_queue: crate::thumbs::ThumbQueue::new(2),
+		layers_sent: HashMap::new(),
+		layers_seq: 0,
 		last_edit: None,
 		ops: EngineOps::default(),
 		preview_latest: HashMap::new(),
@@ -416,9 +480,13 @@ pub(crate) fn run(ctx: EngineContext) {
 		transform: None,
 		transform_latest: Arc::new(AtomicU64::new(0)),
 		transform_refine: None,
+		placing: None,
+		smart_preview: None,
 		smart_children: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
+		derived_running: false,
+		derived_waiting: HashMap::new(),
 	};
 
 	loop {
@@ -506,16 +574,16 @@ impl Engine {
 			}
 			EngineInput::Open(paths) => {
 				for path in paths {
-					self.open(path, None);
+					self.open(path, OpenAs::New);
 				}
 				Changed::default()
 			}
 			EngineInput::Place(paths) => {
 				let target = self.docs.active_id();
 				for path in paths {
-					// FAST: a placed .fxd opens instead of being flattened into a layer.
-					let place = target.filter(|_| !is_fxd(&path));
-					self.open(path, place);
+					// A placed .fxd is flattened into one layer (see `open`).
+					let place = target;
+					self.open(path, place.map_or(OpenAs::New, OpenAs::Place));
 				}
 				Changed::default()
 			}
@@ -933,9 +1001,10 @@ impl Engine {
 					});
 					return;
 				};
-				if open.doc.layer(layer).is_some_and(|l| l.locked_pixels) {
+				if open.doc.locks(layer).pixels {
+					let name = open.doc.layer(layer).map_or_else(|| "the layer".to_owned(), |l| l.name.clone());
 					self.to_ui(&EngineToUi::Toast {
-						text: "Could not paint: the layer's pixels are locked".into(),
+						text: format!("Could not paint: “{name}” is locked (or its group is); unlock it in the Layers panel"),
 					});
 					return;
 				}
@@ -1141,6 +1210,17 @@ impl Engine {
 				if id.starts_with("trace:") {
 					return Changed::default();
 				}
+				// Navigator: centre the view on a canvas point.
+				if id == "view:center" {
+					let get = |k: &str| args.get(k).and_then(serde_json::Value::as_f64).filter(|v| v.is_finite());
+					if let (Some(x), Some(y)) = (get("x"), get("y")) {
+						let view = self.view_mut();
+						view.view.center_x = x;
+						view.view.center_y = y;
+						return Changed { view: true, cursor: None };
+					}
+					return Changed::default();
+				}
 				// Preferences (M7-T09): merge, save, apply.
 				if id == "prefs:set" {
 					self.prefs.merge(&args);
@@ -1157,6 +1237,7 @@ impl Engine {
 					|| self.m11_action(&id, &args)
 					|| self.m12_action(&id, &args)
 					|| self.m13_action(&id, &args)
+					|| self.overview_action(&id, &args)
 				{
 					return Changed::default();
 				}
@@ -1168,7 +1249,7 @@ impl Engine {
 				}
 				if let Some(index) = id.strip_prefix("doc:open-recent:") {
 					if let Some(path) = index.parse::<usize>().ok().and_then(|i| self.prefs.recent().get(i).cloned()) {
-						self.open(path, None);
+						self.open(path, OpenAs::New);
 					}
 					return Changed::default();
 				}
@@ -1209,6 +1290,10 @@ impl Engine {
 				self.step_history(doc, true);
 				Changed::default()
 			}
+			UiToEngine::RequestLayers { doc } => {
+				self.send_layer_list(doc, true);
+				Changed::default()
+			}
 			UiToEngine::RequestThumbnails { doc, layers, size } => {
 				// Bounded: a thumbnail is `size² × 4` bytes and one job per layer.
 				let size = size.clamp(8, 512);
@@ -1232,6 +1317,25 @@ impl Engine {
 			}
 			UiToEngine::FilterPreviewCancel { doc } => {
 				self.cancel_preview(doc);
+				Changed::default()
+			}
+			UiToEngine::AdjustmentPreview { doc, layer, adjustment } => {
+				if let Some(open) = self.docs.get_mut(doc)
+					&& matches!(open.doc.layer(layer).map(|l| &l.kind), Some(LayerKind::Adjustment(_)))
+				{
+					open.adjustment_preview = Some((layer, adjustment));
+					open.preview_rev += 1;
+					self.request_frame();
+				}
+				Changed::default()
+			}
+			UiToEngine::AdjustmentPreviewEnd { doc } => {
+				if let Some(open) = self.docs.get_mut(doc)
+					&& open.adjustment_preview.take().is_some()
+				{
+					open.preview_rev += 1;
+					self.request_frame();
+				}
 				Changed::default()
 			}
 			UiToEngine::ToolOptions { tool, options } if tool == "_view" || tool == "_prefs" => {
@@ -1490,7 +1594,7 @@ impl Engine {
 
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
-	fn open(&mut self, path: PathBuf, place: Option<DocId>) {
+	fn open(&mut self, path: PathBuf, target: OpenAs) {
 		// Brush and pattern files go to their libraries (M8-T01/T06).
 		if self.open_resource(&path) {
 			return;
@@ -1524,26 +1628,52 @@ impl Engine {
 			};
 			// A native `.fxd` opens lazily, reading only the manifest (M3-T05);
 			// every other file imports band by band.
+			// A decoder panic (a malformed file) must still complete the task.
+			let panicked = |panic: Box<dyn std::any::Any + Send>| IoError::Decode(format!("import worker panicked: {}", panic_text(&*panic)));
 			if is_fxd(&path) {
 				let _ = internal.send(Internal::Progress {
 					task,
 					label: format!("{label}: reading the manifest"),
 					fraction: 0.5,
 				});
-				let result = fxd::open(&path, &store).map(Box::new);
-				let _ = internal.send(Internal::OpenedFxd { task, path, result });
+				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fxd::open(&path, &store).map(Box::new)))
+					.unwrap_or_else(|panic| Err(panicked(panic)));
+				if let OpenAs::Place(doc) = target {
+					// Place: the file's composite becomes one layer.
+					let _ = internal.send(Internal::Progress {
+						task,
+						label: format!("{label}: flattening"),
+						fraction: 0.7,
+					});
+					let result = result.map_err(|e| e.to_string()).and_then(|opened| {
+						std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+							let placed = &opened.document;
+							let roots: Vec<fx_core::LayerId> = placed.layers.iter().map(|l| l.id).collect();
+							let mut image = crate::export::composite_layers(placed, &roots, None, &store, None).map_err(|e| e.to_string())?;
+							mips::ensure_all_mips(&mut image, &store).map_err(|e| e.to_string())?;
+							Ok(image)
+						}))
+						.unwrap_or_else(|panic| Err(format!("flattening panicked: {}", panic_text(&*panic))))
+					});
+					let _ = internal.send(Internal::PlacedFxd { task, path, doc, result });
+					return;
+				}
+				let _ = internal.send(Internal::OpenedFxd { task, path, result, target });
 				return;
 			}
-			let result = fx_io::import_file(&path, &store, &mut report).and_then(|mut imported| {
-				let _ = internal.send(Internal::Progress {
-					task,
-					label: format!("{label}: building previews"),
-					fraction: 0.9,
-				});
-				mips::ensure_all_mips(&mut imported.image, &store)?;
-				Ok(imported)
-			});
-			let _ = internal.send(Internal::Imported { task, path, result, place });
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				fx_io::import_file(&path, &store, &mut report).and_then(|mut imported| {
+					let _ = internal.send(Internal::Progress {
+						task,
+						label: format!("{label}: building previews"),
+						fraction: 0.9,
+					});
+					mips::ensure_all_mips(&mut imported.image, &store)?;
+					Ok(imported)
+				})
+			}))
+			.unwrap_or_else(|panic| Err(panicked(panic)));
+			let _ = internal.send(Internal::Imported { task, path, result, target });
 		});
 		if let Err(error) = spawned {
 			self.to_ui(&EngineToUi::ProgressDone { task });
@@ -1562,10 +1692,9 @@ impl Engine {
 			});
 			return;
 		};
-		// A snapshot: editing may go on while the export runs. Shape layers
-		// are rasterised from their geometry, so their level-0 tiles are
-		// drawn first (M6-T06).
-		vector::prepare_level0(&mut open.doc, &self.store, None);
+		// A snapshot: editing may go on while the export runs. The export
+		// computes the derived tiles it reads (shapes, text, effects) row by
+		// row on its own copy (code review 2026-09-27 R06/R07).
 		let doc = open.doc.clone();
 		if let Err(error) = crate::export::options_for(&doc, &path, false) {
 			self.to_ui(&EngineToUi::Error {
@@ -1681,8 +1810,18 @@ impl Engine {
 		}
 		let Some(layer_id) = open.doc.active_layer() else { return };
 		let refusal = match open.doc.layer(layer_id) {
-			Some(layer) if !matches!(layer.kind, LayerKind::Pixel { .. } | LayerKind::Smart { .. }) => Some("Free Transform works on a pixel layer"),
-			Some(layer) if layer.locked_position || layer.locked_pixels => Some("The layer is locked"),
+			Some(layer)
+				if !matches!(
+					layer.kind,
+					LayerKind::Pixel { .. } | LayerKind::Smart { .. } | LayerKind::Shape { .. } | LayerKind::Text { .. }
+				) =>
+			{
+				Some("Free Transform works on a pixel, shape, type or Smart Object layer")
+			}
+			Some(layer) if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. }) && open.doc.selection.is_some() => {
+				Some("Deselect first: a shape or type layer transforms as a whole")
+			}
+			Some(_) if open.doc.locks(layer_id).position || open.doc.locks(layer_id).pixels => Some("The layer is locked"),
 			None => Some("Select a layer to transform"),
 			_ => None,
 		};
@@ -1704,12 +1843,6 @@ impl Engine {
 			}
 		};
 		self.end_stroke();
-		// A Smart Object's preview reads its level-0 cache (M12-T01).
-		if let Some(open) = self.docs.get_mut(doc_id)
-			&& open.doc.layer(layer_id).is_some_and(|l| matches!(l.kind, LayerKind::Smart { .. }))
-		{
-			vector::prepare_level0(&mut open.doc, &self.store, Some(&[layer_id]));
-		}
 		let mut session = free_transform::Session::new(layer_id, rect, mode, filter);
 		session.custom = custom;
 		let status = session.status();
@@ -1720,7 +1853,7 @@ impl Engine {
 			shown: None,
 			request: 0,
 		});
-		// Cut the source out and make its mips valid, off the engine thread.
+		// Cut the source out, off the engine thread.
 		let doc = open.doc.clone();
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		rayon::spawn(move || {
@@ -1740,7 +1873,8 @@ impl Engine {
 	/// The box Move ▸ Show Transform Controls draws (document pixels), when
 	/// that option is on, the Move tool is active and no transform is up.
 	fn transform_controls(&mut self, doc_id: DocId) -> Option<[f64; 4]> {
-		if self.transform.is_some() || self.settings.bool("move", "Show Transform Controls") != Some(true) {
+		// On unless the option bar says off (the app starts with it on).
+		if self.transform.is_some() || self.settings.bool("move", "Show Transform Controls") == Some(false) {
 			return None;
 		}
 		let open = self.docs.get(doc_id)?;
@@ -1800,13 +1934,42 @@ impl Engine {
 					self.request_frame();
 				}
 			}
-			TransformUpdate::Cancel => self.end_transform(false),
+			TransformUpdate::Cancel => self.cancel_transform(),
+		}
+	}
+
+	/// Esc on the box. A cancelled Place also removes the placed layer: the
+	/// document goes back exactly to how it was before the place.
+	fn cancel_transform(&mut self) {
+		let placing = self.placing.take();
+		self.end_transform(false);
+		if let Some((doc_id, steps)) = placing {
+			self.undo_to(doc_id, steps);
+		}
+	}
+
+	/// Undo until `id`'s history has `steps` entries.
+	fn undo_to(&mut self, id: DocId, steps: usize) {
+		let Some(doc) = self.docs.get_mut(id) else { return };
+		let mut stepped = false;
+		while doc.history.labels().count() > steps && doc.history.undo(&mut doc.doc) {
+			stepped = true;
+		}
+		if !stepped {
+			return;
+		}
+		doc.changed();
+		self.after_edit(id, true);
+		let wanted: Vec<LayerId> = self.thumbs_wanted.keys().filter(|(d, _)| *d == id).map(|(_, l)| *l).collect();
+		for layer in wanted {
+			self.refresh_thumbnail(id, layer);
 		}
 	}
 
 	/// Take the box down; `keep_preview` leaves the transformed pixels on
 	/// screen (a commit, until its job is done).
 	fn end_transform(&mut self, keep_preview: bool) {
+		self.placing = None;
 		let Some((doc_id, _)) = self.transform.take() else { return };
 		self.transform_refine = None;
 		// Whatever preview job is running is now stale.
@@ -1921,8 +2084,12 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let base = match open.doc.layer(layer).map(|l| &l.kind) {
 			Some(LayerKind::Pixel { image, .. }) => image.clone(),
-			// FAST: no live preview for a Smart Filter (M12-T03); OK applies it.
-			Some(LayerKind::Smart { .. }) => return,
+			// A Smart Filter previews as a real (temporary) step: the object's
+			// filters are rendered by its derived cache.
+			Some(LayerKind::Smart { .. }) => {
+				self.smart_filter_preview(id, layer, filter);
+				return;
+			}
 			_ => {
 				self.to_ui(&EngineToUi::Toast {
 					text: "Select a pixel layer to filter it".into(),
@@ -2018,7 +2185,36 @@ impl Engine {
 	}
 
 	/// Drop the preview of `id` (Cancel, Preview off).
+	/// The live preview of a filter over a Smart Object: the filter added as a
+	/// Smart Filter, undone again before the next change, Cancel or OK.
+	fn smart_filter_preview(&mut self, id: DocId, layer: LayerId, filter: FilterParams) {
+		if let Some((d, _, steps)) = self.smart_preview.take() {
+			self.undo_to(d, steps);
+		}
+		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else { return };
+		let command = self.smart_filter_rewrite(
+			id,
+			Command::ApplyFilter {
+				layer: LayerRef::Id(layer),
+				filter,
+			},
+		);
+		if !matches!(command, Command::SetSmartFilters { .. }) {
+			return;
+		}
+		// Not merged into an earlier edit: the step must come off cleanly.
+		self.last_edit = None;
+		self.smart_preview = Some((id, layer, steps));
+		self.command(id, command);
+	}
+
 	fn cancel_preview(&mut self, id: DocId) {
+		if let Some((d, _, steps)) = self.smart_preview
+			&& d == id
+		{
+			self.smart_preview = None;
+			self.undo_to(id, steps);
+		}
 		if let Some(latest) = self.preview_latest.get(&id) {
 			latest.fetch_add(1, Ordering::Relaxed);
 		}
@@ -2036,9 +2232,6 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let label = pixel_job_label(&command);
 		open.busy = Some(label.clone());
-		// These commands read level 0 of layers the view may not have drawn
-		// (M6-T06): fill in the shape tiles before the snapshot is taken.
-		vector::prepare_level0(&mut open.doc, &self.store, None);
 		let before = open.doc.clone();
 		self.next_task += 1;
 		let task = self.next_task;
@@ -2062,6 +2255,11 @@ impl Engine {
 				})),
 				clipboard,
 			};
+			// Commands that read level 0 of layers the view may not have drawn
+			// (merge, rasterise, Smart Objects, the AI jobs) composite through
+			// `crate::derived`, which computes the derived tiles each output
+			// tile reads as it goes (code review 2026-09-27 R06): nothing is
+			// prepared for the whole document first.
 			let mut after = before;
 			let mut ctx = CommandContext {
 				tiles: &store,
@@ -2170,6 +2368,13 @@ impl Engine {
 			Internal::Ai(done) => self.ai_done(*done),
 			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
 			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
+			Internal::Derived {
+				doc,
+				generation,
+				computed,
+				layers,
+				held,
+			} => self.derived_done(doc, generation, &computed, &layers, held),
 			Internal::Exported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
@@ -2229,12 +2434,16 @@ impl Engine {
 				}
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
-			Internal::Imported { task, path, result, place } => {
+			Internal::Imported { task, path, result, target } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
-				if let (Some(doc), Ok(imported)) = (place, &result)
+				if let (OpenAs::Place(doc), Ok(imported)) = (target, &result)
 					&& self.docs.get(doc).is_some()
 				{
 					self.place_imported(doc, &path, imported.image.clone());
+					return;
+				}
+				if let OpenAs::Revert(doc) = target {
+					self.finish_revert(doc, &path, result.map(|imported| OpenDoc::from_import(doc, &path, imported)));
 					return;
 				}
 				match result {
@@ -2261,8 +2470,26 @@ impl Engine {
 					}
 				}
 			}
-			Internal::OpenedFxd { task, path, result } => {
+			Internal::Overview(done) => {
+				let (header, pixels) = *done;
+				(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &pixels)));
+			}
+			Internal::PlacedFxd { task, path, doc, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
+				match result {
+					Ok(image) if self.docs.get(doc).is_some() => self.place_imported(doc, &path, image),
+					Ok(_) => {}
+					Err(error) => self.to_ui(&EngineToUi::Error {
+						text: format!("Could not place {}: {error}", path.display()),
+					}),
+				}
+			}
+			Internal::OpenedFxd { task, path, result, target } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				if let OpenAs::Revert(doc) = target {
+					self.finish_revert(doc, &path, result.map(|opened| OpenDoc::from_fxd(doc, &path, *opened)));
+					return;
+				}
 				match result {
 					Ok(opened) => {
 						self.commit_live_edits();
@@ -2303,6 +2530,7 @@ impl Engine {
 						let saved = self.docs.get_mut(doc).map(|open| {
 							open.file = Some(file);
 							open.path = Some(path.clone());
+							open.source = Some(path.clone());
 							open.dirty = open.generation != generation;
 							open.name = path
 								.file_name()
@@ -2442,12 +2670,82 @@ impl Engine {
 		}
 	}
 
+	/// File ▸ Revert: reload the file this document was opened from or last
+	/// saved to. Undoing the history is not the same thing: saving keeps the
+	/// history, and the history holds only the last N steps.
+	fn revert(&mut self, id: DocId) {
+		self.commit_live_edits();
+		let Some(open) = self.docs.get_mut(id) else { return };
+		let refusal = if let Some(job) = &open.busy {
+			Some(format!("Wait until {job} is finished before reverting"))
+		} else if open.saving {
+			Some("Wait until the save is finished before reverting".into())
+		} else if open.source.is_none() {
+			Some("This document has never been saved: there is nothing to revert to".into())
+		} else {
+			None
+		};
+		if let Some(text) = refusal {
+			self.to_ui(&EngineToUi::Toast { text });
+			return;
+		}
+		if !open.dirty {
+			return;
+		}
+		let source = open.source.clone().expect("checked above");
+		// No edit may land while the file loads: it would be thrown away.
+		open.busy = Some("Revert".into());
+		self.open(source, OpenAs::Revert(id));
+	}
+
+	/// The reloaded content of a revert replaces the document in its tab.
+	fn finish_revert(&mut self, id: DocId, path: &std::path::Path, result: Result<OpenDoc, IoError>) {
+		let Some(old) = self.docs.get_mut(id) else { return };
+		old.busy = None;
+		let mut new = match result {
+			Ok(new) => new,
+			Err(IoError::Cancelled) => return,
+			Err(error) => {
+				tracing::warn!("cannot revert to {}: {error}", path.display());
+				self.to_ui(&EngineToUi::Error {
+					text: format!("Could not revert to {}: {error}", path.display()),
+				});
+				return;
+			}
+		};
+		if matches!(self.transform, Some((doc, _)) if doc == id) {
+			self.end_transform(false);
+		}
+		let Some(old) = self.docs.get_mut(id) else { return };
+		new.doc.fit_levels();
+		// The tab keeps its view and proof settings; the render thread's
+		// caches must never see an old generation number again.
+		new.view = old.view.clone();
+		new.generation = old.generation + 1;
+		new.preview_rev = old.preview_rev + 1;
+		new.name = old.name.clone();
+		new.proof = old.proof.take();
+		new.proof_colors = old.proof_colors;
+		new.gamut_warning = old.gamut_warning;
+		*old = new;
+		self.layers_sent.remove(&id);
+		self.thumbs_wanted.retain(|(d, _), _| *d != id);
+		self.thumbs_last.retain(|(d, _), _| *d != id);
+		self.thumbs_due.retain(|(d, _), _| *d != id);
+		tracing::info!("reverted {id:?} to {}", path.display());
+		self.after_edit(id, true);
+		if self.docs.active_id() == Some(id) {
+			self.after_active_change();
+		}
+	}
+
 	/// Close without asking (the document must already be clean).
 	fn force_close(&mut self, id: DocId) {
 		if matches!(self.transform, Some((doc, _)) if doc == id) {
 			self.end_transform(false);
 		}
 		if self.docs.close(id).is_some() {
+			self.layers_sent.remove(&id);
 			self.thumbs_wanted.retain(|(d, _), _| *d != id);
 			self.thumbs_last.retain(|(d, _), _| *d != id);
 			self.thumbs_due.retain(|(d, _), _| *d != id);
@@ -2593,14 +2891,25 @@ impl Engine {
 
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
+		// OK in a filter dialog over a Smart Object: the live preview's step
+		// goes, the real one follows.
+		if matches!(command, Command::ApplyFilter { .. })
+			&& let Some((d, _, steps)) = self.smart_preview
+			&& d == id
+		{
+			self.smart_preview = None;
+			self.undo_to(id, steps);
+		}
 		// A filter on a Smart Object becomes a Smart Filter (M12-T03).
 		let command = self.smart_filter_rewrite(id, command);
 		self.end_stroke();
 		self.before_command(id, &command);
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
-		// Any other edit while a transform box is up drops the box (Photoshop
-		// greys everything else out; here the edit wins).
-		if matches!(self.transform, Some((doc, _)) if doc == id) && !matches!(command, Command::Transform { .. }) {
+		// A property change on another layer does not invalidate the pixels
+		// being transformed. Keep the box and its preview while that edit lands.
+		let other_layer_props = matches!((&self.transform, &command), (Some((doc, session)), Command::SetLayerProps { layer, .. })
+			if *doc == id && self.docs.get(id).and_then(|open| fx_core::command::resolve(&open.doc, layer).ok()).is_some_and(|target| target != session.layer));
+		if matches!(self.transform, Some((doc, _)) if doc == id) && !matches!(command, Command::Transform { .. }) && !other_layer_props {
 			self.end_transform(false);
 		}
 		let store = self.store.clone();
@@ -2693,7 +3002,7 @@ impl Engine {
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 		if matches!(self.transform, Some((doc, _)) if doc == id) {
 			// Undo while the box is up cancels the box, as in Photoshop.
-			self.end_transform(false);
+			self.cancel_transform();
 			return;
 		}
 		let Some(doc) = self.docs.get_mut(id) else { return };
@@ -2728,11 +3037,6 @@ impl Engine {
 		// copy of it, and `zoom:fit` uses it.
 		let resized = doc.view.doc != (doc.doc.width, doc.doc.height);
 		doc.view.doc = (doc.doc.width, doc.doc.height);
-		let layers = EngineToUi::Layers {
-			doc: id,
-			revision: doc.doc.revision,
-			layers: layer_list(doc),
-		};
 		let history = EngineToUi::History {
 			doc: id,
 			labels: doc.history.labels().chain(doc.history.redo_labels()).map(str::to_owned).collect(),
@@ -2741,12 +3045,17 @@ impl Engine {
 			can_redo: doc.history.can_redo(),
 		};
 		let info = doc.info();
-		self.to_ui(&layers);
+		self.send_layer_list(id, false);
 		self.to_ui(&history);
 		if resized && self.docs.active_id() == Some(id) {
 			self.reactivate_tool();
 		}
-		if content {
+		// Global Light is not content, but the style dialogs read it here.
+		let light_changed = self
+			.docs
+			.get_mut(id)
+			.is_some_and(|doc| std::mem::replace(&mut doc.ui_light, info.global_light) != info.global_light);
+		if content || light_changed {
 			self.to_ui(&EngineToUi::DocumentChanged { info });
 			if self.docs.active_id() == Some(id) {
 				self.request_frame();
@@ -2808,7 +3117,7 @@ impl Engine {
 		let (w, h, revision) = (doc.doc.width, doc.doc.height, doc.generation);
 		self.thumbs_last.insert((id, layer_id), Instant::now());
 		let (store, internal) = (self.store.clone(), self.internal.clone());
-		rayon::spawn(move || {
+		self.thumbs_queue.push((id, layer_id), move || {
 			let result = thumbs::render(source, w, h, size, &store);
 			let _ = internal.send(Internal::Thumbnail {
 				doc: id,
@@ -2998,14 +3307,29 @@ impl Engine {
 		use fx_core::pixels::{Content, Placed, content_bounds};
 		let store = self.store.clone();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		vector::prepare_level0(&mut open.doc, &store, Some(ids));
 		let mut boxes: Vec<(LayerId, (i32, i32, i32, i32))> = Vec::new();
 		for &layer in ids {
 			let Some(l) = open.doc.layer(layer) else { continue };
+			// A shape or text layer: the pixels it draws, computed now.
+			let drawn;
 			let placed = match &l.kind {
 				LayerKind::Pixel { image, offset } => Placed { image, offset: *offset },
-				LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } => Placed { image: cache, offset: (0, 0) },
-				_ => continue, // FAST: groups and fills are not aligned
+				LayerKind::Shape { .. } | LayerKind::Text { .. } => match crate::derived::layer_content(&open.doc, &store, layer) {
+					Ok(image) => {
+						drawn = image;
+						Placed { image: &drawn, offset: (0, 0) }
+					}
+					Err(_) => continue,
+				},
+				// Groups, fills, Smart Objects…: what the layer shows (a group's
+				// whole content, a fill cut by its mask).
+				_ => match crate::export::composite_layers(&open.doc, &[layer], None, &store, None) {
+					Ok(image) => {
+						drawn = image;
+						Placed { image: &drawn, offset: (0, 0) }
+					}
+					Err(_) => continue,
+				},
 			};
 			if let Ok(Some(b)) = content_bounds(placed, Content::Opaque, &store) {
 				boxes.push((layer, b));
@@ -3121,8 +3445,6 @@ impl Engine {
 		if layers.is_empty() {
 			return;
 		}
-		let drawn = vector::prepare_level0(&mut doc.doc, &self.store, Some(&layers));
-		tracing::debug!("rasterising drew {drawn} level-0 shape tiles");
 		let refs: Vec<LayerRef> = layers.iter().map(|&id| LayerRef::Id(id)).collect();
 		self.command(doc_id, Command::Rasterize { layers: refs });
 	}
@@ -3466,14 +3788,7 @@ impl Engine {
 			}
 			// File ▸ Revert (M7-T05). FAST: every history step is undone, which is
 			// the opened state as long as the history kept every step.
-			"doc:revert" => {
-				if let Some(open) = self.docs.get_mut(doc_id) {
-					while open.history.undo(&mut open.doc) {}
-					open.dirty = false;
-					open.changed();
-				}
-				self.after_edit(doc_id, true);
-			}
+			"doc:revert" => self.revert(doc_id),
 			"mask:reveal-sel" | "mask:hide-sel" => {
 				let fill = if id == "mask:hide-sel" {
 					MaskFill::HideSelection
@@ -3525,19 +3840,23 @@ impl Engine {
 	/// nothing to copy (a toast says why).
 	fn copy_layer(&mut self, doc_id: DocId) -> bool {
 		let store = self.store.clone();
-		// A shape layer is copied as the pixels it draws (M6-T06).
-		if let Some(open) = self.docs.get_mut(doc_id) {
-			vector::prepare_level0(&mut open.doc, &store, None);
-		}
 		let result = {
 			let Some(open) = self.docs.get(doc_id) else { return false };
-			let Some((image, offset)) = crate::clipboard::active_pixels(&open.doc) else {
-				self.to_ui(&EngineToUi::Toast {
-					text: "Could not copy: the layer has no pixels".into(),
-				});
-				return false;
+			// A shape layer is copied as the pixels it draws (M6-T06).
+			let (image, offset) = match crate::clipboard::active_pixels(&open.doc, &store) {
+				Ok(Some(active)) => active,
+				Ok(None) => {
+					self.to_ui(&EngineToUi::Toast {
+						text: "Could not copy: the layer has no pixels".into(),
+					});
+					return false;
+				}
+				Err(error) => {
+					self.to_ui(&EngineToUi::Error { text: error.to_string() });
+					return false;
+				}
 			};
-			crate::clipboard::copy_layer(image, offset, open.doc.selection.as_ref(), (open.doc.width, open.doc.height), &store)
+			crate::clipboard::copy_layer(&image, offset, open.doc.selection.as_ref(), (open.doc.width, open.doc.height), &store)
 		};
 		match result {
 			Ok(Some(clip)) => {
@@ -3617,12 +3936,13 @@ impl Engine {
 	/// Place an imported image as a layer of `doc` (M7-T03): pasted centred on
 	/// the canvas, named after the file, then a Free Transform box is put up,
 	/// already scaled to fit when the image is larger than the canvas
-	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc keeps
-	/// the layer at its size (FAST: Photoshop removes it).
+	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc removes
+	/// the placed layer again (every step of the place is undone).
 	fn place_imported(&mut self, doc: DocId, path: &std::path::Path, image: fx_tiles::TiledImage) {
 		let (w, h) = (image.width(), image.height());
 		let Some(open) = self.docs.get(doc) else { return };
 		let (cw, ch) = (open.doc.width, open.doc.height);
+		let steps_before = open.history.labels().count();
 		let clip = fx_core::pixels::ClipboardImage {
 			image,
 			offset: (0, 0),
@@ -3661,6 +3981,9 @@ impl Engine {
 			return;
 		}
 		self.start_transform(doc, TransformMode::Free);
+		if matches!(self.transform, Some((d, _)) if d == doc) {
+			self.placing = Some((doc, steps_before));
+		}
 		let fit = (f64::from(cw) / f64::from(w)).min(f64::from(ch) / f64::from(h));
 		if fit < 1.0
 			&& let Some((_, session)) = &mut self.transform
@@ -3741,77 +4064,132 @@ impl Engine {
 	}
 
 	fn send_layers(&mut self) {
-		if let Some(doc) = self.docs.active_mut() {
-			let message = EngineToUi::Layers {
-				doc: doc.id,
-				revision: doc.doc.revision,
-				layers: layer_list(doc),
-			};
-			self.to_ui(&message);
+		if let Some(id) = self.docs.active_id() {
+			self.send_layer_list(id, true);
 		}
 	}
 
-	/// Compute the dirty mip tiles a frame asked for, then redraw. Mips are
-	/// derived data: no undo step, no revision bump (only a new snapshot).
+	/// Send `id`'s layer list: only the rows that changed since the last one
+	/// sent when the tree kept its shape, else (or with `full`) all of it.
+	fn send_layer_list(&mut self, id: DocId, full: bool) {
+		let Some(doc) = self.docs.get(id) else { return };
+		let (revision, layers) = (doc.doc.revision, layer_list(doc));
+		self.layers_seq += 1;
+		let seq = self.layers_seq;
+		let patch = match self.layers_sent.get(&id) {
+			Some((base, old)) if !full => fx_protocol::layers_patch(old, &layers).map(|changed| (*base, changed)),
+			_ => None,
+		};
+		let message = match patch {
+			Some((base, changed)) => EngineToUi::LayersPatch {
+				doc: id,
+				revision,
+				seq,
+				base,
+				changed,
+			},
+			None => EngineToUi::Layers {
+				doc: id,
+				revision,
+				layers: layers.clone(),
+				seq,
+			},
+		};
+		self.layers_sent.insert(id, (seq, layers));
+		self.to_ui(&message);
+	}
+
+	/// The tiles a frame asked for (dirty or dropped mips, generated-layer
+	/// caches, vector masks, effects). Derived data: no undo step, no revision
+	/// bump, only a new snapshot. They are computed on a worker, on a copy of
+	/// the document, one job at a time (code review 2026-09-27 R07: computing
+	/// them here kept input, tool changes and new commands waiting).
 	fn compute_mips(&mut self, work: MipWork) {
+		if self.derived_running {
+			match self.derived_waiting.get_mut(&work.doc) {
+				Some(waiting) if (waiting.revision, waiting.generation) == (work.revision, work.generation) => {
+					for request in work.requests {
+						if !waiting.requests.contains(&request) {
+							waiting.requests.push(request);
+						}
+					}
+				}
+				_ => {
+					self.derived_waiting.insert(work.doc, work);
+				}
+			}
+			return;
+		}
+		self.start_derived(work);
+	}
+
+	fn start_derived(&mut self, work: MipWork) {
 		let store = self.store.clone();
-		let Some(doc) = self.docs.get_mut(work.doc) else { return };
-		if doc.doc.revision != work.revision {
+		let Some(open) = self.docs.get(work.doc) else { return };
+		// The render thread names its snapshot by `render_generation` (the
+		// content generation and the preview's), not by `generation`: comparing
+		// the two dropped every request after the first edit, so shapes, text
+		// and styles never drew until the document was reopened.
+		if (open.doc.revision, open.render_generation()) != (work.revision, work.generation) {
 			// The document changed meanwhile; the next frame asks again.
 			return;
 		}
-		let mut shape_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-		let mut mask_tiles: Vec<(fx_core::LayerId, usize, u32, u32)> = Vec::new();
-		let mut effect_tiles: Vec<(fx_core::LayerId, u8, usize, u32, u32)> = Vec::new();
-		for request in &work.requests {
-			match request {
-				TileRequest::Mip(request) => {
-					let Some(layer) = doc.doc.layer_mut(request.layer) else { continue };
-					let image = if request.mask {
-						match layer.mask.as_mut() {
-							Some(mask) => &mut mask.image,
-							None => continue,
-						}
-					} else {
-						match &mut layer.kind {
-							fx_core::LayerKind::Pixel { image, .. } => image,
-							_ => continue,
-						}
-					};
-					// A request from a snapshot the document no longer matches.
-					let grid_has = |image: &fx_tiles::TiledImage| {
-						request.level < image.level_count() && {
-							let grid = image.grid(request.level);
-							request.x < grid.cols() && request.y < grid.rows()
-						}
-					};
-					if !grid_has(image) {
-						continue;
-					}
-					if let Err(error) = mips::ensure_mip(image, &store, request.level, request.x, request.y) {
-						tracing::warn!("mip {request:?} failed: {error}");
-					}
-				}
-				// Shape tiles are drawn from the geometry, all levels alike
-				// (M6-T06); collect them and draw one parallel batch per layer.
-				TileRequest::Vector(request) if request.vector_mask => mask_tiles.push((request.layer, request.level, request.x, request.y)),
-				TileRequest::Vector(request) => shape_tiles.push((request.layer, request.level, request.x, request.y)),
-				TileRequest::Effect(request) => effect_tiles.push((request.layer, request.effect, request.level, request.x, request.y)),
+		let mut computed = open.doc.clone();
+		let (doc, generation) = (work.doc, work.generation);
+		let layers: std::collections::HashSet<LayerId> = work.requests.iter().map(TileRequest::layer).collect();
+		let internal = self.internal.clone();
+		let requests = work.requests;
+		let spawned = std::thread::Builder::new().name("derived-tiles".into()).spawn(move || {
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::derived::fulfil(&mut computed, &store, &requests)));
+			if let Err(panic) = result {
+				tracing::warn!("derived tiles panicked: {}", panic_text(&*panic));
+			}
+			let held = crate::derived::hold(&computed, &store, &requests);
+			let _ = internal.send(Internal::Derived {
+				doc,
+				generation,
+				computed: Box::new(computed),
+				layers,
+				held,
+			});
+		});
+		match spawned {
+			Ok(_) => self.derived_running = true,
+			Err(error) => tracing::warn!("cannot start the derived-tile job: {error}"),
+		}
+	}
+
+	/// A derived-tile job finished: install what is still current, then start
+	/// the next waiting one.
+	fn derived_done(
+		&mut self,
+		doc: DocId,
+		generation: u64,
+		computed: &Document,
+		layers: &std::collections::HashSet<LayerId>,
+		held: Vec<Arc<fx_tiles::TileBuffer>>,
+	) {
+		self.derived_running = false;
+		let store = self.store.clone();
+		if let Some(open) = self.docs.get_mut(doc) {
+			if open.render_generation() == generation {
+				crate::derived::merge(&mut open.doc, computed, layers, &store);
+				// Held until the next batch lands: the frame this one answers
+				// composites them first (the previous batch is let go).
+				open.derived_held = held;
+			}
+			// Always a new snapshot: the render thread asks again for whatever
+			// is still missing (a stale job installed nothing).
+			open.invalidate_snapshot();
+			if self.docs.active_id() == Some(doc) {
+				self.request_frame();
 			}
 		}
-		if !shape_tiles.is_empty() {
-			vector::draw_requests(&mut doc.doc, &store, &shape_tiles);
-		}
-		// Vector masks (M10-T06).
-		if !mask_tiles.is_empty() {
-			vector::draw_vector_mask_requests(&mut doc.doc, &store, &mask_tiles);
-		}
-		if !effect_tiles.is_empty() {
-			crate::effects::draw_effect_requests(&mut doc.doc, &store, &effect_tiles);
-		}
-		doc.invalidate_snapshot();
-		if self.docs.active_id() == Some(work.doc) {
-			self.request_frame();
+		let next = self.derived_waiting.keys().next().copied();
+		if let Some(next) = next
+			&& let Some(work) = self.derived_waiting.remove(&next)
+		{
+			self.start_derived(work);
 		}
 	}
 
@@ -4395,6 +4773,7 @@ mod m12;
 mod m13;
 mod m8;
 mod m9;
+mod overview;
 
 #[cfg(test)]
 mod tests {

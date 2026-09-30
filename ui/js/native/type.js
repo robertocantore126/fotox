@@ -1,10 +1,10 @@
 // Fotox — the Type tool's keyboard side (M6-T07).
 //
 // The engine lays the text out and draws it; the UI owns the keyboard and the
-// IME. While a type session is open a hidden <textarea> holds the focus, and
-// every change of its text or selection goes to the engine as `text_edit`
-// (UTF-8 byte offsets, which is what the engine indexes). Esc cancels,
-// Ctrl+Enter / keypad Enter commit (sent as the viewport keys Escape / Enter).
+// IME. While a type session is open a textarea holds the focus, and every
+// change of its text or selection goes to the engine as `text_edit` (UTF-8
+// byte offsets, which is what the engine indexes). Esc cancels, Ctrl+Enter /
+// keypad Enter commit (sent as the viewport keys Escape / Enter).
 
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
@@ -47,11 +47,18 @@ function ensureArea() {
   area.id = "type-input";
   area.setAttribute("autocomplete", "off");
   area.setAttribute("spellcheck", "false");
-  // Invisible, but focusable and in the layout (so the IME has somewhere to go).
+  // Keep the editing target visible. The old 2 px, behind-the-app textarea
+  // made a text layer look uneditable even when the engine had opened a live
+  // text session. FAST: this is a floating editor until TextEdit carries the
+  // text frame's screen bounds for a true on-canvas DOM overlay.
   Object.assign(area.style, {
-    position: "fixed", left: "50%", top: "50%", width: "2px", height: "2px",
-    opacity: "0", border: "0", padding: "0", resize: "none", zIndex: "-1",
+    position: "fixed", left: "50%", top: "68px", transform: "translateX(-50%)",
+    width: "min(440px, calc(100vw - 64px))", minHeight: "54px", maxHeight: "180px",
+    padding: "8px 10px", resize: "vertical", zIndex: "1000", display: "none",
+    color: "#f1f3f7", background: "#20242c", border: "1px solid #5c8edb",
+    borderRadius: "4px", boxShadow: "0 6px 20px #0008", font: "13px/1.4 Segoe UI, sans-serif",
   });
+  area.setAttribute("aria-label", "Edit text layer. Escape cancels; Ctrl+Enter applies.");
   area.addEventListener("input", send);
   area.addEventListener("select", send);
   area.addEventListener("keyup", send);
@@ -76,11 +83,12 @@ function ensureArea() {
 export function initType(onFonts) {
   bridge.on(ENGINE.TEXT_EDIT, ({ open, text, selection }) => {
     if (!open) {
-      if (area) { area.blur(); area.value = ""; }
+      if (area) { area.blur(); area.value = ""; area.style.display = "none"; }
       lastSent = "";
       return;
     }
     const el = ensureArea();
+    el.style.display = "block";
     el.value = text;
     const [start, end] = selection;
     el.setSelectionRange(fromBytes(text, start), fromBytes(text, end));

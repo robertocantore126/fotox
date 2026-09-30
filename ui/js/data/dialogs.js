@@ -12,6 +12,7 @@ const txt = (label, value, o = {}) => ({ type: "text", label, value, ...o });
 const lbl = (text, o = {}) => ({ type: "label", text, ...o });
 const row = (...fields) => ({ type: "row", fields });
 const grp = (label, fields) => ({ type: "group", label, fields });
+const STYLE_PAGES = ["Styles", "Blending Options: Default", "Drop Shadow", "Inner Shadow", "Outer Glow", "Inner Glow", "Bevel & Emboss", "Satin", "Color Overlay", "Gradient Overlay", "Pattern Overlay", "Stroke"];
 const sep = { type: "sep" };
 const PREVIEW = { type: "preview" };
 
@@ -248,55 +249,83 @@ dialogs["replace-color"] = { title: "Replace Color", width: 440, fields: [{ type
 dialogs["blending-options"] = {
   title: "Layer Style", width: 620, wide: true, icon: "i-fx",
   fields: [
-    { type: "stylelist", items: ["Styles", "Blending Options: Default", "Drop Shadow", "Inner Shadow", "Outer Glow", "Inner Glow", "Bevel & Emboss", "Satin", "Color Overlay", "Gradient Overlay", "Pattern Overlay", "Stroke"] },
+    { type: "stylelist", items: STYLE_PAGES },
     { type: "col", fields: [
-      grp("General Blending", [sel("Blend Mode:", ["Normal", "Dissolve", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light"], "Normal"), num("Opacity:", 100, { unit: "%", w: 60 })]),
-      grp("Advanced Blending", [num("Fill Opacity:", 100, { unit: "%", w: 60 }), { type: "channelsrow" }, chk("Blend Interior Effects as Group", false), chk("Blend Clipped Layers as Group", false), chk("Transparency Shapes Layer", false), chk("Layer Mask Hides Effects", false), chk("Vector Mask Hides Effects", false)]),
-      grp("Blend If: Grey", [{ type: "blendif", left: "This Layer", right: "Underlying Layer" }]),
+      grp("General Blending", [{ type: "blend", mode: "Normal" }, rng("Opacity:", 100, { unit: "%" })]),
+      grp("Advanced Blending", [rng("Fill Opacity:", 100, { unit: "%" })]),
     ] },
   ],
   ok: "OK", cancel: "Cancel",
 };
 
 const styleDialog = (title, extra) => ({
-  title: "Layer Style — " + title, width: 560, icon: "i-fx",
+  title: "Layer Style — " + title, width: 600, icon: "i-fx",
   fields: [
-    { type: "stylelist", items: ["Styles", "Blending Options: Default", "Drop Shadow", "Inner Shadow", "Outer Glow", "Inner Glow", "Bevel & Emboss", "Satin", "Color Overlay", "Gradient Overlay", "Pattern Overlay", "Stroke"], active: title },
+    { type: "stylelist", items: STYLE_PAGES, active: title },
     { type: "col", fields: extra },
   ],
   ok: "OK", cancel: "Cancel",
 });
 
+// Every number of a style has a slider (the box beside it takes a typed
+// value); the ranges are Photoshop's slider ranges.
+const ANGLE = (v) => rng("Angle:", v, { min: -180, max: 180, unit: "°" });
+const PX = (label, v, max = 250) => rng(label, v, { min: 0, max, unit: "px" });
+const PCT = (label, v) => rng(label, v, { unit: "%" });
+
 dialogs["style-drop-shadow"] = styleDialog("Drop Shadow", [
-  { type: "blend", mode: "Multiply" }, { type: "color", label: "Colour", value: "#000000" },
-  rng("Opacity:", 75), num("Angle:", 120, { unit: "°", w: 60 }), chk("Use Global Light", true),
-  num("Distance:", 5, { unit: "px", w: 60 }), rng("Spread:", 0), num("Size:", 5, { unit: "px", w: 60 }),
-  num("Noise:", 0, { unit: "%", w: 60 }), chk("Layer Knocks Out Drop Shadow", true),
+  grp("Structure", [{ type: "blend", mode: "Multiply" }, { type: "color", label: "Colour", value: "#000000" }, PCT("Opacity:", 75),
+    ANGLE(120), chk("Use Global Light", true), PX("Distance:", 5, 500), PCT("Spread:", 0), PX("Size:", 5)]),
+  grp("Quality", [sel("Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear"), PCT("Noise:", 0)]),
 ]);
-dialogs["style-inner-shadow"] = styleDialog("Inner Shadow", [{ type: "blend", mode: "Multiply" }, { type: "color", label: "Colour", value: "#000000" }, rng("Opacity:", 75), num("Angle:", 120, { unit: "°", w: 60 }), num("Distance:", 5, { unit: "px", w: 60 }), rng("Choke:", 0), num("Size:", 5, { unit: "px", w: 60 })]);
-dialogs["style-outer-glow"] = styleDialog("Outer Glow", [{ type: "blend", mode: "Screen" }, rng("Opacity:", 75), rng("Noise:", 0), { type: "color", label: "Colour", value: "#f5d442" }, { type: "glowtype" }, rng("Spread:", 0), num("Size:", 9, { unit: "px", w: 60 }), rng("Range:", 50, { min: 1, max: 100 })]);
-dialogs["style-inner-glow"] = styleDialog("Inner Glow", [{ type: "blend", mode: "Screen" }, rng("Opacity:", 75), rng("Noise:", 0), { type: "color", label: "Colour", value: "#f5d442" }, { type: "glowtype", value: "Center" }, rng("Choke:", 0), num("Size:", 9, { unit: "px", w: 60 })]);
+dialogs["style-inner-shadow"] = styleDialog("Inner Shadow", [
+  grp("Structure", [{ type: "blend", mode: "Multiply" }, { type: "color", label: "Colour", value: "#000000" }, PCT("Opacity:", 75),
+    ANGLE(120), chk("Use Global Light", true), PX("Distance:", 5, 500), PCT("Choke:", 0), PX("Size:", 5)]),
+  grp("Quality", [sel("Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear")]),
+]);
+dialogs["style-outer-glow"] = styleDialog("Outer Glow", [
+  grp("Structure", [{ type: "blend", mode: "Screen" }, PCT("Opacity:", 75), PCT("Noise:", 0), sel("Fill Type:", ["Color", "Gradient"], "Color"), { type: "color", label: "Colour", value: "#ffffbe" }]),
+  grp("Elements", [PCT("Spread:", 0), PX("Size:", 5)]),
+  grp("Quality", [sel("Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear")]),
+]);
+dialogs["style-inner-glow"] = styleDialog("Inner Glow", [
+  grp("Structure", [{ type: "blend", mode: "Screen" }, PCT("Opacity:", 75), PCT("Noise:", 0), { type: "color", label: "Colour", value: "#ffffbe" }]),
+  grp("Elements", [rad("Source:", ["Center", "Edge"], 1, { inline: true }), PCT("Choke:", 0), PX("Size:", 5)]),
+  grp("Quality", [sel("Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear")]),
+]);
 dialogs["style-bevel"] = styleDialog("Bevel & Emboss", [
-  grp("Structure", [sel("Style:", ["Inner Bevel", "Outer Bevel", "Emboss", "Pillow Emboss", "Stroke Emboss"], "Inner Bevel"), sel("Technique:", ["Smooth", "Chisel Hard", "Chisel Soft"], "Smooth"), num("Depth:", 100, { unit: "%", w: 60 }), rad("Direction:", ["Up", "Down"], 0, { inline: true }), num("Size:", 6, { unit: "px", w: 60 }), num("Soften:", 0, { unit: "px", w: 60 })]),
-  grp("Shading", [num("Angle:", 120, { unit: "°", w: 60 }), num("Altitude:", 30, { unit: "°", w: 60 }), sel("Highlight Mode:", ["Screen", "Normal", "Multiply"], "Screen"), { type: "color", label: "Highlight", value: "#ffffff" }, rng("Highlight Opacity:", 75), sel("Shadow Mode:", ["Multiply", "Normal", "Screen"], "Multiply"), { type: "color", label: "Shadow", value: "#000000" }, rng("Shadow Opacity:", 75)]),
+  grp("Structure", [sel("Style:", ["Inner Bevel", "Outer Bevel", "Emboss", "Pillow Emboss"], "Inner Bevel"), rng("Depth:", 100, { min: 1, max: 1000, unit: "%" }), rad("Direction:", ["Up", "Down"], 0, { inline: true }), PX("Size:", 5), PX("Soften:", 0, 16)]),
+  grp("Shading", [ANGLE(120), chk("Use Global Light", true), rng("Altitude:", 30, { min: 0, max: 90, unit: "°" }),
+    { type: "blend", label: "Highlight Mode:", mode: "Screen" }, { type: "color", label: "Highlight", value: "#ffffff" }, PCT("Highlight Opacity:", 75),
+    { type: "blend", label: "Shadow Mode:", mode: "Multiply" }, { type: "color", label: "Shadow", value: "#000000" }, PCT("Shadow Opacity:", 75)]),
+  grp("Structure ▸ More", [sel("Technique:", ["Smooth", "Chisel Hard", "Chisel Soft"], "Smooth"), sel("Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear")]),
+  grp("Shading ▸ More", [sel("Gloss Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear"), chk("Anti-aliased", false)]),
+  grp("Texture (the current pattern)", [chk("Texture", false), rng("Texture Scale:", 100, { min: 1, max: 1000, unit: "%" }), rng("Texture Depth:", 100, { min: -1000, max: 1000, unit: "%" }), chk("Invert Texture", false), chk("Link Texture with Layer", true)]),
 ]);
-dialogs["style-satin"] = styleDialog("Satin", [{ type: "blend", mode: "Multiply" }, { type: "color", label: "Colour", value: "#000000" }, rng("Opacity:", 50), num("Angle:", 19, { unit: "°", w: 60 }), num("Distance:", 11, { unit: "px", w: 60 }), num("Size:", 14, { unit: "px", w: 60 }), chk("Invert", true)]);
-dialogs["style-color-overlay"] = styleDialog("Color Overlay", [{ type: "blend", mode: "Normal" }, { type: "color", label: "Colour", value: "#7c5cff" }, rng("Opacity:", 100)]);
-dialogs["style-gradient-overlay"] = styleDialog("Gradient Overlay", [{ type: "blend", mode: "Normal" }, rng("Opacity:", 100), { type: "gradientbar" }, sel("Style:", ["Linear", "Radial", "Angle", "Reflected", "Diamond"], "Linear"), num("Angle:", 90, { unit: "°", w: 60 }), num("Scale:", 100, { unit: "%", w: 60 }), chk("Reverse", false), chk("Align with Layer", true), rad("Method:", ["Align", "Dither"], 0, { inline: true })]);
-dialogs["style-pattern-overlay"] = styleDialog("Pattern Overlay", [{ type: "blend", mode: "Normal" }, rng("Opacity:", 100), { type: "patternpick" }, num("Scale:", 100, { unit: "%", w: 60 }), num("Angle:", 0, { unit: "°", w: 60 })]);
-dialogs["style-stroke"] = styleDialog("Stroke", [{ type: "stroke", value: "Colour" }, { type: "color", label: "Colour", value: "#ffffff" }, num("Size:", 2, { unit: "px", w: 60 }), sel("Position:", ["Outside", "Inside", "Centre"], "Outside"), sel("Blend Mode:", ["Normal", "Multiply", "Screen"], "Normal"), rng("Opacity:", 100), chk("Overprint", false)]);
+dialogs["style-satin"] = styleDialog("Satin", [
+  grp("Structure", [{ type: "blend", mode: "Multiply" }, { type: "color", label: "Colour", value: "#000000" }, PCT("Opacity:", 50), ANGLE(19), PX("Distance:", 11), PX("Size:", 14), chk("Invert", true)]),
+  grp("Quality", [sel("Contour:", ["Linear", "Cone", "Cone - Inverted", "Cove - Deep", "Cove - Shallow", "Gaussian", "Half Round", "Ring", "Ring - Double", "Rolling Slope - Descending", "Rounded Steps", "Sawtooth 1"], "Linear")]),
+]);
+dialogs["style-color-overlay"] = styleDialog("Color Overlay", [grp("Color", [{ type: "blend", mode: "Normal" }, { type: "color", label: "Colour", value: "#ff0000" }, PCT("Opacity:", 100)])]);
+dialogs["style-gradient-overlay"] = styleDialog("Gradient Overlay", [{ type: "blend", mode: "Normal" }, PCT("Opacity:", 100), { type: "gradientbar" }, sel("Style:", ["Linear", "Radial", "Angle", "Reflected", "Diamond"], "Linear"), ANGLE(90), rng("Scale:", 100, { min: 10, max: 150, unit: "%" }), chk("Reverse", false), chk("Align with Layer", true), chk("Dither", true)]);
+dialogs["style-pattern-overlay"] = styleDialog("Pattern Overlay", [{ type: "blend", mode: "Normal" }, PCT("Opacity:", 100), { type: "patternpick" }, rng("Scale:", 100, { min: 1, max: 1000, unit: "%" }), ANGLE(0), chk("Link with Layer", true)]);
+dialogs["style-stroke"] = styleDialog("Stroke", [
+  grp("Structure", [PX("Size:", 3), sel("Position:", ["Outside", "Inside", "Centre"], "Outside"), { type: "blend", mode: "Normal" }, PCT("Opacity:", 100)]),
+  // Fill Type: the Gradient tool's current gradient, or the current pattern.
+  grp("Fill", [sel("Fill Type:", ["Color", "Gradient", "Pattern"], "Color"), { type: "color", label: "Colour", value: "#000000" }]),
+]);
 
 dialogs["fill-solid"] = { title: "New Layer — Solid Colour", width: 380, icon: "i-swatch", fields: [{ type: "color", label: "Fill colour", value: "#efc36a" }, sel("Mode:", ["Normal", "Multiply", "Screen", "Overlay"], "Normal"), num("Opacity:", 100, { unit: "%", w: 60 })], ok: "OK", cancel: "Cancel" };
 dialogs["fill-gradient"] = { title: "New Layer — Gradient Fill", width: 420, fields: [{ type: "gradientbar" }, sel("Style:", ["Linear", "Radial", "Angle", "Reflected", "Diamond"], "Linear"), num("Angle:", 90, { unit: "°", w: 60 }), num("Scale:", 100, { unit: "%", w: 60 }), chk("Reverse", false) ], ok: "OK", cancel: "Cancel" };
 dialogs["fill-pattern"] = { title: "New Layer — Pattern Fill", width: 420, fields: [{ type: "patternpick" }, num("Scale:", 100, { unit: "%", w: 60 })], ok: "OK", cancel: "Cancel" };
 // Edit ▸ Content-Aware Fill (M11-T02). FAST: a dialog, not Photoshop's
 // workspace (no sampling-area brush, no live preview, no adaptation options).
-dialogs["content-aware-fill"] = { title: "Content-Aware Fill", width: 380, fields: [sel("Sampling Area:", ["Auto"], "Auto"), sel("Output To:", ["Current Layer", "New Layer", "Duplicate Layer"], "Current Layer"), num("Seed:", 1, { w: 60 })], ok: "OK", cancel: "Cancel" };
+dialogs["content-aware-fill"] = { title: "Content-Aware Fill", width: 380, fields: [sel("Output To:", ["Current Layer", "New Layer", "Duplicate Layer"], "Current Layer"), num("Seed:", 1, { w: 60 })], ok: "OK", cancel: "Cancel" };
 dialogs["content-aware-scale"] = { title: "Content-Aware Scale", width: 380, fields: [num("Width:", 100, { unit: "%", w: 60 }), num("Height:", 100, { unit: "%", w: 60 }), num("Amount:", 100, { unit: "%", w: 60 }), sel("Protect:", ["None"], "None"), chk("Protect Skin Tones", false)], ok: "OK", cancel: "Cancel" };
 // The Smart Filters list (M12-T03); its fields are built per layer.
 dialogs["smart-filters"] = { title: "Smart Filters", width: 360, fields: [], ok: "OK", cancel: "Cancel" };
 dialogs["new-layer-comp"] = { title: "New Layer Comp", width: 360, fields: [txt("Name:", "Layer Comp"), chk("Visibility", true), chk("Position", true), chk("Appearance (Layer Style)", true)], ok: "OK", cancel: "Cancel" };
-dialogs["warp-text"] = { title: "Warp Text", width: 460, fields: [sel("Style:", ["None", "Arc", "Arch", "Bulge", "Squeeze", "Fish", "Flag", "Rise", "Wave"], "Arc"), rad("Horizontal / Vertical:", ["Horizontal", "Vertical"], 0, { inline: true }), rng("Bend:", 50, { min: -100, max: 100 }), rng("Horizontal Distortion:", 0, { min: -100, max: 100 }), rng("Vertical Distortion:", 0, { min: -100, max: 100 })], ok: "OK", cancel: "Cancel" };
+dialogs["warp-text"] = { title: "Warp Text", width: 460, fields: [sel("Style:", ["None", "Arc", "Arch", "Bulge", "Squeeze", "Fish", "Flag", "Rise", "Wave"], "Arc"), rng("Bend:", 50, { min: -100, max: 100 })], ok: "OK", cancel: "Cancel" };
 dialogs["layer-lock"] = { title: "Lock All Layers", width: 320, fields: [chk("Lock Transparent Pixels", true), chk("Lock Image Pixels", true), chk("Lock Position", false)], ok: "OK", cancel: "Cancel" };
 dialogs.defringe = { title: "Defringe", width: 320, fields: [num("Width:", 1, { unit: "px", w: 60 })], ok: "OK", cancel: "Cancel" };
 

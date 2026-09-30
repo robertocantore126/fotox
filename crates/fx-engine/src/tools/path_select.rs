@@ -61,11 +61,13 @@ impl PathSelect {
 	}
 }
 
-/// The topmost shape layer under the document point, top → bottom.
+/// The topmost shape layer under the document point, top → bottom. Hidden
+/// and fully locked layers (their groups' state included) are clicked
+/// through ([`Document::tool_ignored`]).
 fn hit(doc: &Document, x: f64, y: f64) -> Option<fx_core::LayerId> {
 	doc.panel_order()
 		.into_iter()
-		.find(|&id| doc.layer(id).is_some_and(|layer| layer.visible && contains_shape(layer, x, y)))
+		.find(|&id| !doc.tool_ignored(id) && doc.layer(id).is_some_and(|layer| contains_shape(layer, x, y)))
 }
 
 /// Whether a document point is inside a layer's shape, in the shape's own

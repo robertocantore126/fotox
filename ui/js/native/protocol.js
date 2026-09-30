@@ -26,9 +26,12 @@ export const UI = Object.freeze({
   CLOSE_DOCUMENT_ANSWER: "close_document_answer",
   FILTER_PREVIEW: "filter_preview",
   FILTER_PREVIEW_CANCEL: "filter_preview_cancel",
+  ADJUSTMENT_PREVIEW: "adjustment_preview",
+  ADJUSTMENT_PREVIEW_END: "adjustment_preview_end",
   PROOF_SETUP: "proof_setup",
   SET_ZOOM: "set_zoom",
   REQUEST_THUMBNAILS: "request_thumbnails",
+  REQUEST_LAYERS: "request_layers",
   TOOL_OPTIONS: "tool_options",
   SET_COLORS: "set_colors",
   // A key the shortcut map did not consume, for the viewport tools (M5-T04):
@@ -51,6 +54,7 @@ export const ENGINE = Object.freeze({
   DOCUMENT_CLOSED: "document_closed",
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
+  LAYERS_PATCH: "layers_patch",
   HISTORY: "history",
   VIEW: "view",
   STATUS: "status",
@@ -60,6 +64,8 @@ export const ENGINE = Object.freeze({
   ERROR: "error",
   COLOR_PICKED: "color_picked",
   THUMBNAIL: "thumbnail",
+  // Navigator, Histogram, Properties, Character (engine/overview.rs).
+  OVERVIEW: "overview",
   // The Type tool's session (M6-T07) and the system font list.
   TEXT_EDIT: "text_edit",
   FONTS: "fonts",

@@ -58,6 +58,7 @@ const K_LOAD_PREFIX: u32 = 7;
 const F_CLIP: u32 = 1;
 const F_MASK: u32 = 2;
 const F_DISSOLVE: u32 = 4;
+const F_BLEND_IF: u32 = 16;
 
 /// Max nesting of groups (clipping groups count) the shader supports.
 pub const MAX_DEPTH: usize = 11;
@@ -650,8 +651,20 @@ impl GpuCompositor {
 				alpha,
 				mask,
 				clip,
+				blend_if,
 			} => {
 				g.kind = K_LAYER;
+				// Blend If: each slider's pairs packed as `a·256 + b` (exact in f32).
+				if let Some(b) = blend_if {
+					g.flags |= F_BLEND_IF;
+					let pack = |a: u8, b: u8| f32::from(a) * 256.0 + f32::from(b);
+					g.params = [
+						pack(b.this_layer[0], b.this_layer[1]),
+						pack(b.this_layer[2], b.this_layer[3]),
+						pack(b.underlying[0], b.underlying[1]),
+						pack(b.underlying[2], b.underlying[3]),
+					];
+				}
 				g.blend = blend.shader_id();
 				g.alpha = *alpha;
 				g.seed = layer.0 as u32;

@@ -307,6 +307,33 @@ impl Tool for Shape {
 						..Default::default()
 					};
 				};
+				// Shape Area (Photoshop's path operations): Combine / Subtract /
+				// Intersect / Exclude add the shape to the active shape layer.
+				let op = match number(ctx, &self.tool, "Shape Area").map(|v| v.round() as i64) {
+					Some(1) => Some(fx_core::path::PathOp::Combine),
+					Some(2) => Some(fx_core::path::PathOp::Subtract),
+					Some(3) => Some(fx_core::path::PathOp::Intersect),
+					Some(4) => Some(fx_core::path::PathOp::Exclude),
+					_ => None,
+				};
+				if let Some(op) = op {
+					let active = ctx.doc.active_layer().and_then(|id| ctx.doc.layer(id));
+					if let Some(fx_core::LayerKind::Shape { shape: current, transform: placed, .. }) = active.map(|l| &l.kind)
+						&& let Some((combined, placement)) = current.add_part(*placed, shape.clone(), transform, op)
+					{
+						return ToolResult {
+							command: Some(Command::SetShape {
+								layer: fx_core::LayerRef::Active,
+								shape: Some(combined),
+								fill: None,
+								stroke: None,
+								transform: Some(placement),
+							}),
+							cursor: Some(CursorShape::Crosshair),
+							..Default::default()
+						};
+					}
+				}
 				let layer = NewLayer::Shape {
 					shape,
 					fill: Some(Paint::Solid { rgba: ctx.settings.fg }),

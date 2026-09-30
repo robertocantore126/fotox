@@ -68,6 +68,107 @@ pub enum VectorShape {
 	/// An isosceles triangle pointing up in its `w × h` box, corners rounded
 	/// by `radius` local pixels (the Triangle tool, M10-T07).
 	Triangle { w: f64, h: f64, radius: f64 },
+	/// Several shapes in one layer, combined in order by their shape-area
+	/// operation (Photoshop's Combine / Subtract / Intersect / Exclude). The
+	/// first part's operation is ignored. Parts are placed in this shape's
+	/// local space, normalised so the union's box starts at (0, 0).
+	Compound { parts: Vec<ShapePart> },
+}
+
+/// One part of a [`VectorShape::Compound`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapePart {
+	pub shape: VectorShape,
+	/// Part-local → compound-local.
+	pub transform: [f64; 6],
+	#[serde(default)]
+	pub op: crate::path::PathOp,
+}
+
+/// `outer ∘ inner` for `[a, b, c, d, e, f]` matrices.
+pub fn compose(outer: [f64; 6], inner: [f64; 6]) -> [f64; 6] {
+	let (m, t) = (outer, inner);
+	[
+		m[0] * t[0] + m[2] * t[1],
+		m[1] * t[0] + m[3] * t[1],
+		m[0] * t[2] + m[2] * t[3],
+		m[1] * t[2] + m[3] * t[3],
+		m[0] * t[4] + m[2] * t[5] + m[4],
+		m[1] * t[4] + m[3] * t[5] + m[5],
+	]
+}
+
+/// The inverse of an `[a, b, c, d, e, f]` matrix (`None` when singular).
+pub fn invert(m: [f64; 6]) -> Option<[f64; 6]> {
+	let det = m[0] * m[3] - m[1] * m[2];
+	if det.abs() < 1e-12 || !det.is_finite() {
+		return None;
+	}
+	let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+	Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
+/// A path's elements through a matrix.
+pub fn transform_elements(elements: &[PathEl], m: [f64; 6]) -> Vec<PathEl> {
+	let at = |p: [f64; 2]| [m[0] * p[0] + m[2] * p[1] + m[4], m[1] * p[0] + m[3] * p[1] + m[5]];
+	elements
+		.iter()
+		.map(|e| match *e {
+			PathEl::MoveTo(p) => PathEl::MoveTo(at(p)),
+			PathEl::LineTo(p) => PathEl::LineTo(at(p)),
+			PathEl::QuadTo(c, p) => PathEl::QuadTo(at(c), at(p)),
+			PathEl::CubicTo(c1, c2, p) => PathEl::CubicTo(at(c1), at(c2), at(p)),
+			PathEl::Close => PathEl::Close,
+		})
+		.collect()
+}
+
+/// Combine two coverages (0..=1) by a shape-area operation.
+pub fn combine_coverage(op: crate::path::PathOp, acc: f64, part: f64) -> f64 {
+	use crate::path::PathOp;
+	match op {
+		PathOp::Combine => acc + part - acc * part,
+		PathOp::Subtract => acc * (1.0 - part),
+		PathOp::Intersect => acc * part,
+		PathOp::Exclude => acc + part - 2.0 * acc * part,
+	}
+}
+
+impl VectorShape {
+	/// Add `part` (placed by `part_transform` in document space) to this shape,
+	/// placed by `transform`, with `op`: the result is a compound shape and
+	/// its new placement, normalised so its box starts at its local origin.
+	pub fn add_part(&self, transform: [f64; 6], part: VectorShape, part_transform: [f64; 6], op: crate::path::PathOp) -> Option<(VectorShape, [f64; 6])> {
+		let inverse = invert(transform)?;
+		let mut parts = match self {
+			VectorShape::Compound { parts } => parts.clone(),
+			other => vec![ShapePart {
+				shape: other.clone(),
+				transform: IDENTITY,
+				op: crate::path::PathOp::Combine,
+			}],
+		};
+		parts.push(ShapePart {
+			shape: part,
+			transform: compose(inverse, part_transform),
+			op,
+		});
+		// Normalise: the union's box at (0, 0).
+		let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+		for p in &parts {
+			let [bx0, by0, _, _] = document_box(&p.shape, p.transform);
+			x0 = x0.min(bx0);
+			y0 = y0.min(by0);
+		}
+		if !x0.is_finite() || !y0.is_finite() {
+			return None;
+		}
+		let shift = [1.0, 0.0, 0.0, 1.0, -x0, -y0];
+		for p in &mut parts {
+			p.transform = compose(shift, p.transform);
+		}
+		Some((VectorShape::Compound { parts }, compose(transform, [1.0, 0.0, 0.0, 1.0, x0, y0])))
+	}
 }
 
 /// How a shape's paint is applied. Gradients and patterns follow.
@@ -127,6 +228,15 @@ impl VectorShape {
 			VectorShape::Line { length, width } => (length.abs(), width.abs()),
 			VectorShape::Triangle { w, h, .. } => (w.abs(), h.abs()),
 			VectorShape::Path { elements } => path_bounds(elements),
+			VectorShape::Compound { parts } => {
+				let (mut x1, mut y1) = (0.0f64, 0.0f64);
+				for p in parts {
+					let [_, _, bx1, by1] = document_box(&p.shape, p.transform);
+					x1 = x1.max(bx1);
+					y1 = y1.max(by1);
+				}
+				(x1, y1)
+			}
 		}
 	}
 
@@ -141,6 +251,9 @@ impl VectorShape {
 			VectorShape::Line { length, width } => rounded_rect(length.abs(), width.abs(), [0.0; 4]),
 			VectorShape::Triangle { w, h, radius } => triangle(w.abs(), h.abs(), *radius),
 			VectorShape::Path { elements } => elements.clone(),
+			// Every part's outline (hit tests and paths; the renderer combines
+			// the parts' coverage itself).
+			VectorShape::Compound { parts } => parts.iter().flat_map(|p| transform_elements(&p.shape.outline(), p.transform)).collect(),
 		}
 	}
 
@@ -150,6 +263,16 @@ impl VectorShape {
 	/// polygon and the test is the even-odd crossing rule, which is accurate
 	/// enough to pick a shape by clicking it (M6-T06, the Path Selection tool).
 	pub fn contains(&self, x: f64, y: f64) -> bool {
+		if let VectorShape::Compound { parts } = self {
+			let mut inside = 0.0;
+			for (i, p) in parts.iter().enumerate() {
+				let Some(inv) = invert(p.transform) else { continue };
+				let (lx, ly) = (inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5]);
+				let hit = if p.shape.contains(lx, ly) { 1.0 } else { 0.0 };
+				inside = if i == 0 { hit } else { combine_coverage(p.op, inside, hit) };
+			}
+			return inside >= 0.5;
+		}
 		let (bx0, by0, bx1, by1) = self.local_box();
 		if x < bx0 || y < by0 || x > bx1 || y > by1 {
 			return false;
@@ -211,7 +334,7 @@ impl VectorShape {
 				}
 			}
 			VectorShape::Line { .. } => "Line",
-			VectorShape::Path { .. } => "Shape",
+			VectorShape::Path { .. } | VectorShape::Compound { .. } => "Shape",
 			VectorShape::Triangle { .. } => "Triangle",
 		}
 	}

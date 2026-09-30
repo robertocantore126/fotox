@@ -18,13 +18,11 @@ use fx_ops::neighbourhood::{LevelSource, TileRef};
 use fx_ops::resample::SourceInfo;
 use fx_tiles::{PixelFormat, TileBuffer, TileError, TileStore};
 
-use crate::ops::ImageSource;
-
 type Memo = Mutex<HashMap<(usize, i64, i64), Option<TileRef>>>;
 
 /// The Smart Object's rendered (unfiltered) tiles, resampled on demand.
 struct Rendered<'a> {
-	view: &'a ImageSource<'a>,
+	view: &'a dyn LevelSource,
 	source: SourceInfo,
 	transform: fx_core::Mapping,
 	grid: (i64, i64),
@@ -33,7 +31,7 @@ struct Rendered<'a> {
 
 impl LevelSource for Rendered<'_> {
 	fn format(&self) -> PixelFormat {
-		self.view.image.format()
+		self.view.format()
 	}
 
 	fn tile(&self, level: usize, tx: i64, ty: i64) -> Result<Option<TileRef>, TileError> {
@@ -128,7 +126,7 @@ fn mix(out: &mut TileBuffer, below: Option<&TileRef>, opacity: f32, format: Pixe
 /// resample is `tiles`; the aprons are resampled as needed).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply(
-	view: &ImageSource<'_>,
+	view: &dyn LevelSource,
 	source: SourceInfo,
 	transform: fx_core::Mapping,
 	filters: &[SmartFilter],
@@ -160,7 +158,7 @@ pub(crate) fn apply(
 		return Ok(tiles);
 	}
 	let wanted: Vec<(u32, u32)> = tiles.iter().map(|(k, _)| *k).collect();
-	run(&rendered, filters, geometry, level, &wanted, view.image.format())
+	run(&rendered, filters, geometry, level, &wanted, view.format())
 }
 
 /// Stack `filters` (bottom first) over `below` and read the wanted tiles of

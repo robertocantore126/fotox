@@ -30,6 +30,7 @@ import { initChannels } from "./native/channels-panel.js";
 import { initInfo } from "./native/info-panel.js";
 import { initPaths } from "./native/paths-panel.js";
 import { initComps } from "./native/comps-panel.js";
+import { initOverview } from "./native/overview-panels.js";
 import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
@@ -116,7 +117,7 @@ function buildToolbar(container) {
   // blocco colori in fondo alla colonna
   const swatches = h("div", { class: "toolswatches" });
   const fg = h("button", { class: "mini-swatch fg", type: "button", dataset: { tip: "Set foreground colour" }, onclick: () => openDialog("color-picker") });
-  const bg = h("button", { class: "mini-swatch bg", type: "button", dataset: { tip: "Set background colour" }, onclick: () => openDialog("color-picker") });
+  const bg = h("button", { class: "mini-swatch bg", type: "button", dataset: { tip: "Set background colour" }, onclick: () => openDialog("color-picker", { target: "bg" }) });
   const swap = h("button", { class: "mini-btn swap", type: "button", dataset: { tip: "Swap foreground and background" }, onclick: () => { setColors(state.colors.bg, state.colors.fg); toast("Swapped foreground and background colours"); } }, icon("i-swap", "ic sm"));
   const reset = h("button", { class: "mini-btn reset", type: "button", dataset: { tip: "Default foreground and background colours" }, onclick: () => { setColors("#000000", "#ffffff"); toast("Default colours restored"); } }, icon("i-reset-bw", "ic sm"));
   swatches.append(h("div", { class: "swatch-pair" }, bg, fg), h("div", { class: "swatch-tools" }, swap, reset));
@@ -290,6 +291,7 @@ async function boot() {
   // engine bridge ------------------------------------------------------
   if (bridge.isNative) {
     initNativePanels();
+    initOverview();
     initColor();
     initTools();
     initPrefs();

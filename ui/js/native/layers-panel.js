@@ -10,18 +10,19 @@
 
 import { h, icon, clear, add } from "../el.js";
 import { openDropdown } from "../popup.js";
-import { openDialog } from "../dialogs.js";
+import { openDialog, dialogValues } from "../dialogs.js";
 import { state, setTool, emit } from "../state.js";
 import { toast } from "../tooltip.js";
 import * as bridge from "./bridge.js";
 import { UI, ENGINE } from "./protocol.js";
 import { pickFile } from "./brush-settings.js";
 import { openMenuPopup } from "../menu.js";
+import { layerStyleEffects, layerStyleItems } from "../data/menus.js";
 
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
 
-const BLENDS = [
+export const BLENDS = [
   ["pass_through", "Pass Through"],
   ["normal", "Normal"], ["dissolve", "Dissolve"],
   ["darken", "Darken"], ["multiply", "Multiply"], ["color_burn", "Color Burn"], ["linear_burn", "Linear Burn"], ["darker_color", "Darker Color"],
@@ -118,10 +119,13 @@ let history = null;      // last `history` message of the active document
 const historySource = new Map(); // doc → the History Brush's source row (M8-T07)
 const histories = new Map(); // doc → history message
 
+let layersSeq = null;    // `seq` of the list `layers` holds (patches name it as `base`)
+let resyncing = false;   // a `request_layers` is on its way
 let layersRoot = null;
 let historyRoot = null;
 let listEl = null;
 let spacerEl = null;
+const layerScroll = new Map(); // document id → the Layers list's user scroll position
 let dragId = null;
 let editNew = null;      // ids before a new adjustment layer: its dialog opens when it arrives
 
@@ -130,6 +134,8 @@ export function initNativePanels() {
   bridge.on(ENGINE.ACTIVE_DOCUMENT, ({ doc: id }) => {
     doc = id;
     layers = [];
+    layersSeq = null;
+    resyncing = false;
     tree = [];
     history = id == null ? null : histories.get(id) || null;
     editNew = null;
@@ -138,7 +144,29 @@ export function initNativePanels() {
   });
   bridge.on(ENGINE.LAYERS, (msg) => {
     if (msg.doc !== doc) return;
-    layers = msg.layers;
+    layersSeq = msg.seq ?? null;
+    resyncing = false;
+    showLayers(msg.layers);
+  });
+  // Only the rows an edit changed (a property, not the tree): the list this
+  // panel holds with those rows replaced. A patch against another list (one
+  // was missed) asks for the whole list again.
+  bridge.on(ENGINE.LAYERS_PATCH, (msg) => {
+    if (msg.doc !== doc) return;
+    if (msg.base !== layersSeq) {
+      if (!resyncing) {
+        resyncing = true;
+        bridge.send({ type: UI.REQUEST_LAYERS, doc });
+      }
+      return;
+    }
+    layersSeq = msg.seq;
+    if (!msg.changed.length) return;
+    const byId = new Map(msg.changed.map((l) => [l.id, l]));
+    showLayers(layers.map((l) => byId.get(l.id) || l));
+  });
+  function showLayers(list) {
+    layers = list;
     tree = buildTree(layers);
     for (const l of layers) {
       const key = `${doc}:${l.id}`;
@@ -152,7 +180,7 @@ export function initNativePanels() {
       editNew = null;
       if (added.adjustment.kind !== "invert") editAdjustment(added);
     }
-  });
+  }
   bridge.on(ENGINE.HISTORY_SOURCE, (msg) => {
     historySource.set(msg.doc, msg.state ?? 0);
     renderHistory();
@@ -168,6 +196,7 @@ export function initNativePanels() {
   bridge.on(ENGINE.DOCUMENT_CLOSED, ({ doc: id }) => {
     histories.delete(id);
     historySource.delete(id);
+    layerScroll.delete(id);
     const prefix = `${id}:`;
     for (const map of [thumbs, thumbStamps, collapsed]) for (const key of [...map.keys()]) if (key.startsWith(prefix)) map.delete(key);
     for (const key of [...requested]) if (key.startsWith(prefix)) requested.delete(key);
@@ -291,6 +320,14 @@ function renderLayers() {
   }
   const a = active();
   const locks = !!a;
+  // The lock buttons read the active layer and set every selected one
+  // (one history step), like Photoshop.
+  const setLocks = (patch) => {
+    const ids = selectedIds().length ? selectedIds() : [a.id];
+    const commands = ids.map((id) => ({ op: "set_layer_props", layer: ref(id), props: patch }));
+    send(commands.length === 1 ? commands[0] : { op: "sequence", commands, label: "Lock Change" });
+  };
+  const allLocked = !!a && a.locked_pixels && a.locked_position;
 
   // Blend mode, opacity, fill of the active layer.
   const modeBtn = h("button", {
@@ -313,12 +350,14 @@ function renderLayers() {
   layersRoot.append(h("div", { class: "phead-row" },
     h("span", { class: "plock-row" },
       h("span", { class: "pf-label", text: "Lock:" }),
-      lockBtn("i-grid", "Lock transparent pixels", a && a.locked_transparency, locks, () => setProps(a.id, { locked_transparency: !a.locked_transparency })),
-      lockBtn("i-image", "Lock image pixels", a && a.locked_pixels, locks, () => setProps(a.id, { locked_pixels: !a.locked_pixels })),
-      lockBtn("i-layers", "Lock position", a && a.locked_position, locks, () => setProps(a.id, { locked_position: !a.locked_position })),
-      lockBtn("i-lock", "Lock all", a && a.locked_pixels && a.locked_position, locks, () => {
-        const on = !(a.locked_pixels && a.locked_position);
-        setProps(a.id, { locked_pixels: on, locked_position: on });
+      lockBtn("i-grid", "Lock transparent pixels", a && a.locked_transparency, locks, () => setLocks({ locked_transparency: !a.locked_transparency })),
+      lockBtn("i-image", "Lock image pixels", a && a.locked_pixels, locks, () => setLocks({ locked_pixels: !a.locked_pixels })),
+      lockBtn("i-layers", "Lock position", a && a.locked_position, locks, () => setLocks({ locked_position: !a.locked_position })),
+      // Lock All: canvas tools then click through the layer as if it were
+      // hidden; the Layers panel is the way back to it.
+      lockBtn("i-lock", "Lock all (tools skip the layer)", allLocked, locks, () => {
+        const on = !allLocked;
+        setLocks({ locked_pixels: on, locked_position: on, locked_transparency: on });
       })),
     h("span", { class: "pbar-gap" }),
     percentField("Fill:", a, "fill")));
@@ -326,13 +365,27 @@ function renderLayers() {
   // The virtualised list.
   listEl = h("div", { class: "plist nlist" });
   spacerEl = h("div", { class: "nlist-space" });
+  spacerEl.style.height = visibleRows().length * ROW_H + "px";
   listEl.append(spacerEl);
-  listEl.addEventListener("scroll", () => renderRows());
-  listEl.addEventListener("dragover", (e) => { if (dragId != null) e.preventDefault(); });
-  listEl.addEventListener("drop", (e) => dropOnList(e));
-  layersRoot.append(listEl);
+  const currentList = listEl;
+  const currentDoc = doc;
+  listEl.addEventListener("scroll", () => {
+    if (currentList !== listEl) return;
+    layerScroll.set(currentDoc, currentList.scrollTop);
+    renderRows();
+  });
+  listEl.style.height = savedHeight("layers", 260) + "px";
+  layersRoot.append(listEl, resizeGrip(listEl, "layers", 90, 1400, () => renderRows()));
 
   layersRoot.append(h("div", { class: "pbar" },
+    // Layer styles (R2-10): the engine has had them since M6-T08, but this
+    // panel had no fx button, so they were only reachable from the menu bar.
+    barBtn("i-fx", "Add a layer style", (btn) => {
+      // The engine refuses styles on groups and adjustments (FAST): say so
+      // here instead of opening a dialog that cannot apply.
+      if (a && !canHaveStyles(a)) toast("Layer styles work on pixel, shape, text, fill and Smart Object layers (not on groups yet)");
+      else openMenuPopup(btn, layerStyleItems, {});
+    }),
     barBtn("i-mask", "Add layer mask (Alt: hide)", (btn, e) => {
       if (!a) return;
       if (a.has_mask) toast("The layer already has a mask");
@@ -363,7 +416,11 @@ function renderLayers() {
   ));
 
   // Rows need the list's height, known after layout.
-  requestAnimationFrame(() => renderRows());
+  requestAnimationFrame(() => {
+    if (currentList !== listEl) return;
+    currentList.scrollTop = layerScroll.get(currentDoc) || 0;
+    renderRows();
+  });
 }
 
 function renderRows() {
@@ -384,7 +441,7 @@ function row(i, v) {
   const el = h("div", {
     class: "plist-row nrow" + (l.selected ? " sel" : "") + (l.visible ? "" : " hidden-layer"),
     style: { top: v * ROW_H + "px", height: ROW_H + "px", paddingLeft: 4 + l.depth * 14 + "px" },
-    draggable: "true", "data-id": String(l.id),
+    "data-id": String(l.id),
   });
 
   const eye = h("button", {
@@ -479,27 +536,11 @@ function row(i, v) {
     name,
     filters,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
-    l.locked ? h("span", { class: "nlock", "data-tip": "Locked" }, icon("i-lock", "ic xs")) : null]);
+    lockMark(l)]);
 
-  el.addEventListener("click", (e) => select(l, e));
+  el.addEventListener("click", (e) => { if (!swallowClick) select(l, e); });
   el.addEventListener("contextmenu", (e) => layerContextMenu(l, e));
-  el.addEventListener("dragstart", (e) => { dragId = l.id; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(l.id)); });
-  el.addEventListener("dragend", () => { dragId = null; clearDropMarks(); });
-  el.addEventListener("dragover", (e) => {
-    if (dragId == null) return;
-    e.preventDefault();
-    e.stopPropagation();
-    clearDropMarks();
-    el.classList.add("drop-" + dropZone(e, el, l));
-  });
-  el.addEventListener("drop", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const zone = dropZone(e, el, l);
-    clearDropMarks();
-    moveTo(dragId, i, zone);
-    dragId = null;
-  });
+  el.addEventListener("pointerdown", (e) => beginRowDrag(e, l));
   return el;
 }
 
@@ -525,8 +566,10 @@ function layerContextMenu(l, e) {
   const item = (label, a, o = {}) => ({ label, a, ...o });
   const sep = { sep: true };
   const pixel = l.kind === "pixel";
+  const styled = canHaveStyles(l);
   const items = [
-    item("Blending Options...", "dlg:blending-options"),
+    item("Blending Options...", "dlg:blending-options", { dis: !styled }),
+    item("Layer Style", "", { sub: layerStyleEffects, dis: !styled }),
     sep,
     item("Duplicate Layer", "layer:duplicate"),
     item("Delete Layer", "layer:delete"),
@@ -592,10 +635,75 @@ function rename(l, label) {
   input.addEventListener("blur", () => finish(true));
 }
 
-/* drag and drop: above / below a row, or into a group (middle of the row) */
+/* drag and drop: above / below a row, or into a group (middle of the row)
+
+   Pointer events, not HTML5 drag and drop: the UI runs in off-screen CEF,
+   whose host does not implement `StartDragging`, so every HTML5 drag was
+   cancelled the moment it started and layers could not be reordered. */
+
+const DRAG_THRESHOLD = 4; // px before a press on a row becomes a drag
+let swallowClick = false;  // the click that ends a drag is not a selection
+
+function beginRowDrag(e, l) {
+  if (e.button !== 0) return;
+  // Buttons, inputs and the name editor inside a row keep their own presses.
+  if (e.target.closest("button, input, select, textarea, [contenteditable]")) return;
+  const start = { x: e.clientX, y: e.clientY };
+  let dragging = false;
+  const rowAt = (x, y) => {
+    const r = document.elementFromPoint(x, y)?.closest(".nrow");
+    return r && listEl && listEl.contains(r) ? r : null;
+  };
+  const move = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD) return;
+      dragging = true;
+      dragId = l.id;
+      document.body.classList.add("layer-dragging");
+    }
+    // Near the list's edges, scroll it.
+    const box = listEl.getBoundingClientRect();
+    if (ev.clientY < box.top + 16) listEl.scrollTop -= ROW_H / 2;
+    else if (ev.clientY > box.bottom - 16) listEl.scrollTop += ROW_H / 2;
+    clearDropMarks();
+    const r = rowAt(ev.clientX, ev.clientY);
+    const target = r && layers.find((x) => String(x.id) === r.dataset.id);
+    if (target) r.classList.add("drop-" + dropZone(ev, r, target));
+  };
+  const end = (ev) => {
+    window.removeEventListener("pointermove", move, true);
+    window.removeEventListener("pointerup", end, true);
+    window.removeEventListener("pointercancel", end, true);
+    document.body.classList.remove("layer-dragging");
+    if (!dragging) return;
+    swallowClick = true;
+    setTimeout(() => { swallowClick = false; }, 0);
+    clearDropMarks();
+    const id = dragId;
+    dragId = null;
+    if (ev.type === "pointercancel") return;
+    const r = rowAt(ev.clientX, ev.clientY);
+    const target = r && layers.findIndex((x) => String(x.id) === r.dataset.id);
+    if (r && target >= 0) {
+      moveTo(id, target, dropZone(ev, r, layers[target]));
+      return;
+    }
+    // Below the last row: the bottom of the root list.
+    const box = listEl.getBoundingClientRect();
+    if (ev.clientX >= box.left && ev.clientX <= box.right && ev.clientY >= box.top && ev.clientY <= box.bottom) {
+      send({ op: "move_layer", layer: ref(id), parent: null, index: 0 });
+    }
+  };
+  window.addEventListener("pointermove", move, true);
+  window.addEventListener("pointerup", end, true);
+  window.addEventListener("pointercancel", end, true);
+}
 
 function dropZone(e, el, l) {
-  const y = e.offsetY / el.offsetHeight;
+  // `offsetY` is measured from the child under the pointer (thumbnail,
+  // label, icon), not necessarily from this row. Use the row's own bounds.
+  const rect = el.getBoundingClientRect();
+  const y = (e.clientY - rect.top) / rect.height;
   if (l.kind === "group" && y > 0.3 && y < 0.7) return "into";
   return y < 0.5 ? "above" : "below";
 }
@@ -623,15 +731,6 @@ function moveTo(id, targetRow, zone) {
     if (src.parent === parent && src.index < tree[targetRow].index) index -= 1;
   }
   send({ op: "move_layer", layer: ref(id), parent: parent == null ? null : ref(parent), index });
-}
-
-function dropOnList(e) {
-  // Dropped below the last row: bottom of the root list.
-  e.preventDefault();
-  if (dragId == null) return;
-  send({ op: "move_layer", layer: ref(dragId), parent: null, index: 0 });
-  dragId = null;
-  clearDropMarks();
 }
 
 /* opacity / fill: typed value, or scrub by dragging the label */
@@ -665,6 +764,57 @@ function percentField(label, a, prop) {
   return h("span", { class: "pf-fieldwrap" }, lab, input, h("span", { class: "pf-unit", text: "%" }));
 }
 
+/** Whether the engine takes layer styles on `l` (`set_layer_style`). */
+const canHaveStyles = (l) => l.kind !== "group" && l.kind !== "adjustment";
+
+/** A list height the user dragged, remembered across sessions (px). */
+function savedHeight(key, fallback) {
+  try {
+    const v = Number(localStorage.getItem("fotox.height." + key));
+    return v > 0 ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** A thin bar under `list` that resizes it vertically and remembers the height. */
+function resizeGrip(list, key, min, max, onResize) {
+  const grip = h("div", { class: "plist-grip", "data-tip": "Drag to resize" });
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const start = e.clientY;
+    const from = list.getBoundingClientRect().height;
+    const move = (m) => {
+      const height = Math.round(Math.min(max, Math.max(min, from + m.clientY - start)));
+      list.style.height = height + "px";
+      onResize?.();
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      try { localStorage.setItem("fotox.height." + key, String(Math.round(list.getBoundingClientRect().height))); } catch { /* storage off: session only */ }
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+  return grip;
+}
+
+/**
+ * The row's lock icon, as in Photoshop: solid for Lock All (tools skip the
+ * layer), hollow for a partial lock or one that comes from a locked group.
+ */
+function lockMark(l) {
+  const full = l.locked_pixels && l.locked_position;
+  if (full) return h("span", { class: "nlock", "data-tip": "Locked: tools skip this layer" }, icon("i-lock", "ic xs"));
+  if (l.locked || l.locked_by_group) {
+    const tip = l.locked_by_group && !l.locked ? "Locked by its group" : "Partly locked";
+    return h("span", { class: "nlock partial", "data-tip": tip }, icon("i-lock", "ic xs"));
+  }
+  return null;
+}
+
 function lockBtn(ic, tip, on, enabled, fn) {
   return h("button", {
     class: "plock-btn" + (on ? " on" : ""), type: "button", "data-tip": tip, disabled: !enabled,
@@ -690,7 +840,8 @@ function requestThumbnails() {
 /* ------------------------------------------------------------------ adjustments (M2-T04 step 3) */
 
 // Dialog ↔ `Adjustment` mapping for the adjustments with a slider dialog.
-// Every change is sent live as `set_adjustment`; Cancel restores the original.
+// Every change is previewed live outside the history; OK commits one
+// `set_adjustment`, Cancel drops the preview (see `adjustmentSession`).
 const ADJUSTMENT_DIALOGS = {
   brightness_contrast: {
     dialog: "brightness-contrast",
@@ -732,11 +883,6 @@ const ADJUSTMENT_DIALOGS = {
     dialog: "threshold",
     toValues: (a) => ({ "Threshold Level:": a.level }),
     fromValues: (v) => ({ kind: "threshold", level: Math.min(255, Math.max(1, Math.round(v["Threshold Level:"]))) }),
-  },
-  gradient_map: {
-    dialog: "gradient-map",
-    toValues: (a) => ({ "Gradient:": nameOf(GRADIENTS, a.stops) || "Black, White", Reverse: a.reverse }),
-    fromValues: (v) => ({ kind: "gradient_map", stops: GRADIENTS[v["Gradient:"]] || GRADIENTS["Black, White"], reverse: !!v.Reverse }),
   },
   exposure: {
     dialog: "exposure",
@@ -803,35 +949,88 @@ const PER_CHANNEL_DIALOGS = {
   },
 };
 
-function editAdjustment(l) {
+/**
+ * A live adjustment dialog as one transaction (code review 2026-09-27 R11):
+ * `show` previews a value on screen only (no history step, no dirty flag, the
+ * redo branch kept), `commit` adds one `set_adjustment` step — none when the
+ * value is unchanged — and `cancel` drops the preview. The document is the one
+ * the dialog was opened for.
+ */
+function adjustmentSession(l) {
+  const at = doc;
+  const original = l.adjustment;
+  const end = () => bridge.send({ type: UI.ADJUSTMENT_PREVIEW_END, doc: at });
+  return {
+    original,
+    show: (adjustment) => bridge.send({ type: UI.ADJUSTMENT_PREVIEW, doc: at, layer: l.id, adjustment }),
+    cancel: end,
+    commit: (adjustment) => {
+      end();
+      if (JSON.stringify(adjustment) === JSON.stringify(original)) return;
+      bridge.send({ type: UI.COMMAND, doc: at, command: { op: "set_adjustment", layer: ref(l.id), adjustment } });
+    },
+  };
+}
+
+export function editAdjustment(l) {
   const adj = l.adjustment;
   if (!adj) return;
   if (PER_CHANNEL_DIALOGS[adj.kind]) { editPerChannel(l, PER_CHANNEL_DIALOGS[adj.kind]); return; }
   if (adj.kind === "color_lookup") { pickLut(l.id); return; }
+  if (adj.kind === "gradient_map") { editGradientMap(l); return; }
   const spec = ADJUSTMENT_DIALOGS[adj.kind];
   if (!spec) {
     toast(adj.kind === "invert" ? "Invert has no settings" : "This adjustment has no dialog yet");
     return;
   }
-  const original = adj;
-  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
+  const session = adjustmentSession(l);
   // "Preview" off shows the layer as it was; OK still applies the dialog's values.
-  const preview = (values) => set(values.Preview === false ? original : spec.fromValues(values));
+  const preview = (values) => session.show(values.Preview === false ? session.original : spec.fromValues(values));
   openDialog(spec.dialog, {
     title: `${l.name}`,
     values: spec.toValues(adj),
     onChange: preview,
-    onOk: (values) => set(spec.fromValues(values)),
-    onCancel: () => set(original),
+    onOk: (values) => session.commit(spec.fromValues(values)),
+    onCancel: session.cancel,
+  });
+}
+
+async function editGradientMap(l) {
+  const { gradientEditor, resolveSwatches } = await import("./gradients.js");
+  const session = adjustmentSession(l);
+  const original = session.original;
+  const work = {
+    colors: (original.stops.length ? original.stops : GRADIENTS["Black, White"])
+      .map((s) => ({ location: s.position, midpoint: 0.5, color: [...s.color] })),
+    opacities: [], method: "perceptual",
+  };
+  const make = (values) => {
+    const gradient = structuredClone(work);
+    resolveSwatches(gradient);
+    return { kind: "gradient_map", stops: gradient.colors.map((s) => ({ position: s.location, color: s.color })), reverse: !!values.Reverse };
+  };
+  let wrap;
+  const preview = (values) => session.show(values.Preview === false ? original : make(values));
+  wrap = openDialog("gradient-map", {
+    title: l.name,
+    width: 460,
+    fields: [
+      { type: "element", el: gradientEditor(work, () => { if (wrap) preview(dialogValues(wrap)); }, { colorOnly: true }) },
+      { type: "check", label: "Reverse", on: original.reverse },
+      { type: "check", label: "Preview", on: true },
+    ],
+    onChange: preview,
+    onOk: (values) => session.commit(make(values)),
+    onCancel: session.cancel,
   });
 }
 
 function editPerChannel(l, spec) {
-  const original = l.adjustment;
+  const session = adjustmentSession(l);
+  const original = session.original;
   const parts = spec.parts(original).map((c) => JSON.parse(JSON.stringify(c)));
   let shown = spec.first || 0;
   let last = {};
-  const set = (adjustment) => send({ op: "set_adjustment", layer: ref(l.id), adjustment });
   const current = () => spec.make(original, parts, last);
   last = spec.extra ? spec.extra(original) : {};
   openDialog(spec.dialog, {
@@ -846,10 +1045,10 @@ function editPerChannel(l, spec) {
         return;
       }
       parts[shown] = spec.fromValues(values);
-      set(values.Preview === false ? original : current());
+      session.show(values.Preview === false ? original : current());
     },
-    onOk: () => set(current()),
-    onCancel: () => set(original),
+    onOk: () => session.commit(current()),
+    onCancel: session.cancel,
   });
 }
 
@@ -867,7 +1066,10 @@ export function historyPanel() {
 function renderHistory() {
   if (!historyRoot) return;
   clear(historyRoot);
-  const list = h("div", { class: "plist" });
+  // Compact rows, about seven of them by default (Rob, 2026-09-29: the panel
+  // took space the Layers panel needs); the grip under it resizes it.
+  const list = h("div", { class: "plist hlist" });
+  list.style.height = savedHeight("history", 150) + "px";
   if (doc == null) {
     list.append(h("div", { class: "pempty", text: "No document." }));
   } else {
@@ -890,7 +1092,7 @@ function renderHistory() {
       list.append(r);
     });
   }
-  historyRoot.append(list, h("div", { class: "pbar" },
+  historyRoot.append(list, resizeGrip(list, "history", 60, 600), h("div", { class: "pbar" },
     barBtn("i-undo", "Step backward (Ctrl+Z)", () => jump(-1)),
     barBtn("i-redo", "Step forward (Ctrl+Shift+Z)", () => jump(1)),
   ));

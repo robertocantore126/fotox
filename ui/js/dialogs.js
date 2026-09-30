@@ -3,11 +3,14 @@
 
 import { h, icon, clear } from "./el.js";
 import { dialogDef } from "./data/dialogs.js";
-import { openDropdown, popupLayer } from "./popup.js";
-import { state, emit } from "./state.js";
+import { openDropdown, openPopup, popupLayer } from "./popup.js";
+import { state, emit, setColors } from "./state.js";
 import { getDocCanvas } from "./canvas.js";
 
 let stack = [];
+
+/** Every blend mode the engine has, in Photoshop's menu order. */
+export const BLEND_MODES = ["Normal", "Dissolve", "Darken", "Multiply", "Color Burn", "Linear Burn", "Darker Color", "Lighten", "Screen", "Color Dodge", "Linear Dodge (Add)", "Lighter Color", "Overlay", "Soft Light", "Hard Light", "Vivid Light", "Linear Light", "Pin Light", "Hard Mix", "Difference", "Exclusion", "Subtract", "Divide", "Hue", "Saturation", "Color", "Luminosity"];
 
 // `overrides` may also carry, for dialogs that edit something live (M2-T04,
 // adjustment layers in the app):
@@ -21,6 +24,12 @@ let stack = [];
 //             Don't Save / Cancel); each closes the dialog, then runs onClick
 export function openDialog(id, overrides = {}) {
   const def = { ...dialogDef(id), ...overrides };
+  if (id === "color-picker" && !def.onOk) {
+    def.fields = [{ type: "colorpicker", target: def.target }];
+    def.onOk = (values) => {
+      if (values.color) setColors(def.target === "bg" ? null : values.color, def.target === "bg" ? values.color : null);
+    };
+  }
   const fields = def.values ? withValues(def.fields || [], def.values) : def.fields || [];
   const body = h("div", { class: "dlg-body" });
   const cols = fields.some((f) => f.type === "col");
@@ -38,6 +47,7 @@ export function openDialog(id, overrides = {}) {
     // Plain number boxes (not a slider's box): every edit counts.
     grid.querySelectorAll(".dlg-line.inline > .dlg-input.num").forEach((c) => c.addEventListener("input", changed));
     grid.querySelectorAll(".dlg-color + .dlg-input").forEach((c) => c.addEventListener("input", changed));
+    grid.querySelectorAll(".dlg-radiowrap input").forEach((c) => c.addEventListener("change", changed));
   }
 
   const titleBar = h("div", { class: "dlg-title" },
@@ -71,8 +81,11 @@ export function openDialog(id, overrides = {}) {
     h("div", { class: "modal-scrim", onclick: () => close() }),
     dlg);
   popupLayer().append(wrap);
-  stack.push({ wrap, id, onCancel: def.onCancel });
+  const entry = { wrap, id, onCancel: def.onCancel };
+  stack.push(entry);
   emit("overlays");
+  // A live Layer Style sidebar (see `wireStyleList`); the mock's otherwise.
+  if (def.styleList) wireStyleList(grid, def.styleList, () => close(entry, true));
 
   const rect = dlg.getBoundingClientRect();
   dlg.style.marginTop = Math.max(10, (window.innerHeight - rect.height) / 2 - 30) + "px";
@@ -104,7 +117,7 @@ function withValues(fields, values) {
   return fields.map((f) => {
     if (f.fields) return { ...f, fields: withValues(f.fields, values) };
     if (f.type === "curve" && values.curve) return { ...f, points: values.curve };
-    if (f.type === "blend" && values["Blend Mode:"]) return { ...f, mode: values["Blend Mode:"] };
+    if (f.type === "blend" && values[f.label || "Blend Mode:"]) return { ...f, mode: values[f.label || "Blend Mode:"] };
     if (f.label && Object.prototype.hasOwnProperty.call(values, f.label)) {
       return f.type === "check" ? { ...f, on: !!values[f.label] } : { ...f, value: values[f.label] };
     }
@@ -137,6 +150,9 @@ function readValues(grid) {
     // A colour field (M6-T08 style dialogs): its hex box.
     const chip = line.querySelector(".dlg-color");
     if (chip) set(key, line.querySelector("input.dlg-input").value);
+    // A plain text field (`textField`): its text.
+    const text = !chip && line.querySelector(':scope > input.dlg-input[type="text"]:not(.num)');
+    if (text) set(key, text.value);
   });
   grid.querySelectorAll(".dlg-checkline").forEach((line) => {
     const box = line.querySelector(".dlg-check");
@@ -168,6 +184,8 @@ function readValues(grid) {
   });
   const curve = grid.querySelector(".curve-canvas");
   if (curve && curve.getPoints) values.curve = curve.getPoints();
+  const picker = grid.querySelector(".colorpicker");
+  if (picker && picker.getColor) values.color = picker.getColor();
   return values;
 }
 
@@ -264,14 +282,14 @@ function renderField(f) {
     case "matrix": return matrixField();
     case "histo": return histoField();
     case "curve": return curveField(f);
-    case "colorpicker": return colorPickerField();
+    case "colorpicker": return colorPickerField(f);
     // A DOM node a native module built (M8: the Gradient Editor, pattern picker).
     case "element": return f.el;
     case "gradientbar": return gradientBar();
     case "patternpick": return patternPick();
     case "anchor": return anchorField();
     case "stylelist": return styleList(f);
-    case "blend": return h("div", { class: "dlg-line" }, h("span", { class: "dlg-field-label", text: "Blend Mode:" }), selectControl(["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light"], f.mode || "Normal"));
+    case "blend": return h("div", { class: "dlg-line" }, h("span", { class: "dlg-field-label", text: f.label || "Blend Mode:" }), selectControl(BLEND_MODES, f.mode || "Normal"));
     case "balancebar": return balanceBar(f);
     case "glowtype": return h("div", { class: "dlg-line" }, h("span", { class: "dlg-field-label", text: "Technique:" }), radioInline(["Softer", "Precise"], 0), h("span", { class: "dlg-field-label", text: "Source:" }), radioInline(["Edge", "Center"], f.value === "Center" ? 1 : 0));
     case "stroke": return h("div", { class: "dlg-line" }, h("span", { class: "dlg-field-label", text: "Fill Type:" }), selectControl(["Colour", "Gradient", "Pattern"], f.value));
@@ -344,7 +362,8 @@ function radioField(f) {
   (f.options || []).forEach((o, i) => {
     // A multi group (Trim's "Trim Away") starts with every box ticked, as in
     // Photoshop.
-    const dot = h("input", { type: f.multi ? "checkbox" : "radio", name, checked: f.multi ? true : i === f.value });
+    // The start value is an option's index or its label.
+    const dot = h("input", { type: f.multi ? "checkbox" : "radio", name, checked: f.multi ? true : i === f.value || o === f.value });
     group.append(h("label", { class: "dlg-checkline" }, dot, h("span", { text: o })));
   });
   return h("div", { class: "dlg-radiowrap" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, group);
@@ -367,13 +386,148 @@ function rangeField(f) {
     input.value = v;
     input.dispatchEvent(new Event("input"));
   });
-  return h("div", { class: "dlg-line" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, input, out);
+  return h("div", { class: "dlg-line" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, input, out, f.unit ? h("span", { class: "dlg-unit", text: f.unit }) : null);
 }
 
+/**
+ * A colour field: the swatch opens a colour popover (square, hue bar, RGB and
+ * HSB sliders) that edits this field — it used to open the foreground colour
+ * picker, so a style's colour could only be typed as hex. Every change fires
+ * `input` on the hex box, which is what a live dialog listens to.
+ */
 function colorField(f) {
-  const chip = h("button", { class: "dlg-color", type: "button", style: { background: f.value }, onclick: () => emit("ask-dialog", "color-picker") });
-  return h("div", { class: "dlg-line" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, chip,
-    h("input", { class: "dlg-input", type: "text", value: f.value, style: { width: "90px" } }));
+  const input = h("input", { class: "dlg-input", type: "text", value: f.value, style: { width: "90px" } });
+  const chip = h("button", {
+    class: "dlg-color", type: "button", style: { background: f.value }, "data-tip": "Pick a colour",
+    onclick: (e) => {
+      e.stopPropagation();
+      openColorPopover(chip, input.value, (hex) => {
+        input.value = hex;
+        chip.style.background = hex;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    },
+  });
+  input.addEventListener("input", () => { if (parseHex(input.value)) chip.style.background = input.value; });
+  return h("div", { class: "dlg-line" }, f.label ? h("span", { class: "dlg-field-label", text: f.label }) : null, chip, input);
+}
+
+/** `#rgb` / `#rrggbb` → `[r, g, b]` (0..255), or null. */
+function parseHex(value) {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(value).trim());
+  if (!match) return null;
+  const digits = match[1].length === 3 ? [...match[1]].map((c) => c + c).join("") : match[1];
+  const n = parseInt(digits, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+const toHexColor = (rgb) => "#" + rgb.map((n) => Math.round(Math.min(255, Math.max(0, n))).toString(16).padStart(2, "0")).join("");
+function rgbToHsb([r, g, b]) {
+  [r, g, b] = [r / 255, g / 255, b / 255];
+  const hi = Math.max(r, g, b), lo = Math.min(r, g, b), d = hi - lo;
+  let hue = 0;
+  if (d) {
+    if (hi === r) hue = ((g - b) / d) % 6;
+    else if (hi === g) hue = (b - r) / d + 2;
+    else hue = (r - g) / d + 4;
+  }
+  return [((hue * 60) + 360) % 360, hi ? d / hi : 0, hi];
+}
+function hsbToRgb(hue, s, v) {
+  const c = v * s, x = c * (1 - Math.abs(((hue / 60) % 2) - 1)), m = v - c;
+  const p = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x] : hue < 240 ? [0, x, c] : hue < 300 ? [x, 0, c] : [c, 0, x];
+  return p.map((n) => Math.round((n + m) * 255));
+}
+
+/**
+ * A colour popover anchored on `anchor`, starting at `hex`; `onInput(hex)` on
+ * every change (square, hue bar, the R G B / H S B sliders, the hex box).
+ */
+export function openColorPopover(anchor, hex, onInput) {
+  let [hue, sat, bri] = rgbToHsb(parseHex(hex) || [0, 0, 0]);
+  const marker = h("div", { class: "cp-marker" });
+  const hueMarker = h("div", { class: "cp-hue-marker" });
+  const area = h("div", { class: "cp-area" }, marker);
+  const hueBar = h("div", { class: "cp-hue" }, hueMarker);
+  const rows = {};
+  const slider = (key, max) => {
+    const range = h("input", { class: "dlg-range cp-slider", type: "range", min: 0, max, value: 0 });
+    const box = h("input", { class: "dlg-input num", type: "text", value: "0", style: { width: "40px" } });
+    rows[key] = { range, box, max };
+    return h("div", { class: "cp-slider-row" }, h("span", { class: "cp-slider-label", text: key }), range, box);
+  };
+  const hexBox = h("input", { class: "dlg-input", type: "text", value: hex, style: { width: "74px" } });
+  const swatch = h("span", { class: "cp-swatch-now" });
+  const current = () => hsbToRgb(hue, sat, bri);
+  const sync = (from) => {
+    const rgb = current();
+    const values = { R: rgb[0], G: rgb[1], B: rgb[2], H: Math.round(hue), S: Math.round(sat * 100), V: Math.round(bri * 100) };
+    for (const [key, row] of Object.entries(rows)) {
+      if (key !== from) { row.range.value = String(values[key]); row.box.value = String(values[key]); }
+    }
+    // Slider tracks show where each channel goes.
+    const [r, g, b] = rgb;
+    rows.R.range.style.background = `linear-gradient(90deg, rgb(0,${g},${b}), rgb(255,${g},${b}))`;
+    rows.G.range.style.background = `linear-gradient(90deg, rgb(${r},0,${b}), rgb(${r},255,${b}))`;
+    rows.B.range.style.background = `linear-gradient(90deg, rgb(${r},${g},0), rgb(${r},${g},255))`;
+    rows.H.range.style.background = "linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)";
+    rows.S.range.style.background = `linear-gradient(90deg, ${toHexColor(hsbToRgb(hue, 0, bri))}, ${toHexColor(hsbToRgb(hue, 1, bri))})`;
+    rows.V.range.style.background = `linear-gradient(90deg, #000, ${toHexColor(hsbToRgb(hue, sat, 1))})`;
+    marker.style.left = sat * 100 + "%";
+    marker.style.top = (1 - bri) * 100 + "%";
+    hueMarker.style.left = (hue / 360) * 100 + "%";
+    area.style.background = `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent), hsl(${hue} 100% 50%)`;
+    const out = toHexColor(rgb);
+    if (from !== "#") hexBox.value = out;
+    swatch.style.background = out;
+    onInput(out);
+  };
+  const track = (el, changed) => {
+    const move = (e) => {
+      const r = el.getBoundingClientRect();
+      changed(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)));
+      sync();
+    };
+    el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); move(e); });
+    el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) move(e); });
+  };
+  track(area, (x, y) => { sat = x; bri = 1 - y; });
+  track(hueBar, (x) => { hue = Math.min(359.999, x * 360); });
+  const content = h("div", { class: "colorpicker cp-popover" }, area, hueBar,
+    h("div", { class: "cp-sliders" }, slider("R", 255), slider("G", 255), slider("B", 255), slider("H", 359), slider("S", 100), slider("V", 100)),
+    h("div", { class: "cp-slider-row" }, swatch, h("span", { class: "cp-slider-label", text: "#" }), hexBox));
+  const fromRows = (key, value) => {
+    if (key === "R" || key === "G" || key === "B") {
+      const rgb = current();
+      rgb["RGB".indexOf(key)] = value;
+      [hue, sat, bri] = rgbToHsb(rgb);
+      // Keep the hue of a grey while its RGB sliders move.
+      if (rows.H) hue = sat === 0 ? Number(rows.H.range.value) : hue;
+    } else if (key === "H") hue = value;
+    else if (key === "S") sat = value / 100;
+    else bri = value / 100;
+  };
+  for (const [key, row] of Object.entries(rows)) {
+    row.range.addEventListener("input", () => { row.box.value = row.range.value; fromRows(key, Number(row.range.value)); sync(key); });
+    row.box.addEventListener("change", () => {
+      const v = Math.min(row.max, Math.max(0, Math.round(Number(row.box.value)) || 0));
+      row.box.value = String(v);
+      row.range.value = String(v);
+      fromRows(key, v);
+      sync(key);
+    });
+  }
+  hexBox.addEventListener("change", () => {
+    const rgb = parseHex(hexBox.value);
+    if (!rgb) return;
+    [hue, sat, bri] = rgbToHsb(rgb);
+    sync("#");
+  });
+  openPopup({ anchor, content, className: "cp-pop", side: "right", keep: true });
+  // First paint without reporting a change.
+  const report = onInput;
+  onInput = () => {};
+  sync();
+  onInput = report;
 }
 
 function previewField() {
@@ -595,24 +749,94 @@ function buttonClicked(btn, f) {
   if (!fields || !fields.classList.contains("live")) emit("mock", f.text);
 }
 
-function colorPickerField() {
+function colorPickerField(f) {
+  const clamp01 = (n) => Math.min(1, Math.max(0, n));
+  const parseHex = (value) => {
+    const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(value).trim());
+    if (!match) return null;
+    const digits = match[1].length === 3 ? [...match[1]].map((c) => c + c).join("") : match[1];
+    const n = parseInt(digits, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const toHex = (rgb) => "#" + rgb.map((n) => Math.round(n).toString(16).padStart(2, "0")).join("");
+  const toHsv = ([r, g, b]) => {
+    [r, g, b] = [r / 255, g / 255, b / 255];
+    const hi = Math.max(r, g, b), lo = Math.min(r, g, b), d = hi - lo;
+    let h = 0;
+    if (d) {
+      if (hi === r) h = ((g - b) / d) % 6;
+      else if (hi === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+    }
+    return [((h * 60) + 360) % 360, hi ? d / hi : 0, hi];
+  };
+  const toRgb = (h, s, v) => {
+    const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+    const parts = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+      : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+    return parts.map((n) => Math.round((n + m) * 255));
+  };
+
+  let [hueValue, saturation, brightness] = toHsv(parseHex(f.target === "bg" ? state.colors.bg : state.colors.fg) || [0, 0, 0]);
+  let current = "#000000";
   const wrap = h("div", { class: "colorpicker" });
-  const area = h("div", { class: "cp-area", onclick: moveMarker }, h("div", { class: "cp-marker", style: { left: "70%", top: "30%" } }));
-  const hue = h("div", { class: "cp-hue", onclick: moveMarker }, h("div", { class: "cp-hue-marker", style: { left: "18%" } }));
-  function moveMarker(e) {
-    const r = e.currentTarget.getBoundingClientRect();
-    const marker = e.currentTarget.querySelector("[class$=marker]");
-    if (!marker) return;
-    const x = ((e.clientX - r.left) / r.width) * 100;
-    const y = ((e.clientY - r.top) / r.height) * 100;
-    if (marker.classList.contains("cp-marker")) { marker.style.left = x + "%"; marker.style.top = y + "%"; }
-    else marker.style.left = x + "%";
-  }
-  wrap.append(area, hue,
-    h("div", { class: "cp-fields" },
-      ...[["R", "30"], ["G", "30"], ["B", "34"], ["H", "230"], ["S", "12"], ["B", "13"]].map(([k, v]) => h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: k }), h("input", { class: "dlg-input num", type: "text", value: v }))),
-      h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: "#" }), h("input", { class: "dlg-input", type: "text", value: "1E1E22" }))),
-    h("div", { class: "cp-swatches" }, ...["#1e1e22", "#ffffff", "#e26060", "#7ac74f", "#5b8df5", "#f5d442", "#8b5cf6", "#3fb6a8"].map((c) => h("span", { class: "swatch", style: { background: c } }))));
+  const marker = h("div", { class: "cp-marker" });
+  const hueMarker = h("div", { class: "cp-hue-marker" });
+  const area = h("div", { class: "cp-area" }, marker);
+  const hue = h("div", { class: "cp-hue" }, hueMarker);
+  const inputs = {};
+  const field = (key) => {
+    const input = h("input", { class: "dlg-input num", type: "text", inputmode: "numeric", "aria-label": key });
+    inputs[key] = input;
+    return h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: key }), input);
+  };
+  const fields = h("div", { class: "cp-fields" }, ...["R", "G", "B", "H", "S", "V"].map(field), field("#"));
+  const sync = () => {
+    const [r, g, b] = toRgb(hueValue, saturation, brightness);
+    current = toHex([r, g, b]);
+    inputs.R.value = String(r);
+    inputs.G.value = String(g);
+    inputs.B.value = String(b);
+    inputs.H.value = String(Math.round(hueValue));
+    inputs.S.value = String(Math.round(saturation * 100));
+    inputs.V.value = String(Math.round(brightness * 100));
+    inputs["#"].value = current.slice(1).toUpperCase();
+    marker.style.left = saturation * 100 + "%";
+    marker.style.top = (1 - brightness) * 100 + "%";
+    hueMarker.style.left = hueValue / 360 * 100 + "%";
+    area.style.background = `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent), hsl(${hueValue} 100% 50%)`;
+  };
+  const fromRgb = (rgb) => { [hueValue, saturation, brightness] = toHsv(rgb); sync(); };
+  const track = (el, changed) => {
+    const move = (e) => {
+      const r = el.getBoundingClientRect();
+      changed(clamp01((e.clientX - r.left) / r.width), clamp01((e.clientY - r.top) / r.height));
+      sync();
+    };
+    el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); move(e); });
+    el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) move(e); });
+  };
+  track(area, (x, y) => { saturation = x; brightness = 1 - y; });
+  track(hue, (x) => { hueValue = Math.min(359.999, x * 360); });
+  for (const key of ["R", "G", "B"]) inputs[key].addEventListener("change", () => {
+    const rgb = ["R", "G", "B"].map((k) => Math.min(255, Math.max(0, Number(inputs[k].value) || 0)));
+    fromRgb(rgb);
+  });
+  for (const key of ["H", "S", "V"]) inputs[key].addEventListener("change", () => {
+    hueValue = ((Number(inputs.H.value) || 0) % 360 + 360) % 360;
+    saturation = clamp01((Number(inputs.S.value) || 0) / 100);
+    brightness = clamp01((Number(inputs.V.value) || 0) / 100);
+    sync();
+  });
+  inputs["#"].addEventListener("change", () => {
+    const rgb = parseHex(inputs["#"].value);
+    if (rgb) fromRgb(rgb); else sync();
+  });
+  const swatches = h("div", { class: "cp-swatches" }, ...["#1e1e22", "#ffffff", "#e26060", "#7ac74f", "#5b8df5", "#f5d442", "#8b5cf6", "#3fb6a8"]
+    .map((c) => h("button", { class: "swatch", type: "button", style: { background: c }, "aria-label": c, onclick: () => fromRgb(parseHex(c)) })));
+  wrap.append(area, hue, fields, swatches);
+  wrap.getColor = () => current;
+  sync();
   return wrap;
 }
 
@@ -651,10 +875,52 @@ function styleList(f) {
   for (const item of f.items || []) {
     list.append(h("div", {
       class: "style-picker-row" + (item === f.active || (item === "Blending Options: Default" && !f.active) ? " sel" : ""),
+      "data-item": item,
       onclick: (e) => { [...list.children].forEach((c) => c.classList.remove("sel")); e.currentTarget.classList.add("sel"); },
     }, item === "Styles" || item === "Blending Options: Default" ? null : h("span", { class: "style-picker-check" }, icon("i-check", "ic xs")), h("span", { text: item })));
   }
   return list;
+}
+
+/**
+ * Make the Layer Style sidebar real (`spec` from the app's style dialogs):
+ * each effect's box shows whether it is on for the layer and turns it on
+ * or off (`spec.onToggle(name, on)`); a click on a name switches to that
+ * page (`spec.onPick(name)`), keeping what was done on this one (`done`
+ * closes this page without cancelling). The mock-up's list showed every
+ * effect ticked and only moved the highlight.
+ */
+function wireStyleList(grid, spec, done) {
+  const list = grid.querySelector(".style-picker");
+  if (!list) return;
+  for (const old of [...list.children]) {
+    const name = old.dataset.item;
+    if (name === "Styles") { old.remove(); continue; } // style presets: not in the app
+    const row = old.cloneNode(true); // without the mock's listeners
+    old.replaceWith(row);
+    const box = row.querySelector(".style-picker-check");
+    if (box) {
+      box.classList.add("live");
+      const paint = () => {
+        clear(box);
+        if (spec.enabled[name]) box.append(icon("i-check", "ic xs"));
+        box.classList.toggle("on", !!spec.enabled[name]);
+        box.dataset.tip = spec.enabled[name] ? `Turn ${name} off` : `Turn ${name} on`;
+      };
+      paint();
+      box.addEventListener("click", (e) => {
+        e.stopPropagation();
+        spec.enabled[name] = !spec.enabled[name];
+        paint();
+        spec.onToggle(name, spec.enabled[name]);
+      });
+    }
+    row.addEventListener("click", () => {
+      if (row.classList.contains("sel")) return;
+      done();
+      spec.onPick(name);
+    });
+  }
 }
 
 function blendIfField(f) {

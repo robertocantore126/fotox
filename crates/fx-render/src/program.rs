@@ -119,6 +119,9 @@ pub enum Op {
 		mask: Option<MaskRef>,
 		/// Source-atop (clipped layer): keeps the backdrop alpha.
 		clip: bool,
+		/// Blending Options ▸ Blend If: the layer's alpha × how much its own
+		/// grey and the backdrop's grey let it show.
+		blend_if: Option<fx_core::styles::BlendIf>,
 	},
 	/// Adjustment layer: `Cs = f(Cb)`, always composited source-atop.
 	Adjust {
@@ -245,11 +248,27 @@ impl TileRequest {
 ///
 /// Errors with the list of dirty mip tiles if any input is not computed yet.
 pub fn build_program(doc: &Document, level: usize, tx: u32, ty: u32, luts: &mut dyn FnMut(&Adjustment) -> Arc<Lut>) -> Result<TileProgram, Vec<TileRequest>> {
+	build_program_checked(doc, level, tx, ty, luts, &|_| false)
+}
+
+/// [`build_program`] that also asks for the derived tiles `evicted` says the
+/// store dropped (`TileStore::is_evicted`): such a tile is clean in its image
+/// but has no pixels left, and only its producer can bring it back (code
+/// review 2026-09-27 R01). The render thread builds its programs this way.
+pub fn build_program_checked(
+	doc: &Document,
+	level: usize,
+	tx: u32,
+	ty: u32,
+	luts: &mut dyn FnMut(&Adjustment) -> Arc<Lut>,
+	evicted: &dyn Fn(&fx_tiles::TileHandle) -> bool,
+) -> Result<TileProgram, Vec<TileRequest>> {
 	let mut builder = Builder {
 		level,
 		origin: (tx as i64 * TILE_SIZE as i64, ty as i64 * TILE_SIZE as i64),
 		missing: Vec::new(),
 		luts,
+		evicted,
 		global_light: doc.global_light,
 	};
 	let ops = builder.list(&doc.layers);
@@ -276,6 +295,7 @@ struct Builder<'a> {
 	origin: (i64, i64),
 	missing: Vec<TileRequest>,
 	luts: &'a mut dyn FnMut(&Adjustment) -> Arc<Lut>,
+	evicted: &'a dyn Fn(&fx_tiles::TileHandle) -> bool,
 	global_light: f64,
 }
 
@@ -293,12 +313,86 @@ enum SourceTile {
 	Effect(u8),
 }
 
-enum MaskEval {
+/// One mask's value over a tile.
+enum Single {
 	/// Mask is 0 everywhere in this tile: the layer is invisible here.
 	Hidden,
 	/// Mask is this constant here: folded into alpha.
 	Constant(f32),
 	Varying(MaskRef),
+}
+
+/// A layer's pixel and vector masks together over a tile: their product.
+enum MaskEval {
+	Hidden,
+	Constant(f32),
+	/// `factor` (the constant one of the two, if any) folds into alpha;
+	/// `second` is set when both masks vary here.
+	Varying {
+		factor: f32,
+		mask: MaskRef,
+		second: Option<MaskRef>,
+	},
+}
+
+/// What an op carries after its masks: alpha with the constant part folded
+/// in, the op's own mask and the second varying mask, if any.
+type Masked = (f32, Option<MaskRef>, Option<MaskRef>);
+
+impl MaskEval {
+	/// `alpha` × the masks; `None` when nothing shows.
+	fn apply(self, alpha: f32) -> Option<Masked> {
+		match self {
+			MaskEval::Hidden => None,
+			MaskEval::Constant(m) if m <= 0.0 => None,
+			MaskEval::Constant(m) => Some((alpha * m, None, None)),
+			MaskEval::Varying { factor, mask, second } => Some((alpha * factor, Some(mask), second)),
+		}
+	}
+}
+
+/// An op whose layer has a second varying mask (pixel and vector masks both
+/// vary in this tile, code review 2026-09-27 R12): the op draws with the
+/// first, and a group around it applies the second. For a layer,
+/// `B(D, L, α·m₁·m₂)` = the layer drawn Normal with `α·m₁` into an isolated
+/// group, composited with `B` and `m₂`; for an adjustment, a pass-through
+/// group lerps by `m₂`. Both are exact.
+fn with_second_mask(op: Op, second: Option<MaskRef>) -> Vec<Op> {
+	let Some(second) = second else { return vec![op] };
+	match op {
+		Op::Layer {
+			layer,
+			source,
+			blend,
+			alpha,
+			mask,
+			clip,
+			blend_if,
+		} => wrap_isolated(
+			vec![Op::Layer {
+				layer,
+				source,
+				blend: BlendMode::Normal,
+				alpha,
+				mask,
+				clip: false,
+				blend_if,
+			}],
+			blend,
+			1.0,
+			Some(second),
+			clip,
+		),
+		adjust @ Op::Adjust { .. } => vec![
+			Op::BeginPassThrough,
+			adjust,
+			Op::EndPassThrough {
+				alpha: 1.0,
+				mask: Some(second),
+			},
+		],
+		other => vec![other],
+	}
 }
 
 impl Builder<'_> {
@@ -342,11 +436,14 @@ impl Builder<'_> {
 				if inner.is_empty() {
 					return Vec::new();
 				}
-				match self.mask(base) {
-					MaskEval::Hidden => return Vec::new(),
-					MaskEval::Constant(m) => wrap_isolated(inner, BlendMode::Normal, m, None, false),
-					MaskEval::Varying(mask) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(mask), false),
-				}
+				let Some((alpha, mask, second)) = self.mask(base).apply(1.0) else {
+					return Vec::new();
+				};
+				let inner = match second {
+					Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
+					None => inner,
+				};
+				wrap_isolated(inner, BlendMode::Normal, alpha, mask, false)
 			}
 			_ => self.content(base, BlendMode::Normal, base.fill, false),
 		};
@@ -380,59 +477,92 @@ impl Builder<'_> {
 							alpha: 1.0,
 							mask: None,
 							clip: false,
+							blend_if: None,
 						},
 					);
 				}
 				if inner.is_empty() {
+					// A styled group's shadow or glow can reach tiles its content does not.
+					return self.with_effects(layer, clip, Vec::new());
+				}
+				let Some((alpha, mask, second)) = self.mask(layer).apply(layer.opacity) else {
 					return Vec::new();
-				}
-				let (alpha, mask) = match self.mask(layer) {
-					MaskEval::Hidden => return Vec::new(),
-					MaskEval::Constant(m) => (layer.opacity * m, None),
-					MaskEval::Varying(mask) => (layer.opacity, Some(mask)),
 				};
-				if layer.blend == BlendMode::PassThrough && !clip {
-					if alpha >= 1.0 && mask.is_none() {
-						return inner; // exactly equivalent, cheaper
+				// Both masks vary: the inner group applies the second (a nested
+				// pass-through lerp, or an isolated group, are both exact).
+				let inner = match second {
+					Some(second) if layer.blend == BlendMode::PassThrough && !clip => {
+						let mut ops = Vec::with_capacity(inner.len() + 2);
+						ops.push(Op::BeginPassThrough);
+						ops.extend(inner);
+						ops.push(Op::EndPassThrough {
+							alpha: 1.0,
+							mask: Some(second),
+						});
+						ops
 					}
-					let mut ops = Vec::with_capacity(inner.len() + 2);
-					ops.push(Op::BeginPassThrough);
-					ops.extend(inner);
-					ops.push(Op::EndPassThrough { alpha, mask });
-					return ops;
-				}
-				wrap_isolated(inner, normal_if_pass(layer.blend), alpha, mask, clip)
+					Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
+					None => inner,
+				};
+				let group = if layer.blend == BlendMode::PassThrough && !clip {
+					if alpha >= 1.0 && mask.is_none() {
+						inner // exactly equivalent, cheaper
+					} else {
+						let mut ops = Vec::with_capacity(inner.len() + 2);
+						ops.push(Op::BeginPassThrough);
+						ops.extend(inner);
+						ops.push(Op::EndPassThrough { alpha, mask });
+						ops
+					}
+				} else {
+					wrap_isolated(inner, normal_if_pass(layer.blend), alpha, mask, clip)
+				};
+				// A styled group: its effects around its composite, as for a layer.
+				self.with_effects(layer, clip, group)
 			}
 			_ => {
-				let content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
-				// Layer styles (M6-T08): shadows and glows under the content,
-				// the interior effects and the stroke over it, each with its own
-				// mode and opacity × the layer's (fill does not reach them).
-				// FAST: ignored on clipped layers; the mask shapes the effects
-				// like the content (VERIFY "Layer Mask Hides Effects").
-				let Some(styles) = layer
-					.styles
-					.as_ref()
-					.filter(|_| !clip && layer.effects.len() == fx_core::styles::EffectKind::ALL.len())
-				else {
-					return content;
-				};
-				let mut below = Vec::new();
-				let mut above = Vec::new();
-				for kind in fx_core::styles::EffectKind::ALL {
-					let Some(params) = styles.effect(kind, self.global_light) else { continue };
-					let ops = self.effect(layer, kind, &params);
-					if kind.below_content() {
-						below.extend(ops);
-					} else {
-						above.extend(ops);
+				let mut content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
+				// Blend If shapes the content only (effects keep their own alpha).
+				if let Some(range) = layer.styles.as_ref().and_then(|s| s.blend_if).filter(|b| !b.is_identity()) {
+					for op in &mut content {
+						if let Op::Layer { blend_if, .. } = op {
+							*blend_if = Some(range);
+						}
 					}
 				}
-				below.extend(content);
-				below.extend(above);
-				below
+				self.with_effects(layer, clip, content)
 			}
 		}
+	}
+
+	/// Layer styles (M6-T08): shadows and glows under `content`, the interior
+	/// effects and the stroke over it, each with its own mode and opacity ×
+	/// the layer's (fill does not reach them). A group's effects surround its
+	/// whole composite.
+	/// FAST: ignored on clipped layers; the mask shapes the effects like the
+	/// content (VERIFY "Layer Mask Hides Effects").
+	fn with_effects(&mut self, layer: &Layer, clip: bool, content: Vec<Op>) -> Vec<Op> {
+		let Some(styles) = layer
+			.styles
+			.as_ref()
+			.filter(|_| !clip && layer.effects.len() == fx_core::styles::EffectKind::ALL.len())
+		else {
+			return content;
+		};
+		let mut below = Vec::new();
+		let mut above = Vec::new();
+		for kind in fx_core::styles::EffectKind::ALL {
+			let Some(params) = styles.effect(kind, self.global_light) else { continue };
+			let ops = self.effect(layer, kind, &params);
+			if kind.below_content() {
+				below.extend(ops);
+			} else {
+				above.extend(ops);
+			}
+		}
+		below.extend(content);
+		below.extend(above);
+		below
 	}
 
 	/// The op of one layer-style effect: its cache, composited like a layer.
@@ -441,11 +571,8 @@ impl Builder<'_> {
 		if alpha <= 0.0 {
 			return Vec::new();
 		}
-		let (alpha, mask) = match self.mask(layer) {
-			MaskEval::Hidden => return Vec::new(),
-			MaskEval::Constant(m) if m <= 0.0 => return Vec::new(),
-			MaskEval::Constant(m) => (alpha * m, None),
-			MaskEval::Varying(mask) => (alpha, Some(mask)),
+		let Some((alpha, mask, second)) = self.mask(layer).apply(alpha) else {
+			return Vec::new();
 		};
 		let Some(cache) = layer.effects.get(kind.index()) else {
 			return Vec::new();
@@ -456,14 +583,18 @@ impl Builder<'_> {
 		if quad.all_empty() {
 			return Vec::new();
 		}
-		vec![Op::Layer {
-			layer: layer.id,
-			source: Source::Tiles(quad),
-			blend: params.blend,
-			alpha,
-			mask,
-			clip: false,
-		}]
+		with_second_mask(
+			Op::Layer {
+				layer: layer.id,
+				source: Source::Tiles(quad),
+				blend: params.blend,
+				alpha,
+				mask,
+				clip: false,
+				blend_if: None,
+			},
+			second,
+		)
 	}
 
 	/// A non-group layer's own op, with its mask.
@@ -471,11 +602,8 @@ impl Builder<'_> {
 		if alpha <= 0.0 {
 			return Vec::new();
 		}
-		let (alpha, mask) = match self.mask(layer) {
-			MaskEval::Hidden => return Vec::new(),
-			MaskEval::Constant(m) if m <= 0.0 => return Vec::new(),
-			MaskEval::Constant(m) => (alpha * m, None),
-			MaskEval::Varying(mask) => (alpha, Some(mask)),
+		let Some((alpha, mask, second)) = self.mask(layer).apply(alpha) else {
+			return Vec::new();
 		};
 		let op = match &layer.kind {
 			LayerKind::Pixel { image, offset } => {
@@ -492,6 +620,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			LayerKind::SolidFill { rgba } => Op::Layer {
@@ -501,6 +630,7 @@ impl Builder<'_> {
 				alpha,
 				mask,
 				clip,
+				blend_if: None,
 			},
 			// A shape layer's pixels are its cache: rasterised from the geometry
 			// at this level, on demand (M6-T06). The fill and stroke colours live
@@ -522,6 +652,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			// A text layer's pixels are its cache too: laid out from the string
@@ -544,6 +675,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			// A gradient / pattern fill layer (M8-T03/T06): drawn from its
@@ -563,6 +695,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			LayerKind::Adjustment(adjustment) => {
@@ -642,22 +775,39 @@ impl Builder<'_> {
 			}
 			LayerKind::Group { .. } => unreachable!("groups are handled by `layer`"),
 		};
-		vec![op]
+		with_second_mask(op, second)
 	}
 
+	/// The layer's masks over this tile: the pixel mask times the vector mask
+	/// (M10-T06), each with its own enable and density.
 	fn mask(&mut self, layer: &Layer) -> MaskEval {
-		// A vector mask (M10-T06). FAST: with a pixel mask as well, the pixel
-		// mask alone is used (the ops carry one mask).
-		let pixel_mask = matches!(&layer.mask, Some(Mask { enabled: true, .. }));
-		if !pixel_mask && let Some(vm) = layer.vector_mask.as_ref().filter(|v| v.enabled) {
-			let outside = 1.0 - vm.density;
-			let Some(quad) = self.quad(&vm.cache, (0, 0), layer.id, SourceTile::VectorMask) else {
-				return MaskEval::Constant(1.0);
-			};
-			return self.eval_quad(quad, outside);
+		let pixel = self.pixel_mask(layer);
+		let vector = match layer.vector_mask.as_ref().filter(|v| v.enabled) {
+			Some(vm) => match self.quad(&vm.cache, (0, 0), layer.id, SourceTile::VectorMask) {
+				Some(quad) => self.eval_quad(quad, 1.0 - vm.density),
+				None => Single::Constant(1.0),
+			},
+			None => Single::Constant(1.0),
+		};
+		match (pixel, vector) {
+			(Single::Hidden, _) | (_, Single::Hidden) => MaskEval::Hidden,
+			(Single::Constant(a), Single::Constant(b)) if a * b <= 0.0 => MaskEval::Hidden,
+			(Single::Constant(a), Single::Constant(b)) => MaskEval::Constant(a * b),
+			(Single::Constant(factor), Single::Varying(mask)) | (Single::Varying(mask), Single::Constant(factor)) => {
+				MaskEval::Varying { factor, mask, second: None }
+			}
+			(Single::Varying(mask), Single::Varying(second)) => MaskEval::Varying {
+				factor: 1.0,
+				mask,
+				second: Some(second),
+			},
 		}
+	}
+
+	/// The pixel mask alone.
+	fn pixel_mask(&mut self, layer: &Layer) -> Single {
 		let Some(mask @ Mask { enabled: true, .. }) = &layer.mask else {
-			return MaskEval::Constant(1.0);
+			return Single::Constant(1.0);
 		};
 		let offset = match (&layer.kind, mask.linked) {
 			(LayerKind::Pixel { offset, .. }, true) => *offset,
@@ -665,7 +815,7 @@ impl Builder<'_> {
 		};
 		let outside = mask.outside_value as f32 / 65535.0;
 		let Some(quad) = self.quad(&mask.image, offset, layer.id, SourceTile::Mip { mask: true }) else {
-			return MaskEval::Constant(1.0);
+			return Single::Constant(1.0);
 		};
 		// Constant if every slot this tile reads is uniform with the same value.
 		let mut constant: Option<f32> = None;
@@ -690,36 +840,36 @@ impl Builder<'_> {
 			}
 		}
 		if varying {
-			return MaskEval::Varying(MaskRef { quad, outside });
+			return Single::Varying(MaskRef { quad, outside });
 		}
 		// Unused slots are `Outside`; if they were all unused, the tile reads
 		// only the top-left slot — covered by the loop above.
 		match constant.unwrap_or(outside) {
-			v if v <= 0.0 => MaskEval::Hidden,
-			v => MaskEval::Constant(v),
+			v if v <= 0.0 => Single::Hidden,
+			v => Single::Constant(v),
 		}
 	}
 
 	/// A mask quad as a constant, hidden or varying mask (M10-T06, the same
 	/// test as `mask`'s).
-	fn eval_quad(&self, quad: Quad, outside: f32) -> MaskEval {
+	fn eval_quad(&self, quad: Quad, outside: f32) -> Single {
 		let mut constant: Option<f32> = None;
 		for slot in &quad.slots {
 			let value = match slot {
 				QuadSlot::Outside => outside,
 				QuadSlot::Slot(TileSlot::Empty) => 0.0,
 				QuadSlot::Slot(TileSlot::Solid(v)) => v.0[0] as f32 / 65535.0,
-				QuadSlot::Slot(TileSlot::Data(_)) => return MaskEval::Varying(MaskRef { quad, outside }),
+				QuadSlot::Slot(TileSlot::Data(_)) => return Single::Varying(MaskRef { quad, outside }),
 			};
 			match constant {
 				None => constant = Some(value),
-				Some(c) if c != value => return MaskEval::Varying(MaskRef { quad, outside }),
+				Some(c) if c != value => return Single::Varying(MaskRef { quad, outside }),
 				_ => {}
 			}
 		}
 		match constant.unwrap_or(outside) {
-			v if v <= 0.0 => MaskEval::Hidden,
-			v => MaskEval::Constant(v),
+			v if v <= 0.0 => Single::Hidden,
+			v => Single::Constant(v),
 		}
 	}
 
@@ -749,7 +899,8 @@ impl Builder<'_> {
 				return QuadSlot::Outside;
 			}
 			let (gx, gy) = (gx as u32, gy as u32);
-			if image.is_dirty(level, gx, gy) {
+			let dropped = matches!(image.slot(level, gx, gy), TileSlot::Data(h) if h.class() == fx_tiles::TileClass::Derived && (self.evicted)(h));
+			if image.is_dirty(level, gx, gy) || dropped {
 				dirty = true;
 				self.missing.push(match source {
 					SourceTile::Mip { mask } => TileRequest::Mip(MipRequest {
@@ -822,6 +973,7 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			alpha,
 			mask,
 			clip,
+			blend_if,
 		} => {
 			layer.hash(h);
 			hash_source(source, h);
@@ -829,6 +981,7 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			alpha.to_bits().hash(h);
 			hash_mask(mask, h);
 			clip.hash(h);
+			blend_if.hash(h);
 		}
 		Op::Adjust {
 			layer,

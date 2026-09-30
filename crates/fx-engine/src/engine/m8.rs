@@ -122,9 +122,8 @@ impl Engine {
 	fn define_pattern(&mut self, from_selection: bool) {
 		let Some(doc_id) = self.docs.active_id() else { return };
 		let store = self.store.clone();
-		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		// FAST: draws every dirty level-0 shape tile, not only those in the rect.
-		crate::vector::prepare_level0(&mut open.doc, &store, None);
+		let Some(open) = self.docs.get(doc_id) else { return };
+		// The composite computes the derived tiles of the rectangle only.
 		let doc = open.doc.clone();
 		let (x0, y0, x1, y1) = match (&doc.selection, from_selection) {
 			(Some(selection), _) => match selection.canvas_bounds((doc.width, doc.height)) {
@@ -235,7 +234,8 @@ impl Engine {
 			"brush:list" => {}
 			"brush:import-abr" => {
 				let data = upload(args);
-				let text = match self.resources.brushes.import_abr(&data) {
+				let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Imported");
+				let text = match self.resources.brushes.import_abr(&data, name) {
 					Ok(0) => "The brush file has no sampled tips Fotox can read".to_owned(),
 					Ok(n) => {
 						self.resources.brushes.save();

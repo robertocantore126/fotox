@@ -77,6 +77,14 @@ function openAiPrefs(id) {
   const variations = input(prefs.comfy_variations ?? 3, 60);
   const fill = input(prefs.comfy_workflow_fill, 260, "bundled inpaint workflow");
   const expand = input(prefs.comfy_workflow_expand, 260, "bundled outpaint workflow");
+  const objectModel = h("select", { class: "dlg-select" },
+    h("option", { value: "birefnet", text: "BiRefNet — precise edges (default)" }),
+    h("option", { value: "sam", text: "EfficientSAM — faster, any region" }));
+  objectModel.value = prefs.ai_object_model === "sam" ? "sam" : "birefnet";
+  const objectBox = h("div", { class: "dlg-group" },
+    h("div", { class: "dlg-group-title", text: "Object Selection tool" }),
+    row("Model:", objectModel),
+    h("div", { class: "dlg-label", text: "BiRefNet reads the area you draw at full resolution. A click on something that does not stand out falls back to EfficientSAM when it is installed." }));
   const comfy = h("div", { class: "dlg-group" },
     h("div", { class: "dlg-group-title", text: "Generative Fill / Expand — local ComfyUI" }),
     row("Address:", address),
@@ -93,11 +101,13 @@ function openAiPrefs(id) {
     width: 640,
     fields: [
       { type: "element", el: h("div", { class: "dlg-group" }, h("div", { class: "dlg-group-title", text: "Models (local, ONNX Runtime)" }), aiModels) },
+      { type: "element", el: objectBox },
       { type: "element", el: comfy },
     ],
     onOk: () => {
       const num = (el, lo, hi, def) => Math.min(hi, Math.max(lo, Number(el.value) || def));
       set({
+        ai_object_model: objectModel.value,
         comfy_address: address.value.trim(),
         comfy_checkpoint: checkpoint.value.trim(),
         comfy_negative: negative.value.trim() || undefined,
@@ -129,13 +139,19 @@ export function openPrefsDialog(id) {
     });
     return;
   }
-  // General / Performance (FAST: one page; the scratch folder is shown, not edited).
+  // General / Performance (FAST: one page). The scratch folder is where tiles
+  // go when the memory budget is full: a fast local disk with room (an
+  // existing folder; empty = %LOCALAPPDATA%\Fotox\scratch).
   openDialog(id, {
     title: "Preferences — Performance",
     fields: [
       { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? 4096, w: 80 },
-      { type: "label", text: `Scratch folder: ${prefs.scratch_dir || "default"} — applies at the next start` },
+      { type: "text", label: "Scratch Folder:", value: prefs.scratch_dir || "", width: 260 },
+      { type: "label", text: "The scratch folder must exist; it applies at the next start." },
     ],
-    onOk: (v) => set({ memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 4096)) }),
+    onOk: (v) => set({
+      memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 4096)),
+      scratch_dir: String(v["Scratch Folder:"] ?? "").trim(),
+    }),
   });
 }

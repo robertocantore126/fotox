@@ -5,8 +5,15 @@
 //! handle is being dragged, refined when the pointer rests), into a display
 //! image that the render snapshot puts in place of the layer. The work of one
 //! update is bounded by the screen, never by the layer: the resampler reads
-//! the source's mip level that matches the scale, and the preparation job has
-//! made every level of the source valid once, at the start.
+//! the source's mip level that matches the scale, computing the mips it reads
+//! the first time (code review 2026-09-27 R06: the preparation job used to
+//! make every level valid up front, and a mip the trim then dropped failed
+//! the preview).
+//!
+//! A Smart Object previews what the command will make of it: its source
+//! composite through the box's mapping composed with its transform. With
+//! Smart Filters on, it previews its rendered pixels instead (the filters run
+//! on the canvas, after the transform).
 //!
 //! With a selection the lifted pixels are what moves: the snapshot shows the
 //! layer with the hole they left and a floating layer above it holding the
@@ -15,8 +22,8 @@
 //! The latest request wins: a job compares its number with `latest` before
 //! it starts and the engine drops a result that is not the newest.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use fx_core::pixels::{Placed, clear, extract, place_in};
 use fx_core::{Document, Filter, LayerId, LayerKind, Mapping, Selection, dest_rect};
@@ -24,7 +31,7 @@ use fx_ops::resample::SourceInfo;
 use fx_render::{ViewTransform, ViewportSize};
 use fx_tiles::{PixelValue, TileClass, TileError, TileSlot, TileStore, TiledImage};
 
-use crate::ops::ImageSource;
+use crate::mips::LazyMips;
 
 /// The layer id the floating selection gets in the render snapshot: never a
 /// real layer's (ids are allocated upwards from 1).
@@ -35,11 +42,14 @@ pub type Shown = (TiledImage, (i32, i32));
 
 /// What the transform moves, prepared once per session on a worker.
 pub struct Prepared {
-	/// The layer's content, or the lifted selection, with every mip level
-	/// valid.
-	pub source: TiledImage,
+	/// The layer's content, or the lifted selection; its mips are computed
+	/// as previews read them and kept for the next one.
+	pub source: Mutex<TiledImage>,
 	/// Where `source` sits on the canvas.
 	pub source_at: (i32, i32),
+	/// A Smart Object's transform: `source` is its composite, placed by this
+	/// mapping (the box's mapping is composed with it, as the command does).
+	pub placement: Option<Mapping>,
 	/// With a selection: the layer's pixels with the hole the lifted ones left
 	/// (at the layer's own offset).
 	pub hole: Option<TiledImage>,
@@ -47,29 +57,45 @@ pub struct Prepared {
 
 impl Prepared {
 	/// Cut out what `layer` of `doc` moves: the selected pixels when there is
-	/// a selection, else the layer's content (to its non-empty tiles), and
-	/// compute every mip level of it so a preview at any zoom reads the level
-	/// it needs. `None` when there is nothing to move.
+	/// a selection, else the layer's content (a Smart Object: its source and
+	/// transform; the selection does not apply to one, as with the command).
+	/// `None` when there is nothing to move.
 	pub fn new(doc: &Document, layer: LayerId, store: &TileStore) -> Result<Option<Self>, TileError> {
-		// A Smart Object previews from its drawn level-0 cache (M12-T01;
-		// FAST: the committed transform is resampled from the source, the
-		// preview from the cache). The caller drew level 0 first.
-		let smart_pixels;
+		if let Some(LayerKind::Smart { smart, .. }) = doc.layer(layer).map(|l| &l.kind) {
+			let filtered = smart.filters_enabled && smart.filters.iter().any(|f| f.enabled);
+			let (source, placement) = if filtered {
+				// The filters run after the transform: preview the rendered
+				// pixels (drawn here, on the worker).
+				let content = crate::derived::layer_content(doc, store, layer).map_err(|e| TileError::Io(std::io::Error::other(e.to_string())))?;
+				(content, None)
+			} else {
+				(smart.source.composite.clone(), Some(smart.transform))
+			};
+			return Ok(Some(Self {
+				source: Mutex::new(source),
+				source_at: (0, 0),
+				placement,
+				hole: None,
+			}));
+		}
+		// Shape and type: their drawn pixels preview the move (the commit
+		// changes their matrix, losslessly).
+		if matches!(doc.layer(layer).map(|l| &l.kind), Some(LayerKind::Shape { .. } | LayerKind::Text { .. })) {
+			let content = crate::derived::layer_content(doc, store, layer).map_err(|e| TileError::Io(std::io::Error::other(e.to_string())))?;
+			return Ok(Some(Self {
+				source: Mutex::new(content),
+				source_at: (0, 0),
+				placement: None,
+				hole: None,
+			}));
+		}
 		let (image, offset) = match doc.layer(layer).map(|l| &l.kind) {
 			Some(LayerKind::Pixel { image, offset }) => (image, offset),
-			Some(LayerKind::Smart { cache, .. }) => {
-				let mut copy = TiledImage::new(cache.width(), cache.height(), cache.format());
-				for (tx, ty, slot) in cache.grid(0).non_empty() {
-					copy.set_slot(tx, ty, slot.clone());
-				}
-				smart_pixels = copy;
-				(&smart_pixels, &(0, 0))
-			}
 			_ => return Ok(None),
 		};
 		let canvas = (doc.width, doc.height);
 		let placed = Placed { image, offset: *offset };
-		let (mut source, source_at, hole) = match &doc.selection {
+		let (source, source_at, hole) = match &doc.selection {
 			Some(selection) => {
 				let Some((x0, y0, x1, y1)) = selection.canvas_bounds(canvas) else {
 					return Ok(None);
@@ -81,15 +107,12 @@ impl Prepared {
 			}
 			None => (image.clone(), *offset, None),
 		};
-		for level in 1..source.level_count() {
-			let grid = source.grid(level).clone();
-			for ty in 0..grid.rows() {
-				for tx in 0..grid.cols() {
-					crate::mips::ensure_mip(&mut source, store, level, tx, ty)?;
-				}
-			}
-		}
-		Ok(Some(Self { source, source_at, hole }))
+		Ok(Some(Self {
+			source: Mutex::new(source),
+			source_at,
+			placement: None,
+			hole,
+		}))
 	}
 }
 
@@ -113,9 +136,21 @@ impl TransformPreview {
 		match &prepared.hole {
 			None => {
 				if let Some(layer) = doc.layer_mut(self.layer) {
-					if let LayerKind::Pixel { image, offset } = &mut layer.kind {
-						*image = shown.clone();
-						*offset = *at;
+					match &mut layer.kind {
+						LayerKind::Pixel { image, offset } => {
+							*image = shown.clone();
+							*offset = *at;
+						}
+						// A Smart Object shows the transformed pixels in place
+						// of its cache, with its own blending (it used to stay
+						// still until the transform was committed).
+						LayerKind::Smart { .. } => {
+							layer.kind = LayerKind::Pixel {
+								image: shown.clone(),
+								offset: *at,
+							};
+						}
+						_ => {}
 					}
 					// A linked mask is transformed by the command, not by the
 					// preview: showing it where it was would cut the moving pixels.
@@ -176,15 +211,26 @@ impl PreviewJob {
 		if !current() {
 			return Ok(None);
 		}
-		let source = &self.prepared.source;
-		let placed = self
-			.mapping
-			.after_translation(f64::from(self.prepared.source_at.0), f64::from(self.prepared.source_at.1));
-		let Some((at, size)) = dest_rect(&placed, [0.0, 0.0, f64::from(source.width()), f64::from(source.height())]) else {
+		let (width, height, levels, format) = {
+			let source = self.prepared.source.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			(source.width(), source.height(), source.level_count(), source.format())
+		};
+		let placed = match self.prepared.placement {
+			Some(inner) => {
+				let Some(placed) = fx_core::command::m12::compose(self.mapping, inner) else {
+					return Ok(None);
+				};
+				placed
+			}
+			None => self
+				.mapping
+				.after_translation(f64::from(self.prepared.source_at.0), f64::from(self.prepared.source_at.1)),
+		};
+		let Some((at, size)) = dest_rect(&placed, [0.0, 0.0, f64::from(width), f64::from(height)]) else {
 			return Ok(None);
 		};
 		let local = placed.after_destination_translation(-f64::from(at.0), -f64::from(at.1));
-		let mut image = TiledImage::new(size.0, size.1, source.format());
+		let mut image = TiledImage::new(size.0, size.1, format);
 		// The frame reads the preview at the canvas's level, which a small
 		// preview's own pyramid may not reach.
 		image.ensure_levels(fx_tiles::level_count_for(self.canvas.0, self.canvas.1));
@@ -193,11 +239,8 @@ impl PreviewJob {
 		let Some((_, tiles)) = crate::filters::visible_tiles(&self.view, self.viewport, self.canvas, &image, at, level) else {
 			return Ok(Some((image, at)));
 		};
-		let info = SourceInfo {
-			size: (source.width(), source.height()),
-			levels: source.level_count(),
-		};
-		let view = ImageSource { image: source, store };
+		let info = SourceInfo { size: (width, height), levels };
+		let view = LazyMips::new(&self.prepared.source, store);
 		let done = fx_ops::resample::resample(&view, info, local, self.filter, level, &tiles)?;
 		if !current() {
 			return Ok(None);
@@ -230,6 +273,11 @@ pub fn start_rect(doc: &Document, layer: LayerId, store: &TileStore) -> Result<O
 			Some(LayerKind::Pixel { image, offset }) => content_bounds(Placed { image, offset: *offset }, Content::Opaque, store)?,
 			// A Smart Object's box is its source through its transform (M12-T01).
 			Some(LayerKind::Smart { smart, .. }) => smart.bounds().map(|((x, y), (w, h))| (x, y, x + w as i32, y + h as i32)),
+			// Shape and type: the pixels they draw.
+			Some(LayerKind::Shape { .. } | LayerKind::Text { .. }) => {
+				let drawn = crate::derived::layer_content(doc, store, layer).map_err(|e| TileError::Io(std::io::Error::other(e.to_string())))?;
+				content_bounds(Placed { image: &drawn, offset: (0, 0) }, Content::Opaque, store)?
+			}
 			_ => None,
 		},
 	};

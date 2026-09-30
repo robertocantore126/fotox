@@ -56,18 +56,18 @@ function toHex(c) {
  * The Gradient Editor as a DOM node editing `g` in place; `changed()` after
  * every edit.
  */
-export function gradientEditor(g, changed = () => {}) {
+export function gradientEditor(g, changed = () => {}, { colorOnly = false } = {}) {
   const root = h("div", { class: "grad-editor" });
   const render = () => {
     clear(root);
     const bar = h("div", { class: "gradient-preview big", style: { background: gradientCss(g), height: "28px", borderRadius: "3px", margin: "4px 0 8px" } });
     const presetBtn = h("button", { class: "btn small", type: "button", text: "Presets…", onclick: (e) => openDropdown({
-      anchor: e.currentTarget, items: Object.keys(PRESETS), value: "", width: 200,
+      anchor: e.currentTarget, items: Object.keys(PRESETS).filter((name) => !colorOnly || !PRESETS[name].opacities.length), value: "", width: 200,
       onPick: (name) => { Object.assign(g, structuredClone(PRESETS[name])); render(); changed(); },
     }) });
     const method = h("select", { class: "pf-select" }, ...["perceptual", "linear", "classic"].map((m) => h("option", { value: m, text: m[0].toUpperCase() + m.slice(1), selected: g.method === m })));
     method.addEventListener("change", () => { g.method = method.value; changed(); });
-    root.append(h("div", { class: "dlg-line" }, presetBtn, h("span", { class: "dlg-field-label", text: "Method:" }), method), bar);
+    root.append(h("div", { class: "dlg-line" }, presetBtn, colorOnly ? null : h("span", { class: "dlg-field-label", text: "Method:" }), colorOnly ? null : method), bar);
     // Colour stops.
     const rows = h("div", { class: "grad-stops" }, h("div", { class: "dlg-label", text: "Colour stops (location %, midpoint %)" }));
     g.colors.forEach((s, i) => {
@@ -75,7 +75,7 @@ export function gradientEditor(g, changed = () => {}) {
       color.addEventListener("input", () => { s.color = hex(color.value); bar.style.background = gradientCss(g); changed(); });
       const kind = h("select", { class: "pf-select" }, ...[["rgb", "Colour"], ["fg", "Foreground"], ["bg", "Background"]].map(([v, t]) => h("option", { value: v, text: t, selected: (typeof s.color === "string" ? s.color : "rgb") === v })));
       kind.addEventListener("change", () => { s.color = kind.value === "rgb" ? hex(color.value) : kind.value; render(); changed(); });
-      const loc = numBox(s.location * 100, (v) => { s.location = v / 100; g.colors.sort((a, b) => a.location - b.location); changed(); });
+      const loc = numBox(s.location * 100, (v) => { s.location = v / 100; g.colors.sort((a, b) => a.location - b.location); render(); changed(); });
       const mid = numBox(s.midpoint * 100, (v) => { s.midpoint = Math.min(95, Math.max(5, v)) / 100; changed(); });
       const del = h("button", { class: "pbar-btn", type: "button", "data-tip": "Delete stop", onclick: () => { if (g.colors.length > 1) { g.colors.splice(i, 1); render(); changed(); } } }, icon("i-trash", "ic sm"));
       rows.append(h("div", { class: "dlg-line" }, kind, color, loc, mid, del));
@@ -91,7 +91,7 @@ export function gradientEditor(g, changed = () => {}) {
       ops.append(h("div", { class: "dlg-line" }, o, loc, mid, del));
     });
     ops.append(h("button", { class: "btn small", type: "button", text: "Add opacity stop", onclick: () => { if (!g.opacities.length) g.opacities.push(op(0, 1)); g.opacities.push(op(1, 1)); render(); changed(); } }));
-    root.append(rows, ops);
+    root.append(rows, colorOnly ? null : ops);
   };
   render();
   return root;
@@ -159,6 +159,9 @@ export function openGradientFillDialog(edit = false) {
     ],
     onOk: (v) => {
       const content = {
+        // Keep what the dialog does not show (the centre's offset, the
+        // mirror a flipped canvas set).
+        ...(old || {}),
         fill: "gradient",
         gradient: work,
         kind: String(v["Style:"] || "Linear").toLowerCase(),
@@ -166,7 +169,7 @@ export function openGradientFillDialog(edit = false) {
         scale: Math.min(1000, Math.max(1, Number(v["Scale:"]) || 100)),
         reverse: !!v.Reverse,
         dither: v.Dither !== false,
-        offset: [0, 0],
+        offset: old ? old.offset : [0, 0],
       };
       resolveSwatches(content.gradient);
       if (old) sendCommand({ op: "set_fill_layer", layer: { id: activeLayerId() }, content });

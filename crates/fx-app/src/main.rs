@@ -194,6 +194,8 @@ fn run(ui_context: UiContext<Setup>) -> ExitCode {
 			return ExitCode::FAILURE;
 		}
 	};
+	// Not in the engine's start: the tests spawn engines too.
+	fx_engine::ai::warm();
 
 	if !cli.files.is_empty() {
 		engine.send(fx_engine::EngineInput::Open(cli.files.clone()));

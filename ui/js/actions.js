@@ -173,6 +173,10 @@ export function runAction(item) {
     newAdjustmentLayer(a === "dlg:color-lookup" ? "Color Lookup..." : "Selective Color...");
     return;
   }
+  if (a === "dlg:gradient-map" && bridge.isNative) {
+    newAdjustmentLayer("Gradient Map...");
+    return;
+  }
   // Edit ▸ Content-Aware Scale (M11-T05). FAST: a dialog instead of the
   // transform box.
   if (a === "misc:content-aware-scale" && bridge.isNative) {

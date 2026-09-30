@@ -467,11 +467,13 @@ fn antialias_from_options(ctx: &ToolContext<'_>) -> TextAntialias {
 	TextAntialias::all().into_iter().find(|a| a.label() == label).unwrap_or(TextAntialias::Sharp)
 }
 
-/// The topmost visible text layer whose ink contains the document point.
+/// The topmost text layer whose ink contains the document point. Hidden and
+/// fully locked ones (their groups' state included) are clicked through: a
+/// click there starts a new text layer ([`Document::tool_ignored`]).
 fn hit_text_layer(doc: &Document, at: (f64, f64)) -> Option<(LayerId, TextContent)> {
 	let mut hits = Vec::new();
 	doc.walk(|layer, _| {
-		if layer.visible
+		if !doc.tool_ignored(layer.id)
 			&& matches!(layer.kind, LayerKind::Text { .. })
 			&& let Some(content) = layer.kind.text_content()
 		{

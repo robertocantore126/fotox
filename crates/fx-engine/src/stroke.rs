@@ -12,7 +12,7 @@ use fx_core::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
 use fx_core::{CommandError, Document, LayerId, LayerKind, Selection};
 use fx_ops::brush::{LayerSource, SourceTiles, Stroke, StrokeSetup};
 use fx_render::adjust::LutCache;
-use fx_tiles::{TILE_PIXELS, TileBuffer, TileError, TileStore, TiledImage};
+use fx_tiles::{TILE_PIXELS, TileError, TileStore, TiledImage};
 
 /// What a stroke on a layer needs from the document at its start.
 pub struct Prepared {
@@ -75,7 +75,7 @@ pub fn prepare(doc: &Document, layer: LayerId, target: StrokeTarget, tool: &Stro
 		image,
 		offset,
 		selection: doc.selection.clone(),
-		lock_alpha: target == StrokeTarget::Pixels && found.locked_transparency,
+		lock_alpha: target == StrokeTarget::Pixels && doc.locks(layer).transparency,
 		source,
 	})
 }
@@ -109,9 +109,10 @@ pub fn setup<'a>(prepared: &'a Prepared, doc: &Document, tool: StrokeTool, brush
 /// The composite of a document as a clone source: canvas tiles through the
 /// CPU reference compositor, on demand, cached.
 pub struct CompositeTiles {
-	doc: Document,
+	/// A copy of the document: the derived tiles it reads are computed into
+	/// it (code review 2026-09-27 R01/R06).
+	doc: Mutex<(Document, LutCache)>,
 	store: TileStore,
-	luts: Mutex<LutCache>,
 	cache: Mutex<HashMap<(u32, u32), fx_ops::brush::stroke::SourceTile>>,
 }
 
@@ -119,9 +120,8 @@ impl CompositeTiles {
 	/// A source reading `doc` (a snapshot taken when the stroke starts).
 	pub fn new(doc: Document, store: TileStore) -> Self {
 		Self {
-			doc,
+			doc: Mutex::new((doc, LutCache::default())),
 			store,
-			luts: Mutex::new(LutCache::default()),
 			cache: Mutex::new(HashMap::new()),
 		}
 	}
@@ -132,18 +132,27 @@ impl SourceTiles for CompositeTiles {
 		if let Some(t) = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(tx, ty)) {
 			return Ok(t.clone());
 		}
-		let program = {
-			let mut luts = self.luts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-			fx_render::build_program(&self.doc, 0, tx, ty, &mut |a| luts.get(a)).map_err(|_| TileError::Evicted)?
-		};
-		let pixels: Vec<[f32; 4]> = if program.is_empty() {
-			vec![[0.0; 4]; TILE_PIXELS]
-		} else {
-			let fetch = |h: &fx_tiles::TileHandle| -> Arc<TileBuffer> { self.store.get(h).expect("tile of a live document") };
-			fx_render::reference::render_tile(&program, &fetch)
-				.iter()
-				.map(|p| p.map(|v| v as f32))
-				.collect()
+		// Prepared under the lock, rendered outside it; an input the trim
+		// dropped in between is prepared again.
+		let mut rendered = None;
+		for _ in 0..4 {
+			let program = {
+				let mut guard = self.doc.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+				let (doc, luts) = &mut *guard;
+				crate::derived::prepare(doc, &self.store, 0, &[(tx, ty)], luts)?.remove(0)
+			};
+			match crate::derived::render_pinned(&program, &self.store) {
+				Ok(pixels) => {
+					rendered = Some(pixels);
+					break;
+				}
+				Err(TileError::Evicted) => continue,
+				Err(error) => return Err(error),
+			}
+		}
+		let pixels: Vec<[f32; 4]> = match rendered.ok_or(TileError::Evicted)? {
+			None => vec![[0.0; 4]; TILE_PIXELS],
+			Some(pixels) => pixels.iter().map(|p| p.map(|v| v as f32)).collect(),
 		};
 		let t = Arc::new(pixels);
 		self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert((tx, ty), t.clone());

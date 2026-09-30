@@ -38,7 +38,7 @@ pub use blend::BlendMode;
 pub use color::{BitDepth, ColorProfile, DocumentColor, RenderingIntent};
 pub use command::{Command, CommandContext, CommandEffect, CommandError, LayerRef};
 pub use document::NAME_KINDS;
-pub use document::{Document, Guide};
+pub use document::{Document, Guide, Locks, MAX_GROUP_NESTING};
 pub use history::History;
 pub use layer::{Adjustment, GradientStop, Layer, LayerId, LayerKind, Mask, VectorMask};
 pub use ops::{Conversion, FilterParams, PixelOps};

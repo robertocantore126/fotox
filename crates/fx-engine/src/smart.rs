@@ -3,16 +3,20 @@
 //! transform (M6-T01's sampler picks the source level from the scale), then
 //! run through the Smart Filters (M12-T03).
 //!
-//! FAST: the first draw makes every mip level of the composite valid (a
-//! one-off cost proportional to the source's tiles); Bicubic always.
+//! The source's mips are computed as the sampler reads them, and held until
+//! the batch is drawn (code review 2026-09-27 R06: the first draw used to make
+//! every mip level of the composite valid, a cost proportional to the whole
+//! source, and a mip the trim dropped before the sampler read it failed the
+//! draw). FAST: Bicubic always.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use fx_core::LayerKind;
 use fx_ops::resample::SourceInfo;
 use fx_tiles::{TileError, TileStore};
 
-use crate::ops::ImageSource;
+use crate::mips::LazyMips;
 
 /// Draw `tiles` (`(level, tx, ty)`) of Smart Object `id`.
 pub fn draw_smart_tiles(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, tiles: &[(usize, u32, u32)]) -> usize {
@@ -31,26 +35,12 @@ fn draw(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, ti
 	let LayerKind::Smart { smart, cache } = &mut layer.kind else {
 		return Ok(0);
 	};
-	// Every mip of the composite valid (they stay valid: the composite is
-	// immutable until the source changes).
-	let composite = &mut smart.source.composite;
-	let levels = composite.level_count();
-	for level in 1..levels {
-		let grid = composite.grid(level).clone();
-		for ty in 0..grid.rows() {
-			for tx in 0..grid.cols() {
-				if composite.is_dirty(level, tx, ty) {
-					crate::mips::ensure_mip(composite, store, level, tx, ty)?;
-				}
-			}
-		}
-	}
-	let composite = composite.clone();
 	let source = SourceInfo {
-		size: (composite.width(), composite.height()),
-		levels,
+		size: (smart.source.composite.width(), smart.source.composite.height()),
+		levels: smart.source.composite.level_count(),
 	};
-	let view = ImageSource { image: &composite, store };
+	let composite = Mutex::new(smart.source.composite.clone());
+	let view = LazyMips::new(&composite, store);
 	let mut by_level: HashMap<usize, Vec<(u32, u32)>> = HashMap::new();
 	for &(level, tx, ty) in tiles {
 		by_level.entry(level).or_default().push((tx, ty));
@@ -76,5 +66,8 @@ fn draw(doc: &mut fx_core::Document, id: fx_core::LayerId, store: &TileStore, ti
 			drawn += 1;
 		}
 	}
+	// The mips computed stay valid until the source changes: keep them.
+	drop(view);
+	smart.source.composite = composite.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
 	Ok(drawn)
 }

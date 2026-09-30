@@ -93,3 +93,101 @@ fn saving_during_a_stroke_commits_it_first() {
 	harness.engine.send(EngineInput::Pointer(pointer(PointerKind::Up, 260.0, 220.0, 0)));
 	harness.engine.shutdown();
 }
+
+/// Wait for a Layers message of `doc` with `n` layers; returns `n`.
+fn layer_count(harness: &Harness, doc: DocId, n: usize) -> usize {
+	harness.wait(&format!("{n} layers"), |s| match s {
+		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == doc && layers.len() == n => Some(n),
+		_ => None,
+	})
+}
+
+/// Code review 2026-09-27 R05: open A, edit to B, save B, edit to C, Revert.
+/// Revert used to undo the whole history (back to A, not the saved B) and
+/// call the result clean.
+#[test]
+fn revert_reloads_the_saved_file_not_the_history_start() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-harden-revert-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 300, 200)]));
+	let doc = opened(&harness);
+	let new_layer = || {
+		harness.ui(UiToEngine::Action {
+			id: "layer:new".into(),
+			args: serde_json::Value::Null,
+		})
+	};
+	new_layer();
+	layer_count(&harness, doc, 2);
+	let path = dir.join("b.fxd");
+	harness.engine.send(EngineInput::SaveAs { doc, path: path.clone() });
+	harness.wait("the saved document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentChanged { info }) if info.doc == doc && !info.dirty => Some(()),
+		_ => None,
+	});
+	new_layer();
+	layer_count(&harness, doc, 3);
+	harness.ui(UiToEngine::Action {
+		id: "doc:revert".into(),
+		args: serde_json::Value::Null,
+	});
+	// Reverted to the saved B, not the opened A.
+	layer_count(&harness, doc, 2);
+	harness.wait("a clean document", |s| match s {
+		Seen::Ui(EngineToUi::DocumentChanged { info }) if info.doc == doc && !info.dirty => Some(()),
+		_ => None,
+	});
+	harness.engine.shutdown();
+}
+
+/// Code review 2026-09-27 R11: an adjustment dialog's live preview and its
+/// Cancel used to be `set_adjustment` commands — history steps that cleared
+/// the redo branch. The preview messages touch neither history nor redo.
+#[test]
+fn an_adjustment_preview_keeps_history_and_redo() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-harden-adjust-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "photo.tif", 300, 200)]));
+	let doc = opened(&harness);
+	harness.ui(UiToEngine::Command {
+		doc,
+		command: fx_core::Command::AddLayer {
+			layer: fx_core::command::NewLayer::Adjustment(fx_core::Adjustment::Invert),
+			name: None,
+		},
+	});
+	let adjustment = harness.wait("the adjustment layer", |s| match s {
+		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == doc => {
+			layers.iter().find(|l| l.kind == fx_protocol::LayerInfoKind::Adjustment).map(|l| l.id)
+		}
+		_ => None,
+	});
+	harness.ui(UiToEngine::Action {
+		id: "layer:new".into(),
+		args: serde_json::Value::Null,
+	});
+	layer_count(&harness, doc, 3);
+	harness.ui(UiToEngine::Undo { doc });
+	layer_count(&harness, doc, 2);
+
+	harness.ui(UiToEngine::AdjustmentPreview {
+		doc,
+		layer: adjustment,
+		adjustment: fx_core::Adjustment::Posterize { levels: 3 },
+	});
+	harness.ui(UiToEngine::AdjustmentPreviewEnd { doc });
+	// The redo branch survived: Redo brings the new layer back.
+	harness.ui(UiToEngine::Redo { doc });
+	layer_count(&harness, doc, 3);
+	harness.engine.shutdown();
+}

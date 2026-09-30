@@ -73,6 +73,7 @@ impl DragTool for GradientTool {
 			reverse: s.bool(id, "Reverse").unwrap_or(false),
 			dither: s.bool(id, "Dither").unwrap_or(true),
 			transparency: s.bool(id, "Transparency").unwrap_or(true),
+			mirror: false,
 		};
 		Ok(Some(Command::FillGradient {
 			layer: LayerRef::Active,

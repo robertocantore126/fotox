@@ -3,28 +3,54 @@
 use super::*;
 use crate::smart::{SmartFilter, SmartObject, SmartSource, new_uid};
 
-/// `outer ∘ inner` for affine / projective mappings (`None` for a warp or a
-/// custom mesh: FAST, those are refused on a Smart Object).
+/// `outer ∘ inner`, when one mapping can hold it: affine and projective
+/// mappings multiply; a matrix after a warp moves its control points (an
+/// affine map, exactly: a Bézier patch stays one) or joins the homography
+/// after its surface; a matrix before a warp joins the homography before it
+/// reads its parameters (an axis-aligned scale is folded into its source
+/// rectangle instead). `None` for a warp of a warp and for any custom
+/// mapping (Liquify, Puppet Warp: their geometry lives in a session-only
+/// registry of [`crate::warp_map::KEEP`] entries, so a Smart Object must not
+/// keep one).
 pub fn compose(outer: Mapping, inner: Mapping) -> Option<Mapping> {
-	fn matrix(m: Mapping) -> Option<[f64; 9]> {
-		match m {
-			Mapping::Affine([a, b, c, d, e, f]) => Some([a, c, e, b, d, f, 0.0, 0.0, 1.0]),
-			Mapping::Projective(m) => Some(m),
-			_ => None,
+	use crate::transform::{matrix3, mul3};
+	match (outer, inner) {
+		(Mapping::Custom { .. }, _) | (_, Mapping::Custom { .. }) | (Mapping::Warp(_), Mapping::Warp(_)) => None,
+		(Mapping::Warp(mut patch), inner) => {
+			let m = matrix3(&inner)?;
+			match (patch.pre, inner) {
+				// The patch reads its parameters from `src_rect`: a scale and
+				// translation first are the rectangle pulled back through them.
+				(None, Mapping::Affine([a, b, c, d, e, f])) if b == 0.0 && c == 0.0 && a > 0.0 && d > 0.0 => {
+					let r = patch.src_rect;
+					patch.src_rect = [(r[0] - e) / a, (r[1] - f) / d, (r[2] - e) / a, (r[3] - f) / d];
+				}
+				(pre, _) => patch.pre = Some(pre.map_or(m, |pre| mul3(&pre, &m))),
+			}
+			Some(Mapping::Warp(patch))
+		}
+		(outer, Mapping::Warp(mut patch)) => {
+			let m = matrix3(&outer)?;
+			match (patch.post, outer) {
+				(None, Mapping::Affine(_)) => {
+					for p in &mut patch.points {
+						let q = outer.forward_point(p[0], p[1])?;
+						*p = [q.0, q.1];
+					}
+				}
+				(post, _) => patch.post = Some(post.map_or(m, |post| mul3(&m, &post))),
+			}
+			Some(Mapping::Warp(patch))
+		}
+		(outer, inner) => {
+			let m = mul3(&matrix3(&outer)?, &matrix3(&inner)?);
+			if m[6] == 0.0 && m[7] == 0.0 && m[8] != 0.0 {
+				let s = m[8];
+				return Some(Mapping::Affine([m[0] / s, m[3] / s, m[1] / s, m[4] / s, m[2] / s, m[5] / s]));
+			}
+			Some(Mapping::Projective(m))
 		}
 	}
-	let (a, b) = (matrix(outer)?, matrix(inner)?);
-	let mut m = [0.0; 9];
-	for r in 0..3 {
-		for c in 0..3 {
-			m[r * 3 + c] = (0..3).map(|k| a[r * 3 + k] * b[k * 3 + c]).sum();
-		}
-	}
-	if m[6] == 0.0 && m[7] == 0.0 && m[8] != 0.0 {
-		let s = m[8];
-		return Some(Mapping::Affine([m[0] / s, m[3] / s, m[1] / s, m[4] / s, m[2] / s, m[5] / s]));
-	}
-	Some(Mapping::Projective(m))
 }
 
 /// A Smart Object layer around `source` (identity transform).
@@ -105,8 +131,9 @@ fn find_arc(layers: &[Arc<Layer>], id: LayerId) -> Option<Arc<Layer>> {
 /// Free Transform of a Smart Object (M12-T01): only the transform changes.
 pub(super) fn transform_smart(doc: &mut Document, id: LayerId, mapping: Mapping) -> Result<CommandEffect, CommandError> {
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let position_locked = doc.locks(id).position;
 	let layer = doc.layer_mut(id).expect("resolved");
-	if layer.locked_position {
+	if position_locked {
 		return Err(CommandError::Locked(id));
 	}
 	let LayerKind::Smart { smart, cache } = &mut layer.kind else {
@@ -114,7 +141,7 @@ pub(super) fn transform_smart(doc: &mut Document, id: LayerId, mapping: Mapping)
 	};
 	let Some(new) = compose(mapping, smart.transform) else {
 		return Err(CommandError::NotAllowed(
-			"this warp cannot be applied to a Smart Object yet; rasterise it first".into(),
+			"this Smart Object is already warped: a second warp cannot be kept on it; rasterise it first".into(),
 		));
 	};
 	smart.transform = new;

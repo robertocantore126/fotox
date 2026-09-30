@@ -30,7 +30,7 @@ use crate::ops::{FilterParams, PixelOps};
 use crate::pixels::Placed;
 use crate::selection::{self, SelectMode, SelectModify, Selection, SelectionShape, WandParams};
 use crate::stroke::{BrushParams, StrokeSample, StrokeTarget, StrokeTool};
-use crate::text::{TextContent, TextRun};
+use crate::text::TextContent;
 use crate::transform::{Anchor9, Filter, Mapping, Permutation, dest_rect};
 use crate::vector::{Paint, StrokeStyle, VectorShape, document_box, grow_box};
 
@@ -167,6 +167,21 @@ pub enum Command {
 		layers: Vec<LayerRef>,
 		dx: i32,
 		dy: i32,
+	},
+	/// The Move tool with a pixel selection: the selected pixels of the active
+	/// layer (and the selection with them) move by whole pixels. `copy`
+	/// (Alt+drag) leaves the original pixels in place instead of a hole.
+	/// Labelled "Move" / "Duplicate Pixels".
+	MovePixels {
+		dx: i32,
+		dy: i32,
+		copy: bool,
+	},
+	/// Several commands as one history step named `label`, all or nothing
+	/// (the Move tool's Alt+drag: Duplicate, then Move, undone at once).
+	Sequence {
+		commands: Vec<Command>,
+		label: String,
 	},
 	/// Align / Distribute (M7-T04): each layer by its own amount, one step
 	/// named `label`.
@@ -685,6 +700,12 @@ pub enum Command {
 		layer: LayerRef,
 		styles: Option<crate::styles::LayerStyles>,
 	},
+	/// Layer ▸ Layer Style ▸ Global Light: the document's light angle, which
+	/// every effect with "Use Global Light" follows. Every styled layer's
+	/// effects are redrawn.
+	SetGlobalLight {
+		angle: f64,
+	},
 	/// Layer ▸ Rasterize ▸ Shape / Layer / Type (M6-T06/T07): every named layer
 	/// becomes a pixel layer holding what it drew, keeping its id, position in
 	/// the stack, name, opacity, blend mode and mask (Photoshop keeps those
@@ -743,6 +764,7 @@ pub struct CommandContext<'a> {
 impl Command {
 	/// Apply to `doc`. On error `doc` is unchanged.
 	pub fn apply(&self, doc: &mut Document, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+		let nesting = doc.group_nesting();
 		let effect = match self {
 			Command::SelectLayers { layers } => select_layers(doc, layers),
 			Command::AddLayer { layer, name } => add_layer(doc, layer, name.as_deref()),
@@ -753,6 +775,20 @@ impl Command {
 			Command::SetLayerProps { layer, props } => set_layer_props(doc, layer, props),
 			Command::OffsetLayer { layer, dx, dy } => offset_layer(doc, layer, *dx, *dy),
 			Command::OffsetLayers { layers, dx, dy } => offset_layers(doc, layers, *dx, *dy),
+			Command::MovePixels { dx, dy, copy } => move_pixels(doc, *dx, *dy, *copy, ctx),
+			Command::Sequence { commands, label } => {
+				let mut all = CommandEffect {
+					label: label.clone(),
+					..Default::default()
+				};
+				for command in commands {
+					let effect = command.apply(doc, ctx)?;
+					all.pixels_changed.extend(effect.pixels_changed);
+					all.props_changed.extend(effect.props_changed);
+					all.structure_changed |= effect.structure_changed;
+				}
+				Ok(all)
+			}
 			Command::SetGuides { guides, label } => {
 				if guides.iter().any(|g| !g.position.is_finite()) {
 					return Err(CommandError::InvalidValue {
@@ -981,8 +1017,20 @@ impl Command {
 			} => set_shape(doc, layer, shape.as_ref(), fill.as_ref(), stroke.as_ref(), *transform),
 			Command::SetText { layer, content, dirty } => set_text(doc, layer, content, *dirty),
 			Command::SetLayerStyle { layer, styles } => set_layer_style(doc, layer, styles.clone()),
+			Command::SetGlobalLight { angle } => set_global_light(doc, *angle),
 			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
+		// One check for every command that can nest (Group, Move into a group,
+		// Paste, Duplicate…). A document already deeper, from an older file,
+		// can still be edited: only going deeper is refused. The caller
+		// (`History::execute`) puts the document back.
+		let after = doc.group_nesting();
+		if after > crate::document::MAX_GROUP_NESTING && after > nesting {
+			return Err(CommandError::NotAllowed(format!(
+				"groups can be nested at most {} levels deep",
+				crate::document::MAX_GROUP_NESTING
+			)));
+		}
 		doc.revision += 1;
 		Ok(effect)
 	}
@@ -992,6 +1040,7 @@ impl Command {
 // The commands
 // ---------------------------------------------------------------------------
 
+mod canvas_space;
 mod m10;
 pub mod m11;
 pub mod m12;
@@ -1275,14 +1324,49 @@ fn set_layer_props(doc: &mut Document, layer: &LayerRef, props: &LayerPropsPatch
 		target.locked_position = v;
 	}
 	Ok(CommandEffect {
-		label: "Layer Properties".into(),
+		label: props_label(props).into(),
 		props_changed: vec![id],
 		..Default::default()
 	})
 }
 
+/// The History label of a property patch: what changed, like Photoshop's
+/// "Blending Change" / "Master Opacity Change" (close, not claimed exact),
+/// instead of one "Layer Properties" for everything. Several fields at once
+/// (a Layer Style dialog's blending page) keep the generic label.
+fn props_label(props: &LayerPropsPatch) -> &'static str {
+	let LayerPropsPatch {
+		name,
+		visible,
+		opacity,
+		fill,
+		blend,
+		clipped,
+		locked_pixels,
+		locked_transparency,
+		locked_position,
+	} = props;
+	let locks = locked_pixels.is_some() || locked_transparency.is_some() || locked_position.is_some();
+	let fields = [name.is_some(), visible.is_some(), opacity.is_some(), fill.is_some(), blend.is_some(), clipped.is_some(), locks];
+	if fields.iter().filter(|&&f| f).count() != 1 {
+		return "Layer Properties";
+	}
+	match () {
+		_ if name.is_some() => "Rename Layer",
+		_ if *visible == Some(true) => "Show Layer",
+		_ if visible.is_some() => "Hide Layer",
+		_ if opacity.is_some() => "Opacity Change",
+		_ if fill.is_some() => "Fill Opacity Change",
+		_ if blend.is_some() => "Blending Change",
+		_ if *clipped == Some(true) => "Create Clipping Mask",
+		_ if clipped.is_some() => "Release Clipping Mask",
+		_ => "Lock Change",
+	}
+}
+
 fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Result<CommandEffect, CommandError> {
 	let id = resolve(doc, layer)?;
+	let position_locked = doc.locks(id).position;
 	let target = doc.layer_mut(id).expect("resolved id exists");
 	// Only pixel layers have an offset at all; a linked mask follows it (the
 	// renderer places a linked mask at the layer's offset, an unlinked one at
@@ -1291,7 +1375,7 @@ fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Resul
 	let LayerKind::Pixel { offset, .. } = &mut target.kind else {
 		return Err(CommandError::NotAllowed("only pixel layers have an offset".into()));
 	};
-	if target.locked_position {
+	if position_locked {
 		return Err(CommandError::Locked(id));
 	}
 	// All or nothing: compute both axes before writing either.
@@ -1332,7 +1416,7 @@ fn offset_layers(doc: &mut Document, layers: &[LayerRef], dx: i32, dy: i32) -> R
 		}
 	}
 	for &id in &ids {
-		if doc.layer(id).is_some_and(|l| l.locked_position) {
+		if doc.locks(id).position {
 			return Err(CommandError::Locked(id));
 		}
 	}
@@ -1345,6 +1429,16 @@ fn offset_layers(doc: &mut Document, layers: &[LayerRef], dx: i32, dy: i32) -> R
 			LayerKind::Shape { transform, cache, .. } | LayerKind::Text { transform, cache, .. } => {
 				transform[4] += f64::from(dx);
 				transform[5] += f64::from(dy);
+				cache.mark_all_dirty();
+			}
+			// A Smart Object is placed by its transform (it used to be skipped:
+			// Auto-Select could pick one, the drop recorded a "Move", nothing moved).
+			LayerKind::Smart { smart, cache } => {
+				let shift = Mapping::translation(f64::from(dx), f64::from(dy));
+				let Some(moved) = m12::compose(shift, smart.transform) else {
+					return Err(CommandError::NotAllowed("this Smart Object's warp cannot be moved; rasterise it first".into()));
+				};
+				smart.transform = moved;
 				cache.mark_all_dirty();
 			}
 			_ => {}
@@ -1575,13 +1669,42 @@ fn box_of(shape: &VectorShape, transform: [f64; 6], stroke: Option<&StrokeStyle>
 /// the text inks; the engine computes `dirty` from the old and the new layout
 /// and the command carries it, which also makes undo redraw exactly the same
 /// tiles. An empty text layer draws nothing, and its tiles go Empty.
+fn set_global_light(doc: &mut Document, angle: f64) -> Result<CommandEffect, CommandError> {
+	if !angle.is_finite() {
+		return Err(CommandError::InvalidValue {
+			field: "angle",
+			reason: "not a number".into(),
+		});
+	}
+	// -180..=180, as Photoshop shows it.
+	let angle = (angle + 180.0).rem_euclid(360.0) - 180.0;
+	doc.global_light = angle;
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let mut styled = Vec::new();
+	doc.walk(|layer, _| {
+		if layer.styles.is_some() {
+			styled.push(layer.id);
+		}
+	});
+	for &id in &styled {
+		if let Some(layer) = doc.layer_mut(id) {
+			layer.effects = crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+		}
+	}
+	Ok(CommandEffect {
+		label: "Global Light".into(),
+		props_changed: styled,
+		..Default::default()
+	})
+}
+
 fn set_layer_style(doc: &mut Document, layer: &LayerRef, styles: Option<crate::styles::LayerStyles>) -> Result<CommandEffect, CommandError> {
 	let id = resolve(doc, layer)?;
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
-	if matches!(target.kind, LayerKind::Group { .. } | LayerKind::Adjustment(_)) {
-		// FAST: Photoshop allows styles on groups; not here yet.
-		return Err(CommandError::NotAllowed("layer styles need a pixel, shape, text or fill layer".into()));
+	if matches!(target.kind, LayerKind::Adjustment(_)) {
+		// Groups take styles (their effects surround the group's composite).
+		return Err(CommandError::NotAllowed("an adjustment layer cannot have a layer style".into()));
 	}
 	target.effects = match &styles {
 		Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
@@ -1642,7 +1765,8 @@ fn set_text(doc: &mut Document, layer: &LayerRef, content: &TextContent, dirty: 
 }
 
 /// `Rasterize` (M6-T06): turn a generated layer into the pixels it drew.
-/// The layer keeps its id, name, place, opacity, blend mode and mask.
+/// The layer keeps its id, name, place, opacity, fill, blend mode, clipping,
+/// masks and styles, none of which are baked into the pixels.
 fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	if layers.is_empty() {
 		return Err(CommandError::NotAllowed("no layers to rasterise".into()));
@@ -1656,20 +1780,15 @@ fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) 
 			_ => {}
 		}
 	}
-	// Composite each layer alone, with its own opacity, fill and blend mode
-	// neutralised: those stay on the layer (Photoshop keeps them too).
-	let mut flat = doc.clone();
-	for &id in &ids {
-		if let Some(layer) = flat.layer_mut(id) {
-			layer.visible = true;
-			layer.opacity = 1.0;
-			layer.fill = 1.0;
-			layer.blend = BlendMode::Normal;
-		}
-	}
+	// Composite each layer's own content alone: everything that stays attached
+	// to the layer and applies again when the new pixels render — opacity,
+	// fill, blend mode, both masks, styles, clipping — is left out, and so are
+	// the enclosing groups (code review 2026-09-27 R02: a 50 % mask used to be
+	// baked in and then applied a second time).
 	let mut images = Vec::with_capacity(ids.len());
 	for &id in &ids {
-		images.push((id, pixel_ops(ctx, "rasterising")?.composite(&flat, &[id], None, ctx.tiles)?));
+		let solo = content_alone(doc, id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+		images.push((id, pixel_ops(ctx, "rasterising")?.composite(&solo, &[id], None, ctx.tiles)?));
 	}
 	let mut changed = Vec::with_capacity(ids.len());
 	for (id, image) in images {
@@ -1695,6 +1814,26 @@ fn rasterize(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) 
 // ---------------------------------------------------------------------------
 
 /// Resolve a [`LayerRef`] to an existing id.
+/// `doc` with layer `id` alone at the top level, visible, opaque, Normal,
+/// unclipped, without masks or styles: compositing it gives the layer's own
+/// content — what Rasterize keeps, and what Copy takes from a shape layer.
+/// `None` when there is no such layer.
+pub fn content_alone(doc: &Document, id: LayerId) -> Option<Document> {
+	let mut layer = doc.layer(id)?.clone();
+	layer.visible = true;
+	layer.opacity = 1.0;
+	layer.fill = 1.0;
+	layer.blend = BlendMode::Normal;
+	layer.clipped = false;
+	layer.mask = None;
+	layer.vector_mask = None;
+	layer.styles = None;
+	layer.effects = Vec::new();
+	let mut solo = doc.clone();
+	solo.layers = vec![Arc::new(layer)];
+	Some(solo)
+}
+
 pub fn resolve(doc: &Document, layer: &LayerRef) -> Result<LayerId, CommandError> {
 	let found = match layer {
 		LayerRef::Id(id) => doc.layer(*id).map(|l| l.id),
@@ -2024,10 +2163,10 @@ fn scale_alpha8(alpha: u8, mask: u16) -> u8 {
 fn apply_filter(doc: &mut Document, layer: &LayerRef, filter: &FilterParams, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	filter.validate()?;
 	let id = resolve(doc, layer)?;
-	let target = doc.layer(id).expect("resolved id exists");
-	if target.locked_pixels {
+	if doc.locks(id).pixels {
 		return Err(CommandError::Locked(id));
 	}
+	let target = doc.layer(id).expect("resolved id exists");
 	let LayerKind::Pixel { image, offset } = &target.kind else {
 		return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
 	};
@@ -2134,8 +2273,16 @@ fn assign_profile(doc: &mut Document, profile: &ColorProfile) -> Result<CommandE
 	})
 }
 
-/// `ConvertProfile` (M4-T03): the pixels of every pixel layer and the colour
-/// of every solid fill, converted; then the document's profile.
+/// `ConvertProfile` (M4-T03): every colour of the document converted, then
+/// the document's profile. Code review 2026-09-27 R10: the match over layer
+/// kinds is exhaustive, so a new kind must decide what it converts.
+///
+/// * pixels: pixel layers, Smart Object composites (and their nested
+///   documents), the document's patterns;
+/// * parameters: solid fills, shape paints, text runs, gradient fills, layer
+///   style colours, artboard backgrounds; derived caches are redrawn;
+/// * not converted: adjustment parameters (operations, not colours), masks
+///   and alpha channels (grey coverage).
 fn convert_profile(
 	doc: &mut Document,
 	profile: &ColorProfile,
@@ -2152,108 +2299,73 @@ fn convert_profile(
 		bpc,
 	};
 	// Compute everything first (all or nothing), then install.
-	let mut converted: Vec<(LayerId, LayerKind)> = Vec::new();
-	let mut failure = None;
-	doc.walk(|layer, _| {
-		if failure.is_some() {
-			return;
-		}
-		let kind = match &layer.kind {
-			LayerKind::Pixel { image, offset } => ops
-				.convert(image, &conversion, ctx.tiles)
-				.map(|image| LayerKind::Pixel { image, offset: *offset }),
-			LayerKind::SolidFill { rgba } => ops.convert_color(*rgba, &conversion).map(|rgba| LayerKind::SolidFill { rgba }),
-			// A shape's own colours convert with it; the cache is redrawn from
-			// the new geometry afterwards (M6-T06).
-			LayerKind::Shape {
-				shape,
-				fill,
-				stroke,
-				transform,
-				cache,
-			} => {
-				let fill = match fill {
-					Some(paint) => match ops.convert_color(paint.rgba(), &conversion) {
-						Ok(rgba) => Some(Paint::Solid { rgba }),
-						Err(error) => {
-							failure = Some(error);
-							return;
-						}
-					},
-					None => None,
-				};
-				let stroke = match stroke {
-					Some(style) => match ops.convert_color(style.paint.rgba(), &conversion) {
-						Ok(rgba) => Some(StrokeStyle {
-							paint: Paint::Solid { rgba },
-							..style.clone()
-						}),
-						Err(error) => {
-							failure = Some(error);
-							return;
-						}
-					},
-					None => None,
-				};
-				let mut cache = cache.clone();
-				cache.mark_all_dirty();
-				Ok(LayerKind::Shape {
-					shape: shape.clone(),
-					fill,
-					stroke,
-					transform: *transform,
-					cache,
-				})
-			}
-			// A text layer's runs carry its colours; they convert with the
-			// document and the cache is redrawn from them (M6-T07).
-			LayerKind::Text {
-				text,
-				runs,
-				frame,
-				align,
-				antialias,
-				transform,
-				warp,
-				cache,
-			} => {
-				let mut converted = Vec::with_capacity(runs.len());
-				for run in runs {
-					match ops.convert_color(run.color, &conversion) {
-						Ok(color) => converted.push(TextRun { color, ..run.clone() }),
-						Err(error) => {
-							failure = Some(error);
-							return;
-						}
-					}
-				}
-				let mut cache = cache.clone();
-				cache.mark_all_dirty();
-				Ok(LayerKind::Text {
-					text: text.clone(),
-					runs: converted,
-					frame: *frame,
-					align: *align,
-					antialias: *antialias,
-					transform: *transform,
-					warp: *warp,
-					cache,
-				})
-			}
-			_ => return,
+	let mut ids = Vec::new();
+	doc.walk(|layer, _| ids.push(layer.id));
+	let mut patches: Vec<(LayerId, Layer)> = Vec::with_capacity(ids.len());
+	for id in ids {
+		let layer = doc.layer(id).expect("walked layer exists");
+		// A group's children are converted on their own: patch only the
+		// group's own fields (a clone of the group would bring stale children).
+		let mut patched = if let LayerKind::Group { .. } = layer.kind {
+			let mut own = Layer::new(
+				layer.id,
+				String::new(),
+				LayerKind::Group {
+					expanded: false,
+					children: Vec::new(),
+				},
+			);
+			own.styles = layer.styles.clone();
+			own.effects = layer.effects.clone();
+			own.artboard = layer.artboard.clone();
+			own
+		} else {
+			layer.clone()
 		};
-		match kind {
-			Ok(kind) => converted.push((layer.id, kind)),
-			Err(error) => failure = Some(error),
+		// Parameter colours: gathered, converted in one batch, written back.
+		let mut colors = Vec::new();
+		visit_layer_colors(&mut patched, &mut |c| colors.push(*c));
+		if !colors.is_empty() {
+			ops.convert_colors(&mut colors, &conversion)?;
+			let mut converted = colors.into_iter();
+			visit_layer_colors(&mut patched, &mut |c| *c = converted.next().expect("same walk"));
 		}
-	});
-	if let Some(error) = failure {
-		return Err(error);
+		match &mut patched.kind {
+			LayerKind::Pixel { image, .. } => *image = ops.convert(image, &conversion, ctx.tiles)?,
+			LayerKind::Smart { smart, cache } => {
+				smart.source.composite = ops.convert(&smart.source.composite, &conversion, ctx.tiles)?;
+				let mut nested = (*smart.source.doc).clone();
+				convert_profile(&mut nested, profile, intent, bpc, ctx)?;
+				smart.source.doc = Arc::new(nested);
+				cache.mark_all_dirty();
+			}
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } => cache.mark_all_dirty(),
+			LayerKind::SolidFill { .. } | LayerKind::Adjustment(_) | LayerKind::Group { .. } => {}
+		}
+		for effect in &mut patched.effects {
+			effect.mark_all_dirty();
+		}
+		patches.push((id, patched));
 	}
-	let changed: Vec<LayerId> = converted.iter().map(|(id, _)| *id).collect();
-	for (id, kind) in converted {
-		doc.layer_mut(id).expect("walked layer exists").kind = kind;
+	let mut patterns = doc.patterns.clone();
+	for pattern in &mut patterns {
+		let mut pixels = (*pattern.pixels).clone();
+		ops.convert_colors(&mut pixels, &conversion)?;
+		// The id stays: layers and styles refer to the pattern by it.
+		pattern.pixels = Arc::new(pixels);
 	}
+	let mut changed = Vec::with_capacity(patches.len());
+	for (id, patched) in patches {
+		let layer = doc.layer_mut(id).expect("walked layer exists");
+		if !matches!(patched.kind, LayerKind::Group { .. }) {
+			layer.kind = patched.kind;
+		}
+		layer.styles = patched.styles;
+		layer.effects = patched.effects;
+		layer.artboard = patched.artboard;
+		changed.push(id);
+	}
+	doc.patterns = patterns;
 	doc.color.profile = profile.clone();
 	Ok(CommandEffect {
 		label: "Convert to Profile".into(),
@@ -2261,6 +2373,101 @@ fn convert_profile(
 		props_changed: doc.panel_order(),
 		..Default::default()
 	})
+}
+
+/// Every colour a layer's own parameters carry — its kind's, its styles',
+/// its artboard's — in a fixed order, as straight RGBA16 (a gradient stop's
+/// float RGB round-trips through it).
+fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
+	fn gradient(g: &mut crate::gradient::Gradient, f: &mut dyn FnMut(&mut [u16; 4])) {
+		for stop in &mut g.colors {
+			let mut c = [0, 0, 0, u16::MAX];
+			for i in 0..3 {
+				c[i] = (stop.color[i].clamp(0.0, 1.0) * 65535.0).round() as u16;
+			}
+			let before = c;
+			f(&mut c);
+			if c != before {
+				for i in 0..3 {
+					stop.color[i] = f32::from(c[i]) / 65535.0;
+				}
+			}
+		}
+	}
+	match &mut layer.kind {
+		LayerKind::SolidFill { rgba } => f(rgba),
+		LayerKind::Shape { fill, stroke, .. } => {
+			if let Some(Paint::Solid { rgba }) = fill {
+				f(rgba);
+			}
+			if let Some(StrokeStyle {
+				paint: Paint::Solid { rgba }, ..
+			}) = stroke
+			{
+				f(rgba);
+			}
+		}
+		LayerKind::Text { runs, .. } => {
+			for run in runs {
+				f(&mut run.color);
+			}
+		}
+		LayerKind::FillLayer { content, .. } => match content {
+			crate::fill::FillLayer::Gradient(g) => gradient(&mut g.gradient, f),
+			// The pattern's pixels are converted with the document's patterns.
+			crate::fill::FillLayer::Pattern { .. } => {}
+		},
+		// Pixels (converted as images), groups (their children are walked on
+		// their own), adjustments (operations on whatever is below, not
+		// colours) and Smart Objects (their composite and nested document).
+		LayerKind::Pixel { .. } | LayerKind::Group { .. } | LayerKind::Adjustment(_) | LayerKind::Smart { .. } => {}
+	}
+	if let Some(styles) = &mut layer.styles {
+		let crate::styles::LayerStyles {
+			drop_shadow,
+			outer_glow,
+			inner_shadow,
+			color_overlay,
+			stroke,
+			bevel,
+			inner_glow,
+			satin,
+			gradient_overlay,
+			pattern_overlay: _,
+			blend_if: _,
+		} = styles;
+		if let Some(e) = drop_shadow {
+			f(&mut e.color);
+		}
+		if let Some(e) = outer_glow {
+			f(&mut e.color);
+		}
+		if let Some(e) = inner_shadow {
+			f(&mut e.color);
+		}
+		if let Some(e) = color_overlay {
+			f(&mut e.color);
+		}
+		if let Some(e) = stroke {
+			f(&mut e.color);
+		}
+		if let Some(e) = bevel {
+			f(&mut e.highlight_color);
+			f(&mut e.shadow_color);
+		}
+		if let Some(e) = inner_glow {
+			f(&mut e.color);
+		}
+		if let Some(e) = satin {
+			f(&mut e.color);
+		}
+		if let Some(e) = gradient_overlay {
+			gradient(&mut e.gradient.gradient, f);
+		}
+	}
+	if let Some(background) = layer.artboard.as_mut().and_then(|a| a.background.as_mut()) {
+		f(background);
+	}
 }
 
 fn delete_mask_effect(id: LayerId, pixels_changed: bool) -> CommandEffect {
@@ -2416,10 +2623,10 @@ fn magic_wand(doc: &mut Document, params: &WandParams, mode: SelectMode, ctx: &m
 /// pixels and layers without pixels are refused.
 fn pixel_target(doc: &Document, layer: &LayerRef) -> Result<(LayerId, TiledImage, (i32, i32)), CommandError> {
 	let id = resolve(doc, layer)?;
-	let target = doc.layer(id).expect("resolved id exists");
-	if target.locked_pixels {
+	if doc.locks(id).pixels {
 		return Err(CommandError::Locked(id));
 	}
+	let target = doc.layer(id).expect("resolved id exists");
 	match &target.kind {
 		LayerKind::Pixel { image, offset } => Ok((id, image.clone(), *offset)),
 		_ => Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into())),
@@ -2451,7 +2658,7 @@ fn fill(
 		});
 	}
 	let (id, image, offset) = pixel_target(doc, layer)?;
-	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let locked_alpha = doc.locks(id).transparency;
 	let spec = crate::pixels::FillSpec {
 		color,
 		mode,
@@ -2536,10 +2743,10 @@ fn stroke(
 		return Err(CommandError::NotAllowed("a stroke needs at least one sample".into()));
 	}
 	let id = resolve(doc, layer)?;
-	let layer = doc.layer(id).expect("resolved id exists");
-	if layer.locked_pixels {
+	if doc.locks(id).pixels {
 		return Err(CommandError::Locked(id));
 	}
+	let layer = doc.layer(id).expect("resolved id exists");
 	match target {
 		StrokeTarget::Pixels if !matches!(layer.kind, LayerKind::Pixel { .. }) => {
 			return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into()));
@@ -2619,41 +2826,33 @@ fn layer_ids(doc: &Document) -> Vec<LayerId> {
 fn set_canvas(doc: &mut Document, width: u32, height: u32) -> Vec<LayerId> {
 	doc.width = width;
 	doc.height = height;
-	let format = doc.color.depth.rgba_format();
+	let (format, gray) = (doc.color.depth.rgba_format(), crate::selection::gray_format(doc.color.depth));
 	let mut changed = Vec::new();
 	for id in layer_ids(doc) {
-		if let Some(layer) = doc.layer_mut(id)
-			&& let Some((_, cache)) = layer.kind.derived_placement()
-		{
-			if (cache.width(), cache.height()) == (width, height) {
-				continue;
+		let Some(layer) = doc.layer_mut(id) else { continue };
+		// Every canvas-sized derived cache (code review 2026-09-27 R03): the
+		// generated layers', vector masks' and layer-style effects'.
+		let mut caches: Vec<(&mut TiledImage, PixelFormat)> = Vec::new();
+		match &mut layer.kind {
+			LayerKind::Shape { cache, .. } | LayerKind::Text { cache, .. } | LayerKind::FillLayer { cache, .. } | LayerKind::Smart { cache, .. } => {
+				caches.push((cache, format));
 			}
-			*cache = TiledImage::derived(width, height, format);
-			changed.push(id);
+			LayerKind::Pixel { .. } | LayerKind::Group { .. } | LayerKind::Adjustment(_) | LayerKind::SolidFill { .. } => {}
 		}
-	}
-	changed
-}
-
-/// Fold a canvas-level mapping into every generated layer's matrix (M6-T06/T07):
-/// a shape or a text layer is placed by a matrix, so the canvas turning,
-/// flipping or scaling turns, flips or scales it exactly, and nothing is
-/// resampled. Returns the layers that changed; a mapping that is not affine
-/// (which no canvas-level command produces) leaves them all alone.
-fn map_generated_layers(doc: &mut Document, mapping: Mapping) -> Vec<LayerId> {
-	let mut changed = Vec::new();
-	for id in layer_ids(doc) {
-		if let Some(layer) = doc.layer_mut(id)
-			&& let Some((transform, cache)) = layer.kind.derived_placement()
-		{
-			let Some(moved) = mapping.then_affine(*transform) else {
-				continue;
-			};
-			if moved == *transform {
-				continue;
+		if let Some(vm) = layer.vector_mask.as_mut() {
+			caches.push((&mut vm.cache, gray));
+		}
+		for effect in &mut layer.effects {
+			caches.push((effect, format));
+		}
+		let mut resized = false;
+		for (cache, format) in caches {
+			if (cache.width(), cache.height()) != (width, height) {
+				*cache = TiledImage::derived(width, height, format);
+				resized = true;
 			}
-			*transform = moved;
-			cache.mark_all_dirty();
+		}
+		if resized {
 			changed.push(id);
 		}
 	}
@@ -2736,6 +2935,12 @@ fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>)
 		Some(selection) => Some(ops.rotate(&selection.image, selection.offset, canvas, op, ctx.tiles)?),
 		None => None,
 	};
+	let channels = canvas_space::map_channels(doc, |image| {
+		let (image, at) = ops.rotate(image, (0, 0), canvas, op, ctx.tiles)?;
+		Ok(crate::pixels::place_at(&image, at, (0, 0), PixelValue::TRANSPARENT, ctx.tiles)?)
+	})?;
+	// Everything that is not pixels (shapes, text, Smart Objects, paths…).
+	let space = canvas_space::SpacePlan::new(doc, op.mapping(canvas), canvas, (dest_w, dest_h))?;
 	// Phase 2: commit.
 	let mut changed = Vec::new();
 	for (id, image, offset) in images {
@@ -2763,7 +2968,8 @@ fn permute_canvas(doc: &mut Document, op: Permutation, ctx: &CommandContext<'_>)
 	}
 	// Generated layers (shapes, M6-T06, and text, M6-T07) carry a transform,
 	// not pixels: they turn with the canvas without losing anything.
-	changed.extend(map_generated_layers(doc, op.mapping(canvas)));
+	canvas_space::set_channels(doc, channels);
+	changed.extend(space.apply(doc));
 	changed.extend(set_canvas(doc, dest_w, dest_h));
 	changed.sort_unstable();
 	changed.dedup();
@@ -2801,7 +3007,7 @@ fn rotate_canvas_arbitrary(doc: &mut Document, angle_deg: f64, filter: Filter, c
 		return Err(CommandError::NotAllowed("the rotated canvas has no bounding box".into()));
 	};
 	let mapping = turn.after_destination_translation(-f64::from(left), -f64::from(top));
-	let mut changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	let mut changed = resample_document(doc, ops, mapping, size, filter, ctx.tiles)?;
 	changed.extend(set_canvas(doc, size.0, size.1));
 	Ok(CommandEffect {
 		label: "Rotate Image".into(),
@@ -2821,7 +3027,7 @@ fn canvas_size(doc: &mut Document, width: u32, height: u32, anchor: Anchor9, sto
 		});
 	}
 	let (dx, dy) = anchor.offset((doc.width, doc.height), (width, height));
-	let (mut moved, masks) = shift_offsets(doc, dx, dy, store)?;
+	let (mut moved, masks) = shift_offsets(doc, dx, dy, (width, height), store)?;
 	moved.extend(set_canvas(doc, width, height));
 	Ok(CommandEffect {
 		label: "Canvas Size".into(),
@@ -2838,7 +3044,7 @@ fn canvas_size(doc: &mut Document, width: u32, height: u32, anchor: Anchor9, sto
 /// (unlinked, or on a group or an adjustment layer) has no offset to move: its
 /// pixels move instead, and what goes past the new origin is dropped. Returns
 /// the layers that moved and the layers whose mask pixels were moved.
-fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Result<(Vec<LayerId>, Vec<LayerId>), CommandError> {
+fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, new_size: (u32, u32), store: &TileStore) -> Result<(Vec<LayerId>, Vec<LayerId>), CommandError> {
 	let moved_offset = |offset: (i32, i32)| -> Result<(i32, i32), CommandError> { Ok((checked_offset(offset.0, dx)?, checked_offset(offset.1, dy)?)) };
 	// Validate every new offset before moving anything.
 	let mut moved = Vec::new();
@@ -2863,6 +3069,10 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Res
 		Some(selection) => Some(moved_offset(selection.offset)?),
 		None => None,
 	};
+	let channels = canvas_space::map_channels(doc, |image| {
+		Ok(crate::pixels::place_at(image, (dx, dy), (0, 0), PixelValue::TRANSPARENT, store)?)
+	})?;
+	let space = canvas_space::SpacePlan::new(doc, Mapping::translation(f64::from(dx), f64::from(dy)), (doc.width, doc.height), new_size)?;
 	// Commit.
 	for (id, offset) in &moved {
 		if let Some(layer) = doc.layer_mut(*id)
@@ -2879,7 +3089,8 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, store: &TileStore) -> Res
 	}
 	// A shape or text layer has no offset to move: its matrix is translated
 	// instead (M6-T06/T07), which is the same thing without touching a tile.
-	let mut shapes = map_generated_layers(doc, Mapping::translation(f64::from(dx), f64::from(dy)));
+	canvas_space::set_channels(doc, channels);
+	let mut shapes = space.apply(doc);
 	let mut masks_moved = Vec::new();
 	for (id, image) in masks {
 		if let Some(layer) = doc.layer_mut(id)
@@ -2925,6 +3136,7 @@ fn clip_document(doc: &mut Document, rect: (i32, i32, u32, u32), store: &TileSto
 	};
 	let selection = doc.selection.as_ref().map(clip).transpose()?;
 	let reselect = doc.reselect.as_ref().map(clip).transpose()?;
+	let channels = canvas_space::map_channels(doc, |image| Ok(crate::pixels::clip_to_rect(Placed { image, offset: (0, 0) }, rect, store)?))?;
 	// Commit.
 	let mut changed = Vec::new();
 	for (id, image) in images {
@@ -2949,6 +3161,7 @@ fn clip_document(doc: &mut Document, rect: (i32, i32, u32, u32), store: &TileSto
 	if let (Some(selection), Some(image)) = (doc.reselect.as_mut(), reselect) {
 		selection.image = image;
 	}
+	canvas_space::set_channels(doc, channels);
 	Ok(changed)
 }
 
@@ -2984,6 +3197,70 @@ fn tight(image: &TiledImage, offset: (i32, i32), store: &TileStore) -> Result<Op
 
 /// Edit ▸ Free Transform and the Transform submenu (M6-T04).
 fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filter: Filter, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	transform_pixels(doc, layer, mapping, filter, false, ctx)
+}
+
+/// The Move tool's pixel move and nudge ([`Command::MovePixels`]).
+fn move_pixels(doc: &mut Document, dx: i32, dy: i32, copy: bool, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	if doc.selection.is_none() {
+		return Err(CommandError::NotAllowed("nothing is selected".into()));
+	}
+	let id = resolve(doc, &LayerRef::Active)?;
+	if !matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Pixel { .. })) {
+		return Err(CommandError::NotAllowed("selected pixels can be moved on a pixel layer only".into()));
+	}
+	let mapping = Mapping::translation(f64::from(dx), f64::from(dy));
+	let mut effect = transform_pixels(doc, &LayerRef::Id(id), mapping, Filter::Nearest, copy, ctx)?;
+	effect.label = if copy { "Duplicate Pixels".into() } else { "Move".into() };
+	Ok(effect)
+}
+
+/// Free Transform on a shape or text layer: `mapping` (affine only) is
+/// composed onto the layer's local → document matrix.
+fn transform_vector(doc: &mut Document, id: LayerId, mapping: Mapping) -> Result<CommandEffect, CommandError> {
+	let Mapping::Affine(m) = mapping else {
+		return Err(CommandError::NotAllowed(
+			"a shape or type layer takes scale, rotate and skew; rasterize it (Layer ▸ Rasterize) for perspective or warp".into(),
+		));
+	};
+	let compose = |t: [f64; 6]| -> [f64; 6] {
+		[
+			m[0] * t[0] + m[2] * t[1],
+			m[1] * t[0] + m[3] * t[1],
+			m[0] * t[2] + m[2] * t[3],
+			m[1] * t[2] + m[3] * t[3],
+			m[0] * t[4] + m[2] * t[5] + m[4],
+			m[1] * t[4] + m[3] * t[5] + m[5],
+		]
+	};
+	let (w, h) = (f64::from(doc.width), f64::from(doc.height));
+	let kind = doc.layer(id).map(|l| l.kind.clone()).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	let mut effect = match kind {
+		LayerKind::Shape { transform, .. } => set_shape(doc, &LayerRef::Id(id), None, None, None, Some(compose(transform)))?,
+		LayerKind::Text { .. } => {
+			let mut content = doc
+				.layer(id)
+				.and_then(|l| l.kind.text_content())
+				.ok_or(CommandError::NotAllowed("not a text layer".into()))?;
+			content.transform = compose(content.transform);
+			set_text(doc, &LayerRef::Id(id), &content, [0.0, 0.0, w, h])?
+		}
+		_ => return Err(CommandError::NotAllowed("not a shape or text layer".into())),
+	};
+	effect.label = "Free Transform".into();
+	Ok(effect)
+}
+
+/// Free Transform's body. With a selection, `keep_source` leaves the lifted
+/// pixels in place too (a copy) instead of a hole.
+fn transform_pixels(
+	doc: &mut Document,
+	layer: &LayerRef,
+	mapping: Mapping,
+	filter: Filter,
+	keep_source: bool,
+	ctx: &CommandContext<'_>,
+) -> Result<CommandEffect, CommandError> {
 	if !mapping.is_finite() {
 		return Err(CommandError::InvalidValue {
 			field: "mapping",
@@ -2995,6 +3272,11 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 	if matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Smart { .. })) {
 		return m12::transform_smart(doc, id, mapping);
 	}
+	// Shape and text layers stay vectors: the box's affine part goes into
+	// their matrix (Photoshop scales the path / the type).
+	if matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Shape { .. } | LayerKind::Text { .. })) {
+		return transform_vector(doc, id, mapping);
+	}
 	let ops = pixel_ops(ctx, "Free Transform")?;
 	let store = ctx.tiles;
 	let canvas = (doc.width, doc.height);
@@ -3002,7 +3284,8 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 	let LayerKind::Pixel { image, offset } = &target.kind else {
 		return Err(CommandError::NotAllowed("only a pixel layer can be transformed".into()));
 	};
-	if target.locked_position || target.locked_pixels {
+	let locks = doc.locks(id);
+	if locks.position || locks.pixels {
 		return Err(CommandError::Locked(id));
 	}
 	let offset = *offset;
@@ -3034,7 +3317,11 @@ fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filte
 			let lifted = crate::pixels::extract(placed, Some(selection), canvas, store)?;
 			let at = (x0 as i32, y0 as i32);
 			let lifted = crate::pixels::place_in(&lifted, offset, at, Some((x1 - x0, y1 - y0)), fx_tiles::PixelValue::TRANSPARENT, store)?;
-			let hole = crate::pixels::clear(placed, selection, canvas, store)?;
+			let hole = if keep_source {
+				image.clone()
+			} else {
+				crate::pixels::clear(placed, selection, canvas, store)?
+			};
 			let (moved, moved_at) = resample_placed(ops, &lifted, at, mapping, filter, store)?;
 			let (merged, merged_at) = crate::pixels::over(
 				Placed { image: &hole, offset },
@@ -3107,7 +3394,7 @@ fn crop(doc: &mut Document, rect: (i32, i32, u32, u32), angle_deg: f64, delete_c
 		// straightened images unfold from there, and the ones that end up in
 		// the box are exactly the ones the user sees.
 		let mapping = Mapping::rotation_about(angle.to_radians(), cx, cy).after_destination_translation(-f64::from(rect.0), -f64::from(rect.1));
-		pixels_changed = resample_document(doc, ops, mapping, Filter::BicubicAutomatic, ctx.tiles)?;
+		pixels_changed = resample_document(doc, ops, mapping, (rect.2, rect.3), Filter::BicubicAutomatic, ctx.tiles)?;
 		if delete_cropped {
 			// The images are already in the box's frame: clip to the box.
 			pixels_changed.extend(clip_document(doc, (0, 0, rect.2, rect.3), ctx.tiles)?);
@@ -3116,7 +3403,7 @@ fn crop(doc: &mut Document, rect: (i32, i32, u32, u32), angle_deg: f64, delete_c
 		if delete_cropped {
 			pixels_changed = clip_document(doc, rect, ctx.tiles)?;
 		}
-		let (moved, masks) = shift_offsets(doc, -rect.0, -rect.1, ctx.tiles)?;
+		let (moved, masks) = shift_offsets(doc, -rect.0, -rect.1, (rect.2, rect.3), ctx.tiles)?;
 		props_changed = moved;
 		pixels_changed.extend(masks);
 	}
@@ -3167,7 +3454,7 @@ fn image_size(
 	};
 	let ops = pixel_ops(ctx, "Image Size")?;
 	let mapping = Mapping::scale(f64::from(width) / f64::from(doc.width), f64::from(height) / f64::from(doc.height));
-	let mut changed = resample_document(doc, ops, mapping, filter, ctx.tiles)?;
+	let mut changed = resample_document(doc, ops, mapping, (width, height), filter, ctx.tiles)?;
 	changed.extend(set_canvas(doc, width, height));
 	doc.ppi = ppi;
 	Ok(CommandEffect {
@@ -3182,7 +3469,17 @@ fn image_size(
 /// rotation). Every image's size and offset come from its mapped bounding box,
 /// so the layout scales with the canvas. Returns the layers that changed; the
 /// caller sets the document's new size.
-fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, filter: Filter, store: &TileStore) -> Result<Vec<LayerId>, CommandError> {
+fn resample_document(
+	doc: &mut Document,
+	ops: &dyn PixelOps,
+	mapping: Mapping,
+	new_size: (u32, u32),
+	filter: Filter,
+	store: &TileStore,
+) -> Result<Vec<LayerId>, CommandError> {
+	// A homography cannot be kept on a shape or text layer's matrix: those
+	// become Smart Objects first (the history step restores them on failure).
+	let wrapped = canvas_space::wrap_for_projection(doc, &mapping, ops, store)?;
 	// Phase 1: every new image, while the document is still untouched.
 	let mut images = Vec::new();
 	let mut masks = Vec::new();
@@ -3211,6 +3508,11 @@ fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, f
 		Some(selection) => Some(resample_placed(ops, &selection.image, selection.offset, mapping, filter, store)?),
 		None => None,
 	};
+	let channels = canvas_space::map_channels(doc, |image| {
+		let (image, at) = resample_placed(ops, image, (0, 0), mapping, filter, store)?;
+		Ok(crate::pixels::place_at(&image, at, (0, 0), PixelValue::TRANSPARENT, store)?)
+	})?;
+	let space = canvas_space::SpacePlan::new(doc, mapping, (doc.width, doc.height), new_size)?;
 	// Phase 2: commit.
 	let mut changed = Vec::new();
 	for (id, (image, offset)) in images {
@@ -3232,7 +3534,9 @@ fn resample_document(doc: &mut Document, ops: &dyn PixelOps, mapping: Mapping, f
 	}
 	// Generated layers (M6-T06/T07) go through the same mapping as a matrix
 	// instead of as pixels: a straighten or a resize keeps them sharp.
-	changed.extend(map_generated_layers(doc, mapping));
+	canvas_space::set_channels(doc, channels);
+	changed.extend(space.apply(doc));
+	changed.extend(wrapped);
 	if let Some((image, offset)) = selection {
 		doc.selection = Some(Selection { image, offset });
 	}
@@ -3942,6 +4246,49 @@ mod tests {
 		assert_eq!(f.child_ids(g), [b, c, d], "bottom → top");
 	}
 
+	/// Groups nest at most 10 deep (Photoshop's limit): Group Layers, a new
+	/// group inside the deepest one and a move into it are refused past it,
+	/// and the refused command leaves the document as it was.
+	#[test]
+	fn groups_nest_at_most_ten_levels_deep() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		for _ in 0..crate::document::MAX_GROUP_NESTING {
+			f.ok(Command::GroupLayers {
+				layers: vec![LayerRef::Id(a)],
+				name: None,
+			});
+		}
+		assert_eq!(f.doc.group_nesting(), 10);
+		let revision = f.doc.revision;
+		let error = f.fail(Command::GroupLayers {
+			layers: vec![LayerRef::Id(a)],
+			name: None,
+		});
+		assert!(error.to_string().contains("at most 10 levels"), "{error}");
+		assert_eq!(f.doc.group_nesting(), 10, "the refused group is not left behind");
+		assert_eq!(f.doc.revision, revision);
+		// A new group next to A, inside the deepest group, would be the 11th.
+		f.select(&[a]);
+		f.fail(Command::AddLayer {
+			layer: NewLayer::Group,
+			name: None,
+		});
+		// A group from the root moved into the deepest group: refused too.
+		let top = f.doc.layers[0].id;
+		f.select(&[top]);
+		let loose = f.add(NewLayer::Group, "loose");
+		let deepest = f.doc.panel_order().into_iter().rfind(|id| *id != a && *id != loose).expect("the deepest group");
+		f.fail(Command::MoveLayer {
+			layer: LayerRef::Id(loose),
+			parent: Some(LayerRef::Id(deepest)),
+			index: 0,
+		});
+		// Pixel layers inside the deepest group are fine.
+		f.select(&[a]);
+		f.add_pixel("B");
+	}
+
 	#[test]
 	fn add_layer_names_layers_like_photoshop_per_kind_and_per_document() {
 		let mut f = Fixture::new();
@@ -4607,6 +4954,108 @@ mod tests {
 		assert_eq!(f.pixel(a).1, (0, 0), "the lock held");
 	}
 
+	/// A group's locks cover its children (Rob, 2026-09-29): a child of a
+	/// locked group refuses to move, and tools ignore it.
+	#[test]
+	fn a_group_lock_covers_its_children() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		let g = f.group("G");
+		f.ok(Command::MoveLayer {
+			layer: LayerRef::Id(a),
+			parent: Some(LayerRef::Id(g)),
+			index: 0,
+		});
+		assert!(!f.doc.tool_ignored(a));
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(g),
+			props: LayerPropsPatch {
+				locked_pixels: Some(true),
+				locked_position: Some(true),
+				..Default::default()
+			},
+		});
+		assert!(f.doc.locks(a).all() && f.doc.tool_ignored(a), "{:?}", f.doc.locks(a));
+		let error = f.fail(Command::OffsetLayers {
+			layers: vec![LayerRef::Id(a)],
+			dx: 1,
+			dy: 0,
+		});
+		assert!(matches!(error, CommandError::Locked(id) if id == a), "{error:?}");
+		// Hidden groups hide their children from tools too.
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(g),
+			props: LayerPropsPatch {
+				locked_pixels: Some(false),
+				locked_position: Some(false),
+				visible: Some(false),
+				..Default::default()
+			},
+		});
+		assert!(!f.doc.locks(a).any() && !f.doc.shown(a) && f.doc.tool_ignored(a));
+	}
+
+	/// The Move tool's Alt+drag: one step, all or nothing.
+	#[test]
+	fn a_sequence_is_one_step_and_all_or_nothing() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		let steps = f.history.labels().count();
+		let duplicate_and_move = || Command::Sequence {
+			commands: vec![
+				Command::DuplicateLayers {
+					layers: vec![LayerRef::Id(a)],
+				},
+				Command::OffsetLayers {
+					layers: Vec::new(),
+					dx: 5,
+					dy: 0,
+				},
+			],
+			label: "Duplicate and Move".into(),
+		};
+		f.ok(duplicate_and_move());
+		assert_eq!(f.history.labels().count(), steps + 1);
+		assert_eq!(f.history.labels().last(), Some("Duplicate and Move"));
+		let copy = f.doc.active_layer().unwrap();
+		assert_eq!((f.pixel(a).1, f.pixel(copy).1), ((0, 0), (5, 0)));
+		// The move fails (the copy of a position-locked layer is locked too):
+		// the duplicate made before it is rolled back.
+		f.ok(Command::SetLayerProps {
+			layer: LayerRef::Id(a),
+			props: LayerPropsPatch {
+				locked_position: Some(true),
+				..Default::default()
+			},
+		});
+		let layers = f.order().len();
+		f.fail(duplicate_and_move());
+		assert_eq!(f.order().len(), layers, "the duplicate was rolled back");
+	}
+
+	#[test]
+	fn property_steps_say_what_changed() {
+		let mut f = Fixture::new();
+		let a = f.add_pixel("A");
+		let label = |f: &mut Fixture, props: LayerPropsPatch| {
+			f.ok(Command::SetLayerProps {
+				layer: LayerRef::Id(a),
+				props,
+			})
+			.label
+		};
+		assert_eq!(label(&mut f, LayerPropsPatch { blend: Some(BlendMode::Screen), ..Default::default() }), "Blending Change");
+		assert_eq!(label(&mut f, LayerPropsPatch { opacity: Some(0.5), ..Default::default() }), "Opacity Change");
+		assert_eq!(label(&mut f, LayerPropsPatch { visible: Some(false), ..Default::default() }), "Hide Layer");
+		let lock_all = LayerPropsPatch {
+			locked_pixels: Some(true),
+			locked_position: Some(true),
+			locked_transparency: Some(true),
+			..Default::default()
+		};
+		assert_eq!(label(&mut f, lock_all), "Lock Change");
+	}
+
 	#[test]
 	fn offset_layer_rejects_an_overflow_and_an_unknown_layer() {
 		let mut f = Fixture::new();
@@ -5194,6 +5643,329 @@ mod tests {
 		assert!(matches!(f.doc.layer(fill).unwrap().kind, LayerKind::SolidFill { rgba: [300, 200, 100, 65535] }));
 		f.history.undo(&mut f.doc);
 		assert_eq!(f.doc.color.profile, ColorProfile::AdobeRgb1998, "undo restores the profile");
+	}
+
+	/// Code review 2026-09-27 R10: Convert to Profile skipped gradient fills,
+	/// styles, artboards, patterns and Smart Objects while still changing the
+	/// Code review 2026-09-27 R03: a Smart Object with a Free Transform warp
+	/// follows the canvas (an affine map of a Bézier patch is the patch of
+	/// its moved control points); a Liquify geometry is never kept.
+	#[test]
+	fn a_warped_smart_object_follows_the_canvas() {
+		use crate::transform::BezierPatch;
+		let mut patch = BezierPatch::identity(40, 20);
+		patch.set_point(1, 2, 31.0, 3.0);
+		let flip = Mapping::affine(-1.0, 0.0, 0.0, 1.0, 400.0, 0.0);
+		let Some(Mapping::Warp(moved)) = m12::compose(flip, Mapping::Warp(patch)) else {
+			panic!("a flip of a warp is a warp")
+		};
+		for (p, q) in patch.points.iter().zip(moved.points) {
+			assert_eq!(q, [400.0 - p[0], p[1]]);
+		}
+		assert_eq!(moved.src_rect, patch.src_rect);
+		// A warp after a scale and a move reads the pulled-back rectangle.
+		let Some(Mapping::Warp(over)) = m12::compose(Mapping::Warp(patch), Mapping::affine(2.0, 0.0, 0.0, 4.0, 10.0, 20.0)) else {
+			panic!("a warp over an axis-aligned scale is a warp")
+		};
+		assert_eq!(over.src_rect, [-5.0, -5.0, 15.0, 0.0]);
+		assert!(matches!(
+			m12::compose(Mapping::Warp(patch), Mapping::rotation_about(0.3, 0.0, 0.0)),
+			Some(Mapping::Warp(BezierPatch { pre: Some(_), .. }))
+		));
+		let custom = Mapping::Custom {
+			id: 1,
+			src: [0.0; 2],
+			dst: [0.0; 2],
+		};
+		assert!(m12::compose(custom, Mapping::identity()).is_none());
+		assert!(m12::compose(Mapping::identity(), custom).is_none());
+
+		// Through the command: Flip Canvas moves the Smart Object's warp.
+		let mut f = Fixture::new();
+		let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+		let nested = Document::new(40, 20, f.doc.color.clone(), 72.0);
+		let id = f.doc.allocate_layer_id();
+		f.doc.layers.push(Arc::new(Layer::new(
+			id,
+			"Smart",
+			LayerKind::Smart {
+				smart: crate::smart::SmartObject {
+					source: crate::smart::SmartSource {
+						doc: Arc::new(nested),
+						composite: TiledImage::new(40, 20, format),
+						linked: None,
+						linked_mtime: None,
+						uid: 1,
+					},
+					transform: Mapping::Warp(patch),
+					filters: Vec::new(),
+					filters_enabled: true,
+				},
+				cache: TiledImage::derived(w, h, format),
+			},
+		)));
+		f.ok_with_ops(Command::FlipCanvas { horizontal: true });
+		let LayerKind::Smart { smart, .. } = &f.doc.layer(id).expect("layer").kind else {
+			panic!("not a Smart Object")
+		};
+		assert_eq!(smart.transform, Mapping::Warp(moved));
+	}
+
+	/// Code review 2026-09-27 R03: a gradient fill of every style follows
+	/// flips and turns — the colour at every mapped point is the colour the
+	/// point had before (the Angle style's sweep is mirrored by a flip).
+	#[test]
+	fn a_gradient_fill_follows_flips_and_turns() {
+		use crate::gradient::GradientKind;
+		for kind in [
+			GradientKind::Linear,
+			GradientKind::Radial,
+			GradientKind::Angle,
+			GradientKind::Reflected,
+			GradientKind::Diamond,
+		] {
+			let mut f = Fixture::new();
+			let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+			let id = f.doc.allocate_layer_id();
+			let gradient = crate::gradient::GradientLayer {
+				gradient: crate::gradient::Gradient::two([0.1, 0.8, 0.3], [0.9, 0.2, 0.6]),
+				kind,
+				angle: 30.0,
+				scale: 60.0,
+				reverse: false,
+				dither: false,
+				offset: (40.0, -25.0),
+				mirror: false,
+			};
+			f.doc.layers.push(Arc::new(Layer::new(
+				id,
+				"Gradient",
+				LayerKind::FillLayer {
+					content: crate::fill::FillLayer::Gradient(gradient),
+					cache: TiledImage::derived(w, h, format),
+				},
+			)));
+			let color = |doc: &Document, (x, y): (f64, f64)| {
+				let LayerKind::FillLayer {
+					content: crate::fill::FillLayer::Gradient(g),
+					..
+				} = &doc.layer(id).expect("layer").kind
+				else {
+					panic!("not a gradient fill")
+				};
+				g.placed((doc.width, doc.height)).color_at_point(x, y, 0, 0)
+			};
+			// Away from the Angle style's seam, where either side is right.
+			let points = [(250.5, 160.5), (310.2, 90.7), (180.4, 120.1), (120.9, 250.3), (330.3, 200.8)];
+			let steps: Vec<(Command, Box<dyn Fn((f64, f64), (f64, f64)) -> (f64, f64)>)> = vec![
+				(Command::FlipCanvas { horizontal: true }, Box::new(|(x, y), (w, _)| (w - x, y))),
+				(Command::RotateCanvas { quarter_turns: 1 }, Box::new(|(x, y), (_, h)| (h - y, x))),
+				(Command::FlipCanvas { horizontal: false }, Box::new(|(x, y), (_, h)| (x, h - y))),
+			];
+			let mut at: Vec<(f64, f64)> = points.to_vec();
+			let mut expected: Vec<[f64; 4]> = at.iter().map(|p| color(&f.doc, *p)).collect();
+			for (command, map) in steps {
+				let size = (f64::from(f.doc.width), f64::from(f.doc.height));
+				f.ok_with_ops(command.clone());
+				for (i, p) in at.iter_mut().enumerate() {
+					*p = map(*p, size);
+					let got = color(&f.doc, *p);
+					assert!(
+						got.iter().zip(expected[i]).all(|(a, b)| (a - b).abs() < 1e-6),
+						"{kind:?} after {command:?}: point {i} at {p:?} is {got:?}, was {:?}",
+						expected[i]
+					);
+				}
+				expected = at.iter().map(|p| color(&f.doc, *p)).collect();
+			}
+		}
+	}
+
+	/// Code review 2026-09-27 R03: a pattern fill follows flips, turns and
+	/// Canvas Size — the colour at every mapped point is the colour the point
+	/// had before.
+	#[test]
+	fn a_pattern_fill_follows_the_canvas() {
+		let mut f = Fixture::new();
+		let pixels: Vec<[u16; 4]> = (0..6u16).map(|i| [i * 10_000, 65_535 - i * 9_000, (i * 7_919) % 5 * 13_000, 65_535]).collect();
+		let pattern = crate::pattern::Pattern::new("P", 3, 2, pixels);
+		let pid = pattern.id;
+		f.doc.patterns.push(pattern);
+		let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+		let id = f.doc.allocate_layer_id();
+		f.doc.layers.push(Arc::new(Layer::new(
+			id,
+			"Pattern",
+			LayerKind::FillLayer {
+				content: crate::fill::FillLayer::Pattern {
+					pattern: pid,
+					scale: 170.0,
+					angle: 23.0,
+					origin: [0.0, 0.0],
+					mirror: false,
+				},
+				cache: TiledImage::derived(w, h, format),
+			},
+		)));
+		let color = |doc: &Document, (x, y): (f64, f64)| {
+			let LayerKind::FillLayer { content, .. } = &doc.layer(id).expect("layer").kind else {
+				panic!("not a fill layer")
+			};
+			content.color_at(None, doc.patterns.first(), x, y, 0, 0)
+		};
+		let points = [(10.3, 7.9), (200.5, 150.5), (399.2, 0.4), (123.0, 287.6), (57.7, 31.1)];
+		let mut expected: Vec<[f64; 4]> = points.iter().map(|p| color(&f.doc, *p)).collect();
+		// Each step: the command and where it sends a point of the canvas before.
+		let steps: Vec<(Command, Box<dyn Fn((f64, f64), (f64, f64)) -> (f64, f64)>)> = vec![
+			(Command::FlipCanvas { horizontal: true }, Box::new(|(x, y), (w, _)| (w - x, y))),
+			(Command::RotateCanvas { quarter_turns: 1 }, Box::new(|(x, y), (_, h)| (h - y, x))),
+			(Command::FlipCanvas { horizontal: false }, Box::new(|(x, y), (_, h)| (x, h - y))),
+			(
+				Command::CanvasSize {
+					width: 360,
+					height: 480,
+					anchor: Anchor9::Center,
+				},
+				Box::new(|(x, y), _| (x + 30.0, y + 40.0)),
+			),
+		];
+		let mut at: Vec<(f64, f64)> = points.to_vec();
+		for (command, map) in steps {
+			let size = (f64::from(f.doc.width), f64::from(f.doc.height));
+			f.ok_with_ops(command.clone());
+			for (i, p) in at.iter_mut().enumerate() {
+				*p = map(*p, size);
+				let got = color(&f.doc, *p);
+				assert!(
+					got.iter().zip(expected[i]).all(|(a, b)| (a - b).abs() < 1e-6),
+					"after {command:?}: point {i} at {p:?} is {got:?}, was {:?}",
+					expected[i]
+				);
+			}
+			expected = at.iter().map(|p| color(&f.doc, *p)).collect();
+		}
+	}
+
+	/// document's profile. `FakeOps` "converts" by swapping red and blue.
+	#[test]
+	fn convert_to_profile_reaches_every_colour_bearing_kind() {
+		let mut f = Fixture::new();
+		f.ok(Command::AssignProfile {
+			profile: ColorProfile::AdobeRgb1998,
+		});
+		let c = [100, 200, 300, 65535];
+		let swapped = [300, 200, 100, 65535];
+		let (w, h, format) = (f.doc.width, f.doc.height, f.doc.color.depth.rgba_format());
+		// A gradient fill.
+		let gradient_id = f.doc.allocate_layer_id();
+		let gradient = crate::gradient::GradientLayer {
+			gradient: crate::gradient::Gradient::two([0.25, 0.5, 0.75], [1.0, 0.0, 0.0]),
+			kind: crate::gradient::GradientKind::Linear,
+			angle: 0.0,
+			scale: 100.0,
+			reverse: false,
+			dither: false,
+			offset: (0.0, 0.0),
+			mirror: false,
+		};
+		let gradient_layer = Layer::new(
+			gradient_id,
+			"Gradient",
+			LayerKind::FillLayer {
+				content: crate::fill::FillLayer::Gradient(gradient),
+				cache: TiledImage::derived(w, h, format),
+			},
+		);
+		// An artboard group with a drop shadow, holding a solid fill.
+		let child = f.doc.allocate_layer_id();
+		let group_id = f.doc.allocate_layer_id();
+		let mut group = Layer::new(
+			group_id,
+			"Artboard",
+			LayerKind::Group {
+				expanded: true,
+				children: vec![Arc::new(Layer::new(child, "Fill", LayerKind::SolidFill { rgba: c }))],
+			},
+		);
+		group.artboard = Some(crate::layer::Artboard {
+			rect: (0, 0, 10, 10),
+			background: Some(c),
+		});
+		group.styles = Some(crate::styles::LayerStyles {
+			drop_shadow: Some(crate::styles::DropShadow {
+				color: c,
+				..Default::default()
+			}),
+			..Default::default()
+		});
+		group.effects = crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+		// A Smart Object whose nested document has a solid fill.
+		let mut nested = Document::new(
+			10,
+			10,
+			DocumentColor {
+				depth: BitDepth::U16,
+				profile: ColorProfile::AdobeRgb1998,
+			},
+			72.0,
+		);
+		let nested_fill = nested.allocate_layer_id();
+		nested.layers.push(Arc::new(Layer::new(nested_fill, "Inner", LayerKind::SolidFill { rgba: c })));
+		let smart_id = f.doc.allocate_layer_id();
+		let smart = Layer::new(
+			smart_id,
+			"Smart",
+			LayerKind::Smart {
+				smart: crate::smart::SmartObject {
+					source: crate::smart::SmartSource {
+						doc: Arc::new(nested),
+						composite: TiledImage::new(10, 10, format),
+						linked: None,
+						linked_mtime: None,
+						uid: 1,
+					},
+					transform: Mapping::identity(),
+					filters: Vec::new(),
+					filters_enabled: true,
+				},
+				cache: TiledImage::derived(w, h, format),
+			},
+		);
+		f.doc.layers.extend([Arc::new(gradient_layer), Arc::new(group), Arc::new(smart)]);
+		f.doc.patterns.push(crate::pattern::Pattern::new("dots", 1, 1, vec![c]));
+		let pattern_id = f.doc.patterns[0].id;
+
+		f.ok_with_ops(Command::ConvertProfile {
+			profile: ColorProfile::Srgb,
+			intent: RenderingIntent::RelativeColorimetric,
+			bpc: true,
+		});
+		let LayerKind::FillLayer {
+			content: crate::fill::FillLayer::Gradient(g),
+			..
+		} = &f.doc.layer(gradient_id).unwrap().kind
+		else {
+			panic!("a gradient fill")
+		};
+		assert_eq!(
+			g.gradient.colors[0].color,
+			[0.75, 0.5, 0.25].map(|v: f32| f32::from((v * 65535.0).round() as u16) / 65535.0)
+		);
+		let group = f.doc.layer(group_id).unwrap();
+		assert_eq!(group.artboard.as_ref().unwrap().background, Some(swapped));
+		assert_eq!(group.styles.as_ref().unwrap().drop_shadow.as_ref().unwrap().color, swapped);
+		assert_eq!(group.effects.len(), crate::styles::EffectKind::ALL.len(), "the effect caches stay");
+		assert!(
+			matches!(f.doc.layer(child).unwrap().kind, LayerKind::SolidFill { rgba } if rgba == swapped),
+			"a group's child is converted once"
+		);
+		let LayerKind::Smart { smart, .. } = &f.doc.layer(smart_id).unwrap().kind else {
+			panic!("a smart object")
+		};
+		assert_eq!(smart.source.doc.color.profile, ColorProfile::Srgb);
+		assert!(matches!(smart.source.doc.layer(nested_fill).unwrap().kind, LayerKind::SolidFill { rgba } if rgba == swapped));
+		assert_eq!(f.doc.patterns[0].id, pattern_id, "layers refer to the pattern by id");
+		assert_eq!(f.doc.patterns[0].pixels[0], swapped);
 	}
 
 	// -----------------------------------------------------------------------

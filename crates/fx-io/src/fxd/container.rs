@@ -44,10 +44,10 @@ static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 static WRITER_PATHS: OnceLock<(Mutex<std::collections::HashSet<PathBuf>>, Condvar)> = OnceLock::new();
 
 /// Process-wide exclusive lease for writing a file path.
-pub(super) struct PathWriteLock(PathBuf);
+pub(crate) struct PathWriteLock(PathBuf);
 
 impl PathWriteLock {
-	pub(super) fn acquire(path: &Path) -> Self {
+	pub(crate) fn acquire(path: &Path) -> Self {
 		let absolute = if path.is_absolute() {
 			path.to_path_buf()
 		} else {

@@ -49,7 +49,7 @@ pub(super) fn bucket_fill(
 	let Some(region) = wand_region(doc, params, ctx, "the Paint Bucket")? else {
 		return Err(CommandError::NotAllowed("nothing to fill there".into()));
 	};
-	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let locked_alpha = doc.locks(id).transparency;
 	let placed = crate::pixels::Placed { image: &image, offset };
 	let canvas = (doc.width, doc.height);
 	let (filled, offset) = match source {
@@ -109,7 +109,7 @@ pub(super) fn magic_erase(
 	// FAST: opacity below 100 % erases fully (the coverage is not scaled).
 	let _ = opacity;
 	let layer_ref = doc.layer(id).expect("resolved id exists");
-	let locked_alpha = layer_ref.locked_transparency;
+	let locked_alpha = doc.locks(id).transparency;
 	let background = layer_ref.name == "Background" && layer_ref.locked_position;
 	let placed = crate::pixels::Placed { image: &image, offset };
 	let canvas = (doc.width, doc.height);
@@ -156,7 +156,7 @@ pub(super) fn fill_gradient(
 		});
 	}
 	let (id, image, offset) = pixel_target(doc, layer)?;
-	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let locked_alpha = doc.locks(id).transparency;
 	let placed = crate::pixels::Placed { image: &image, offset };
 	let paint = |x: i64, y: i64| fill.color_at(x, y);
 	let (filled, offset) = crate::pixels::fill_with(
@@ -187,7 +187,7 @@ pub(super) fn fill_pattern(
 	ctx: &CommandContext<'_>,
 ) -> Result<CommandEffect, CommandError> {
 	let (id, image, offset) = pixel_target(doc, layer)?;
-	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let locked_alpha = doc.locks(id).transparency;
 	let paint = pattern_paint(doc, pattern)?;
 	let placed = crate::pixels::Placed { image: &image, offset };
 	let (filled, offset) = crate::pixels::fill_with(

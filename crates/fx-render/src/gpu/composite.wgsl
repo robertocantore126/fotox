@@ -31,6 +31,7 @@ const K_ADJUST_SELECTIVE: u32 = 14u;
 const F_CLIP: u32 = 1u;
 const F_MASK: u32 = 2u;
 const F_DISSOLVE: u32 = 4u;
+const F_BLEND_IF: u32 = 16u;
 const F_PRESERVE: u32 = 8u; // adjustments: keep the input's luminance
 
 const STACK: u32 = 12u;
@@ -96,6 +97,26 @@ fn fetch(code: u32, p: vec2<u32>) -> vec4<f32> {
 		case 6u: { return textureLoad(page6, q, layer, 0); }
 		default: { return textureLoad(page7, q, layer, 0); }
 	}
+}
+
+// Blend If (Gray), `reference::blend_if_factor`: params = the two sliders,
+// each pair packed as a·256 + b.
+fn blend_if_slider(black: f32, white: f32, grey: f32) -> f32 {
+	let v = clamp(grey, 0.0, 1.0) * 255.0;
+	let b0 = floor(black / 256.0);
+	let b1 = black - b0 * 256.0;
+	let w0 = floor(white / 256.0);
+	let w1 = white - w0 * 256.0;
+	var k_black = 1.0;
+	if v < b0 { k_black = 0.0; } else if v < b1 { k_black = (v - b0) / max(b1 - b0, 1e-6); }
+	var k_white = 1.0;
+	if v > w1 { k_white = 0.0; } else if v > w0 { k_white = (w1 - v) / max(w1 - w0, 1e-6); }
+	return k_black * k_white;
+}
+
+fn blend_if_factor(params: vec4<f32>, cs: vec3<f32>, cb: vec3<f32>) -> f32 {
+	let w = vec3<f32>(0.299, 0.587, 0.114);
+	return blend_if_slider(params.x, params.y, dot(cs, w)) * blend_if_slider(params.z, params.w, dot(cb, w));
 }
 
 // Straight RGBA of the op's source at output pixel p.
@@ -466,6 +487,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 			case K_LAYER: {
 				let src = sample_src(i, p);
 				var alpha_s = src.a * ops[i].alpha * sample_mask(i, p);
+				if (ops[i].flags & F_BLEND_IF) != 0u {
+					alpha_s *= blend_if_factor(ops[i].params, src.rgb, unpremultiply(stack[sp]));
+				}
 				var mode = ops[i].blend;
 				if (ops[i].flags & F_DISSOLVE) != 0u {
 					let h = dissolve_hash(job.origin.x + p.x, job.origin.y + p.y, ops[i].seed);

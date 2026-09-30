@@ -8,11 +8,16 @@
 //!
 //! Gestures, as in Photoshop 2019+:
 //!
-//! * a corner scales proportionally about the opposite corner, Shift frees
-//!   the proportions, Alt scales about the reference point;
+//! * a corner scales freely about the opposite corner, Shift constrains its
+//!   proportions, Alt scales about the reference point;
 //! * a side scales one axis (Shift: both);
-//! * inside moves, outside rotates about the reference point (Shift: 15°
-//!   steps); the reference point itself can be dragged;
+//! * inside moves (the middle too), just outside (within [`ROTATE_BAND`] of
+//!   the box) rotates about the reference point (Shift: 15° steps); the
+//!   reference point is hidden and taken with Alt, as in Photoshop 2019+
+//!   (a press in the middle used to take the pivot, so dragging a layer by
+//!   its middle moved nothing);
+//! * a press farther away commits the transform, as Enter does (or cancels
+//!   one that changed nothing): clicking elsewhere ends the box;
 //! * Ctrl + corner distorts (the corner moves freely), Ctrl + side moves that
 //!   side, Ctrl+Shift + side skews along the side, Ctrl+Alt+Shift + corner
 //!   is perspective (the corner and its neighbour move apart symmetrically);
@@ -38,6 +43,9 @@ pub type Point = (f64, f64);
 const HANDLE_SLOP: f64 = 7.0;
 /// The square handle, on screen.
 const HANDLE_PX: f32 = 8.0;
+/// Screen pixels outside the box where a press still rotates; farther away
+/// it commits the transform.
+const ROTATE_BAND: f64 = 24.0;
 /// The slops are screen distances; below this zoom they would be huge.
 const MIN_ZOOM: f64 = 0.02;
 /// Shift snaps a rotation to this many degrees.
@@ -128,7 +136,10 @@ enum Grab {
 	Side(usize),
 	Reference,
 	Inside,
+	/// Just outside the box: rotates.
 	Outside,
+	/// Away from the box (or a warp's surface): commits.
+	Away,
 	/// A Warp control point.
 	WarpPoint(usize),
 	/// Inside the warp surface at parameter `(u, v)`.
@@ -164,6 +175,8 @@ pub struct Session {
 	pub filter: Filter,
 	drag: Option<Drag>,
 	hover: Option<Point>,
+	/// Alt held at the last event: the reference point shows and can be taken.
+	alt: bool,
 	zoom: f64,
 	/// Select ▸ Transform Selection (M9-T02): the box transforms the
 	/// selection's coverage, not the layer.
@@ -186,6 +199,7 @@ impl Session {
 			filter,
 			drag: None,
 			hover: None,
+			alt: false,
 			zoom: 1.0,
 			selection: false,
 			custom: None,
@@ -352,9 +366,15 @@ impl Session {
 		self.zoom = zoom.max(MIN_ZOOM);
 		let pointer = (event.x, event.y);
 		self.hover = Some(pointer);
+		self.alt = event.modifiers.alt;
 		match event.kind {
 			PointerKind::Down if event.buttons & BUTTON_LEFT != 0 => {
 				let grab = self.grab_at(pointer);
+				// A click elsewhere ends the box, keeping what was done.
+				if grab == Grab::Away {
+					self.drag = None;
+					return self.commit();
+				}
 				self.drag = Some(Drag {
 					grab,
 					start: pointer,
@@ -447,6 +467,8 @@ impl Session {
 		}
 		match self.hover.map(|p| self.grab_at(p)) {
 			Some(Grab::Inside | Grab::WarpInside(..)) => CursorShape::Move,
+			// A click there commits: the plain arrow says so.
+			Some(Grab::Away) => CursorShape::Default,
 			_ => CursorShape::Crosshair,
 		}
 	}
@@ -495,7 +517,12 @@ impl Session {
 						size_px: HANDLE_PX,
 					});
 				}
-				items.push(OverlayItem::Crosshair { at: self.reference });
+				// Shown while it can be taken (Alt) or once it left the middle.
+				let centre = midpoint(self.quad[0], self.quad[2]);
+				let moved = (self.reference.0 - centre.0).abs() > 1e-6 || (self.reference.1 - centre.1).abs() > 1e-6;
+				if self.alt || moved {
+					items.push(OverlayItem::Crosshair { at: self.reference });
+				}
 			}
 		}
 		Overlay { items }
@@ -510,7 +537,7 @@ impl Session {
 			}
 			return match surface_parameter(patch, p, slop) {
 				Some((u, v)) => Grab::WarpInside(u, v),
-				None => Grab::Outside,
+				None => Grab::Away,
 			};
 		}
 		if let Some(i) = (0..4).find(|&i| near(self.quad[i])) {
@@ -519,10 +546,16 @@ impl Session {
 		if let Some(i) = (0..4).find(|&i| near(midpoint(self.quad[i], self.quad[(i + 1) % 4]))) {
 			return Grab::Side(i);
 		}
-		if near(self.reference) {
+		if self.alt && near(self.reference) {
 			return Grab::Reference;
 		}
-		if inside(&self.quad, p) { Grab::Inside } else { Grab::Outside }
+		if inside(&self.quad, p) {
+			Grab::Inside
+		} else if distance_to_quad(&self.quad, p) <= ROTATE_BAND / self.zoom {
+			Grab::Outside
+		} else {
+			Grab::Away
+		}
 	}
 
 	/// Apply one move of a drag.
@@ -559,7 +592,9 @@ impl Session {
 				self.reference = (drag.reference.0 + delta.0, drag.reference.1 + delta.1);
 				return;
 			}
-			// Outside a warp's surface there is nothing to take hold of.
+			// Outside a warp's surface there is nothing to take hold of; a
+			// press away from the box never starts a drag.
+			Grab::Away => return,
 			Grab::Outside if self.patch.is_some() => return,
 			Grab::Inside if self.mode != Mode::Rotate => {
 				quad = quad.map(|q| (q.0 + delta.0, q.1 + delta.1));
@@ -598,9 +633,10 @@ impl Session {
 					let e1 = sub(quad[(k + 1) % 4], opposite);
 					let e2 = sub(quad[(k + 3) % 4], opposite);
 					let corner = quad[k];
-					let (s, t) = if !live.shift {
-						// Proportional (the default since Photoshop 2019): along
-						// the diagonal.
+					let (s, t) = if live.shift {
+						// Shift constrains a free corner drag to the original aspect
+						// ratio. Keeping the unconstrained result as the default makes
+						// a rectangle handle follow the pointer on both axes.
 						let d = sub(corner, anchor);
 						let k = dot(sub(p, anchor), d) / dot(d, d).max(1e-12);
 						(k, k)
@@ -774,6 +810,20 @@ fn bilinear(quad: &[Point; 4], u: f64, v: f64) -> Point {
 }
 
 /// Whether `p` is inside the convex quad.
+/// The distance from `p` to the nearest side of `quad`.
+fn distance_to_quad(quad: &[Point; 4], p: Point) -> f64 {
+	(0..4)
+		.map(|i| {
+			let (a, b) = (quad[i], quad[(i + 1) % 4]);
+			let ab = sub(b, a);
+			let len2 = dot(ab, ab);
+			let t = if len2 > 0.0 { (dot(sub(p, a), ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+			let q = add(a, scale(ab, t));
+			((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt()
+		})
+		.fold(f64::INFINITY, f64::min)
+}
+
 fn inside(quad: &[Point; 4], p: Point) -> bool {
 	let mut sign = 0.0;
 	for i in 0..4 {
@@ -860,27 +910,27 @@ mod tests {
 	}
 
 	#[test]
-	fn a_corner_scales_proportionally_about_the_opposite_corner() {
+	fn a_corner_scales_freely_by_default_and_shift_constrains_proportions() {
 		let mut s = session();
 		// Dragging the bottom-right corner along the diagonal to twice the size.
 		drag(&mut s, (300.0, 200.0), (500.0, 300.0), Modifiers::default());
 		maps(&s, (100.0, 100.0), (100.0, 100.0));
 		maps(&s, (300.0, 200.0), (500.0, 300.0));
-		// Off the diagonal the proportions still hold.
+		// Off the diagonal, the corner follows the pointer freely.
 		let mut s = session();
 		drag(&mut s, (300.0, 200.0), (500.0, 200.0), Modifiers::default());
-		let [tl, tr, _, bl] = s.quad;
-		assert!(((tr.0 - tl.0) / (bl.1 - tl.1) - 2.0).abs() < 1e-9, "{:?}", s.quad);
-		// Shift frees them.
+		maps(&s, (300.0, 200.0), (500.0, 200.0));
+		maps(&s, (100.0, 200.0), (100.0, 200.0));
+		assert!(s.status().starts_with("W: 200.0%  H: 100.0%"), "{}", s.status());
+		// Shift constrains the original aspect ratio.
 		let mut s = session();
 		let shift = Modifiers {
 			shift: true,
 			..Default::default()
 		};
 		drag(&mut s, (300.0, 200.0), (500.0, 200.0), shift);
-		maps(&s, (300.0, 200.0), (500.0, 200.0));
-		maps(&s, (100.0, 200.0), (100.0, 200.0));
-		assert!(s.status().starts_with("W: 200.0%  H: 100.0%"), "{}", s.status());
+		let [tl, tr, _, bl] = s.quad;
+		assert!(((tr.0 - tl.0) / (bl.1 - tl.1) - 2.0).abs() < 1e-9, "{:?}", s.quad);
 	}
 
 	#[test]
@@ -904,8 +954,9 @@ mod tests {
 	#[test]
 	fn outside_rotates_about_the_reference_point_and_shift_snaps() {
 		let mut s = session();
-		// From straight right of the centre (200, 150) to straight below it.
-		drag(&mut s, (400.0, 150.0), (200.0, 350.0), Modifiers::default());
+		// From just right of the box, level with the centre (200, 150), to
+		// straight below the centre.
+		drag(&mut s, (310.0, 150.0), (200.0, 260.0), Modifiers::default());
 		maps(&s, (200.0, 150.0), (200.0, 150.0));
 		maps(&s, (300.0, 150.0), (200.0, 250.0));
 		let shift = Modifiers {
@@ -913,13 +964,50 @@ mod tests {
 			..Default::default()
 		};
 		let mut s = session();
-		drag(&mut s, (400.0, 150.0), (400.0, 150.0 + 200.0 * 20f64.to_radians().tan()), shift);
+		drag(&mut s, (310.0, 150.0), (310.0, 150.0 + 110.0 * 20f64.to_radians().tan()), shift);
 		assert!(s.status().ends_with("Angle: 15.0°"), "{}", s.status());
-		// Moving the reference point moves the pivot.
+		// Moving the reference point (Alt) moves the pivot.
+		let alt = Modifiers {
+			alt: true,
+			..Default::default()
+		};
 		let mut s = session();
-		drag(&mut s, (200.0, 150.0), (100.0, 100.0), Modifiers::default());
-		drag(&mut s, (400.0, 100.0), (100.0, 400.0), Modifiers::default());
+		drag(&mut s, (200.0, 150.0), (100.0, 100.0), alt);
+		drag(&mut s, (310.0, 100.0), (100.0, 310.0), Modifiers::default());
 		maps(&s, (100.0, 100.0), (100.0, 100.0));
+	}
+
+	/// A press in the middle of the box moves the layer: the reference point
+	/// sits there, hidden, and only Alt takes it.
+	#[test]
+	fn a_drag_from_the_middle_moves_the_box() {
+		let mut s = session();
+		drag(&mut s, (200.0, 150.0), (260.0, 170.0), Modifiers::default());
+		maps(&s, (100.0, 100.0), (160.0, 120.0));
+		assert!(
+			!s.overlay().items.iter().any(|i| matches!(i, OverlayItem::Crosshair { .. })),
+			"the reference point stays hidden"
+		);
+	}
+
+	/// A press away from the box ends it, keeping what was done (as Enter);
+	/// with nothing done, it cancels. Only the box, its handles and a narrow
+	/// band around it take hold of anything.
+	#[test]
+	fn a_press_away_from_the_box_commits_it() {
+		let mut s = session();
+		drag(&mut s, (150.0, 150.0), (170.0, 150.0), Modifiers::default());
+		let away = s.pointer(&event(PointerKind::Down, (600.0, 500.0), Modifiers::default()), 1.0);
+		assert!(matches!(away, Update::Commit(Command::Transform { .. })), "{away:?}");
+		let mut s = session();
+		let away = s.pointer(&event(PointerKind::Down, (600.0, 500.0), Modifiers::default()), 1.0);
+		assert_eq!(away, Update::Cancel, "nothing was transformed");
+		// The band scales with the zoom: 24 screen pixels.
+		let mut s = session();
+		s.pointer(&event(PointerKind::Move, (340.0, 150.0), Modifiers::default()), 1.0);
+		assert_eq!(s.cursor(), CursorShape::Default, "40 px out: a click commits");
+		s.pointer(&event(PointerKind::Move, (340.0, 150.0), Modifiers::default()), 0.5);
+		assert_eq!(s.cursor(), CursorShape::Crosshair, "at 50 % the same point is 20 px out: it rotates");
 	}
 
 	#[test]

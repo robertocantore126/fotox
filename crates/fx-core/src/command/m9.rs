@@ -265,7 +265,7 @@ pub(super) fn perspective_crop(
 		reason: "the quadrilateral is degenerate".into(),
 	})?;
 	let ops = pixel_ops(ctx, "Perspective Crop")?;
-	let mut pixels_changed = resample_document(doc, ops, mapping, Filter::BicubicAutomatic, ctx.tiles)?;
+	let mut pixels_changed = resample_document(doc, ops, mapping, (width, height), Filter::BicubicAutomatic, ctx.tiles)?;
 	pixels_changed.extend(clip_document(doc, (0, 0, width, height), ctx.tiles)?);
 	pixels_changed.sort_unstable();
 	pixels_changed.dedup();
@@ -275,6 +275,8 @@ pub(super) fn perspective_crop(
 		label: "Perspective Crop".into(),
 		pixels_changed,
 		props_changed,
+		// Shape and text layers may have become Smart Objects.
+		structure_changed: true,
 		..Default::default()
 	})
 }

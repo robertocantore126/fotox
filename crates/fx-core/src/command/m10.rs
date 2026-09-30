@@ -237,7 +237,7 @@ pub(super) fn fill_path(
 	let Some(region) = work.selection else {
 		return Err(CommandError::NotAllowed("the path encloses no area".into()));
 	};
-	let locked_alpha = doc.layer(id).is_some_and(|l| l.locked_transparency);
+	let locked_alpha = doc.locks(id).transparency;
 	let placed = crate::pixels::Placed { image: &image, offset };
 	let canvas = (doc.width, doc.height);
 	let (filled, offset) = match source {

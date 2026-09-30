@@ -31,7 +31,7 @@ use fx_render::adjust::LutCache;
 use fx_render::gpu::{CompositorConfig, GpuCompositor, TileOutcome, ViewportRenderer};
 use fx_render::overlay::tessellate;
 use fx_render::{
-	FramePlan, Overlay, TestPatternRenderer, TileKey, TileProgram, TileRequest, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program, plan_frame,
+	FramePlan, Overlay, TestPatternRenderer, TileKey, TileProgram, TileRequest, VIEWPORT_FORMAT, ViewTransform, ViewportSize, build_program_checked, plan_frame,
 };
 use fx_tiles::{TILE_SIZE, TileId, TileStore};
 
@@ -94,6 +94,9 @@ pub(crate) enum RenderRequest {
 pub(crate) struct MipWork {
 	pub doc: DocId,
 	pub revision: u64,
+	/// The snapshot that asked, as `OpenDoc::render_generation` names it (undo
+	/// winds the revision back; the generation never repeats).
+	pub generation: u64,
 	pub requests: Vec<TileRequest>,
 }
 
@@ -186,7 +189,15 @@ pub(crate) fn run(ctx: RenderContext) {
 		let mut again = false;
 		let mut uploads = 0;
 		match &f.doc {
-			None => pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc),
+			None => {
+				// No document: let go of the last one's pixels (its snapshot and
+				// the programs holding its tiles), or closing the last document
+				// kept all of it in memory until another was drawn.
+				if let Some(pipeline) = tiles.as_mut() {
+					pipeline.forget_document();
+				}
+				pattern.render(&ctx.queue, &mut encoder, &target, viewport, &f.view, f.virtual_doc);
+			}
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
 				pipeline.compositor.set_hot_layer(f.hot_layer);
@@ -303,6 +314,15 @@ impl TilePipeline {
 		}
 	}
 
+	/// Drop everything held for the document last drawn.
+	fn forget_document(&mut self) {
+		self.snapshot = None;
+		self.current = None;
+		self.ready.clear();
+		self.programs.clear();
+		self.mips_sent.clear();
+	}
+
 	/// Draw one frame of `doc`. Returns whether another frame should follow
 	/// straight away (progress was made but the view is not complete yet).
 	#[allow(clippy::too_many_arguments)]
@@ -372,7 +392,10 @@ impl TilePipeline {
 		for key in keys {
 			if !self.programs.contains_key(&key) {
 				let luts = &mut self.luts;
-				match build_program(doc, key.level, key.tx, key.ty, &mut |a| luts.get(a)) {
+				let store = &ctx.store;
+				// A derived tile the store dropped is asked for again, like a
+				// dirty one (code review 2026-09-27 R01).
+				match build_program_checked(doc, key.level, key.tx, key.ty, &mut |a| luts.get(a), &|h| store.is_evicted(h)) {
 					Ok(program) => {
 						self.programs.insert(key, program);
 					}
@@ -393,6 +416,7 @@ impl TilePipeline {
 			&& let Err(crossbeam_channel::SendError(work)) = ctx.mips.send(MipWork {
 				doc: id,
 				revision: doc.revision,
+				generation,
 				requests: mips,
 			}) {
 			for m in &work.requests {
@@ -419,6 +443,15 @@ impl TilePipeline {
 						budget_spent = true;
 					}
 					for handle in missing {
+						// Dropped for good (a derived tile under memory
+						// pressure): loading cannot bring it back. Forget the
+						// program that points at it; the next frame builds a new
+						// one, which asks the engine to recompute the tile.
+						if ctx.store.is_evicted(&handle) {
+							self.programs.remove(&key);
+							budget_spent = true;
+							continue;
+						}
 						self.load(ctx, handle);
 					}
 				}
@@ -527,7 +560,8 @@ fn create_viewport_texture(device: &wgpu::Device, viewport: ViewportSize) -> wgp
 		sample_count: 1,
 		dimension: wgpu::TextureDimension::D2,
 		format: VIEWPORT_FORMAT,
-		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+		// COPY_SRC: tests read the frame back (what the user would see).
+		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
 		view_formats: &[],
 	})
 }

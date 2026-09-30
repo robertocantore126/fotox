@@ -1,10 +1,10 @@
 //! The Object Selection tool (W, M13-T04).
 //!
 //! Rectangle mode: drag a box around the object (a click is a point
-//! prompt). Lasso mode: draw roughly around it; its bounding box and its
-//! centre go to the decoder. The release asks the engine for an EfficientSAM
-//! run (`AiRequest::Object`); the engine reuses the document's embedding when
-//! the content has not changed (S39), and the mask comes back as one
+//! prompt). Lasso mode: draw roughly around it; the outline is sent too and
+//! cuts the result. The release asks the engine for a model run
+//! (`AiRequest::Object`): BiRefNet by default, EfficientSAM when chosen in
+//! Preferences ▸ AI, and the mask comes back as one
 //! `SelectBy` step, "Object Selection". Shift adds, Alt subtracts; with a
 //! selection and no modifier the option bar's Mode applies.
 //!
@@ -71,11 +71,13 @@ impl Tool for ObjectSelect {
 					AiRequest::Object {
 						boxed: None,
 						points: vec![(at, true)],
+						lasso: Vec::new(),
 						mode,
 					}
 				} else {
 					AiRequest::Object {
 						boxed: Some([x0, y0, x1, y1]),
+						lasso: if self.lasso { points.clone() } else { Vec::new() },
 						points: if self.lasso {
 							vec![(((x0 + x1) / 2.0, (y0 + y1) / 2.0), true)]
 						} else {

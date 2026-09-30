@@ -198,6 +198,10 @@ pub struct GradientFill {
 	/// Use the opacity stops (off = opaque everywhere).
 	#[serde(default = "yes")]
 	pub transparency: bool,
+	/// The Angle sweep runs clockwise on screen instead of counter-clockwise
+	/// (a gradient fill after a flipped canvas).
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub mirror: bool,
 }
 
 fn yes() -> bool {
@@ -233,7 +237,8 @@ impl GradientFill {
 					let base = dy.atan2(dx);
 					let a = py.atan2(px) - base;
 					// Photoshop sweeps counter-clockwise on screen (VERIFY).
-					(-a).rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU
+					let a = if self.mirror { a } else { -a };
+					a.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU
 				}
 			}
 		};
@@ -280,16 +285,26 @@ pub struct GradientLayer {
 	/// Offset of the centre from the canvas centre, document pixels.
 	#[serde(default)]
 	pub offset: (f64, f64),
+	/// The Angle style sweeps the other way (code review 2026-09-27 R03: a
+	/// flipped canvas mirrors the fill; the other styles are symmetric).
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub mirror: bool,
 }
 
 impl GradientLayer {
 	/// The placed gradient on a canvas of `size`.
 	pub fn placed(&self, size: (u32, u32)) -> GradientFill {
-		let (w, h) = (f64::from(size.0), f64::from(size.1));
+		self.placed_in((0.0, 0.0, f64::from(size.0), f64::from(size.1)))
+	}
+
+	/// The gradient placed over the box `(x, y, w, h)` (document pixels):
+	/// the canvas, or a layer's bounds for a Gradient Overlay aligned with
+	/// its layer.
+	pub fn placed_in(&self, (x, y, w, h): (f64, f64, f64, f64)) -> GradientFill {
 		let a = self.angle.to_radians();
 		let (ux, uy) = (a.cos(), -a.sin());
 		let half = (w * ux.abs() + h * uy.abs()) / 2.0 * (self.scale / 100.0).max(0.01);
-		let c = (w / 2.0 + self.offset.0, h / 2.0 + self.offset.1);
+		let c = (x + w / 2.0 + self.offset.0, y + h / 2.0 + self.offset.1);
 		let (start, end) = match self.kind {
 			GradientKind::Linear | GradientKind::Angle => ((c.0 - ux * half, c.1 - uy * half), (c.0 + ux * half, c.1 + uy * half)),
 			_ => (c, (c.0 + ux * half, c.1 + uy * half)),
@@ -302,6 +317,7 @@ impl GradientLayer {
 			reverse: self.reverse,
 			dither: self.dither,
 			transparency: true,
+			mirror: self.mirror,
 		}
 	}
 }

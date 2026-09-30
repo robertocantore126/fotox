@@ -201,6 +201,14 @@ impl PixelOps for EngineOps {
 		Ok(px[0])
 	}
 
+	fn convert_colors(&self, colors: &mut [[u16; 4]], conversion: &Conversion<'_>) -> Result<(), CommandError> {
+		if colors.is_empty() {
+			return Ok(());
+		}
+		rgb_transform(conversion)?.apply(colors);
+		Ok(())
+	}
+
 	fn rasterise(&self, shape: &SelectionShape, size: (u32, u32), depth: BitDepth, anti_alias: bool, store: &TileStore) -> Result<Selection, CommandError> {
 		fx_ops::raster::rasterise(shape, size, depth, anti_alias, store)
 	}
@@ -364,34 +372,40 @@ impl EngineOps {
 /// The Magic Wand reads the composite of a document through the CPU
 /// reference compositor, one canvas tile at a time (M5-T04).
 struct CompositeSource<'a> {
-	doc: Document,
+	/// A copy of the document: the derived tiles the wand reads are computed
+	/// into it (code review 2026-09-27 R01/R06).
+	doc: std::sync::Mutex<(Document, fx_render::adjust::LutCache)>,
 	store: &'a TileStore,
-	luts: std::sync::Mutex<fx_render::adjust::LutCache>,
 }
 
 impl<'a> CompositeSource<'a> {
 	fn new(doc: Document, store: &'a TileStore) -> Self {
 		Self {
-			doc,
+			doc: std::sync::Mutex::new((doc, Default::default())),
 			store,
-			luts: std::sync::Mutex::new(Default::default()),
 		}
 	}
 }
 
 impl fx_ops::flood::WandSource for CompositeSource<'_> {
 	fn tile(&self, tx: u32, ty: u32) -> Result<fx_ops::flood::WandTile, CommandError> {
-		let program = {
-			let mut luts = self.luts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-			fx_render::build_program(&self.doc, 0, tx, ty, &mut |a| luts.get(a))
-				.map_err(|_| CommandError::NotAllowed("full-resolution tiles are missing".into()))?
-		};
-		if program.is_empty() {
-			return Ok(fx_ops::flood::WandTile::Uniform([0.0; 4]));
+		let unreadable = |e: fx_tiles::TileError| CommandError::NotAllowed(format!("the document's tiles: {e}"));
+		// Prepared under the lock, rendered outside it; an input the trim
+		// dropped in between is prepared again.
+		for _ in 0..4 {
+			let program = {
+				let mut guard = self.doc.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+				let (doc, luts) = &mut *guard;
+				crate::derived::prepare(doc, self.store, 0, &[(tx, ty)], luts).map_err(unreadable)?.remove(0)
+			};
+			match crate::derived::render_pinned(&program, self.store) {
+				Ok(None) => return Ok(fx_ops::flood::WandTile::Uniform([0.0; 4])),
+				Ok(Some(pixels)) => return Ok(fx_ops::flood::WandTile::Data(pixels.iter().map(|p| p.map(|v| v as f32)).collect())),
+				Err(fx_tiles::TileError::Evicted) => continue,
+				Err(error) => return Err(unreadable(error)),
+			}
 		}
-		let fetch = |h: &fx_tiles::TileHandle| self.store.get(h).expect("tile of a live document");
-		let pixels = fx_render::reference::render_tile(&program, &fetch);
-		Ok(fx_ops::flood::WandTile::Data(pixels.iter().map(|p| p.map(|v| v as f32)).collect()))
+		Err(unreadable(fx_tiles::TileError::Evicted))
 	}
 }
 

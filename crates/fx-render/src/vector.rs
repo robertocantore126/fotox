@@ -41,6 +41,9 @@ pub fn render_shape_tile(
 	let Some(mut pixmap) = Pixmap::new(pixels, pixels) else {
 		return TileBuffer::zeroed(format);
 	};
+	if let VectorShape::Compound { parts } = shape {
+		return render_compound_tile(parts, fill, stroke, transform, level, tile, format);
+	}
 	let Some(path) = build_path(&shape.outline()) else {
 		return convert(&pixmap.take_demultiplied(), format);
 	};
@@ -73,6 +76,62 @@ pub fn render_shape_tile(
 	}
 	if let Some(stroke) = stroke {
 		draw_stroke(&mut pixmap, &path, stroke, scale, tile_transform);
+	}
+	convert(&pixmap.take_demultiplied(), format)
+}
+
+/// A compound shape's tile: each part's coverage rasterised on its own, the
+/// coverages combined in order by their shape-area operation, the fill
+/// painted through the result. FAST: the stroke follows every part's own
+/// outline, not the combined outline.
+fn render_compound_tile(
+	parts: &[fx_core::vector::ShapePart],
+	fill: Option<&Paint>,
+	stroke: Option<&StrokeStyle>,
+	transform: [f64; 6],
+	level: usize,
+	tile: (u32, u32),
+	format: PixelFormat,
+) -> TileBuffer {
+	use fx_core::vector::{combine_coverage, compose};
+	let n = (TILE_SIZE * TILE_SIZE) as usize;
+	let mut coverage = vec![0.0f64; n];
+	for (i, part) in parts.iter().enumerate() {
+		// The part alone, drawn opaque white: its alpha is its coverage.
+		let white = Paint::Solid { rgba: [65_535; 4] };
+		let alone = render_shape_tile(&part.shape, Some(&white), None, compose(transform, part.transform), level, tile, PixelFormat::Rgba8);
+		let bytes = alone.bytes();
+		for (k, c) in coverage.iter_mut().enumerate() {
+			let a = f64::from(bytes[k * 4 + 3]) / 255.0;
+			*c = if i == 0 { a } else { combine_coverage(part.op, *c, a) };
+		}
+	}
+	let Some(mut pixmap) = Pixmap::new(TILE_SIZE, TILE_SIZE) else {
+		return TileBuffer::zeroed(format);
+	};
+	if let Some(paint) = fill {
+		let [r, g, b, a] = paint.rgba().map(|v| f64::from(v) / 65535.0);
+		let data = pixmap.data_mut();
+		for (k, c) in coverage.iter().enumerate() {
+			let alpha = (c.clamp(0.0, 1.0) * a * 255.0).round();
+			// Premultiplied RGBA8.
+			data[k * 4] = (r * alpha).round() as u8;
+			data[k * 4 + 1] = (g * alpha).round() as u8;
+			data[k * 4 + 2] = (b * alpha).round() as u8;
+			data[k * 4 + 3] = alpha as u8;
+		}
+	}
+	if let Some(stroke) = stroke {
+		let scale = f64::from(1u32 << level);
+		let origin = (f64::from(tile.0) * f64::from(TILE_SIZE), f64::from(tile.1) * f64::from(TILE_SIZE));
+		let level_to_tile = Transform::from_row((1.0 / scale) as f32, 0.0, 0.0, (1.0 / scale) as f32, -origin.0 as f32, -origin.1 as f32);
+		for part in parts {
+			let m = compose(transform, part.transform);
+			let local_to_doc = Transform::from_row(m[0] as f32, m[1] as f32, m[2] as f32, m[3] as f32, m[4] as f32, m[5] as f32);
+			if let Some(path) = build_path(&part.shape.outline()) {
+				draw_stroke(&mut pixmap, &path, stroke, scale, level_to_tile.pre_concat(local_to_doc));
+			}
+		}
 	}
 	convert(&pixmap.take_demultiplied(), format)
 }

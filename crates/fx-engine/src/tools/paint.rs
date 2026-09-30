@@ -119,6 +119,7 @@ impl Paint {
 			tip: 0,
 			dynamics: Default::default(),
 			seed: 0,
+			profile: Default::default(),
 		}
 		.with_settings(s.options.get(self.id).and_then(|o| o.get("_brush")));
 		self.m8_brush(ctx, brush)
@@ -533,6 +534,9 @@ impl WithSettings for BrushParams {
 		}
 		if let Some(d) = extra.get("dynamics").and_then(|d| serde_json::from_value(d.clone()).ok()) {
 			self.dynamics = d;
+		}
+		if let Some(p) = extra.get("profile").and_then(|p| serde_json::from_value(p.clone()).ok()) {
+			self.profile = p;
 		}
 		self
 	}

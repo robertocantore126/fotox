@@ -5,6 +5,7 @@
 // `active_document` / `view` messages. A tab click sends
 // `activate_document`, its close button `close_document`.
 
+import { activeLayerInfo } from "./layers-panel.js";
 import { h, icon } from "../el.js";
 import { state } from "../state.js";
 import { status } from "../tooltip.js";
@@ -58,6 +59,11 @@ export function initDocumentTabs(tabs, add) {
     if (size) size.textContent = d ? `${d.info.width} × ${d.info.height} px` : "";
   });
 
+  // The tab names the active layer and whether its mask is the target.
+  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH]) {
+    bridge.on(type, (msg) => { if (msg.doc === active) queueMicrotask(() => refresh(active)); });
+  }
+
   bridge.on(ENGINE.VIEW, (view) => {
     const d = docs.get(view.doc);
     if (!d) return;
@@ -101,7 +107,11 @@ function refresh(id) {
   const { info } = d;
   const zoom = d.zoom == null ? "" : ` @ ${formatZoom(d.zoom)}%`;
   const bits = info.depth === "u16" || info.depth === "U16" ? 16 : 8;
-  const label = `${info.name}${zoom} (RGB/${bits})${info.dirty ? "*" : ""}`;
+  // Photoshop's tab: the active layer, and "Layer Mask" when painting goes
+  // to its mask, so the editing target is always visible.
+  const layer = id === active ? activeLayerInfo() : null;
+  const target = layer ? `${layer.name}${layer.edit_mask ? ", Layer Mask" : ""}, ` : "";
+  const label = `${info.name}${zoom} (${target}RGB/${bits})${info.dirty ? "*" : ""}`;
   d.tab.querySelector(".doctab-label").textContent = label;
   d.tab.title = `${info.name} — ${info.width} × ${info.height} px, ${info.profile_name}, ${Math.round(info.ppi)} ppi`;
   if (id === active) state.doc = { ...state.doc, name: info.name, w: info.width, h: info.height, bits };

@@ -19,9 +19,7 @@ use fx_core::Document;
 use fx_core::select_ops::{ModelKind, ModelMask};
 use fx_render::adjust::LutCache;
 use fx_render::blend::unpremultiply;
-use fx_render::build_program;
 use fx_render::program::TileRequest;
-use fx_render::reference::render_tile;
 use fx_tiles::{TILE_SIZE, TileStore};
 
 /// The composite at the mip level whose long side is at most `max_side`:
@@ -32,6 +30,8 @@ pub struct Working {
 	pub width: usize,
 	pub height: usize,
 	pub level: usize,
+	/// Canvas pixel of the working image's top-left corner (a crop's).
+	pub origin: (i64, i64),
 }
 
 impl Working {
@@ -42,42 +42,7 @@ impl Working {
 
 /// Serve the tiles a program is missing (the frame loop's work, inline).
 pub fn serve(doc: &mut Document, store: &TileStore, requests: &[TileRequest]) {
-	let mut shapes = Vec::new();
-	let mut masks = Vec::new();
-	let mut effects = Vec::new();
-	for request in requests {
-		match request {
-			TileRequest::Mip(r) => {
-				let Some(layer) = doc.layer_mut(r.layer) else { continue };
-				let image = if r.mask {
-					match layer.mask.as_mut() {
-						Some(mask) => &mut mask.image,
-						None => continue,
-					}
-				} else {
-					match &mut layer.kind {
-						fx_core::LayerKind::Pixel { image, .. } => image,
-						_ => continue,
-					}
-				};
-				if let Err(error) = crate::mips::ensure_mip(image, store, r.level, r.x, r.y) {
-					tracing::warn!("mip {r:?} failed: {error}");
-				}
-			}
-			TileRequest::Vector(r) if r.vector_mask => masks.push((r.layer, r.level, r.x, r.y)),
-			TileRequest::Vector(r) => shapes.push((r.layer, r.level, r.x, r.y)),
-			TileRequest::Effect(r) => effects.push((r.layer, r.effect, r.level, r.x, r.y)),
-		}
-	}
-	if !shapes.is_empty() {
-		crate::vector::draw_requests(doc, store, &shapes);
-	}
-	if !masks.is_empty() {
-		crate::vector::draw_vector_mask_requests(doc, store, &masks);
-	}
-	if !effects.is_empty() {
-		crate::effects::draw_effect_requests(doc, store, &effects);
-	}
+	crate::derived::fulfil(doc, store, requests);
 }
 
 /// Read the composite at a working resolution (M13-T01): the number of tiles
@@ -94,6 +59,35 @@ pub fn working_composite(doc: &mut Document, store: &TileStore, max_side: u32) -
 		width: w,
 		height: h,
 		level,
+		origin: (0, 0),
+	})
+}
+
+/// The composite of the canvas rectangle `rect` (`x0, y0, x1, y1`, clamped
+/// to the canvas) at the finest mip level whose long side is at most
+/// `max_side`: a crop read at up to full resolution, so a model sees a small
+/// object with all its detail instead of a shrunk whole document.
+pub fn working_crop(doc: &mut Document, store: &TileStore, rect: (i64, i64, i64, i64), max_side: u32) -> Result<Working, String> {
+	let (w, h) = (i64::from(doc.width), i64::from(doc.height));
+	let (x0, y0, x1, y1) = (rect.0.clamp(0, w), rect.1.clamp(0, h), rect.2.clamp(0, w), rect.3.clamp(0, h));
+	if x1 <= x0 || y1 <= y0 {
+		return Err("the area is outside the canvas".into());
+	}
+	let mut level = 0usize;
+	while ((x1 - x0).max(y1 - y0) >> level) > i64::from(max_side) && level < 16 {
+		level += 1;
+	}
+	let step = 1i64 << level;
+	// Whole mip pixels, rounded outward.
+	let (mx0, my0) = (x0.div_euclid(step), y0.div_euclid(step));
+	let (mx1, my1) = ((x1 + step - 1).div_euclid(step), (y1 + step - 1).div_euclid(step));
+	let pixels = composite_rect(doc, store, level, (mx0, my0, mx1, my1))?;
+	Ok(Working {
+		pixels,
+		width: (mx1 - mx0) as usize,
+		height: (my1 - my0) as usize,
+		level,
+		origin: (mx0 * step, my0 * step),
 	})
 }
 
@@ -112,21 +106,20 @@ pub fn composite_rect(doc: &mut Document, store: &TileStore, level: usize, rect:
 		return Ok(pixels);
 	}
 	let mut luts = LutCache::default();
+	let mut tiles = Vec::new();
 	for ty in cy0.div_euclid(t)..=(cy1 - 1).div_euclid(t) {
 		for tx in cx0.div_euclid(t)..=(cx1 - 1).div_euclid(t) {
-			let mut program = None;
-			for _ in 0..4 {
-				match build_program(doc, level, tx as u32, ty as u32, &mut |a| luts.get(a)) {
-					Ok(p) => {
-						program = Some(p);
-						break;
-					}
-					Err(requests) => serve(doc, store, &requests),
-				}
-			}
-			let program = program.ok_or_else(|| "the document's tiles could not be prepared".to_owned())?;
-			let fetch = |handle: &fx_tiles::TileHandle| store.get(handle).expect("tile of a live document");
-			let tile = render_tile(&program, &fetch);
+			tiles.push((tx as u32, ty as u32));
+		}
+	}
+	// Code review 2026-09-27 R01: the derived inputs are computed (again, if
+	// the trim dropped them) and held while each tile renders.
+	let rendered =
+		crate::derived::render_tiles(doc, store, level, &tiles, &mut luts).map_err(|e| format!("the document's tiles could not be prepared: {e}"))?;
+	for tile in rendered {
+		let (tx, ty) = (i64::from(tile.tile.0), i64::from(tile.tile.1));
+		{
+			let Some(tile) = tile.pixels else { continue };
 			for py in 0..t {
 				let y = ty * t + py;
 				if y < cy0 || y >= cy1 {
@@ -257,6 +250,40 @@ pub fn model(path: &std::path::Path) -> Result<Arc<Model>, AiError> {
 	Ok(m)
 }
 
+/// Load ONNX Runtime and every installed model on a background thread at
+/// start, and run BiRefNet once on a blank image, so the first Select
+/// Subject / Object Selection does not wait for the runtime, the DirectML
+/// sessions and their first-run shader compilation.
+pub fn warm() {
+	use fx_ai::models::{BIREFNET, EFFICIENT_SAM};
+	let spawned = std::thread::Builder::new().name("ai-warm".into()).spawn(|| {
+		if !fx_ai::runtime::available() {
+			return;
+		}
+		let started = std::time::Instant::now();
+		if BIREFNET.installed() {
+			let result = model(&BIREFNET.path(BIREFNET.files[0].file)).and_then(|m| {
+				const SIDE: usize = 1024;
+				m.run(vec![Tensor32::new(vec![1, 3, SIDE, SIDE], vec![0.0; 3 * SIDE * SIDE]).into()])
+			});
+			if let Err(error) = result {
+				tracing::warn!("AI warm-up, {}: {error}", BIREFNET.name);
+			}
+		}
+		if EFFICIENT_SAM.installed() {
+			for file in EFFICIENT_SAM.files {
+				if let Err(error) = model(&EFFICIENT_SAM.path(file.file)) {
+					tracing::warn!("AI warm-up, {}: {error}", file.file);
+				}
+			}
+		}
+		tracing::info!("AI warm-up done in {:.2} s", started.elapsed().as_secs_f64());
+	});
+	if let Err(error) = spawned {
+		tracing::warn!("AI warm-up thread: {error}");
+	}
+}
+
 /// The inputs in the model's order, matched by name.
 pub fn ordered(model: &Model, mut named: Vec<(&str, Input)>) -> Result<Vec<Input>, AiError> {
 	let mut out = Vec::with_capacity(model.inputs.len());
@@ -275,10 +302,17 @@ pub fn to_u8(logits: &[f32]) -> Vec<u8> {
 	logits.iter().map(|v| (fx_ai::image::sigmoid(*v) * 255.0).round() as u8).collect()
 }
 
-/// A `mw × mh` mask covering the working image, placed on the canvas.
-pub fn mask_over(width: usize, height: usize, level: usize, mw: u32, mh: u32, values: Vec<u8>, kind: ModelKind) -> ModelMask {
+/// A `mw × mh` mask covering the working image (`width × height` at mip
+/// `level`, its corner at canvas `origin`), placed on the canvas.
+#[allow(clippy::too_many_arguments)]
+pub fn mask_over(width: usize, height: usize, level: usize, origin: (i64, i64), mw: u32, mh: u32, values: Vec<u8>, kind: ModelKind) -> ModelMask {
 	let scale = f64::from(1u32 << level);
-	let rect = (0, 0, (width as f64 * scale) as i64, (height as f64 * scale) as i64);
+	let rect = (
+		origin.0,
+		origin.1,
+		origin.0 + (width as f64 * scale) as i64,
+		origin.1 + (height as f64 * scale) as i64,
+	);
 	// The guided filter's window: about one and a half mask cells.
 	let cell = (rect.2.max(rect.3) as f64 / f64::from(mw.max(mh).max(1))) as f32;
 	ModelMask {
@@ -320,6 +354,7 @@ pub fn subject_mask(work: &Working) -> Result<ModelMask, AiError> {
 		work.width,
 		work.height,
 		work.level,
+		work.origin,
 		SIDE as u32,
 		SIDE as u32,
 		to_u8(&best.data),
@@ -334,6 +369,8 @@ pub struct Embedding {
 	pub width: usize,
 	pub height: usize,
 	pub level: usize,
+	/// Canvas pixel of the working image's corner (a crop's; else 0, 0).
+	pub origin: (i64, i64),
 }
 
 pub fn sam_embedding(work: &Working) -> Result<Embedding, AiError> {
@@ -351,7 +388,257 @@ pub fn sam_embedding(work: &Working) -> Result<Embedding, AiError> {
 		width: w,
 		height: h,
 		level: work.level,
+		origin: work.origin,
 	})
+}
+
+/// The canvas area Object Selection reads for a box (`x0, y0, x1, y1`): the
+/// box and a margin of context around it, clamped to the canvas. The model
+/// then sees the object at up to full resolution, as Photoshop analyses the
+/// region drawn, instead of a whole document shrunk to 1024 px (where a
+/// 300 px object was 75 px wide and its outline a guess).
+pub fn object_crop(boxed: [f64; 4], canvas: (u32, u32)) -> (i64, i64, i64, i64) {
+	let (x0, x1) = (boxed[0].min(boxed[2]), boxed[0].max(boxed[2]));
+	let (y0, y1) = (boxed[1].min(boxed[3]), boxed[1].max(boxed[3]));
+	// VERIFY: how much context helps; a fifth of the box's long side.
+	let margin = ((x1 - x0).max(y1 - y0) * 0.2).max(32.0);
+	(
+		((x0 - margin).floor() as i64).max(0),
+		((y0 - margin).floor() as i64).max(0),
+		((x1 + margin).ceil() as i64).min(i64::from(canvas.0)),
+		((y1 + margin).ceil() as i64).min(i64::from(canvas.1)),
+	)
+}
+
+/// The canvas box around a mask's selected part (values ≥ 128); `None`
+/// when nothing is selected.
+pub fn mask_bounds(mask: &ModelMask) -> Option<[f64; 4]> {
+	let (w, h) = (mask.width as usize, mask.height as usize);
+	let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+	for y in 0..h {
+		for x in 0..w {
+			if mask.values[y * w + x] >= 128 {
+				(x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+			}
+		}
+	}
+	if x0 >= x1 {
+		return None;
+	}
+	let (rx0, ry0, rx1, ry1) = mask.rect;
+	let (sx, sy) = ((rx1 - rx0) as f64 / w as f64, (ry1 - ry0) as f64 / h as f64);
+	Some([
+		rx0 as f64 + x0 as f64 * sx,
+		ry0 as f64 + y0 as f64 * sy,
+		rx0 as f64 + x1 as f64 * sx,
+		ry0 as f64 + y1 as f64 * sy,
+	])
+}
+
+/// Object Selection with BiRefNet (the model Select Subject uses) instead of
+/// EfficientSAM: the area around the box is read at up to full resolution,
+/// BiRefNet finds what stands out in it, and whatever lies outside the
+/// prompt (the box, or the lasso's outline, with a small tolerance) is cut
+/// away. Much finer edges than the small SAM (hair, holes, thin parts), at
+/// the price of needing an object that stands out from its surroundings.
+pub fn birefnet_object(doc: &mut Document, store: &TileStore, boxed: [f64; 4], lasso: &[(f64, f64)], max_side: u32) -> Result<ModelMask, String> {
+	let area = object_crop(boxed, (doc.width, doc.height));
+	let work = working_crop(doc, store, area, max_side)?;
+	let mut mask = subject_mask(&work).map_err(|e| e.to_string())?;
+	mask.kind = ModelKind::Object;
+	clip_to_prompt(&mut mask, boxed, lasso);
+	if mask.values.iter().all(|&v| v < 128) {
+		return Err("No object found there: draw the box or lasso closer around it".into());
+	}
+	Ok(mask)
+}
+
+/// A click with BiRefNet: the whole document says where the object under the
+/// click is (the salient part connected to the click), then that object is
+/// read again as a crop at up to full resolution and only the part
+/// connected to the click is kept. `None` when nothing salient is near.
+pub fn birefnet_click(doc: &mut Document, store: &TileStore, at: (f64, f64), max_side: u32) -> Result<Option<ModelMask>, String> {
+	let work = working_composite(doc, store, max_side)?;
+	let coarse = subject_mask(&work).map_err(|e| e.to_string())?;
+	let Some([x0, y0, x1, y1]) = component_bounds(&coarse, at) else { return Ok(None) };
+	let (cw, ch) = (f64::from(doc.width), f64::from(doc.height));
+	let pad = (x1 - x0).max(y1 - y0) * 0.08;
+	let boxed = [(x0 - pad).max(0.0), (y0 - pad).max(0.0), (x1 + pad).min(cw), (y1 + pad).min(ch)];
+	let area = object_crop(boxed, (doc.width, doc.height));
+	let work = working_crop(doc, store, area, max_side)?;
+	let mut mask = subject_mask(&work).map_err(|e| e.to_string())?;
+	mask.kind = ModelKind::Object;
+	clip_to_prompt(&mut mask, boxed, &[]);
+	keep_component(&mut mask, at);
+	Ok(mask.values.iter().any(|&v| v >= 128).then_some(mask))
+}
+
+/// The mask cell holding canvas `(x, y)`, clamped into the mask.
+fn cell_of(mask: &ModelMask, (x, y): (f64, f64)) -> (usize, usize) {
+	let (rx0, ry0, rx1, ry1) = mask.rect;
+	let (w, h) = (mask.width as usize, mask.height as usize);
+	let cx = ((x - rx0 as f64) / (rx1 - rx0).max(1) as f64 * w as f64).floor();
+	let cy = ((y - ry0 as f64) / (ry1 - ry0).max(1) as f64 * h as f64).floor();
+	((cx.max(0.0) as usize).min(w.saturating_sub(1)), (cy.max(0.0) as usize).min(h.saturating_sub(1)))
+}
+
+/// The selected cell (≥ 128) nearest to `at` within a few percent of the
+/// mask, so a click just off a thin object still finds it.
+fn seed_near(mask: &ModelMask, at: (f64, f64)) -> Option<(usize, usize)> {
+	let (w, h) = (mask.width as usize, mask.height as usize);
+	let (sx, sy) = cell_of(mask, at);
+	let radius = (w.max(h) / 40).max(2) as i64;
+	let mut best: Option<((usize, usize), i64)> = None;
+	for dy in -radius..=radius {
+		for dx in -radius..=radius {
+			let (x, y) = (sx as i64 + dx, sy as i64 + dy);
+			if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+				continue;
+			}
+			let d = dx * dx + dy * dy;
+			if mask.values[y as usize * w + x as usize] >= 128 && best.is_none_or(|(_, b)| d < b) {
+				best = Some(((x as usize, y as usize), d));
+			}
+		}
+	}
+	best.map(|(p, _)| p)
+}
+
+/// The cells connected to `seed` whose value is at least `floor`.
+fn flood(mask: &ModelMask, seed: (usize, usize), floor: u8) -> Vec<bool> {
+	let (w, h) = (mask.width as usize, mask.height as usize);
+	let mut inside = vec![false; w * h];
+	let mut stack = vec![seed];
+	while let Some((x, y)) = stack.pop() {
+		let i = y * w + x;
+		if inside[i] || mask.values[i] < floor {
+			continue;
+		}
+		inside[i] = true;
+		if x > 0 {
+			stack.push((x - 1, y));
+		}
+		if x + 1 < w {
+			stack.push((x + 1, y));
+		}
+		if y > 0 {
+			stack.push((x, y - 1));
+		}
+		if y + 1 < h {
+			stack.push((x, y + 1));
+		}
+	}
+	inside
+}
+
+/// The canvas box of the salient part connected to `at`.
+fn component_bounds(mask: &ModelMask, at: (f64, f64)) -> Option<[f64; 4]> {
+	let seed = seed_near(mask, at)?;
+	let inside = flood(mask, seed, 128);
+	let mut part = ModelMask {
+		values: inside.iter().map(|&b| if b { 255 } else { 0 }).collect(),
+		..mask.clone()
+	};
+	part.kind = mask.kind;
+	mask_bounds(&part)
+}
+
+/// Keep only the part connected to `at` (its soft edge included).
+fn keep_component(mask: &mut ModelMask, at: (f64, f64)) {
+	let Some(seed) = seed_near(mask, at) else {
+		mask.values.fill(0);
+		return;
+	};
+	// A low floor keeps the anti-aliased fringe around the object.
+	let inside = flood(mask, seed, 8);
+	for (v, keep) in mask.values.iter_mut().zip(inside) {
+		if !keep {
+			*v = 0;
+		}
+	}
+}
+
+/// Cut away what lies outside the prompt: the box (a little tolerance), or
+/// the lasso's outline (with the same tolerance, so an outline drawn a bit
+/// tight does not slice the object).
+fn clip_to_prompt(mask: &mut ModelMask, boxed: [f64; 4], lasso: &[(f64, f64)]) {
+	let (x0, x1) = (boxed[0].min(boxed[2]), boxed[0].max(boxed[2]));
+	let (y0, y1) = (boxed[1].min(boxed[3]), boxed[1].max(boxed[3]));
+	let tol = ((x1 - x0).max(y1 - y0) * 0.03).max(4.0);
+	// At most ~256 vertices: the tolerance hides the rest.
+	let step = lasso.len().div_ceil(256).max(1);
+	let poly: Vec<(f64, f64)> = lasso.iter().step_by(step).copied().collect();
+	let (rx0, ry0, rx1, ry1) = mask.rect;
+	let (w, h) = (mask.width as usize, mask.height as usize);
+	let (sx, sy) = ((rx1 - rx0) as f64 / w as f64, (ry1 - ry0) as f64 / h as f64);
+	let tol2 = tol * tol;
+	for cy in 0..h {
+		let y = ry0 as f64 + (cy as f64 + 0.5) * sy;
+		for cx in 0..w {
+			let i = cy * w + cx;
+			if mask.values[i] == 0 {
+				continue;
+			}
+			let x = rx0 as f64 + (cx as f64 + 0.5) * sx;
+			let keep = if poly.len() >= 3 {
+				point_in_polygon(&poly, x, y) || near_outline(&poly, x, y, tol2)
+			} else {
+				x >= x0 - tol && x <= x1 + tol && y >= y0 - tol && y <= y1 + tol
+			};
+			if !keep {
+				mask.values[i] = 0;
+			}
+		}
+	}
+}
+
+fn point_in_polygon(poly: &[(f64, f64)], x: f64, y: f64) -> bool {
+	let mut inside = false;
+	let mut j = poly.len() - 1;
+	for i in 0..poly.len() {
+		let ((xi, yi), (xj, yj)) = (poly[i], poly[j]);
+		if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+			inside = !inside;
+		}
+		j = i;
+	}
+	inside
+}
+
+fn near_outline(poly: &[(f64, f64)], x: f64, y: f64, tol2: f64) -> bool {
+	let mut j = poly.len() - 1;
+	for i in 0..poly.len() {
+		let ((ax, ay), (bx, by)) = (poly[j], poly[i]);
+		let (dx, dy) = (bx - ax, by - ay);
+		let len2 = dx * dx + dy * dy;
+		let t = if len2 > 0.0 { (((x - ax) * dx + (y - ay) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+		let (px, py) = (ax + t * dx - x, ay + t * dy - y);
+		if px * px + py * py <= tol2 {
+			return true;
+		}
+		j = i;
+	}
+	false
+}
+
+/// A click's second pass (Object Selection): the first mask, from the whole
+/// document at ≤ `max_side`, only says *where* the object is; the object is
+/// then read again as a crop around it, at up to full resolution, with the
+/// same clicks and its box as the prompt. The coarse mask is kept when it
+/// covers most of the canvas (a crop would gain nothing).
+pub fn click_refine(doc: &mut Document, store: &TileStore, coarse: ModelMask, points: &[((f64, f64), bool)], max_side: u32) -> Result<ModelMask, String> {
+	let Some([x0, y0, x1, y1]) = mask_bounds(&coarse) else { return Ok(coarse) };
+	let (cw, ch) = (f64::from(doc.width), f64::from(doc.height));
+	if (x1 - x0) * (y1 - y0) > 0.6 * cw * ch {
+		return Ok(coarse);
+	}
+	// The coarse outline can miss thin parts: a looser box.
+	let pad = (x1 - x0).max(y1 - y0) * 0.08;
+	let boxed = [(x0 - pad).max(0.0), (y0 - pad).max(0.0), (x1 + pad).min(cw), (y1 + pad).min(ch)];
+	let area = object_crop(boxed, (doc.width, doc.height));
+	let work = working_crop(doc, store, area, max_side)?;
+	let embedding = sam_embedding(&work).map_err(|e| e.to_string())?;
+	sam_mask(&embedding, Some(boxed), points).map_err(|e| e.to_string())
 }
 
 /// The Object Selection decoder: a box and points in **canvas** pixels.
@@ -359,8 +646,9 @@ pub fn sam_mask(embedding: &Embedding, boxed: Option<[f64; 4]>, points: &[((f64,
 	use fx_ai::models::EFFICIENT_SAM;
 	let decoder = model(&EFFICIENT_SAM.path(EFFICIENT_SAM.files[1].file))?;
 	let s = f64::from(1u32 << embedding.level);
-	let boxed = boxed.map(|b| b.map(|v| (v / s) as f32));
-	let points: Vec<((f32, f32), bool)> = points.iter().map(|((x, y), p)| (((x / s) as f32, (y / s) as f32), *p)).collect();
+	let (ox, oy) = (embedding.origin.0 as f64, embedding.origin.1 as f64);
+	let boxed = boxed.map(|[x0, y0, x1, y1]| [((x0 - ox) / s) as f32, ((y0 - oy) / s) as f32, ((x1 - ox) / s) as f32, ((y1 - oy) / s) as f32]);
+	let points: Vec<((f32, f32), bool)> = points.iter().map(|((x, y), p)| ((((x - ox) / s) as f32, ((y - oy) / s) as f32), *p)).collect();
 	let (coords, labels, size) = fx_ai::sam::prompt(boxed, &points, (embedding.width, embedding.height));
 	let inputs = ordered(
 		&decoder,
@@ -387,6 +675,7 @@ pub fn sam_mask(embedding: &Embedding, boxed: Option<[f64; 4]>, points: &[((f64,
 		embedding.width,
 		embedding.height,
 		embedding.level,
+		embedding.origin,
 		mw as u32,
 		mh as u32,
 		to_u8(&best),

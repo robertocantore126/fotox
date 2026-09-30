@@ -54,6 +54,7 @@ Some UI messages are for the **shell** (`fx-app`), not the engine:
 | `close_document_answer` | `doc`, `answer`: `"save"` \| `"dont_save"` \| `"cancel"` | the user's answer to `close_dirty_document` (M3-T06) |
 | `set_zoom` | `doc`, `zoom` (1.0 = 100 %) | status-bar zoom field, View menu |
 | `request_thumbnails` | `doc`, `layers`, `size` | Layers panel needs thumbnails |
+| `request_layers` | `doc` | send the full `layers` list again: a `layers_patch` did not apply to the list the UI holds |
 | `tool_options` | `tool`, `options` (a JSON object) | the active tool's option-bar values, keyed by the field text without the colon (`{"Size": 40, "Hardness": 75, "Mode": "Normal"}`); sent when a tool becomes active and on every change (M5-T01) |
 | `set_colors` | `fg`, `bg` (16-bit RGBA arrays) | the foreground/background colours: every swatch change, X (swap), D (defaults) (M5-T01) |
 | `key` | `key` (a DOM `KeyboardEvent.key`: `"Escape"`, `"Enter"`, `"Backspace"`, `"Delete"`, the arrows; `"Shift+ArrowLeft"` with Shift) | a key the UI's shortcut map did not consume, for the active viewport tool (M5-T04): Escape drops the marquee/lasso being drawn, Enter closes a polygonal lasso, Backspace/Delete drops its last point, the arrows move the selection outline (Shift = 10 px). Delete/Backspace that no tool uses clear the selected pixels (Edit ▸ Clear, M5-T05) |
@@ -122,7 +123,8 @@ not handle. The engine is the authority for anything that touches a document.
 | `document_opened` / `document_changed` | `info: DocumentInfo` | create/update a document tab |
 | `document_closed` | `doc` | |
 | `active_document` | `doc \| null` | |
-| `layers` | `doc, revision, layers: LayerInfo[]` | full list, top → bottom, tree via `depth`; each row also carries `locked_pixels`, `locked_transparency`, `locked_position`, `edit_mask` (painting goes to the mask, M5-T09), and `adjustment` (adjustment layers) or `fill_color` (solid fills) |
+| `layers_patch` | `doc, revision, seq, base, changed: LayerInfo[]` | the list `base` (a `layers` or `layers_patch` `seq`) with the rows in `changed` replaced by id; ids, order and depth unchanged. Sent after an edit that changed only properties (visibility, opacity, name, styles…), so a click in a 5000-layer document is not 1.4 MB of JSON. A UI holding another list answers `request_layers` (2026-09-27) |
+| `layers` | `doc, revision, layers: LayerInfo[], seq` | full list, top → bottom, tree via `depth` (when a document becomes active, after a structural edit, on `request_layers`); each row also carries `locked_pixels`, `locked_transparency`, `locked_position`, `edit_mask` (painting goes to the mask, M5-T09), and `adjustment` (adjustment layers) or `fill_color` (solid fills) |
 | `history` | `doc, labels, current, can_undo, can_redo` | History panel, Edit menu state |
 | `view` | `doc, zoom, center_x, center_y, rotation_deg` | rulers, status bar, navigator; ≤ 60 Hz |
 | `status` | `memory: MemoryStats, fps, frame_ms_p50, frame_ms_p99, uploads, pending_loads, input_latency_ms_p50, input_latency_ms_p99` | status bar memory readout, frame-time overlay (`debug:fps`); ~2 Hz. The input latency covers brush input → pixels on screen over the last 2 s (0 when nothing was painted, M5-T11) |

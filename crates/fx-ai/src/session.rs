@@ -56,6 +56,17 @@ impl Model {
 			use ort::ep::ExecutionProvider;
 			let dml = ort::ep::DirectML::default();
 			if std::env::var_os("FOTOX_AI_CPU").is_none() && dml.is_available().unwrap_or(false) {
+				// DirectML wants sequential execution without memory patterns.
+				// Its graph fusion runs out of memory on BiRefNet at 1024²
+				// (8007000E, RTX 3060 12 GB); without it BiRefNet takes ~0.5 s.
+				let err = |e: ort::Error<ort::session::builder::SessionBuilder>| AiError::Inference(e.to_string());
+				builder = builder
+					.with_memory_pattern(false)
+					.map_err(err)?
+					.with_parallel_execution(false)
+					.map_err(err)?
+					.with_config_entry("ep.dml.disable_graph_fusion", "1")
+					.map_err(err)?;
 				vec![dml.build(), ort::ep::CPU::default().build()]
 			} else {
 				vec![ort::ep::CPU::default().build()]
