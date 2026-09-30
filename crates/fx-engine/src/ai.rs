@@ -272,10 +272,10 @@ pub fn model(path: &std::path::Path) -> Result<Arc<Model>, AiError> {
 	Ok(m)
 }
 
-/// Load ONNX Runtime and every installed model on a background thread at
-/// start, and run BiRefNet once on a blank image, so the first Select
-/// Subject / Object Selection does not wait for the runtime, the DirectML
-/// sessions and their first-run shader compilation.
+/// Ensure the local selection models are installed, then load them on a
+/// background thread at start and run BiRefNet once on a blank image. This
+/// keeps Select Subject, Remove Background and Object Selection ready without
+/// a first-use setup step.
 pub fn warm() {
 	use fx_ai::models::{BIREFNET, EFFICIENT_SAM};
 	let spawned = std::thread::Builder::new().name("ai-warm".into()).spawn(|| {
@@ -284,6 +284,24 @@ pub fn warm() {
 			return;
 		}
 		let started = std::time::Instant::now();
+		for spec in [BIREFNET, EFFICIENT_SAM] {
+			if spec.installed() {
+				continue;
+			}
+			tracing::info!("AI startup: downloading {} ({} MB)", spec.name, spec.bytes() / 1_000_000);
+			let mut next_report = 25;
+			// FAST: the startup download reports progress to the log, not the UI.
+			if let Err(error) = fx_ai::models::download(&spec, &mut |done, total| {
+				let percent = done.saturating_mul(100) / total.max(1);
+				if percent >= next_report {
+					tracing::info!("AI startup: {} {}%", spec.name, percent);
+					next_report += 25;
+				}
+				true
+			}) {
+				tracing::warn!("AI startup: could not download {}: {error}", spec.name);
+			}
+		}
 		if BIREFNET.installed() {
 			let result = model(&BIREFNET.path(BIREFNET.files[0].file)).and_then(|m| {
 				const SIDE: usize = 1024;
