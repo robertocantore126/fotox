@@ -140,6 +140,28 @@ pub fn composite_rect(doc: &mut Document, store: &TileStore, level: usize, rect:
 	Ok(pixels)
 }
 
+/// `doc` reduced to layer `id`'s own content (visible, opaque, Normal, no
+/// masks or styles: [`fx_core::command::content_alone`]) over neutral grey,
+/// so the Object Selection tool sees the whole layer, the parts other layers
+/// cover included. The grey stands in for transparency: a straight read of
+/// it is black, where a dark object would vanish. `None` for an adjustment
+/// layer (it has no content of its own) or an unknown id.
+pub fn layer_alone(doc: &Document, id: fx_core::LayerId) -> Option<Document> {
+	if matches!(doc.layer(id)?.kind, fx_core::LayerKind::Adjustment(_)) {
+		return None;
+	}
+	let mut solo = fx_core::command::content_alone(doc, id)?;
+	let backdrop = fx_core::Layer::new(
+		solo.allocate_layer_id(),
+		"backdrop",
+		fx_core::LayerKind::SolidFill {
+			rgba: [32768, 32768, 32768, 65535],
+		},
+	);
+	solo.layers.insert(0, Arc::new(backdrop));
+	Some(solo)
+}
+
 /// Bilinear resize of straight RGBA (pixel centres aligned).
 pub fn resize(pixels: &[[f32; 4]], w: usize, h: usize, ow: usize, oh: usize) -> Vec<[f32; 4]> {
 	let mut out = vec![[0.0f32; 4]; ow * oh];

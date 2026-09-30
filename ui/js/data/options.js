@@ -39,7 +39,7 @@ export const optionBars = {
   "magic-wand": [SELECTION_MODE, { type: "gap" }, { type: "num", text: "Tolerance:", value: "32", width: 40 }, { type: "toggle", text: "Anti-alias", on: true }, { type: "toggle", text: "Contiguous", on: true }, { type: "toggle", text: "Sample All Layers", on: false }],
   // M13-T04: Shape = Rectangle / Lasso; the model reads the composite
   // (Sample All Layers is always on in Fotox).
-  "object-select": [SELECTION_MODE, { type: "gap" }, { type: "btngroup", key: "Shape", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "gap" }, { type: "btn", text: "Select Subject", action: "ai:subject" }, { type: "label", text: "Drag around an object (EfficientSAM, local)" }],
+  "object-select": [SELECTION_MODE, { type: "gap" }, { type: "btngroup", key: "Shape", icons: ["i-object-select", "i-lasso"], titles: ["Rectangle", "Lasso"], active: 0 }, { type: "gap" }, { type: "toggle", text: "Sample All Layers", on: false }, { type: "gap" }, { type: "btn", text: "Select Subject", action: "ai:subject" }, { type: "label", text: "Drag around an object on the active layer" }],
 
   // The crop tool reads Ratio / W / H and the Delete Cropped Pixels toggle
   // (M6-T03): the engine's crop command takes exactly those.

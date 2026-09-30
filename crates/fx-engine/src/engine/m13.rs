@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use fx_core::select_ops::SelectOp;
-use fx_core::{Command, LayerRef, SelectMode};
+use fx_core::{Command, Document, LayerId, LayerRef, SelectMode};
 use fx_protocol::{DocId, EngineToUi};
 use serde_json::{Value, json};
 
@@ -35,9 +35,10 @@ const WORKING: u32 = 1024;
 pub(super) struct State {
 	/// The running AI job's task and cancel flag.
 	cancel: Option<(u64, Arc<AtomicBool>)>,
-	/// EfficientSAM's embedding: document, content generation, the canvas
-	/// area it covers (`None` = the whole document), embedding.
-	embedding: Option<(DocId, u64, Option<(i64, i64, i64, i64)>, Arc<ai::Embedding>)>,
+	/// EfficientSAM's embedding: document, content generation, the layer it
+	/// read (`None` = all layers), the canvas area it covers (`None` = the
+	/// whole document), embedding.
+	embedding: Option<(DocId, u64, Option<LayerId>, Option<(i64, i64, i64, i64)>, Arc<ai::Embedding>)>,
 }
 
 /// What a finished AI job hands back to the engine thread.
@@ -52,6 +53,7 @@ pub(crate) enum AiResult {
 	/// An Object Selection whose embedding was computed on the way.
 	Object {
 		generation: u64,
+		layer: Option<LayerId>,
 		area: Option<(i64, i64, i64, i64)>,
 		embedding: Arc<ai::Embedding>,
 		command: Command,
@@ -286,12 +288,13 @@ impl Engine {
 			}
 			Ok(AiResult::Object {
 				generation,
+				layer,
 				area,
 				embedding,
 				command,
 			}) => {
 				if let Some(doc) = done.doc {
-					self.m13.embedding = Some((doc, generation, area, embedding));
+					self.m13.embedding = Some((doc, generation, layer, area, embedding));
 					self.command(doc, command);
 				}
 			}
@@ -354,6 +357,20 @@ impl Engine {
 		}
 	}
 
+	/// What the Object Selection tool reads, and the layer it is (`None`: the
+	/// composite). As in Photoshop, the active layer's whole content, covered
+	/// parts included, unless Sample All Layers is on; the composite when
+	/// the active layer has no content of its own (an adjustment layer).
+	fn object_source(&self, doc_id: DocId) -> Option<(Document, Option<LayerId>)> {
+		let open = self.docs.get(doc_id)?;
+		let sample_all = self.settings.bool("object-select", "Sample All Layers").unwrap_or(false);
+		let alone = (!sample_all)
+			.then(|| open.doc.active_layer())
+			.flatten()
+			.and_then(|id| ai::layer_alone(&open.doc, id).map(|solo| (solo, Some(id))));
+		Some(alone.unwrap_or_else(|| (open.doc.clone(), None)))
+	}
+
 	/// The Object Selection tool with BiRefNet ([`ai::birefnet_object`],
 	/// [`ai::birefnet_click`]).
 	fn object_select_birefnet(&mut self, doc_id: DocId, boxed: Option<[f64; 4]>, points: Vec<((f64, f64), bool)>, lasso: Vec<(f64, f64)>, mode: SelectMode) {
@@ -361,8 +378,7 @@ impl Engine {
 			return;
 		}
 		let store = self.store.clone();
-		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		let mut document = open.doc.clone();
+		let Some((mut document, _)) = self.object_source(doc_id) else { return };
 		let sam = fx_ai::models::EFFICIENT_SAM.installed();
 		self.start_ai(Some(doc_id), "Object Selection".into(), move |progress| {
 			let mask = match boxed {
@@ -406,11 +422,11 @@ impl Engine {
 			return;
 		}
 		let store = self.store.clone();
-		let Some(open) = self.docs.get_mut(doc_id) else { return };
-		let generation = open.generation;
-		let area = boxed.map(|b| ai::object_crop(b, (open.doc.width, open.doc.height)));
+		let Some(generation) = self.docs.get(doc_id).map(|open| open.generation) else { return };
+		let Some((mut document, layer)) = self.object_source(doc_id) else { return };
+		let area = boxed.map(|b| ai::object_crop(b, (document.width, document.height)));
 		let cached = match &self.m13.embedding {
-			Some((d, g, a, e)) if *d == doc_id && *g == generation && *a == area => Some(e.clone()),
+			Some((d, g, l, a, e)) if *d == doc_id && *g == generation && *l == layer && *a == area => Some(e.clone()),
 			_ => None,
 		};
 		let make = move |mask| Command::SelectBy {
@@ -419,7 +435,6 @@ impl Engine {
 		};
 		match cached {
 			Some(embedding) => {
-				let mut document = open.doc.clone();
 				self.start_ai(Some(doc_id), "Object Selection".into(), move |_| {
 					let mut mask = ai::sam_mask(&embedding, boxed, &points).map_err(|e| e.to_string())?;
 					if boxed.is_none() {
@@ -429,7 +444,6 @@ impl Engine {
 				});
 			}
 			None => {
-				let mut document = open.doc.clone();
 				self.start_ai(Some(doc_id), "Object Selection".into(), move |progress| {
 					let work = match area {
 						Some(rect) => ai::working_crop(&mut document, &store, rect, WORKING)?,
@@ -448,6 +462,7 @@ impl Engine {
 					}
 					Ok(AiResult::Object {
 						generation,
+						layer,
 						area,
 						embedding,
 						command: make(mask),
