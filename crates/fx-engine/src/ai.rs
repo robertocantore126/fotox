@@ -279,7 +279,8 @@ pub fn model(path: &std::path::Path) -> Result<Arc<Model>, AiError> {
 pub fn warm() {
 	use fx_ai::models::{BIREFNET, EFFICIENT_SAM};
 	let spawned = std::thread::Builder::new().name("ai-warm".into()).spawn(|| {
-		if !fx_ai::runtime::available() {
+		if let Err(error) = fx_ai::runtime::ensure() {
+			tracing::warn!("AI warm-up could not load ONNX Runtime: {error}");
 			return;
 		}
 		let started = std::time::Instant::now();
