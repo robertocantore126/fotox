@@ -6,10 +6,15 @@
 //! (base64). At start every tip is registered with the brush engine
 //! (`fx_ops::brush::tip::register`), so a preset's `tip` id is what the
 //! option bar sends back. `.abr` files add their sampled tips as presets.
+//!
+//! Presets belong to a `group` (the picker's folders: General Brushes, Dry
+//! Media, Wet Media, Special Effects, Fotox Classic, one per imported file…).
+//! A library saved before groups existed gets the built-in groups added and
+//! keeps its own presets under "My Brushes".
 
 use std::path::PathBuf;
 
-use fx_core::stroke::{BrushParams, Dynamics, StrokeSample};
+use fx_core::stroke::{BrushParams, Control, Dynamics, StrokeSample, TipProfile};
 use fx_ops::brush::{DabPath, Tip};
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +44,16 @@ pub struct Preset {
 	pub dynamics: Dynamics,
 	#[serde(default)]
 	pub tip: Option<TipData>,
+	/// The picker folder; empty = "My Brushes".
+	#[serde(default)]
+	pub group: String,
+	/// The round tip's fall-off.
+	#[serde(default)]
+	pub profile: TipProfile,
 }
+
+/// The folder presets without a group are shown in.
+pub const MY_BRUSHES: &str = "My Brushes";
 
 fn full() -> f32 {
 	1.0
@@ -65,10 +79,20 @@ pub struct Library {
 impl Library {
 	/// Read the file, or Photoshop-like defaults.
 	pub fn load() -> Self {
-		let presets = path()
+		let presets = match path()
 			.and_then(|p| std::fs::read_to_string(p).ok())
 			.and_then(|text| serde_json::from_str::<Vec<Preset>>(&text).ok())
-			.unwrap_or_else(defaults);
+		{
+			// Saved before the groups: the built-in ones first, the file's
+			// own presets after them.
+			Some(own) if own.iter().all(|p| p.group.is_empty()) => {
+				let mut all = defaults();
+				all.extend(own.into_iter().map(|p| Preset { group: MY_BRUSHES.into(), ..p }));
+				all
+			}
+			Some(presets) => presets,
+			None => defaults(),
+		};
 		let library = Self { presets };
 		for preset in &library.presets {
 			tip_id(preset);
@@ -106,16 +130,21 @@ impl Library {
 					"angle": p.angle,
 					"dynamics": p.dynamics,
 					"tip": tip_id(p),
+					"group": if p.group.is_empty() { MY_BRUSHES } else { p.group.as_str() },
+					"profile": p.profile,
 					"thumb": crate::b64::encode(&thumbnail(p)),
+					"tip_thumb": crate::b64::encode(&tip_thumbnail(p)),
 				})
 			})
 			.collect()
 	}
 
-	/// Add the sampled tips of an `.abr` file.
-	pub fn import_abr(&mut self, data: &[u8]) -> Result<usize, String> {
+	/// Add the sampled tips of an `.abr` file, in a group named after it.
+	pub fn import_abr(&mut self, data: &[u8], file_name: &str) -> Result<usize, String> {
 		let tips = fx_io::abr::read_abr(data).map_err(|e| e.to_string())?;
 		let n = tips.len();
+		let group = file_name.trim_end_matches(".abr").trim_end_matches(".ABR");
+		let group = if group.is_empty() { "Imported" } else { group }.to_owned();
 		for tip in tips {
 			self.presets.push(Preset {
 				name: tip.name,
@@ -130,6 +159,8 @@ impl Library {
 					height: tip.height,
 					gray: crate::b64::encode(&tip.gray),
 				}),
+				group: group.clone(),
+				profile: TipProfile::Classic,
 			});
 		}
 		Ok(n)
@@ -151,7 +182,7 @@ pub fn tip_id(preset: &Preset) -> u64 {
 }
 
 fn defaults() -> Vec<Preset> {
-	let round = |name: &str, size: f32, hardness: f32| Preset {
+	let round = |group: &str, name: &str, size: f32, hardness: f32, profile: TipProfile| Preset {
 		name: name.into(),
 		size,
 		hardness,
@@ -160,33 +191,198 @@ fn defaults() -> Vec<Preset> {
 		angle: 0.0,
 		dynamics: Dynamics::default(),
 		tip: None,
+		group: group.into(),
+		profile,
 	};
+	let sampled = |group: &str, name: &str, size: f32, spacing: f32, (width, height, gray): crate::brush_tips::Generated, dynamics: Dynamics| Preset {
+		name: name.into(),
+		size,
+		hardness: 1.0,
+		spacing,
+		roundness: 1.0,
+		angle: 0.0,
+		dynamics,
+		tip: Some(TipData {
+			width,
+			height,
+			gray: crate::b64::encode(&gray),
+		}),
+		group: group.into(),
+		profile: TipProfile::Classic,
+	};
+	let pressure_size = Dynamics {
+		size_control: Control::PenPressure,
+		..Dynamics::default()
+	};
+	let pressure_opacity = Dynamics {
+		opacity_control: Control::PenPressure,
+		..Dynamics::default()
+	};
+	use crate::brush_tips as t;
+	const GENERAL: &str = "General Brushes";
+	const DRY: &str = "Dry Media";
+	const WET: &str = "Wet Media";
+	const FX: &str = "Special Effects";
+	const CLASSIC: &str = "Fotox Classic";
 	vec![
-		round("Soft Round", 30.0, 0.0),
-		round("Hard Round", 30.0, 1.0),
-		round("Soft Round Pressure Size", 45.0, 0.0),
-		round("Hard Round Pressure Opacity", 45.0, 1.0),
+		// Photoshop's soft round, measured from Photopea (TipProfile::Gaussian).
+		round(GENERAL, "Soft Round", 45.0, 0.0, TipProfile::Gaussian),
+		round(GENERAL, "Hard Round", 30.0, 1.0, TipProfile::Gaussian),
 		Preset {
-			name: "Spatter".into(),
+			dynamics: pressure_size,
+			..round(GENERAL, "Soft Round Pressure Size", 45.0, 0.0, TipProfile::Gaussian)
+		},
+		Preset {
+			dynamics: pressure_opacity,
+			..round(GENERAL, "Soft Round Pressure Opacity", 45.0, 0.0, TipProfile::Gaussian)
+		},
+		Preset {
+			dynamics: pressure_size,
+			..round(GENERAL, "Hard Round Pressure Size", 30.0, 1.0, TipProfile::Gaussian)
+		},
+		Preset {
+			dynamics: pressure_opacity,
+			..round(GENERAL, "Hard Round Pressure Opacity", 30.0, 1.0, TipProfile::Gaussian)
+		},
+		Preset {
+			spacing: 0.1,
+			..round(GENERAL, "Soft Airbrush", 120.0, 0.0, TipProfile::Gaussian)
+		},
+		Preset {
 			dynamics: Dynamics {
-				size_jitter: 0.6,
-				scatter: 1.2,
+				size_control: Control::PenPressure,
+				min_diameter: 0.15,
+				..Dynamics::default()
+			},
+			spacing: 0.08,
+			..round(GENERAL, "Inking Pen", 12.0, 0.9, TipProfile::Gaussian)
+		},
+		sampled(
+			DRY,
+			"Chalk",
+			60.0,
+			0.15,
+			t::chalk(),
+			Dynamics {
+				angle_jitter: 0.1,
+				..Dynamics::default()
+			},
+		),
+		sampled(
+			DRY,
+			"Charcoal",
+			50.0,
+			0.1,
+			t::charcoal(),
+			Dynamics {
+				angle_jitter: 0.04,
+				size_jitter: 0.1,
+				..Dynamics::default()
+			},
+		),
+		sampled(DRY, "Pencil Grain", 14.0, 0.12, t::pencil(), pressure_opacity),
+		sampled(DRY, "Dry Brush", 70.0, 0.05, t::dry_brush(), Dynamics::default()),
+		sampled(
+			WET,
+			"Watercolor Blot",
+			90.0,
+			0.18,
+			t::watercolor(),
+			Dynamics {
+				size_jitter: 0.25,
+				angle_jitter: 1.0,
+				..Dynamics::default()
+			},
+		),
+		sampled(WET, "Round Bristle", 60.0, 0.04, t::bristle(), Dynamics::default()),
+		Preset {
+			dynamics: Dynamics {
+				size_control: Control::PenPressure,
+				min_diameter: 0.3,
+				flow_control: Control::PenPressure,
+				..Dynamics::default()
+			},
+			spacing: 0.05,
+			..round(WET, "Wet Ink", 24.0, 0.7, TipProfile::Gaussian)
+		},
+		sampled(
+			FX,
+			"Spatter",
+			80.0,
+			0.6,
+			t::spatter(),
+			Dynamics {
+				size_jitter: 0.5,
+				angle_jitter: 1.0,
+				scatter: 0.8,
+				count: 2,
+				..Dynamics::default()
+			},
+		),
+		sampled(
+			FX,
+			"Sponge",
+			70.0,
+			0.3,
+			t::sponge(),
+			Dynamics {
+				angle_jitter: 1.0,
+				scatter: 0.3,
+				..Dynamics::default()
+			},
+		),
+		sampled(
+			FX,
+			"Stipple",
+			60.0,
+			0.5,
+			t::stipple(),
+			Dynamics {
+				angle_jitter: 1.0,
+				scatter: 1.0,
 				count: 3,
 				..Dynamics::default()
 			},
-			..round("Spatter", 26.0, 0.8)
-		},
+		),
+		// The tips Fotox had before the measured one.
+		round(CLASSIC, "Soft Round (classic)", 30.0, 0.0, TipProfile::Classic),
+		round(CLASSIC, "Hard Round (classic)", 30.0, 1.0, TipProfile::Classic),
 		Preset {
-			name: "Chalk".into(),
 			roundness: 0.4,
 			angle: 35.0,
 			dynamics: Dynamics {
 				angle_jitter: 0.1,
 				..Dynamics::default()
 			},
-			..round("Chalk", 36.0, 0.6)
+			..round(CLASSIC, "Flat Chisel", 36.0, 0.6, TipProfile::Classic)
 		},
 	]
+}
+
+/// Side of a preset's tip thumbnail (the picker's grid).
+pub const TIP_THUMB: u32 = 40;
+
+/// One dab of the preset's tip, fitted in `TIP_THUMB²`, 8-bit coverage.
+pub fn tip_thumbnail(p: &Preset) -> Vec<u8> {
+	let n = TIP_THUMB;
+	let sampled = fx_ops::brush::tip::sampled(tip_id(p));
+	// Soft Gaussian tips reach ~1.6 R: leave room for the tail.
+	let diameter = if sampled.is_none() && p.profile == TipProfile::Gaussian && p.hardness < 0.5 {
+		n as f32 * 0.6
+	} else {
+		n as f32 * 0.9
+	};
+	let tip = match &sampled {
+		Some(t) => Tip::sampled(t.clone(), diameter, p.roundness, p.angle, false),
+		None => Tip::new(diameter, p.hardness, p.roundness, p.angle, false).with_profile(p.profile),
+	};
+	let c = n as f32 / 2.0;
+	(0..n * n)
+		.map(|i| {
+			let (x, y) = ((i % n) as f32 + 0.5 - c, (i / n) as f32 + 0.5 - c);
+			(tip.coverage(x, y).clamp(0.0, 1.0) * 255.0).round() as u8
+		})
+		.collect()
 }
 
 /// Width and height of a preset thumbnail.
@@ -208,6 +404,7 @@ pub fn thumbnail(p: &Preset) -> Vec<u8> {
 			scatter: p.dynamics.scatter.min(0.5),
 			..p.dynamics
 		},
+		profile: p.profile,
 		seed: 7,
 		..BrushParams::default()
 	};
@@ -231,7 +428,7 @@ pub fn thumbnail(p: &Preset) -> Vec<u8> {
 	for dab in dabs {
 		let tip = match &sampled {
 			Some(t) => Tip::sampled(t.clone(), dab.diameter, dab.roundness, dab.angle, false),
-			None => Tip::new(dab.diameter, params.hardness, dab.roundness, dab.angle, false),
+			None => Tip::new(dab.diameter, params.hardness, dab.roundness, dab.angle, false).with_profile(params.profile),
 		};
 		let reach = tip.reach();
 		let (x0, x1) = (

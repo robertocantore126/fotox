@@ -22,7 +22,7 @@ import { layerStyleEffects, layerStyleItems } from "../data/menus.js";
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
 
-const BLENDS = [
+export const BLENDS = [
   ["pass_through", "Pass Through"],
   ["normal", "Normal"], ["dissolve", "Dissolve"],
   ["darken", "Darken"], ["multiply", "Multiply"], ["color_burn", "Color Burn"], ["linear_burn", "Linear Burn"], ["darker_color", "Darker Color"],
@@ -972,7 +972,7 @@ function adjustmentSession(l) {
   };
 }
 
-function editAdjustment(l) {
+export function editAdjustment(l) {
   const adj = l.adjustment;
   if (!adj) return;
   if (PER_CHANNEL_DIALOGS[adj.kind]) { editPerChannel(l, PER_CHANNEL_DIALOGS[adj.kind]); return; }

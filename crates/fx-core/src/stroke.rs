@@ -43,6 +43,22 @@ pub struct BrushParams {
 	/// with the stroke, so live = replay).
 	#[serde(default)]
 	pub seed: u64,
+	/// The round tip's fall-off (ignored by sampled tips).
+	#[serde(default)]
+	pub profile: TipProfile,
+}
+
+/// How a round tip fades from its core to its edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipProfile {
+	/// Fotox's first tip: a smoothstep from `hardness × R` to `R`.
+	#[default]
+	Classic,
+	/// Photoshop / Photopea's soft round, measured from Photopea's dabs
+	/// (2026-09-28, docs/reports/BRUSH-MEASUREMENTS.md): an opaque core,
+	/// then a Gaussian that runs past `R`.
+	Gaussian,
 }
 
 /// What drives a dynamic (Photoshop's "Control" drop-downs).
@@ -158,6 +174,7 @@ impl Default for BrushParams {
 			tip: 0,
 			dynamics: Dynamics::default(),
 			seed: 0,
+			profile: TipProfile::Classic,
 		}
 	}
 }

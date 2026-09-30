@@ -339,9 +339,61 @@ impl Engine {
 	/// A request a tool made (the Object Selection tool, Generative Expand).
 	pub(super) fn ai_request(&mut self, doc_id: DocId, request: AiRequest) {
 		match request {
-			AiRequest::Object { boxed, points, mode } => self.object_select(doc_id, boxed, points, mode),
+			AiRequest::Object { boxed, points, lasso, mode } => {
+				// BiRefNet by default (finer edges); Preferences ▸ AI can pick
+				// the small EfficientSAM, which is also the fallback when
+				// BiRefNet finds nothing under a click.
+				let sam_chosen = self.prefs.string("ai_object_model").as_deref() == Some("sam");
+				if !sam_chosen && fx_ai::models::BIREFNET.installed() {
+					self.object_select_birefnet(doc_id, boxed, points, lasso, mode);
+				} else {
+					self.object_select(doc_id, boxed, points, mode);
+				}
+			}
 			AiRequest::Expand { old, prompt } => self.generative_expand(doc_id, old, prompt),
 		}
+	}
+
+	/// The Object Selection tool with BiRefNet ([`ai::birefnet_object`],
+	/// [`ai::birefnet_click`]).
+	fn object_select_birefnet(&mut self, doc_id: DocId, boxed: Option<[f64; 4]>, points: Vec<((f64, f64), bool)>, lasso: Vec<(f64, f64)>, mode: SelectMode) {
+		if !self.ai_ready(&fx_ai::models::BIREFNET, "The Object Selection tool") {
+			return;
+		}
+		let store = self.store.clone();
+		let Some(open) = self.docs.get_mut(doc_id) else { return };
+		let mut document = open.doc.clone();
+		let sam = fx_ai::models::EFFICIENT_SAM.installed();
+		self.start_ai(Some(doc_id), "Object Selection".into(), move |progress| {
+			let mask = match boxed {
+				Some(b) => ai::birefnet_object(&mut document, &store, b, &lasso, WORKING)?,
+				None => {
+					let at = points.first().map_or((0.0, 0.0), |p| p.0);
+					match ai::birefnet_click(&mut document, &store, at, WORKING)? {
+						Some(mask) => mask,
+						// Nothing stands out under the click: EfficientSAM, whose
+						// point prompts find any region.
+						None if sam => {
+							if !progress(0.5) {
+								return Err(fx_ai::AiError::Cancelled.to_string());
+							}
+							let work = ai::working_composite(&mut document, &store, WORKING)?;
+							let embedding = ai::sam_embedding(&work).map_err(|e| e.to_string())?;
+							let mask = ai::sam_mask(&embedding, None, &points).map_err(|e| e.to_string())?;
+							ai::click_refine(&mut document, &store, mask, &points, WORKING)?
+						}
+						None => return Err("No object found under the click: drag a box around it".into()),
+					}
+				}
+			};
+			if !progress(1.0) {
+				return Err(fx_ai::AiError::Cancelled.to_string());
+			}
+			Ok(AiResult::Command(Command::SelectBy {
+				select: SelectOp::Model(mask),
+				mode,
+			}))
+		});
 	}
 
 	/// The Object Selection tool (T04): EfficientSAM's decoder on the cached

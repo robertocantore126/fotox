@@ -157,13 +157,19 @@ function control(spec, changed) {
     // toast, like the ✓/✗ groups above (M6-T05's Reset View).
     case "btn": return { el: h("button", { class: "ob-btn", type: "button", text: spec.text, onclick: () => emit(spec.action ? "action" : "mock", spec.action || spec.text) }), read: null };
     case "toggle": return toggle(spec);
-    case "num": return num(spec);
+    // Brush size and hardness get a slider beside the box (like Photopea's
+    // and Photoshop's brush popups); every painting tool's schema has them.
+    case "num":
+      if (spec.text === "Size:" && spec.unit === "px") return sizeField(spec);
+      if (spec.text === "Hardness:") return percentField(spec);
+      return num(spec);
     case "text": return textField(spec);
     case "range": return range(spec);
     case "select": return select(spec, changed);
     case "btngroup": return buttonGroup(spec);
     case "swatch": return swatch(spec);
-    case "brushpreset": return brushPreset();
+    // The Photoshop-like brush picker (native/brush-settings.js) when loaded.
+    case "brushpreset": return CUSTOM.brushpreset ? CUSTOM.brushpreset(spec) : brushPreset();
     case "pattern":
     case "customshape":
     case "gradient":
@@ -210,7 +216,7 @@ function num(spec) {
     class: "ob-num" + (spec.disabled ? " off" : ""), type: "text", value: spec.value, inputmode: "decimal",
     style: { width: (spec.width || 48) + "px" }, disabled: spec.disabled || false,
   });
-  const el = h("span", { class: "ob-field" }, spec.label ? h("span", { class: "ob-label", text: spec.label }) : null, input, spec.unit ? h("span", { class: "ob-unit", text: spec.unit }) : null);
+  const el = h("span", { class: "ob-field" }, (spec.label || spec.text) ? h("span", { class: "ob-label", text: spec.label || spec.text }) : null, input, spec.unit ? h("span", { class: "ob-unit", text: spec.unit }) : null);
   return { el, read: () => number(input.value), write: (v) => { input.value = String(v); } };
 }
 
@@ -223,13 +229,48 @@ function textField(spec) {
 function range(spec) {
   const min = spec.min ?? 0;
   const max = spec.max ?? 100;
-  const out = h("span", { class: "ob-unit val", text: spec.value + "%" });
   const input = h("input", { class: "ob-range", type: "range", min, max, value: spec.value });
-  input.addEventListener("input", () => { out.textContent = input.value + "%"; });
-  const el = h("span", { class: "ob-field" }, h("span", { class: "ob-label", text: spec.label }), input, out);
-  const write = (v) => { input.value = String(v); out.textContent = input.value + "%"; };
+  // The value is a box you can type in, not just a read-out.
+  const box = h("input", { class: "ob-num", type: "text", inputmode: "decimal", value: String(spec.value), style: { width: "34px" } });
+  input.addEventListener("input", () => { box.value = input.value; });
+  box.addEventListener("change", () => {
+    const v = Math.min(max, Math.max(min, Math.round(number(box.value) ?? Number(input.value))));
+    box.value = String(v);
+    input.value = String(v);
+  });
+  const el = h("span", { class: "ob-field" }, h("span", { class: "ob-label", text: spec.label || spec.text }), input, box, h("span", { class: "ob-unit", text: spec.unit ?? "%" }));
+  const write = (v) => { input.value = String(v); box.value = input.value; };
   return { el, read: () => number(input.value), write };
 }
+
+// The size slider is cubic, like Photopea's (measured there: its 0..400
+// slider maps to 1..2000 px along t^2.7): fine steps for small brushes, the
+// whole 1..5000 px range at the far end.
+const SIZE_MAX = 5000;
+const sizeToSlider = (px) => Math.round(1000 * Math.cbrt(Math.max(0, (Math.min(SIZE_MAX, px) - 1) / (SIZE_MAX - 1))));
+const sliderToSize = (v) => Math.max(1, Math.round(1 + (SIZE_MAX - 1) * (v / 1000) ** 3));
+
+function sizeField(spec) {
+  const box = h("input", { class: "ob-num", type: "text", inputmode: "decimal", value: spec.value, style: { width: (spec.width || 40) + "px" } });
+  const slider = h("input", { class: "ob-range ob-size", type: "range", min: 0, max: 1000, value: sizeToSlider(Number(spec.value) || 1), "data-tip": "Brush size" });
+  slider.addEventListener("input", () => { box.value = String(sliderToSize(Number(slider.value))); });
+  box.addEventListener("input", () => { const v = number(box.value); if (v != null) slider.value = String(sizeToSlider(v)); });
+  const el = h("span", { class: "ob-field" }, h("span", { class: "ob-label", text: spec.text }), slider, box, h("span", { class: "ob-unit", text: "px" }));
+  const write = (v) => { box.value = String(Math.round(Number(v))); slider.value = String(sizeToSlider(Number(v) || 1)); };
+  return { el, read: () => number(box.value), write };
+}
+
+function percentField(spec) {
+  const box = h("input", { class: "ob-num", type: "text", inputmode: "decimal", value: spec.value, style: { width: "34px" } });
+  const slider = h("input", { class: "ob-range ob-short", type: "range", min: 0, max: 100, value: Number(spec.value) || 0, "data-tip": spec.text.replace(":", "") });
+  slider.addEventListener("input", () => { box.value = slider.value; });
+  box.addEventListener("input", () => { const v = number(box.value); if (v != null) slider.value = String(Math.min(100, Math.max(0, v))); });
+  const el = h("span", { class: "ob-field" }, h("span", { class: "ob-label", text: spec.text }), slider, box, h("span", { class: "ob-unit", text: spec.unit || "%" }));
+  const write = (v) => { box.value = String(Math.round(Number(v))); slider.value = box.value; };
+  return { el, read: () => number(box.value), write };
+}
+
+export { sizeToSlider, sliderToSize };
 
 function select(spec, changed) {
   const valueEl = h("span", { class: "ob-value", text: spec.value ?? (spec.options && spec.options[0]) ?? "" });

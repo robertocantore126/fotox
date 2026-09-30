@@ -297,6 +297,8 @@ pub enum AiRequest {
 	Object {
 		boxed: Option<[f64; 4]>,
 		points: Vec<((f64, f64), bool)>,
+		/// Lasso mode: the outline drawn (canvas pixels); empty for a box.
+		lasso: Vec<(f64, f64)>,
 		mode: SelectMode,
 	},
 	/// The Crop tool's Generative Expand (T06): the old canvas in the new

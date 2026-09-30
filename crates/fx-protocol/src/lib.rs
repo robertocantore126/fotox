@@ -194,6 +194,13 @@ pub struct DocumentInfo {
 	pub profile_name: String,
 	pub ppi: f32,
 	pub dirty: bool,
+	/// Layer Style ▸ Global Light, degrees.
+	#[serde(default = "default_global_light")]
+	pub global_light: f64,
+}
+
+fn default_global_light() -> f64 {
+	120.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -497,6 +504,25 @@ pub enum EngineToUi {
 		revision: u64,
 		width: u32,
 		height: u32,
+	},
+	/// Binary frame (Navigator, Histogram, Properties): payload = `width ×
+	/// height × 4` bytes RGBA8, a small picture of the composite (empty when
+	/// only the bounds were asked for). `histogram` = R, G, B, luminosity,
+	/// 256 counts each; `bounds` = `layer`'s content box in canvas pixels.
+	Overview {
+		doc: DocId,
+		request: u64,
+		width: u32,
+		height: u32,
+		doc_width: u32,
+		doc_height: u32,
+		histogram: Vec<Vec<u32>>,
+		layer: Option<LayerId>,
+		bounds: Option<(i32, i32, i32, i32)>,
+		/// `layer`'s text formatting (first run + alignment) when it is a
+		/// text layer: the Character and Paragraph panels.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		text: Option<serde_json::Value>,
 	},
 }
 

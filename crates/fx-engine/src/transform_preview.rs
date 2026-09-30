@@ -78,6 +78,17 @@ impl Prepared {
 				hole: None,
 			}));
 		}
+		// Shape and type: their drawn pixels preview the move (the commit
+		// changes their matrix, losslessly).
+		if matches!(doc.layer(layer).map(|l| &l.kind), Some(LayerKind::Shape { .. } | LayerKind::Text { .. })) {
+			let content = crate::derived::layer_content(doc, store, layer).map_err(|e| TileError::Io(std::io::Error::other(e.to_string())))?;
+			return Ok(Some(Self {
+				source: Mutex::new(content),
+				source_at: (0, 0),
+				placement: None,
+				hole: None,
+			}));
+		}
 		let (image, offset) = match doc.layer(layer).map(|l| &l.kind) {
 			Some(LayerKind::Pixel { image, offset }) => (image, offset),
 			_ => return Ok(None),
@@ -262,6 +273,11 @@ pub fn start_rect(doc: &Document, layer: LayerId, store: &TileStore) -> Result<O
 			Some(LayerKind::Pixel { image, offset }) => content_bounds(Placed { image, offset: *offset }, Content::Opaque, store)?,
 			// A Smart Object's box is its source through its transform (M12-T01).
 			Some(LayerKind::Smart { smart, .. }) => smart.bounds().map(|((x, y), (w, h))| (x, y, x + w as i32, y + h as i32)),
+			// Shape and type: the pixels they draw.
+			Some(LayerKind::Shape { .. } | LayerKind::Text { .. }) => {
+				let drawn = crate::derived::layer_content(doc, store, layer).map_err(|e| TileError::Io(std::io::Error::other(e.to_string())))?;
+				content_bounds(Placed { image: &drawn, offset: (0, 0) }, Content::Opaque, store)?
+			}
 			_ => None,
 		},
 	};

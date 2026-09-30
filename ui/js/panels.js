@@ -15,6 +15,21 @@ import * as nativeInfo from "./native/info-panel.js";
 import * as nativePaths from "./native/paths-panel.js";
 import * as nativeComps from "./native/comps-panel.js";
 import * as nativeColor from "./native/color-panel.js";
+import * as nativeOverview from "./native/overview-panels.js";
+
+/** User swatches in the app (kept in this browser profile). */
+const SWATCH_KEY = "fotox.swatches";
+function loadSwatches() {
+  try {
+    const list = JSON.parse(localStorage.getItem(SWATCH_KEY) || "null");
+    if (Array.isArray(list) && list.every((c) => typeof c === "string")) return list;
+  } catch { /* unreadable: the defaults */ }
+  return [...mock.swatches];
+}
+function saveSwatches(list) {
+  try { localStorage.setItem(SWATCH_KEY, JSON.stringify(list)); } catch { /* not kept */ }
+}
+let swatchSel = -1;
 
 /** Properties ▸ Quick Actions the app runs (M13-T02): label → action. */
 const QUICK = { "Remove background": "ai:remove-bg", "Select subject": "ai:subject" };
@@ -164,6 +179,28 @@ const renderers = {
   },
 
   swatches() {
+    if (bridge.isNative) {
+      // Real swatches: click = foreground, right-click = background, + adds
+      // the foreground colour, the bin removes the selected swatch.
+      const list = loadSwatches();
+      const wrap = h("div", {});
+      const grid = h("div", { class: "swatch-grid" });
+      const redraw = () => { const next = renderers.swatches(); wrap.replaceWith(next); };
+      list.forEach((c, i) => {
+        grid.append(h("button", {
+          class: "swatch" + (i === swatchSel ? " sel" : ""), type: "button", "data-tip": c, style: { background: c },
+          onclick: () => { swatchSel = i; setColors(c, null); redraw(); },
+          oncontextmenu: (e) => { e.preventDefault(); setColors(null, c); },
+        }));
+      });
+      wrap.append(h("div", { class: "pblock-title", text: "Swatches" }), grid,
+        bar([
+          barBtn("i-plus", "New swatch from the foreground colour", () => { list.push(state.colors.fg); saveSwatches(list); swatchSel = list.length - 1; redraw(); }),
+          barBtn("i-trash", "Delete the selected swatch", () => { if (swatchSel < 0 || swatchSel >= list.length) return; list.splice(swatchSel, 1); saveSwatches(list); swatchSel = -1; redraw(); }),
+          barBtn("i-presets", "Reset to the default swatches", () => { saveSwatches([...mock.swatches]); swatchSel = -1; redraw(); }),
+        ]));
+      return wrap;
+    }
     const grid = h("div", { class: "swatch-grid" });
     for (const c of mock.swatches) {
       grid.append(h("button", {
@@ -177,6 +214,7 @@ const renderers = {
   },
 
   styles() {
+    if (bridge.isNative) return nativeOverview.stylesPanel();
     const list = h("div", { class: "style-list" });
     for (const s of mock.styles) {
       list.append(h("div", { class: "style-row", "data-tip": s }, h("span", { class: "style-thumb" }), h("span", { class: "plist-label", text: s })));
@@ -267,6 +305,7 @@ const renderers = {
   },
 
   actions() {
+    if (bridge.isNative) return nativeOverview.plannedPanel("Actions (recording and playback)", "Planned with automation (M15).");
     const list = h("div", { class: "plist actions" });
     for (const [set, acts] of mock.actions) {
       list.append(h("div", { class: "action-set" }, h("span", { class: "ptoggle" }, icon("i-check", "ic xs")), icon("i-group", "ic sm"), h("span", { class: "plist-label", text: set })));
@@ -304,6 +343,7 @@ const renderers = {
   },
 
   properties() {
+    if (bridge.isNative) return nativeOverview.propertiesPanel();
     const wrap = h("div", { class: "pprops" });
     wrap.append(
       h("div", { class: "pblock-title", text: "Transform" }),
@@ -324,6 +364,7 @@ const renderers = {
   },
 
   histogram() {
+    if (bridge.isNative) return nativeOverview.histogramPanel();
     const cv = h("canvas", { class: "hist-canvas", width: 256, height: 96 });
     const ctx = cv.getContext("2d");
     const g = ctx.createLinearGradient(0, 0, 256, 0);
@@ -345,6 +386,7 @@ const renderers = {
   },
 
   navigator() {
+    if (bridge.isNative) return nativeOverview.navigatorPanel();
     const cv = h("canvas", { class: "nav-canvas", width: 220, height: 140 });
     const ctx = cv.getContext("2d");
     const src = getDocCanvas();
@@ -385,6 +427,7 @@ const renderers = {
   },
 
   measurements() {
+    if (bridge.isNative) return nativeOverview.plannedPanel("The Measurement Log", "The Ruler tool's measurement shows in the Info panel.");
     const table = h("div", { class: "ptable" });
     table.append(h("div", { class: "ptable-head" }, ...["#", "Type", "Length", "Angle", "Area"].map((t) => h("span", { text: t }))));
     for (const r of mock.measurements) table.append(h("div", { class: "ptable-row" }, ...r.map((c) => h("span", { text: c }))));
@@ -392,6 +435,7 @@ const renderers = {
   },
 
   character() {
+    if (bridge.isNative) return nativeOverview.characterPanel();
     const wrap = h("div", { class: "ptext" });
     wrap.append(head([
       h("button", { class: "pf-input grow", "data-tip": "Font family", onclick: (e) => openDropdown({ anchor: e.currentTarget, items: ["Open Sans", "Arimo", "Bitter", "Lato", "Lora", "Merriweather", "Montserrat", "Oswald", "Playfair Display", "Poppins", "Raleway", "Roboto", "Ubuntu"], value: "Open Sans", width: 160 }) },
@@ -418,6 +462,7 @@ const renderers = {
   },
 
   paragraph() {
+    if (bridge.isNative) return nativeOverview.paragraphPanel();
     const wrap = h("div", { class: "ptext" });
     wrap.append(h("div", { class: "pf-actions" },
       ...[["i-quote", "Left"], ["i-props", "Center"], ["i-quote", "Right"], ["i-props", "Justify last left"], ["i-props", "Justify all"]].map(([ic, t]) =>
@@ -466,6 +511,7 @@ const renderers = {
   },
 
   toolpresets() {
+    if (bridge.isNative) return nativeOverview.plannedPanel("Tool Presets", "Brush presets live in the Brushes panel.");
     const list = h("div", { class: "plist" });
     for (const p of mock.toolPresets) list.append(listRow({ label: p, thumb: h("span", { class: "pthumb preset" }, icon("i-presets", "ic sm")) }));
     list.children[1].classList.add("sel");
@@ -474,6 +520,7 @@ const renderers = {
   },
 
   libraries() {
+    if (bridge.isNative) return nativeOverview.plannedPanel("Libraries");
     const grid = h("div", { class: "lib-grid" });
     for (let i = 0; i < 6; i++) {
       grid.append(h("div", { class: "lib-tile", "data-tip": "Empty library item" }, icon("i-plus", "ic"), h("span", { text: "New" })));
@@ -485,6 +532,7 @@ const renderers = {
   },
 
   timeline() {
+    if (bridge.isNative) return nativeOverview.plannedPanel("The Timeline (animation and video)");
     const rows = h("div", { class: "tl-rows" });
     for (const [name, w] of [["Heading", 62], ["Colour wash", 44], ["Photo", 70]]) {
       rows.append(h("div", { class: "tl-row" }, h("span", { class: "tl-name", text: name }), h("span", { class: "tl-bar", style: { width: w + "%" } })));

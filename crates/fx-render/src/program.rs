@@ -119,6 +119,9 @@ pub enum Op {
 		mask: Option<MaskRef>,
 		/// Source-atop (clipped layer): keeps the backdrop alpha.
 		clip: bool,
+		/// Blending Options ▸ Blend If: the layer's alpha × how much its own
+		/// grey and the backdrop's grey let it show.
+		blend_if: Option<fx_core::styles::BlendIf>,
 	},
 	/// Adjustment layer: `Cs = f(Cb)`, always composited source-atop.
 	Adjust {
@@ -364,6 +367,7 @@ fn with_second_mask(op: Op, second: Option<MaskRef>) -> Vec<Op> {
 			alpha,
 			mask,
 			clip,
+			blend_if,
 		} => wrap_isolated(
 			vec![Op::Layer {
 				layer,
@@ -372,6 +376,7 @@ fn with_second_mask(op: Op, second: Option<MaskRef>) -> Vec<Op> {
 				alpha,
 				mask,
 				clip: false,
+				blend_if,
 			}],
 			blend,
 			1.0,
@@ -472,11 +477,13 @@ impl Builder<'_> {
 							alpha: 1.0,
 							mask: None,
 							clip: false,
+							blend_if: None,
 						},
 					);
 				}
 				if inner.is_empty() {
-					return Vec::new();
+					// A styled group's shadow or glow can reach tiles its content does not.
+					return self.with_effects(layer, clip, Vec::new());
 				}
 				let Some((alpha, mask, second)) = self.mask(layer).apply(layer.opacity) else {
 					return Vec::new();
@@ -497,48 +504,65 @@ impl Builder<'_> {
 					Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
 					None => inner,
 				};
-				if layer.blend == BlendMode::PassThrough && !clip {
+				let group = if layer.blend == BlendMode::PassThrough && !clip {
 					if alpha >= 1.0 && mask.is_none() {
-						return inner; // exactly equivalent, cheaper
+						inner // exactly equivalent, cheaper
+					} else {
+						let mut ops = Vec::with_capacity(inner.len() + 2);
+						ops.push(Op::BeginPassThrough);
+						ops.extend(inner);
+						ops.push(Op::EndPassThrough { alpha, mask });
+						ops
 					}
-					let mut ops = Vec::with_capacity(inner.len() + 2);
-					ops.push(Op::BeginPassThrough);
-					ops.extend(inner);
-					ops.push(Op::EndPassThrough { alpha, mask });
-					return ops;
-				}
-				wrap_isolated(inner, normal_if_pass(layer.blend), alpha, mask, clip)
+				} else {
+					wrap_isolated(inner, normal_if_pass(layer.blend), alpha, mask, clip)
+				};
+				// A styled group: its effects around its composite, as for a layer.
+				self.with_effects(layer, clip, group)
 			}
 			_ => {
-				let content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
-				// Layer styles (M6-T08): shadows and glows under the content,
-				// the interior effects and the stroke over it, each with its own
-				// mode and opacity × the layer's (fill does not reach them).
-				// FAST: ignored on clipped layers; the mask shapes the effects
-				// like the content (VERIFY "Layer Mask Hides Effects").
-				let Some(styles) = layer
-					.styles
-					.as_ref()
-					.filter(|_| !clip && layer.effects.len() == fx_core::styles::EffectKind::ALL.len())
-				else {
-					return content;
-				};
-				let mut below = Vec::new();
-				let mut above = Vec::new();
-				for kind in fx_core::styles::EffectKind::ALL {
-					let Some(params) = styles.effect(kind, self.global_light) else { continue };
-					let ops = self.effect(layer, kind, &params);
-					if kind.below_content() {
-						below.extend(ops);
-					} else {
-						above.extend(ops);
+				let mut content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
+				// Blend If shapes the content only (effects keep their own alpha).
+				if let Some(range) = layer.styles.as_ref().and_then(|s| s.blend_if).filter(|b| !b.is_identity()) {
+					for op in &mut content {
+						if let Op::Layer { blend_if, .. } = op {
+							*blend_if = Some(range);
+						}
 					}
 				}
-				below.extend(content);
-				below.extend(above);
-				below
+				self.with_effects(layer, clip, content)
 			}
 		}
+	}
+
+	/// Layer styles (M6-T08): shadows and glows under `content`, the interior
+	/// effects and the stroke over it, each with its own mode and opacity ×
+	/// the layer's (fill does not reach them). A group's effects surround its
+	/// whole composite.
+	/// FAST: ignored on clipped layers; the mask shapes the effects like the
+	/// content (VERIFY "Layer Mask Hides Effects").
+	fn with_effects(&mut self, layer: &Layer, clip: bool, content: Vec<Op>) -> Vec<Op> {
+		let Some(styles) = layer
+			.styles
+			.as_ref()
+			.filter(|_| !clip && layer.effects.len() == fx_core::styles::EffectKind::ALL.len())
+		else {
+			return content;
+		};
+		let mut below = Vec::new();
+		let mut above = Vec::new();
+		for kind in fx_core::styles::EffectKind::ALL {
+			let Some(params) = styles.effect(kind, self.global_light) else { continue };
+			let ops = self.effect(layer, kind, &params);
+			if kind.below_content() {
+				below.extend(ops);
+			} else {
+				above.extend(ops);
+			}
+		}
+		below.extend(content);
+		below.extend(above);
+		below
 	}
 
 	/// The op of one layer-style effect: its cache, composited like a layer.
@@ -567,6 +591,7 @@ impl Builder<'_> {
 				alpha,
 				mask,
 				clip: false,
+				blend_if: None,
 			},
 			second,
 		)
@@ -595,6 +620,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			LayerKind::SolidFill { rgba } => Op::Layer {
@@ -604,6 +630,7 @@ impl Builder<'_> {
 				alpha,
 				mask,
 				clip,
+				blend_if: None,
 			},
 			// A shape layer's pixels are its cache: rasterised from the geometry
 			// at this level, on demand (M6-T06). The fill and stroke colours live
@@ -625,6 +652,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			// A text layer's pixels are its cache too: laid out from the string
@@ -647,6 +675,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			// A gradient / pattern fill layer (M8-T03/T06): drawn from its
@@ -666,6 +695,7 @@ impl Builder<'_> {
 					alpha,
 					mask,
 					clip,
+					blend_if: None,
 				}
 			}
 			LayerKind::Adjustment(adjustment) => {
@@ -943,6 +973,7 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			alpha,
 			mask,
 			clip,
+			blend_if,
 		} => {
 			layer.hash(h);
 			hash_source(source, h);
@@ -950,6 +981,7 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			alpha.to_bits().hash(h);
 			hash_mask(mask, h);
 			clip.hash(h);
+			blend_if.hash(h);
 		}
 		Op::Adjust {
 			layer,

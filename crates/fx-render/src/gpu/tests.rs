@@ -146,6 +146,36 @@ fn every_blend_mode_matches_the_reference() {
 }
 
 #[test]
+fn blend_if_matches_the_reference() {
+	let (_gpu, device, queue) = gpu_or_skip!();
+	let store = store();
+	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
+	let mut luts = LutCache::default();
+	let mut doc = doc(512, 256);
+	let bottom = busy_layer(&mut doc, &store, 11);
+	let mut top = busy_layer(&mut doc, &store, 22);
+	top.styles = Some(fx_core::styles::LayerStyles {
+		blend_if: Some(fx_core::styles::BlendIf {
+			this_layer: [30, 90, 180, 240],
+			underlying: [10, 60, 200, 230],
+		}),
+		..Default::default()
+	});
+	doc.layers.push(Arc::new(bottom));
+	doc.layers.push(Arc::new(top));
+	let programs = programs(&doc, &mut luts);
+	assert!(
+		programs.iter().any(|p| p.ops.iter().any(|op| matches!(op, crate::program::Op::Layer { blend_if: Some(_), .. }))),
+		"the programs carry Blend If"
+	);
+	gpu.begin_frame();
+	let outcomes = gpu.composite(&programs, &|h| store.try_get_hot(h)).unwrap();
+	let (max_err, over) = compare(&gpu, &programs, &outcomes, &store);
+	eprintln!("blend if: max error {max_err:.5}, {:.4} % > 2/1024", over * 100.0);
+	assert!(over < 0.005);
+}
+
+#[test]
 fn groups_clipping_masks_offsets_adjustments_match() {
 	let (_gpu, device, queue) = gpu_or_skip!();
 	let store = store();

@@ -5,9 +5,18 @@
 //! Hardness 1 is a hard disc anti-aliased over one pixel. Tips under 4 px are
 //! supersampled 4 × 4 so tiny brushes do not flicker as they move. The
 //! pencil's tip is the hard disc thresholded at 50 % (no anti-aliasing).
+//!
+//! The Gaussian profile ([`TipProfile::Gaussian`]) is Photoshop's soft round
+//! as Photopea paints it, measured dab by dab (docs/reports/
+//! BRUSH-MEASUREMENTS.md): with `t = r / R`, coverage is 1 up to a core `c`,
+//! then `exp(−(t − c)² / 2σ²)`; `c` and `σ` depend on the hardness and come
+//! from the measured table below. At hardness 0 it is a plain Gaussian with
+//! σ = 0.472 R, so a soft brush reaches ~1.6 × its nominal radius.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+
+pub use fx_core::stroke::TipProfile;
 
 /// A sampled tip (M8-T01): a grey image, 1 = paint, kept as one master and a
 /// box-filtered pyramid of it (the "one master tip" rule: no per-size stamp
@@ -132,6 +141,46 @@ pub struct Tip {
 	pub aliased: bool,
 	/// A sampled tip and the pyramid level this dab reads (M8-T01).
 	sample: Option<(Arc<SampledTip>, usize)>,
+	/// The round tip's fall-off.
+	pub profile: TipProfile,
+	/// Gaussian profile: core and σ as fractions of the radius.
+	gauss: (f32, f32),
+}
+
+/// Photopea's soft round, measured at every 5 % of hardness (R = 100 px,
+/// fitted over coverage 0.03..0.97, worst error 0.004 up to 85 %):
+/// `(core, σ)` as fractions of the radius.
+const GAUSS_TABLE: [(f32, f32); 21] = [
+	(0.0, 0.472),
+	(0.1903, 0.3938),
+	(0.2795, 0.3556),
+	(0.3518, 0.3257),
+	(0.4117, 0.299),
+	(0.4656, 0.2759),
+	(0.5141, 0.2535),
+	(0.5618, 0.2332),
+	(0.6035, 0.2132),
+	(0.6446, 0.1948),
+	(0.6818, 0.1763),
+	(0.7209, 0.1589),
+	(0.7547, 0.1414),
+	(0.7872, 0.1242),
+	(0.8209, 0.1079),
+	(0.8553, 0.0915),
+	(0.8843, 0.0748),
+	(0.9155, 0.0584),
+	(0.9427, 0.0411),
+	(0.9725, 0.0245),
+	(0.9902, 0.0100),
+];
+
+/// `(core, σ)` of the Gaussian profile at `hardness`, interpolated.
+pub fn gauss_params(hardness: f32) -> (f32, f32) {
+	let x = hardness.clamp(0.0, 1.0) * 20.0;
+	let i = (x.floor() as usize).min(19);
+	let f = x - i as f32;
+	let (a, b) = (GAUSS_TABLE[i], GAUSS_TABLE[i + 1]);
+	(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
 }
 
 /// Below this diameter the coverage is supersampled.
@@ -148,7 +197,26 @@ impl Tip {
 			rotation: (a.cos(), a.sin()),
 			aliased,
 			sample: None,
+			profile: TipProfile::Classic,
+			gauss: (0.0, 0.472),
 		}
+	}
+
+	/// The same tip with another fall-off.
+	pub fn with_profile(mut self, profile: TipProfile) -> Self {
+		self.profile = profile;
+		if profile == TipProfile::Gaussian {
+			let (core, sigma) = gauss_params(self.hardness);
+			// A σ under ~half a pixel would alias: widen it to the pixel.
+			let min = 0.45 / self.radius;
+			self.gauss = (core, (sigma * sigma + min * min).sqrt());
+		}
+		self
+	}
+
+	/// Whether this dab uses the Gaussian profile (and is not a hard disc).
+	fn gaussian(&self) -> bool {
+		self.profile == TipProfile::Gaussian && self.sample.is_none() && !self.aliased && self.hardness < 1.0
 	}
 
 	/// A dab of a sampled tip (M8-T01): the image fills a square of
@@ -167,6 +235,11 @@ impl Tip {
 		if self.sample.is_some() {
 			// The square's corners.
 			return self.radius * std::f32::consts::SQRT_2 / self.roundness.max(0.01).sqrt() + 1.0;
+		}
+		if self.gaussian() {
+			// Where the Gaussian drops under 1/512.
+			let (core, sigma) = self.gauss;
+			return self.radius * (core + 3.53 * sigma) + 1.0;
 		}
 		self.radius + 1.0
 	}
@@ -205,6 +278,9 @@ impl Tip {
 	/// over one pixel.
 	fn raw(&self, dx: f32, dy: f32) -> f32 {
 		let r = self.distance(dx, dy);
+		if self.gaussian() {
+			return self.gauss_at(r);
+		}
 		let radius = self.radius;
 		let core = self.hardness * radius;
 		if self.hardness >= 1.0 || radius - core < 1.0 {
@@ -224,6 +300,9 @@ impl Tip {
 	/// The profile at one point (supersampling uses a hard 0/1 edge).
 	fn point(&self, dx: f32, dy: f32) -> f32 {
 		let r = self.distance(dx, dy);
+		if self.gaussian() {
+			return self.gauss_at(r);
+		}
 		let core = self.hardness * self.radius;
 		if r <= core {
 			return 1.0;
@@ -233,6 +312,17 @@ impl Tip {
 		}
 		let t = (r - core) / (self.radius - core).max(f32::EPSILON);
 		1.0 - t * t * (3.0 - 2.0 * t)
+	}
+
+	/// The Gaussian profile at distance `r` (pixels, tip space).
+	fn gauss_at(&self, r: f32) -> f32 {
+		let (core, sigma) = self.gauss;
+		let t = r / self.radius - core;
+		if t <= 0.0 {
+			return 1.0;
+		}
+		let v = (-(t * t) / (2.0 * sigma * sigma)).exp();
+		if v < 1.0 / 512.0 { 0.0 } else { v }
 	}
 
 	/// Distance from the centre in tip space (rotated, the y axis stretched
@@ -271,6 +361,21 @@ mod tests {
 		assert!((tip.coverage(0.0, 0.0) - 1.0).abs() < 1e-6);
 		assert!((tip.coverage(25.0, 0.0) - 0.5).abs() < 1e-6, "halfway: smoothstep(0.5) = 0.5");
 		assert_eq!(tip.coverage(50.0, 0.0), 0.0);
+	}
+
+	#[test]
+	fn the_gaussian_profile_matches_photopea() {
+		// Photopea, hardness 0, diameter 100: coverage at r = 0, 25, 50, 70 px.
+		let tip = Tip::new(100.0, 0.0, 1.0, 0.0, false).with_profile(TipProfile::Gaussian);
+		for (r, want) in [(0.0, 0.9961), (25.0, 0.5676), (50.0, 0.105), (70.0, 0.0118)] {
+			let got = tip.coverage(r, 0.0);
+			assert!((got - want).abs() < 0.01, "r {r}: {got} vs {want}");
+		}
+		assert!(tip.reach() > 75.0, "a soft dab reaches past its radius");
+		// Hardness 50: opaque to 0.68 R, 0.19 at R.
+		let half = Tip::new(100.0, 0.5, 1.0, 0.0, false).with_profile(TipProfile::Gaussian);
+		assert_eq!(half.coverage(30.0, 0.0), 1.0);
+		assert!((half.coverage(50.0, 0.0) - 0.1887).abs() < 0.01);
 	}
 
 	#[test]

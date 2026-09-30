@@ -30,6 +30,7 @@ import { initChannels } from "./native/channels-panel.js";
 import { initInfo } from "./native/info-panel.js";
 import { initPaths } from "./native/paths-panel.js";
 import { initComps } from "./native/comps-panel.js";
+import { initOverview } from "./native/overview-panels.js";
 import { IMPLEMENTED } from "./data/implemented.js";
 
 const UI_VERSION = "0.1.0";
@@ -290,6 +291,7 @@ async function boot() {
   // engine bridge ------------------------------------------------------
   if (bridge.isNative) {
     initNativePanels();
+    initOverview();
     initColor();
     initTools();
     initPrefs();

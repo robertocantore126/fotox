@@ -23,6 +23,9 @@ pub struct OpenDoc {
 	pub history: History,
 	pub view: ViewState,
 	pub dirty: bool,
+	/// The Global Light the UI last got (`DocumentOpened`/`DocumentChanged`):
+	/// a change to it is reported even by an edit that changes no pixels.
+	pub ui_light: f64,
 	/// A save worker owns a snapshot of this document. A second save must not
 	/// start until its completion is applied, or two snapshots can race.
 	pub saving: bool,
@@ -127,6 +130,7 @@ impl OpenDoc {
 			view,
 			dirty: false,
 			saving: false,
+			ui_light: 0.0,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -160,6 +164,7 @@ impl OpenDoc {
 			view,
 			dirty: false,
 			saving: false,
+			ui_light: 0.0,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -231,6 +236,7 @@ impl OpenDoc {
 			view,
 			dirty: false,
 			saving: false,
+			ui_light: 0.0,
 			generation: 0,
 			last_edit: None,
 			hot: None,
@@ -366,6 +372,7 @@ impl OpenDoc {
 			profile_name: profile_name(&self.doc.color.profile),
 			ppi: self.doc.ppi,
 			dirty: self.dirty,
+			global_light: self.doc.global_light,
 		}
 	}
 }
@@ -405,6 +412,7 @@ impl Documents {
 		// A file's layers can be smaller than its canvas (a PSD's, a pasted
 		// layer saved in an .fxd): give them the canvas's mip levels.
 		doc.doc.fit_levels();
+		doc.ui_light = doc.doc.global_light;
 		self.active = Some(doc.id);
 		self.docs.push(doc);
 	}

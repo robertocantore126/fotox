@@ -125,6 +125,15 @@ pub(crate) enum Internal {
 		result: Result<Box<OpenedFxd>, IoError>,
 		target: OpenAs,
 	},
+	/// An `overview:request` finished: the header and its picture.
+	Overview(Box<(EngineToUi, Vec<u8>)>),
+	/// A `.fxd` placed into `doc`: its flattened composite.
+	PlacedFxd {
+		task: u64,
+		path: PathBuf,
+		doc: DocId,
+		result: Result<fx_tiles::TiledImage, String>,
+	},
 	/// A save finished; `Ok` carries the reopened file (M3-T06).
 	Saved {
 		task: u64,
@@ -204,6 +213,8 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::Imported { .. } => "internal imported",
 		Internal::Exported { .. } => "internal exported",
 		Internal::OpenedFxd { .. } => "internal opened fxd",
+		Internal::PlacedFxd { .. } => "internal placed fxd",
+		Internal::Overview(_) => "internal overview",
 		Internal::Saved { .. } => "internal saved",
 		Internal::Copied { .. } => "internal copied",
 		Internal::B3Built { .. } => "internal b3 built",
@@ -306,6 +317,12 @@ struct Engine {
 	transform_latest: Arc<AtomicU64>,
 	/// When a drag's coarse preview is refined at the view level.
 	transform_refine: Option<Instant>,
+	/// A Place in progress: the document and its history length before the
+	/// place, so cancelling the Free Transform box removes the placed layer.
+	placing: Option<(DocId, usize)>,
+	/// A filter dialog's live preview over a Smart Object: the document, the
+	/// layer and the history length to undo back to.
+	smart_preview: Option<(DocId, LayerId, usize)>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
 	/// Pointer moves since the last traced input (the recorder counts them).
@@ -336,6 +353,8 @@ enum EditKey {
 	Shape(LayerRef, [bool; 4]),
 	/// `set_layer_style` of the same layer: a style dialog's live preview (M6-T08).
 	Style(LayerRef),
+	/// `set_global_light`: an Angle drag in a style dialog.
+	GlobalLight,
 	/// Arrow nudges of the Move tool (M7-T02): the tool sends the running
 	/// total. Nudges name their layers and drags do not (empty list), so a
 	/// drag never folds into the nudge before it, and a nudge of other layers
@@ -377,6 +396,7 @@ impl EditKey {
 			}
 			Command::SetAdjustment { layer, .. } => Some(Self::Adjustment(layer.clone())),
 			Command::SetLayerStyle { layer, .. } => Some(Self::Style(layer.clone())),
+			Command::SetGlobalLight { .. } => Some(Self::GlobalLight),
 			Command::OffsetLayers { layers, .. } if !layers.is_empty() => Some(Self::Move(layers.clone())),
 			Command::MovePixels { copy: false, .. } => Some(Self::MovePixels),
 			Command::SetShape {
@@ -460,6 +480,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		transform: None,
 		transform_latest: Arc::new(AtomicU64::new(0)),
 		transform_refine: None,
+		placing: None,
+		smart_preview: None,
 		smart_children: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
@@ -559,8 +581,8 @@ impl Engine {
 			EngineInput::Place(paths) => {
 				let target = self.docs.active_id();
 				for path in paths {
-					// FAST: a placed .fxd opens instead of being flattened into a layer.
-					let place = target.filter(|_| !is_fxd(&path));
+					// A placed .fxd is flattened into one layer (see `open`).
+					let place = target;
 					self.open(path, place.map_or(OpenAs::New, OpenAs::Place));
 				}
 				Changed::default()
@@ -1188,6 +1210,17 @@ impl Engine {
 				if id.starts_with("trace:") {
 					return Changed::default();
 				}
+				// Navigator: centre the view on a canvas point.
+				if id == "view:center" {
+					let get = |k: &str| args.get(k).and_then(serde_json::Value::as_f64).filter(|v| v.is_finite());
+					if let (Some(x), Some(y)) = (get("x"), get("y")) {
+						let view = self.view_mut();
+						view.view.center_x = x;
+						view.view.center_y = y;
+						return Changed { view: true, cursor: None };
+					}
+					return Changed::default();
+				}
 				// Preferences (M7-T09): merge, save, apply.
 				if id == "prefs:set" {
 					self.prefs.merge(&args);
@@ -1204,6 +1237,7 @@ impl Engine {
 					|| self.m11_action(&id, &args)
 					|| self.m12_action(&id, &args)
 					|| self.m13_action(&id, &args)
+					|| self.overview_action(&id, &args)
 				{
 					return Changed::default();
 				}
@@ -1604,6 +1638,26 @@ impl Engine {
 				});
 				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fxd::open(&path, &store).map(Box::new)))
 					.unwrap_or_else(|panic| Err(panicked(panic)));
+				if let OpenAs::Place(doc) = target {
+					// Place: the file's composite becomes one layer.
+					let _ = internal.send(Internal::Progress {
+						task,
+						label: format!("{label}: flattening"),
+						fraction: 0.7,
+					});
+					let result = result.map_err(|e| e.to_string()).and_then(|opened| {
+						std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+							let placed = &opened.document;
+							let roots: Vec<fx_core::LayerId> = placed.layers.iter().map(|l| l.id).collect();
+							let mut image = crate::export::composite_layers(placed, &roots, None, &store, None).map_err(|e| e.to_string())?;
+							mips::ensure_all_mips(&mut image, &store).map_err(|e| e.to_string())?;
+							Ok(image)
+						}))
+						.unwrap_or_else(|panic| Err(format!("flattening panicked: {}", panic_text(&*panic))))
+					});
+					let _ = internal.send(Internal::PlacedFxd { task, path, doc, result });
+					return;
+				}
 				let _ = internal.send(Internal::OpenedFxd { task, path, result, target });
 				return;
 			}
@@ -1756,7 +1810,17 @@ impl Engine {
 		}
 		let Some(layer_id) = open.doc.active_layer() else { return };
 		let refusal = match open.doc.layer(layer_id) {
-			Some(layer) if !matches!(layer.kind, LayerKind::Pixel { .. } | LayerKind::Smart { .. }) => Some("Free Transform works on a pixel layer"),
+			Some(layer)
+				if !matches!(
+					layer.kind,
+					LayerKind::Pixel { .. } | LayerKind::Smart { .. } | LayerKind::Shape { .. } | LayerKind::Text { .. }
+				) =>
+			{
+				Some("Free Transform works on a pixel, shape, type or Smart Object layer")
+			}
+			Some(layer) if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. }) && open.doc.selection.is_some() => {
+				Some("Deselect first: a shape or type layer transforms as a whole")
+			}
 			Some(_) if open.doc.locks(layer_id).position || open.doc.locks(layer_id).pixels => Some("The layer is locked"),
 			None => Some("Select a layer to transform"),
 			_ => None,
@@ -1870,13 +1934,42 @@ impl Engine {
 					self.request_frame();
 				}
 			}
-			TransformUpdate::Cancel => self.end_transform(false),
+			TransformUpdate::Cancel => self.cancel_transform(),
+		}
+	}
+
+	/// Esc on the box. A cancelled Place also removes the placed layer: the
+	/// document goes back exactly to how it was before the place.
+	fn cancel_transform(&mut self) {
+		let placing = self.placing.take();
+		self.end_transform(false);
+		if let Some((doc_id, steps)) = placing {
+			self.undo_to(doc_id, steps);
+		}
+	}
+
+	/// Undo until `id`'s history has `steps` entries.
+	fn undo_to(&mut self, id: DocId, steps: usize) {
+		let Some(doc) = self.docs.get_mut(id) else { return };
+		let mut stepped = false;
+		while doc.history.labels().count() > steps && doc.history.undo(&mut doc.doc) {
+			stepped = true;
+		}
+		if !stepped {
+			return;
+		}
+		doc.changed();
+		self.after_edit(id, true);
+		let wanted: Vec<LayerId> = self.thumbs_wanted.keys().filter(|(d, _)| *d == id).map(|(_, l)| *l).collect();
+		for layer in wanted {
+			self.refresh_thumbnail(id, layer);
 		}
 	}
 
 	/// Take the box down; `keep_preview` leaves the transformed pixels on
 	/// screen (a commit, until its job is done).
 	fn end_transform(&mut self, keep_preview: bool) {
+		self.placing = None;
 		let Some((doc_id, _)) = self.transform.take() else { return };
 		self.transform_refine = None;
 		// Whatever preview job is running is now stale.
@@ -1991,8 +2084,12 @@ impl Engine {
 		let Some(open) = self.docs.get_mut(id) else { return };
 		let base = match open.doc.layer(layer).map(|l| &l.kind) {
 			Some(LayerKind::Pixel { image, .. }) => image.clone(),
-			// FAST: no live preview for a Smart Filter (M12-T03); OK applies it.
-			Some(LayerKind::Smart { .. }) => return,
+			// A Smart Filter previews as a real (temporary) step: the object's
+			// filters are rendered by its derived cache.
+			Some(LayerKind::Smart { .. }) => {
+				self.smart_filter_preview(id, layer, filter);
+				return;
+			}
 			_ => {
 				self.to_ui(&EngineToUi::Toast {
 					text: "Select a pixel layer to filter it".into(),
@@ -2088,7 +2185,36 @@ impl Engine {
 	}
 
 	/// Drop the preview of `id` (Cancel, Preview off).
+	/// The live preview of a filter over a Smart Object: the filter added as a
+	/// Smart Filter, undone again before the next change, Cancel or OK.
+	fn smart_filter_preview(&mut self, id: DocId, layer: LayerId, filter: FilterParams) {
+		if let Some((d, _, steps)) = self.smart_preview.take() {
+			self.undo_to(d, steps);
+		}
+		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else { return };
+		let command = self.smart_filter_rewrite(
+			id,
+			Command::ApplyFilter {
+				layer: LayerRef::Id(layer),
+				filter,
+			},
+		);
+		if !matches!(command, Command::SetSmartFilters { .. }) {
+			return;
+		}
+		// Not merged into an earlier edit: the step must come off cleanly.
+		self.last_edit = None;
+		self.smart_preview = Some((id, layer, steps));
+		self.command(id, command);
+	}
+
 	fn cancel_preview(&mut self, id: DocId) {
+		if let Some((d, _, steps)) = self.smart_preview
+			&& d == id
+		{
+			self.smart_preview = None;
+			self.undo_to(id, steps);
+		}
 		if let Some(latest) = self.preview_latest.get(&id) {
 			latest.fetch_add(1, Ordering::Relaxed);
 		}
@@ -2342,6 +2468,20 @@ impl Engine {
 							text: format!("Could not open {}: {error}", path.display()),
 						});
 					}
+				}
+			}
+			Internal::Overview(done) => {
+				let (header, pixels) = *done;
+				(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &pixels)));
+			}
+			Internal::PlacedFxd { task, path, doc, result } => {
+				self.to_ui(&EngineToUi::ProgressDone { task });
+				match result {
+					Ok(image) if self.docs.get(doc).is_some() => self.place_imported(doc, &path, image),
+					Ok(_) => {}
+					Err(error) => self.to_ui(&EngineToUi::Error {
+						text: format!("Could not place {}: {error}", path.display()),
+					}),
 				}
 			}
 			Internal::OpenedFxd { task, path, result, target } => {
@@ -2751,6 +2891,15 @@ impl Engine {
 
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
+		// OK in a filter dialog over a Smart Object: the live preview's step
+		// goes, the real one follows.
+		if matches!(command, Command::ApplyFilter { .. })
+			&& let Some((d, _, steps)) = self.smart_preview
+			&& d == id
+		{
+			self.smart_preview = None;
+			self.undo_to(id, steps);
+		}
 		// A filter on a Smart Object becomes a Smart Filter (M12-T03).
 		let command = self.smart_filter_rewrite(id, command);
 		self.end_stroke();
@@ -2853,7 +3002,7 @@ impl Engine {
 		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
 		if matches!(self.transform, Some((doc, _)) if doc == id) {
 			// Undo while the box is up cancels the box, as in Photoshop.
-			self.end_transform(false);
+			self.cancel_transform();
 			return;
 		}
 		let Some(doc) = self.docs.get_mut(id) else { return };
@@ -2901,7 +3050,12 @@ impl Engine {
 		if resized && self.docs.active_id() == Some(id) {
 			self.reactivate_tool();
 		}
-		if content {
+		// Global Light is not content, but the style dialogs read it here.
+		let light_changed = self
+			.docs
+			.get_mut(id)
+			.is_some_and(|doc| std::mem::replace(&mut doc.ui_light, info.global_light) != info.global_light);
+		if content || light_changed {
 			self.to_ui(&EngineToUi::DocumentChanged { info });
 			if self.docs.active_id() == Some(id) {
 				self.request_frame();
@@ -3167,7 +3321,15 @@ impl Engine {
 					}
 					Err(_) => continue,
 				},
-				_ => continue, // FAST: groups and fills are not aligned
+				// Groups, fills, Smart Objects…: what the layer shows (a group's
+				// whole content, a fill cut by its mask).
+				_ => match crate::export::composite_layers(&open.doc, &[layer], None, &store, None) {
+					Ok(image) => {
+						drawn = image;
+						Placed { image: &drawn, offset: (0, 0) }
+					}
+					Err(_) => continue,
+				},
 			};
 			if let Ok(Some(b)) = content_bounds(placed, Content::Opaque, &store) {
 				boxes.push((layer, b));
@@ -3774,12 +3936,13 @@ impl Engine {
 	/// Place an imported image as a layer of `doc` (M7-T03): pasted centred on
 	/// the canvas, named after the file, then a Free Transform box is put up,
 	/// already scaled to fit when the image is larger than the canvas
-	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc keeps
-	/// the layer at its size (FAST: Photoshop removes it).
+	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc removes
+	/// the placed layer again (every step of the place is undone).
 	fn place_imported(&mut self, doc: DocId, path: &std::path::Path, image: fx_tiles::TiledImage) {
 		let (w, h) = (image.width(), image.height());
 		let Some(open) = self.docs.get(doc) else { return };
 		let (cw, ch) = (open.doc.width, open.doc.height);
+		let steps_before = open.history.labels().count();
 		let clip = fx_core::pixels::ClipboardImage {
 			image,
 			offset: (0, 0),
@@ -3818,6 +3981,9 @@ impl Engine {
 			return;
 		}
 		self.start_transform(doc, TransformMode::Free);
+		if matches!(self.transform, Some((d, _)) if d == doc) {
+			self.placing = Some((doc, steps_before));
+		}
 		let fit = (f64::from(cw) / f64::from(w)).min(f64::from(ch) / f64::from(h));
 		if fit < 1.0
 			&& let Some((_, session)) = &mut self.transform
@@ -4607,6 +4773,7 @@ mod m12;
 mod m13;
 mod m8;
 mod m9;
+mod overview;
 
 #[cfg(test)]
 mod tests {

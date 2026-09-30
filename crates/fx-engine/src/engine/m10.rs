@@ -7,6 +7,7 @@ use fx_core::{Command, LayerRef};
 use fx_protocol::{DocId, EngineToUi};
 
 use super::Engine;
+use crate::tools::paint::WithSettings;
 
 fn target_json(t: Option<PathTarget>) -> serde_json::Value {
 	serde_json::to_value(t).unwrap_or_default()
@@ -75,6 +76,7 @@ impl Engine {
 			mode: crate::tools::kinds::blend_mode(s.string(tool, "Mode")),
 			..BrushParams::default()
 		}
+		.with_settings(s.options.get(tool).and_then(|o| o.get("_brush")))
 	}
 
 	/// Stroke Path (M10-T01): the path fed to the brush engine as a stroke

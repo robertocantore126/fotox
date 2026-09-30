@@ -700,6 +700,12 @@ pub enum Command {
 		layer: LayerRef,
 		styles: Option<crate::styles::LayerStyles>,
 	},
+	/// Layer ▸ Layer Style ▸ Global Light: the document's light angle, which
+	/// every effect with "Use Global Light" follows. Every styled layer's
+	/// effects are redrawn.
+	SetGlobalLight {
+		angle: f64,
+	},
 	/// Layer ▸ Rasterize ▸ Shape / Layer / Type (M6-T06/T07): every named layer
 	/// becomes a pixel layer holding what it drew, keeping its id, position in
 	/// the stack, name, opacity, blend mode and mask (Photoshop keeps those
@@ -1011,6 +1017,7 @@ impl Command {
 			} => set_shape(doc, layer, shape.as_ref(), fill.as_ref(), stroke.as_ref(), *transform),
 			Command::SetText { layer, content, dirty } => set_text(doc, layer, content, *dirty),
 			Command::SetLayerStyle { layer, styles } => set_layer_style(doc, layer, styles.clone()),
+			Command::SetGlobalLight { angle } => set_global_light(doc, *angle),
 			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
 		// One check for every command that can nest (Group, Move into a group,
@@ -1662,13 +1669,42 @@ fn box_of(shape: &VectorShape, transform: [f64; 6], stroke: Option<&StrokeStyle>
 /// the text inks; the engine computes `dirty` from the old and the new layout
 /// and the command carries it, which also makes undo redraw exactly the same
 /// tiles. An empty text layer draws nothing, and its tiles go Empty.
+fn set_global_light(doc: &mut Document, angle: f64) -> Result<CommandEffect, CommandError> {
+	if !angle.is_finite() {
+		return Err(CommandError::InvalidValue {
+			field: "angle",
+			reason: "not a number".into(),
+		});
+	}
+	// -180..=180, as Photoshop shows it.
+	let angle = (angle + 180.0).rem_euclid(360.0) - 180.0;
+	doc.global_light = angle;
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	let mut styled = Vec::new();
+	doc.walk(|layer, _| {
+		if layer.styles.is_some() {
+			styled.push(layer.id);
+		}
+	});
+	for &id in &styled {
+		if let Some(layer) = doc.layer_mut(id) {
+			layer.effects = crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+		}
+	}
+	Ok(CommandEffect {
+		label: "Global Light".into(),
+		props_changed: styled,
+		..Default::default()
+	})
+}
+
 fn set_layer_style(doc: &mut Document, layer: &LayerRef, styles: Option<crate::styles::LayerStyles>) -> Result<CommandEffect, CommandError> {
 	let id = resolve(doc, layer)?;
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
-	if matches!(target.kind, LayerKind::Group { .. } | LayerKind::Adjustment(_)) {
-		// FAST: Photoshop allows styles on groups; not here yet.
-		return Err(CommandError::NotAllowed("layer styles need a pixel, shape, text or fill layer".into()));
+	if matches!(target.kind, LayerKind::Adjustment(_)) {
+		// Groups take styles (their effects surround the group's composite).
+		return Err(CommandError::NotAllowed("an adjustment layer cannot have a layer style".into()));
 	}
 	target.effects = match &styles {
 		Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
@@ -2398,6 +2434,7 @@ fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
 			satin,
 			gradient_overlay,
 			pattern_overlay: _,
+			blend_if: _,
 		} = styles;
 		if let Some(e) = drop_shadow {
 			f(&mut e.color);
@@ -3178,6 +3215,42 @@ fn move_pixels(doc: &mut Document, dx: i32, dy: i32, copy: bool, ctx: &CommandCo
 	Ok(effect)
 }
 
+/// Free Transform on a shape or text layer: `mapping` (affine only) is
+/// composed onto the layer's local → document matrix.
+fn transform_vector(doc: &mut Document, id: LayerId, mapping: Mapping) -> Result<CommandEffect, CommandError> {
+	let Mapping::Affine(m) = mapping else {
+		return Err(CommandError::NotAllowed(
+			"a shape or type layer takes scale, rotate and skew; rasterize it (Layer ▸ Rasterize) for perspective or warp".into(),
+		));
+	};
+	let compose = |t: [f64; 6]| -> [f64; 6] {
+		[
+			m[0] * t[0] + m[2] * t[1],
+			m[1] * t[0] + m[3] * t[1],
+			m[0] * t[2] + m[2] * t[3],
+			m[1] * t[2] + m[3] * t[3],
+			m[0] * t[4] + m[2] * t[5] + m[4],
+			m[1] * t[4] + m[3] * t[5] + m[5],
+		]
+	};
+	let (w, h) = (f64::from(doc.width), f64::from(doc.height));
+	let kind = doc.layer(id).map(|l| l.kind.clone()).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	let mut effect = match kind {
+		LayerKind::Shape { transform, .. } => set_shape(doc, &LayerRef::Id(id), None, None, None, Some(compose(transform)))?,
+		LayerKind::Text { .. } => {
+			let mut content = doc
+				.layer(id)
+				.and_then(|l| l.kind.text_content())
+				.ok_or(CommandError::NotAllowed("not a text layer".into()))?;
+			content.transform = compose(content.transform);
+			set_text(doc, &LayerRef::Id(id), &content, [0.0, 0.0, w, h])?
+		}
+		_ => return Err(CommandError::NotAllowed("not a shape or text layer".into())),
+	};
+	effect.label = "Free Transform".into();
+	Ok(effect)
+}
+
 /// Free Transform's body. With a selection, `keep_source` leaves the lifted
 /// pixels in place too (a copy) instead of a hole.
 fn transform_pixels(
@@ -3198,6 +3271,11 @@ fn transform_pixels(
 	// A Smart Object only changes its transform (M12-T01).
 	if matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Smart { .. })) {
 		return m12::transform_smart(doc, id, mapping);
+	}
+	// Shape and text layers stay vectors: the box's affine part goes into
+	// their matrix (Photoshop scales the path / the type).
+	if matches!(doc.layer(id).map(|l| &l.kind), Some(LayerKind::Shape { .. } | LayerKind::Text { .. })) {
+		return transform_vector(doc, id, mapping);
 	}
 	let ops = pixel_ops(ctx, "Free Transform")?;
 	let store = ctx.tiles;

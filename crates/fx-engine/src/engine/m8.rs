@@ -234,7 +234,8 @@ impl Engine {
 			"brush:list" => {}
 			"brush:import-abr" => {
 				let data = upload(args);
-				let text = match self.resources.brushes.import_abr(&data) {
+				let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Imported");
+				let text = match self.resources.brushes.import_abr(&data, name) {
 					Ok(0) => "The brush file has no sampled tips Fotox can read".to_owned(),
 					Ok(n) => {
 						self.resources.brushes.save();

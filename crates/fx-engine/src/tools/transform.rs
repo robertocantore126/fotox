@@ -8,8 +8,8 @@
 //!
 //! Gestures, as in Photoshop 2019+:
 //!
-//! * a corner scales proportionally about the opposite corner, Shift frees
-//!   the proportions, Alt scales about the reference point;
+//! * a corner scales freely about the opposite corner, Shift constrains its
+//!   proportions, Alt scales about the reference point;
 //! * a side scales one axis (Shift: both);
 //! * inside moves (the middle too), just outside (within [`ROTATE_BAND`] of
 //!   the box) rotates about the reference point (Shift: 15° steps); the
@@ -633,9 +633,10 @@ impl Session {
 					let e1 = sub(quad[(k + 1) % 4], opposite);
 					let e2 = sub(quad[(k + 3) % 4], opposite);
 					let corner = quad[k];
-					let (s, t) = if !live.shift {
-						// Proportional (the default since Photoshop 2019): along
-						// the diagonal.
+					let (s, t) = if live.shift {
+						// Shift constrains a free corner drag to the original aspect
+						// ratio. Keeping the unconstrained result as the default makes
+						// a rectangle handle follow the pointer on both axes.
 						let d = sub(corner, anchor);
 						let k = dot(sub(p, anchor), d) / dot(d, d).max(1e-12);
 						(k, k)
@@ -909,27 +910,27 @@ mod tests {
 	}
 
 	#[test]
-	fn a_corner_scales_proportionally_about_the_opposite_corner() {
+	fn a_corner_scales_freely_by_default_and_shift_constrains_proportions() {
 		let mut s = session();
 		// Dragging the bottom-right corner along the diagonal to twice the size.
 		drag(&mut s, (300.0, 200.0), (500.0, 300.0), Modifiers::default());
 		maps(&s, (100.0, 100.0), (100.0, 100.0));
 		maps(&s, (300.0, 200.0), (500.0, 300.0));
-		// Off the diagonal the proportions still hold.
+		// Off the diagonal, the corner follows the pointer freely.
 		let mut s = session();
 		drag(&mut s, (300.0, 200.0), (500.0, 200.0), Modifiers::default());
-		let [tl, tr, _, bl] = s.quad;
-		assert!(((tr.0 - tl.0) / (bl.1 - tl.1) - 2.0).abs() < 1e-9, "{:?}", s.quad);
-		// Shift frees them.
+		maps(&s, (300.0, 200.0), (500.0, 200.0));
+		maps(&s, (100.0, 200.0), (100.0, 200.0));
+		assert!(s.status().starts_with("W: 200.0%  H: 100.0%"), "{}", s.status());
+		// Shift constrains the original aspect ratio.
 		let mut s = session();
 		let shift = Modifiers {
 			shift: true,
 			..Default::default()
 		};
 		drag(&mut s, (300.0, 200.0), (500.0, 200.0), shift);
-		maps(&s, (300.0, 200.0), (500.0, 200.0));
-		maps(&s, (100.0, 200.0), (100.0, 200.0));
-		assert!(s.status().starts_with("W: 200.0%  H: 100.0%"), "{}", s.status());
+		let [tl, tr, _, bl] = s.quad;
+		assert!(((tr.0 - tl.0) / (bl.1 - tl.1) - 2.0).abs() < 1e-9, "{:?}", s.quad);
 	}
 
 	#[test]

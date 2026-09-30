@@ -118,9 +118,9 @@ impl Tool for MoveTool {
 		match event.kind {
 			PointerKind::Down => {
 				self.nudge = None;
-				// On unless the option bar says off (the app starts with it on);
+				// Off unless the option bar turns it on (Photopea, M7 decision);
 				// Ctrl inverts it while held.
-				let setting = ctx.settings.bool(TOOL, "Auto-Select").unwrap_or(true);
+				let setting = ctx.settings.bool(TOOL, "Auto-Select").unwrap_or(false);
 				let auto = setting != event.modifiers.ctrl;
 				let mut deselect_on_click = None;
 				let mut selection_changed = false;
@@ -412,6 +412,8 @@ mod tests {
 		// The ids above were set by hand: new layers (duplicates) start past them.
 		let (_, names) = f.doc.id_state();
 		f.doc = f.doc.clone().with_id_state(100, names);
+		// Auto-Select is off by default (Photopea); these tests turn it on.
+		f.options(TOOL, serde_json::json!({ "Auto-Select": true }));
 		f
 	}
 

@@ -54,6 +54,7 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 			alpha,
 			mask,
 			clip,
+			blend_if,
 		} => {
 			let (cs, content_alpha) = match source {
 				Source::Solid(c) => ([c[0] as f64, c[1] as f64, c[2] as f64], c[3] as f64),
@@ -61,6 +62,10 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 			};
 			let m = mask.as_ref().map_or(1.0, |m| sample_mask(m, px, py, buffers));
 			let mut alpha_s = content_alpha * *alpha as f64 * m;
+			if let Some(range) = blend_if {
+				let under = unpremultiply(*stack.last().expect("stack never empty"));
+				alpha_s *= blend_if_factor(range, cs, under);
+			}
 			let mut mode = *blend;
 			if mode == BlendMode::Dissolve {
 				let threshold = dissolve_hash(origin.0 + px, origin.1 + py, layer.0 as u32);
@@ -123,6 +128,14 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 			}
 		}
 	}
+}
+
+/// Blend If (Gray): Rec. 601 grey of the layer and of the backdrop. Must
+/// match `composite.wgsl`.
+pub fn blend_if_factor(range: &fx_core::styles::BlendIf, cs: [f64; 3], cb: [f64; 3]) -> f64 {
+	use fx_core::styles::BlendIf;
+	let grey = |c: [f64; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+	BlendIf::factor(range.this_layer, grey(cs)) * BlendIf::factor(range.underlying, grey(cb))
 }
 
 /// Straight RGB + alpha of a pixel layer at output pixel `(px, py)`.

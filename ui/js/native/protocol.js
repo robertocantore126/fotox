@@ -64,6 +64,8 @@ export const ENGINE = Object.freeze({
   ERROR: "error",
   COLOR_PICKED: "color_picked",
   THUMBNAIL: "thumbnail",
+  // Navigator, Histogram, Properties, Character (engine/overview.rs).
+  OVERVIEW: "overview",
   // The Type tool's session (M6-T07) and the system font list.
   TEXT_EDIT: "text_edit",
   FONTS: "fonts",

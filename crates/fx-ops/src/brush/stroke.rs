@@ -238,7 +238,7 @@ impl Stroke {
 			.iter()
 			.map(|d| match &sampled {
 				Some(tip) => Tip::sampled(tip.clone(), d.diameter, d.roundness, d.angle, pencil),
-				None => Tip::new(d.diameter, self.brush.hardness, d.roundness, d.angle, pencil),
+				None => Tip::new(d.diameter, self.brush.hardness, d.roundness, d.angle, pencil).with_profile(self.brush.profile),
 			})
 			.collect();
 		for (i, (dab, tip)) in dabs.iter().zip(&tips).enumerate() {
@@ -330,7 +330,7 @@ impl Stroke {
 		for dab in dabs {
 			let tip = match &sampled {
 				Some(t) => Tip::sampled(t.clone(), dab.diameter, dab.roundness, dab.angle, pencil),
-				None => Tip::new(dab.diameter, self.brush.hardness, dab.roundness, dab.angle, pencil),
+				None => Tip::new(dab.diameter, self.brush.hardness, dab.roundness, dab.angle, pencil).with_profile(self.brush.profile),
 			};
 			let reach = f64::from(tip.reach());
 			// The dab's rectangle in layer pixels, clipped to the image.

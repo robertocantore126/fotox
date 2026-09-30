@@ -516,7 +516,7 @@ fn a_smart_object_previews_its_source_through_the_box() {
 	assert!(at(240, 190)[3] < 0.01, "and nothing past it: {:?}", at(240, 190));
 }
 
-/// Move ▸ Auto-Select (on by default): a click picks the topmost visible layer
+/// Move ▸ Auto-Select (or Ctrl): a click picks the topmost visible layer
 /// that shows a pixel there. Shapes and text were skipped unless their
 /// full-resolution tiles happened to be drawn, Smart Objects and fill layers
 /// always; masks and hidden groups were not taken into account.
