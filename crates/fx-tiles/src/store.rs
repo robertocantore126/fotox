@@ -900,7 +900,7 @@ impl TileStore {
 		let entries: Vec<Arc<TileEntry>> = keyed.into_iter().map(|(_, e)| e).collect();
 
 		if hot_over {
-			// Derived tiles first: dropping them is free.
+			// Derived tiles first (VERIFY-FIX(P1): compressed, not dropped).
 			for pass_class in [TileClass::Derived, TileClass::Authoritative] {
 				for entry in entries.iter().filter(|e| e.class == pass_class) {
 					if inner.stats.hot_bytes.load(Ordering::Relaxed) <= hot_target {
@@ -914,13 +914,15 @@ impl TileStore {
 		// Demoting hot tiles may have pushed warm over budget.
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
 			let mut scratch_full = false;
-			for entry in &entries {
-				if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
-					break;
-				}
-				if !self.demote_warm(entry) {
-					scratch_full = true;
-					break;
+			'passes: for pass_class in [TileClass::Derived, TileClass::Authoritative] {
+				for entry in entries.iter().filter(|e| e.class == pass_class) {
+					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
+						break 'passes;
+					}
+					if !self.demote_warm(entry) {
+						scratch_full = true;
+						break 'passes;
+					}
 				}
 			}
 			inner.stats.scratch_full.store(scratch_full, Ordering::Relaxed);
@@ -949,15 +951,19 @@ impl TileStore {
 		}
 		let mut full = false;
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
-			for _ in 0..scans {
-				if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
-					break;
-				}
-				let candidate = { inner.eviction_clock.lock().next() };
-				if let Some((entry, recent)) = candidate {
-					if !recent && !self.demote_warm(&entry) {
-						full = true;
-						break;
+			// VERIFY-FIX(P1): drop derived warm copies before writing
+			// authoritative tiles to scratch.
+			'passes: for class in [TileClass::Derived, TileClass::Authoritative] {
+				for _ in 0..scans {
+					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
+						break 'passes;
+					}
+					let candidate = { inner.eviction_clock.lock().next() };
+					if let Some((entry, recent)) = candidate {
+						if !recent && entry.class == class && !self.demote_warm(&entry) {
+							full = true;
+							break 'passes;
+						}
 					}
 				}
 			}
@@ -976,7 +982,12 @@ impl TileStore {
 			if Arc::strong_count(&buffer) > 2 {
 				return;
 			}
-			if entry.class == TileClass::Derived || copies.warm.is_some() || copies.cold.is_some() || copies.backed.is_some() {
+			// VERIFY-FIX(P1): a derived tile is compressed like any other, not
+			// dropped: "dropping them is free" is false for mips, whose
+			// recompute reads every level-0 tile below them. Dropping made
+			// every frame at fit rebuild every layer's pyramid (each level-0
+			// tile read back ~30 times while building 400 layers at 16K).
+			if copies.warm.is_some() || copies.cold.is_some() || copies.backed.is_some() {
 				copies.hot = None;
 				inner.account_hot(entry.format, true, false);
 				if copies.is_empty() {
@@ -1009,6 +1020,16 @@ impl TileStore {
 		let block = {
 			let mut copies = entry.copies.lock();
 			let Some(block) = copies.warm.clone() else { return true };
+			// VERIFY-FIX(P1): a derived tile leaves the warm tier by being dropped
+			// (it can be recomputed); only authoritative tiles go to scratch.
+			if entry.class == TileClass::Derived {
+				copies.warm = None;
+				inner.account_warm(block.len(), false);
+				if copies.is_empty() {
+					inner.stats.evicted_tiles.fetch_add(1, Ordering::Relaxed);
+				}
+				return true;
+			}
 			if copies.cold.is_some() || copies.backed.is_some() {
 				copies.warm = None;
 				inner.account_warm(block.len(), false);
@@ -1156,6 +1177,48 @@ mod tests {
 		for (i, handle) in derived.iter().enumerate() {
 			match store.get(handle) {
 				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, 100 + i as u8).bytes()),
+				Err(TileError::Evicted) => {}
+				Err(e) => panic!("unexpected error {e}"),
+			}
+		}
+	}
+
+	/// A compressible tile (a ramp), like most mips of real art.
+	fn ramp(format: PixelFormat, seed: u8) -> TileBuffer {
+		let bytes: Vec<u8> = (0..format.tile_bytes()).map(|i| (i / 64) as u8 ^ seed).collect();
+		TileBuffer::from_bytes(format, bytes.into_boxed_slice()).unwrap()
+	}
+
+	// VERIFY-FIX(P1): over the hot budget, derived tiles (mips) are compressed
+	// like authoritative ones instead of dropped; dropping them made every
+	// frame rebuild every layer's pyramid from level 0.
+	#[test]
+	fn trim_compresses_derived_tiles_before_dropping_them() {
+		let store = store(); // hot and warm budgets = 4 RGBA16 tiles each
+		let derived: Vec<_> = (0..8).map(|i| store.insert(ramp(PixelFormat::Rgba16, i), TileClass::Derived)).collect();
+		store.trim();
+		let stats = store.stats();
+		assert!(stats.hot_bytes <= store.config().hot_budget);
+		assert_eq!(stats.evicted_tiles, 0, "compressible derived tiles fit the warm tier: none dropped");
+		for (i, handle) in derived.iter().enumerate() {
+			assert_eq!(store.get(handle).unwrap().bytes(), ramp(PixelFormat::Rgba16, i as u8).bytes());
+		}
+	}
+
+	// VERIFY-FIX(P1): past the warm budget a derived tile is dropped, never
+	// written to scratch (only authoritative tiles go there).
+	#[test]
+	fn derived_tiles_never_reach_scratch() {
+		let store = store();
+		let derived: Vec<_> = (0..12).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Derived)).collect();
+		store.trim();
+		store.trim();
+		let stats = store.stats();
+		assert_eq!(stats.cold_bytes, 0, "a derived tile was written to scratch");
+		assert!(stats.evicted_tiles >= 1, "incompressible derived tiles past the warm budget are dropped");
+		for (i, handle) in derived.iter().enumerate() {
+			match store.get(handle) {
+				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, i as u8).bytes()),
 				Err(TileError::Evicted) => {}
 				Err(e) => panic!("unexpected error {e}"),
 			}
@@ -1414,3 +1477,4 @@ mod tests {
 		assert_eq!(source.reads(), 1, "one read fills the hot copy for every waiter");
 	}
 }
+
