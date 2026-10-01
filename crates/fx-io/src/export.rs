@@ -449,7 +449,8 @@ mod tests {
 			true
 		})
 		.unwrap();
-		assert_eq!(calls, 3, "one progress call per band");
+		// VERIFY-FIX(P4): one call per band, plus the cancel check before the part file is published.
+		assert_eq!(calls, 4, "one progress call per band + the final cancel check");
 		let leftovers = std::fs::read_dir(path.parent().unwrap())
 			.unwrap()
 			.filter_map(|e| e.ok())
