@@ -14,6 +14,7 @@ import { h, icon, clear } from "../el.js";
 import { emit } from "../state.js";
 import { setOption, optionValue, registerControl, sizeToSlider, sliderToSize } from "../optionsbar.js";
 import { openPopup, selectButton } from "../popup.js";
+import { askText } from "../dialogs.js";
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
 
@@ -175,8 +176,8 @@ export function brushPanel() {
   return roots.list;
 }
 
-function newPresetFromCurrent() {
-  const name = prompt("Brush name", "Brush " + (presets.length + 1));
+async function newPresetFromCurrent() {
+  const name = await askText("New Brush Preset", "Name:", "Brush " + (presets.length + 1));
   if (!name) return;
   const preset = {
     name,
@@ -206,8 +207,8 @@ function renderList() {
       list.append(h("div", {
         class: "plist-row brush-row" + (i === selected ? " sel" : ""),
         onclick: () => applyPreset(i),
-        ondblclick: () => {
-          const next = prompt("Brush name", p.name);
+        ondblclick: async () => {
+          const next = await askText("Rename Brush", "Name:", p.name);
           if (next) send("brush:rename-preset", { index: i, name: next });
         },
       },

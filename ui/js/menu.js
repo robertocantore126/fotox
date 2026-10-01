@@ -18,7 +18,7 @@ function planned(item) {
   if (IMPLEMENTED.has(item.a) || [...IMPLEMENTED].some((id) => id.endsWith("*") && item.a.startsWith(id.slice(0, -1)))) return false;
   return item.a.startsWith("dlg:") || !LOCAL.some((p) => item.a.startsWith(p));
 }
-import { openPopup, closeAll, closeFrom, topPopup, isPopupOpen } from "./popup.js";
+import { openPopup, closeAll, closeFrom, topPopup, isPopupOpen, reposition } from "./popup.js";
 
 let onAction = () => {};
 let menubar = null; // { buttons: [{ btn, menu }], index }
@@ -85,6 +85,9 @@ export function openMenuPopup(anchor, items, { parent = null, align = "left", cl
   const content = h("div", { class: "menu", role: "menu" });
   const popup = openPopup({ anchor, content, parent, align, className, side: parent ? "submenu" : "below" });
   fillMenu(content, items, { popup, parent });
+  // Placed while still empty: again with its rows, so it flips above or
+  // shifts up instead of running off the bottom (the Layers fx button).
+  reposition(popup);
   highlight(firstRow(content));
   return popup;
 }

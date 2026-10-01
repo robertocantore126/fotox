@@ -9,6 +9,10 @@
 
 .popup {
   position: fixed;
+  /* Above the dialogs (.modal-wrap, 1200, in this same layer): a drop-down
+     or colour popover opened from a dialog was drawn under it, so its
+     choices could not be clicked. Below tooltips (1400). */
+  z-index: 1300;
   pointer-events: auto;
   background: var(--bg-popup);
   border: 1px solid var(--border-popup);

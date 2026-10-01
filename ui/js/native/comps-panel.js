@@ -5,7 +5,7 @@
 // update the selected one, step to the previous / next, delete.
 
 import { h, icon, clear } from "../el.js";
-import { openDialog } from "../dialogs.js";
+import { openDialog, askText } from "../dialogs.js";
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
 import { activeDocument } from "./documents.js";
@@ -37,9 +37,9 @@ function render() {
   const list = h("div", { class: "plist" });
   names.forEach((name, i) => {
     const label = h("span", { class: "plist-label", text: name });
-    label.addEventListener("dblclick", (e) => {
+    label.addEventListener("dblclick", async (e) => {
       e.stopPropagation();
-      const value = prompt("Layer comp name", name);
+      const value = await askText("Rename Layer Comp", "Name:", name);
       if (value) send("comps:rename", { index: i, name: value });
     });
     list.append(h("div", { class: "plist-row" + (i === active ? " sel" : ""), onclick: () => send("comps:apply", { index: i }) },

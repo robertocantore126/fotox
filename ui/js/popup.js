@@ -34,6 +34,12 @@ function place(el, anchorRect, { align = "left", side = "below", width = 0, pare
   el.style.visibility = "hidden";
   el.style.left = "0px";
   el.style.top = "0px";
+  el.style.maxHeight = "";
+  // Taller than the window: it scrolls instead of running off the screen.
+  if (el.offsetHeight > vh - 2 * pad) {
+    el.style.maxHeight = vh - 2 * pad + "px";
+    el.style.overflowY = "auto";
+  }
   const w = width || el.offsetWidth;
   const hgt = el.offsetHeight;
 
@@ -100,6 +106,7 @@ export function openPopup(o) {
   popupLayer().append(el);
   const anchorRect = anchor instanceof Element ? anchor.getBoundingClientRect() : anchor;
   const parentRect = parent ? parent.getBoundingClientRect() : null;
+  el._fotoxPlace = { align, side, width };
   place(el, anchorRect, { align, side, width, parentRect });
 
   const entry = { el, parent, onClose };
@@ -112,6 +119,17 @@ export function openPopup(o) {
   el.dataset.depth = String(stack.length - 1);
   emit("overlays");
   return el;
+}
+
+/**
+ * Places `el` again against its anchor: for content added after
+ * `openPopup` (a menu's rows), which the first placement measured empty.
+ */
+export function reposition(el) {
+  const anchor = el._fotoxAnchor;
+  const anchorRect = anchor instanceof Element ? anchor.getBoundingClientRect() : anchor;
+  const parentRect = el._fotoxParent ? el._fotoxParent.getBoundingClientRect() : null;
+  place(el, anchorRect, { ...el._fotoxPlace, parentRect });
 }
 
 /** Chiude i popup più profondi di `parent` (o tutti se parent è null). */

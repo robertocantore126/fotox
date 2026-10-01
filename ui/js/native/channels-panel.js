@@ -7,7 +7,7 @@
 
 import { h, icon, clear } from "../el.js";
 import { emit } from "../state.js";
-import { openDialog } from "../dialogs.js";
+import { openDialog, askText } from "../dialogs.js";
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
 import { activeDocument } from "./documents.js";
@@ -75,9 +75,9 @@ function render() {
       if (e.ctrlKey || e.metaKey) { e.stopPropagation(); command({ op: "load_selection", channel: i, invert: false, mode: e.shiftKey ? "add" : e.altKey ? "subtract" : "replace" }); }
     });
     const name = h("span", { class: "plist-label", text: c.name });
-    name.addEventListener("dblclick", (e) => {
+    name.addEventListener("dblclick", async (e) => {
       e.stopPropagation();
-      const value = prompt("Channel name", c.name);
+      const value = await askText("Rename Channel", "Name:", c.name);
       if (value) command({ op: "set_channel", channel: i, name: value });
     });
     rows.append(h("div", { class: "plist-row" + (i === selected ? " sel" : ""), onclick: () => { selected = i; render(); } },

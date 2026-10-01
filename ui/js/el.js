@@ -61,3 +61,33 @@ export function clear(node) {
   return node;
 }
 
+
+/**
+ * A left-button drag that starts on `el`: `onMove(event)` at the press and on
+ * every move until the release, wherever the pointer goes; `onUp(event)` at
+ * the release. Mouse events on the window, not pointer capture: the app's
+ * off-screen CEF gets forwarded mouse events, and with capture the drag
+ * stopped (or never followed) once the pointer left the element — the
+ * colour pickers' marker could hardly be moved. `onDown(event)` may return
+ * false to leave the press alone.
+ */
+export function dragOn(el, onMove, { onDown = null, onUp = null } = {}) {
+  el.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (onDown && onDown(e) === false) return;
+    // No text selection or native drag may take the gesture over.
+    e.preventDefault();
+    const move = (m) => {
+      if (!(m.buttons & 1)) { up(m); return; } // the release happened elsewhere
+      onMove(m);
+    };
+    const up = (u) => {
+      window.removeEventListener("mousemove", move, true);
+      window.removeEventListener("mouseup", up, true);
+      onUp?.(u);
+    };
+    window.addEventListener("mousemove", move, true);
+    window.addEventListener("mouseup", up, true);
+    onMove(e);
+  });
+}

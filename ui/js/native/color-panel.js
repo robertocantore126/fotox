@@ -4,7 +4,7 @@
 // (click the other one to switch; click the active one for the Color Picker).
 // Picking a colour is not a document edit: no history step.
 
-import { h, icon } from "../el.js";
+import { h, icon, dragOn } from "../el.js";
 import { state, on, emit, setColors } from "../state.js";
 
 const MODE_KEY = "fotox.colorPanel.mode";
@@ -180,7 +180,8 @@ function wheelControl(canvas) {
     return { c: size / 2, outer, inner, half };
   };
   const draw = () => {
-    const width = Math.max(120, Math.min(220, (canvas.parentElement?.clientWidth || 200) - 8));
+    // Compact: the fields sit beside it, leaving the dock's height to Layers.
+    const width = Math.max(96, Math.min(124, (canvas.parentElement?.clientWidth || 200) - 130));
     if (width !== size) {
       size = width;
       canvas.width = size * dpr;
@@ -246,20 +247,19 @@ function wheelControl(canvas) {
       apply(fromHsv(next), next);
     }
   };
-  canvas.addEventListener("pointerdown", (e) => {
-    const [x, y] = at(e);
-    const { c, inner, outer, half } = geometry();
-    const d = Math.hypot(x - c, y - c);
-    if (d >= inner - 2 && d <= outer + 2) dragging = "ring";
-    else if (Math.abs(x - c) <= half + 4 && Math.abs(y - c) <= half + 4) dragging = "square";
-    else return;
-    canvas.setPointerCapture(e.pointerId);
-    update(e);
+  // The press picks the ring or the square; the drag keeps to it.
+  dragOn(canvas, (e) => { if (dragging) update(e); }, {
+    onDown: (e) => {
+      const [x, y] = at(e);
+      const { c, inner, outer, half } = geometry();
+      const d = Math.hypot(x - c, y - c);
+      if (d >= inner - 2 && d <= outer + 2) dragging = "ring";
+      else if (Math.abs(x - c) <= half + 4 && Math.abs(y - c) <= half + 4) dragging = "square";
+      else return false;
+      return true;
+    },
+    onUp: () => { dragging = null; },
   });
-  canvas.addEventListener("pointermove", (e) => { if (dragging) update(e); });
-  const stop = () => { dragging = null; };
-  canvas.addEventListener("pointerup", stop);
-  canvas.addEventListener("pointercancel", stop);
   return draw;
 }
 

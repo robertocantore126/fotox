@@ -7,7 +7,7 @@
 // ask again after every edit, debounced; the newest answer wins.
 
 import { h, clear, icon } from "../el.js";
-import { openColorPopover } from "../dialogs.js";
+import { openColorPopover, askText } from "../dialogs.js";
 import { selectButton } from "../popup.js";
 import { state, on, emit } from "../state.js";
 import * as bridge from "./bridge.js";
@@ -458,10 +458,10 @@ function drawStyles() {
   if (!list.length) rows.append(note("No saved styles. Give a layer a style (Layer ▸ Layer Style), then press + to keep it here."));
   stylesRoot.append(rows, h("div", { class: "pbar" },
     barBtn("i-trash", "Clear the active layer's style", () => layer && sendCommand({ op: "set_layer_style", layer: { id: layer.id }, styles: null })),
-    barBtn("i-plus", "New style from the active layer", () => {
+    barBtn("i-plus", "New style from the active layer", async () => {
       const l = activeLayerInfo();
       if (!l || !l.styles) { emit("mock", "The active layer has no style to save"); return; }
-      const name = prompt("Style name:", `${l.name} style`);
+      const name = await askText("New Style", "Name:", `${l.name} style`);
       if (!name) return;
       const next = [...stylePresets(), { name, styles: l.styles }];
       styleSel = next.length - 1;

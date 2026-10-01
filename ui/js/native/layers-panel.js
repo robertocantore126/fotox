@@ -8,7 +8,7 @@
 // The list is virtualised (only the visible rows exist), so 1 000 layers
 // scroll and update as fast as 10.
 
-import { h, icon, clear, add } from "../el.js";
+import { h, icon, clear, add, dragOn } from "../el.js";
 import { openDropdown } from "../popup.js";
 import { openDialog, dialogValues } from "../dialogs.js";
 import { state, setTool, emit } from "../state.js";
@@ -128,6 +128,8 @@ let historyRoot = null;
 let listEl = null;
 let spacerEl = null;
 const layerScroll = new Map(); // document id → the Layers list's user scroll position
+const shownActive = new Map(); // document id → the active layer the list last revealed
+let revealId = null;           // a layer to scroll into view after the next layout
 let dragId = null;
 let editNew = null;      // ids before a new adjustment layer: its dialog opens when it arrives
 
@@ -175,6 +177,14 @@ export function initNativePanels() {
       if (l.kind === "group" && !collapsed.has(key)) collapsed.set(key, !l.expanded);
     }
     requestThumbnails();
+    // A new active layer (picked on the canvas, a shortcut, a new layer):
+    // open its groups and scroll the list to it once the rows are laid out.
+    const a = active();
+    if (a && shownActive.get(doc) !== a.id) {
+      shownActive.set(doc, a.id);
+      for (let p = tree[layers.indexOf(a)].parent; p != null; p = tree[layers.findIndex((l) => l.id === p)].parent) collapsed.set(`${doc}:${p}`, false);
+      revealId = a.id;
+    }
     renderLayers();
     // Like Photoshop, a new adjustment layer opens its settings.
     const added = editNew && layers.find((l) => l.adjustment && !editNew.has(l.id));
@@ -199,6 +209,7 @@ export function initNativePanels() {
     histories.delete(id);
     historySource.delete(id);
     layerScroll.delete(id);
+    shownActive.delete(id);
     const prefix = `${id}:`;
     for (const map of [thumbs, thumbStamps, collapsed]) for (const key of [...map.keys()]) if (key.startsWith(prefix)) map.delete(key);
     for (const key of [...requested]) if (key.startsWith(prefix)) requested.delete(key);
@@ -448,6 +459,16 @@ function renderLayers() {
   requestAnimationFrame(() => {
     if (currentList !== listEl) return;
     currentList.scrollTop = layerScroll.get(currentDoc) || 0;
+    if (revealId != null) {
+      const v = visibleRows().findIndex((r) => typeof r === "number" && layers[r].id === revealId);
+      revealId = null;
+      if (v >= 0) {
+        const y = v * ROW_H, view = currentList.clientHeight;
+        if (y < currentList.scrollTop) currentList.scrollTop = y;
+        else if (y + ROW_H > currentList.scrollTop + view) currentList.scrollTop = y + ROW_H - view;
+        layerScroll.set(currentDoc, currentList.scrollTop);
+      }
+    }
     renderRows();
   });
 }
@@ -924,23 +945,17 @@ function savedHeight(key, fallback) {
 /** A thin bar under `list` that resizes it vertically and remembers the height. */
 function resizeGrip(list, key, min, max, onResize) {
   const grip = h("div", { class: "plist-grip", "data-tip": "Drag to resize" });
-  grip.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    grip.setPointerCapture(e.pointerId);
-    const start = e.clientY;
-    const from = list.getBoundingClientRect().height;
-    const move = (m) => {
-      const height = Math.round(Math.min(max, Math.max(min, from + m.clientY - start)));
-      list.style.height = height + "px";
-      onResize?.();
-    };
-    const up = () => {
-      grip.removeEventListener("pointermove", move);
-      grip.removeEventListener("pointerup", up);
+  let start = 0;
+  let from = 0;
+  dragOn(grip, (m) => {
+    const height = Math.round(Math.min(max, Math.max(min, from + m.clientY - start)));
+    list.style.height = height + "px";
+    onResize?.();
+  }, {
+    onDown: (e) => { start = e.clientY; from = list.getBoundingClientRect().height; },
+    onUp: () => {
       try { localStorage.setItem("fotox.height." + key, String(Math.round(list.getBoundingClientRect().height))); } catch { /* storage off: session only */ }
-    };
-    grip.addEventListener("pointermove", move);
-    grip.addEventListener("pointerup", up);
+    },
   });
   return grip;
 }

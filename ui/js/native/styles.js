@@ -16,12 +16,12 @@
 // (`style_presets`, `style_defaults`), not in the browser.
 
 import { h, icon, clear } from "../el.js";
-import { openDialog, openColorPopover, BLEND_MODES, isDialogOpen } from "../dialogs.js";
+import { openDialog, openColorPopover, askText, BLEND_MODES, isDialogOpen } from "../dialogs.js";
 import { openDropdown } from "../popup.js";
 import { toast } from "../tooltip.js";
 import { activeLayerInfo, sendCommand } from "./layers-panel.js";
 import { hexToRgba16, rgba16ToHex } from "./tools.js";
-import { currentGradientResolved, gradientEditor, gradientCss, PRESETS as GRADIENT_PRESETS, resolveSwatches } from "./gradients.js";
+import { currentGradientResolved, gradientEditor, gradientCss, PRESETS as GRADIENT_PRESETS, allGradients, resolveSwatches } from "./gradients.js";
 import { currentPattern, patternList } from "./patterns.js";
 import { activeDocumentInfo } from "./documents.js";
 import { viewZoom } from "./overview-panels.js";
@@ -528,9 +528,11 @@ function gradientRow(label, g, onChange) {
   pick.addEventListener("click", (e) => {
     e.stopPropagation();
     openDropdown({
-      anchor: pick, items: Object.keys(GRADIENT_PRESETS), width: 220,
+      anchor: pick, items: Object.keys(allGradients()), width: 220,
       onPick: (name) => {
-        const next = structuredClone(GRADIENT_PRESETS[name]);
+        const preset = allGradients()[name];
+        if (!preset) return;
+        const next = structuredClone(preset);
         resolveSwatches(next);
         for (const k of Object.keys(g)) delete g[k];
         Object.assign(g, next);
@@ -1215,16 +1217,16 @@ function stylesPage() {
         e.preventDefault();
         openDropdown({
           anchor: e.currentTarget, items: ["Rename Style...", "Delete Style"], width: 160,
-          onPick: (what) => {
+          onPick: async (what) => {
             const next = stylePresets();
             if (what === "Delete Style") next.splice(i, 1);
             else {
-              const name = prompt("Style name:", p.name);
+              const name = await askText("Rename Style", "Name:", p.name);
               if (!name) return;
               next[i] = { ...next[i], name };
             }
             saveStylePresets(next);
-            drawPane();
+            if (S) drawPane();
           },
         });
       },
@@ -1233,9 +1235,9 @@ function stylesPage() {
   return h("div", { class: "ls-col" }, h("div", { class: "ls-title", text: "Styles" }), grid, h("div", { class: "dlg-note", text: "Right-click a style to rename or delete it." }));
 }
 
-function newStyle() {
-  const name = prompt("Style name:", `${S.layer.name} Style`);
-  if (!name) return;
+async function newStyle() {
+  const name = await askText("New Style", "Name:", `${S.layer.name} Style`);
+  if (!name || !S) return;
   const styles = compact(S.styles);
   if (!styles) { toast("The style is empty: turn an effect on first"); return; }
   saveStylePresets([...stylePresets(), { name, styles }]);
