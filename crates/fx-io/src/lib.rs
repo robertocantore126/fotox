@@ -28,7 +28,7 @@ pub enum IoError {
 	TooLarge { width: u64, height: u64 },
 	#[error("decode error: {0}")]
 	Decode(String),
-	#[error(transparent)]
+	#[error("{}", crate::fs_util::error_text(.0))]
 	Io(#[from] std::io::Error),
 	#[error(transparent)]
 	Tiles(#[from] fx_tiles::TileError),
@@ -125,6 +125,8 @@ pub mod abr;
 mod band;
 pub mod export;
 pub mod fxd;
+// AUDIT-FIX(D6+D7+D10): shared durability helpers.
+pub mod fs_util;
 mod jpeg;
 pub mod lut;
 mod png;

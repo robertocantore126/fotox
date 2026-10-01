@@ -12,6 +12,7 @@
 //! A library saved before groups existed gets the built-in groups added and
 //! keeps its own presets under "My Brushes".
 
+// AUDIT-FIX(D7): load synced backups on malformed main JSON; saves use durable sibling replacement.
 use std::path::PathBuf;
 
 use fx_core::stroke::{BrushParams, Control, Dynamics, StrokeSample, TipProfile};
@@ -79,10 +80,7 @@ pub struct Library {
 impl Library {
 	/// Read the file, or Photoshop-like defaults.
 	pub fn load() -> Self {
-		let presets = match path()
-			.and_then(|p| std::fs::read_to_string(p).ok())
-			.and_then(|text| serde_json::from_str::<Vec<Preset>>(&text).ok())
-		{
+		let presets = match path().and_then(|p| fx_io::fs_util::read_json::<Vec<Preset>>(&p)) {
 			// Saved before the groups: the built-in ones first, the file's
 			// own presets after them.
 			Some(own) if own.iter().all(|p| p.group.is_empty()) => {
@@ -108,7 +106,7 @@ impl Library {
 		}
 		match serde_json::to_string(&self.presets) {
 			Ok(text) => {
-				if let Err(error) = std::fs::write(&path, text) {
+				if let Err(error) = fx_io::fs_util::write_json(&path, text.as_bytes()) {
 					tracing::warn!("cannot write {}: {error}", path.display());
 				}
 			}

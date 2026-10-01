@@ -106,10 +106,16 @@ pub fn export_image(path: &Path, width: u32, height: u32, options: ExportOptions
 	}
 	let _lease = crate::fxd::PathWriteLock::acquire(path);
 	let part = part_path(path);
+	// AUDIT-FIX(D6+D10): cleanup covers sync/rename errors too; sync the completed part before publication.
+	let _part_guard = crate::fs_util::PartGuard(part.clone());
 	let result = write(&part, width, height, &options, render, progress);
+	let result = result.and_then(|()| {
+		std::fs::OpenOptions::new().write(true).open(&part)?.sync_all()?;
+		Ok(())
+	});
 	match result {
 		Ok(()) => {
-			std::fs::rename(&part, path)?;
+			crate::fs_util::atomic_replace(&part, path)?;
 			Ok(())
 		}
 		Err(e) => {

@@ -5,6 +5,7 @@
 //! The engine puts the whole library into the tool settings as
 //! `_custom_shapes` (name → path) so the Custom Shape tool can read it.
 
+// AUDIT-FIX(D7): load synced backups on malformed main JSON; saves use durable sibling replacement.
 use std::path::PathBuf;
 
 use fx_core::path::{Anchor, NamedPath, Path, Subpath, smooth_through};
@@ -89,10 +90,7 @@ pub fn builtin() -> Vec<NamedPath> {
 
 /// The user's shapes.
 pub fn load() -> Vec<NamedPath> {
-	path()
-		.and_then(|p| std::fs::read_to_string(p).ok())
-		.and_then(|t| serde_json::from_str(&t).ok())
-		.unwrap_or_default()
+	path().and_then(|p| fx_io::fs_util::read_json(&p)).unwrap_or_default()
 }
 
 /// FAST: errors are logged.
@@ -102,7 +100,7 @@ pub fn save(shapes: &[NamedPath]) {
 		let _ = std::fs::create_dir_all(dir);
 	}
 	if let Ok(text) = serde_json::to_string(shapes)
-		&& let Err(error) = std::fs::write(&path, text)
+		&& let Err(error) = fx_io::fs_util::write_json(&path, text.as_bytes())
 	{
 		tracing::warn!("cannot write {}: {error}", path.display());
 	}

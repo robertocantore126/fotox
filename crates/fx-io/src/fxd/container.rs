@@ -382,7 +382,8 @@ impl std::fmt::Debug for FxdFile {
 impl FxdFile {
 	/// Open a `.fxd` read+write and return it with the newest valid footer.
 	pub fn open(path: &Path) -> Result<(Arc<FxdFile>, Footer), IoError> {
-		let file = OpenOptions::new().read(true).write(true).open(path)?;
+		// AUDIT-FIX(D10): opening documents requires only read access; upgrade at append time.
+		let file = OpenOptions::new().read(true).open(path)?;
 		let len = file.metadata()?.len();
 		if len < HEADER_LEN {
 			return Err(IoError::Decode(format!("not a complete .fxd: file is {len} bytes, header needs {HEADER_LEN}")));
@@ -620,10 +621,15 @@ impl FxdWriter {
 		if !file.matches_path()? {
 			return Err(IoError::Decode("The save path was replaced; save again to rebind the document".into()));
 		}
+		// AUDIT-FIX(D10): acquire a writable handle lazily and verify it still names the same file.
+		let writable = OpenOptions::new().read(true).write(true).open(&file.path)?;
+		if file_identity(&writable)? != file_identity(&file.file)? {
+			return Err(IoError::Decode("The target changed while preparing Save; try again".into()));
+		}
 		let len = file.file.metadata()?.len();
 		let (_, footer) = find_footer(&file.file, len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
 		Ok(FxdWriter {
-			file: file.file,
+			file: Arc::new(writable),
 			id: file.id,
 			path: file.path,
 			_lease: lease,

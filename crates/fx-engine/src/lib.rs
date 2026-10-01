@@ -320,6 +320,11 @@ impl EngineHandle {
 		let output: OutputSink = Arc::new(output);
 		// The preferences' memory budget and scratch folder apply at start (M7-T09).
 		let prefs = prefs::Prefs::load();
+		// AUDIT-FIX(D10): stale-part cleanup is confined to recent-document folders and runs on a worker.
+		let recent = prefs.recent();
+		let _ = std::thread::Builder::new()
+			.name("stale-save-parts".into())
+			.spawn(move || fx_io::fs_util::sweep_parts(&recent));
 		let scratch_dir = prefs.string("scratch_dir").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(scratch_dir);
 		let mut config = TileStoreConfig::reference_machine(scratch_dir);
 		if let Some(mb) = prefs.number("memory_budget_mb").filter(|mb| *mb >= 256.0) {

@@ -3,6 +3,7 @@
 //! file. Patterns a document uses are copied into its `patterns` (saved with
 //! it); the library is the user's collection.
 
+// AUDIT-FIX(D7): load synced backups on malformed main JSON; saves use durable sibling replacement.
 use std::path::PathBuf;
 
 use fx_core::pattern::{MAX_SIDE, Pattern};
@@ -44,7 +45,7 @@ fn from8(name: &str, width: u32, height: u32, rgba: &[u8]) -> Option<Pattern> {
 
 impl Library {
 	pub fn load() -> Self {
-		let stored: Option<Vec<Stored>> = path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok());
+		let stored: Option<Vec<Stored>> = path().and_then(|p| fx_io::fs_util::read_json(&p));
 		let patterns = match stored {
 			Some(list) => list
 				.iter()
@@ -72,7 +73,7 @@ impl Library {
 			})
 			.collect();
 		if let Ok(text) = serde_json::to_string(&list)
-			&& let Err(error) = std::fs::write(&path, text)
+			&& let Err(error) = fx_io::fs_util::write_json(&path, text.as_bytes())
 		{
 			tracing::warn!("cannot write {}: {error}", path.display());
 		}

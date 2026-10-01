@@ -82,6 +82,20 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		SaveTarget::Incremental(_) => None,
 	};
 	let tiles = collect_tiles(request.doc, request.preview);
+	// AUDIT-FIX(D10): conservative raw changed bytes plus manifest allowance; never probe on the render thread.
+	let reuse = match &target {
+		SaveTarget::Incremental(file) => Some(file.id()),
+		_ => None,
+	};
+	let estimate = tiles
+		.iter()
+		.filter(|tile| !tile.handle.backing().is_some_and(|(id, _, _)| Some(id) == reuse))
+		.fold(16u64 << 20, |sum, tile| sum.saturating_add(tile.format.tile_bytes() as u64 + 64));
+	let destination = match &target {
+		SaveTarget::Incremental(file) => file.path(),
+		SaveTarget::Fresh(path) => path.as_path(),
+	};
+	crate::fs_util::require_space(destination, estimate)?;
 	let mut refs: HashMap<u64, ChunkRef> = HashMap::new();
 	let mut written: Vec<(TileHandle, ChunkRef)> = Vec::new();
 	let mut report = SaveReport::default();
@@ -92,9 +106,11 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		SaveTarget::Incremental(_) => None,
 		SaveTarget::Fresh(path) => Some(part_path(path)),
 	};
+	// AUDIT-FIX(D10): the guard outlives the writer, so cleanup runs after handles close.
+	let _part_guard = part.as_ref().map(|path| crate::fs_util::PartGuard(path.clone()));
 	let (mut writer, reuse_id) = match &target {
 		SaveTarget::Incremental(file) => (FxdWriter::append_to((**file).clone())?, Some(file.id())),
-		SaveTarget::Fresh(path) => (FxdWriter::create(&part_path(path))?, None),
+		SaveTarget::Fresh(_) => (FxdWriter::create(part.as_ref().expect("fresh part assigned"))?, None),
 	};
 
 	let total = tiles.len().max(1);
@@ -156,7 +172,8 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 			SaveTarget::Incremental(_) => unreachable!("part is only set for Fresh"),
 		};
 		drop(committed);
-		std::fs::rename(&part, &target)?;
+		// AUDIT-FIX(D6): write-through replacement after the committed part is synced and closed.
+		crate::fs_util::atomic_replace(&part, &target)?;
 		FxdFile::open(&target)?.0
 	} else {
 		Arc::new(committed)
@@ -186,9 +203,8 @@ pub fn needs_compaction(live_bytes: u64, file_len: u64) -> bool {
 
 /// `<target>.part` in the same folder, so the replace is a rename.
 fn part_path(target: &Path) -> PathBuf {
-	let mut name = target.as_os_str().to_os_string();
-	name.push(".part");
-	PathBuf::from(name)
+	// AUDIT-FIX(D10): simultaneous and restarted jobs never truncate another job's part.
+	crate::fs_util::unique_part(target)
 }
 
 /// Total bytes of live data a save would leave: header + every referenced
