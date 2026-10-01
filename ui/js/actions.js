@@ -5,7 +5,7 @@
 import { state, setFlag, toggleFlag, setTool, emit } from "./state.js";
 import { openDialog } from "./dialogs.js";
 import { toast, status } from "./tooltip.js";
-import { zoomIn, zoomOut, fit, actual, zoomTo, toggleFpsOverlay } from "./canvas.js";
+import { zoomIn, zoomOut, fit, fill, actual, zoomTo, toggleFpsOverlay } from "./canvas.js";
 import * as panels from "./panels.js";
 import { newAdjustmentLayer } from "./native/layers-panel.js";
 import { dockGroups } from "./data/panels.js";
@@ -19,7 +19,7 @@ import { openNewDocument } from "./native/newdoc.js";
 import { isGuideDialog, openGuideDialog } from "./native/guides.js";
 import { isPrefsDialog, openPrefsDialog } from "./native/prefs.js";
 import { isGenerativeDialog, openGenerativeFill } from "./native/generative.js";
-import { activeDocument } from "./native/documents.js";
+import { activeDocument, activeDocumentInfo } from "./native/documents.js";
 import { isGradientDialog, openGradientDialog, openGradientFillDialog } from "./native/gradients.js";
 import { isPatternDialog, openPatternFillDialog } from "./native/patterns.js";
 import { isChannelDialog, openChannelDialog, channelNames } from "./native/channels-panel.js";
@@ -244,8 +244,16 @@ export function runAction(item) {
   if (a === "zoom:out") { zoomOut(); return; }
   if (a === "zoom:fit") { fit(); status("Fit on screen"); return; }
   if (a === "zoom:100") { actual(); status("Actual pixels"); return; }
-  if (a === "zoom:fill") { zoomTo(200); status("Fill screen"); return; }
-  if (a === "zoom:print") { zoomTo(72); status("Print size"); return; }
+  // Fill Screen is the engine's (it knows the viewport), sent above.
+  if (a === "zoom:fill") { if (!bridge.isNative) fill(); status("Fill screen"); return; }
+  // Print Size: an inch of the document is an inch of the screen (the
+  // screen taken at Windows' 96 ppi times the display scale).
+  if (a === "zoom:print") {
+    const ppi = (bridge.isNative ? activeDocumentInfo()?.ppi : state.doc?.ppi) || 72;
+    zoomTo(((96 * (bridge.isNative ? window.devicePixelRatio || 1 : 1)) / ppi) * 100);
+    status("Print size");
+    return;
+  }
 
   if (a.startsWith("toggle:")) {
     const key = a.slice(7);

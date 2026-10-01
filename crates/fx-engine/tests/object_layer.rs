@@ -35,7 +35,7 @@ fn layer(store: &TileStore, id: u64, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Arc
 			image.put_buffer(store, tx, ty, buffer);
 		}
 	}
-	Arc::new(Layer::new(LayerId(id), &format!("layer {id}"), LayerKind::Pixel { image, offset: (0, 0) }))
+	Arc::new(Layer::new(LayerId(id), format!("layer {id}"), LayerKind::Pixel { image, offset: (0, 0) }))
 }
 
 fn inside(x: u32, y: u32) -> bool {

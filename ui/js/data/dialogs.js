@@ -258,6 +258,14 @@ dialogs["blending-options"] = {
   ok: "OK", cancel: "Cancel",
 };
 
+// The app's Layer Style window and its helpers (native/styles.js builds
+// their content; these give the frame and the buttons).
+dialogs["layer-style"] = { title: "Layer Style", width: 900, icon: "i-fx", fields: [], ok: null, cancel: null };
+dialogs["contour-editor"] = { title: "Contour Editor", width: 470, fields: [], ok: "OK", cancel: "Cancel" };
+dialogs["gradient-editor-style"] = { title: "Gradient Editor", width: 520, fields: [], ok: "OK", cancel: "Cancel" };
+dialogs["global-light"] = { title: "Global Light", width: 360, icon: "i-fx", fields: [], ok: "OK", cancel: "Cancel" };
+dialogs["scale-effects"] = { title: "Scale Layer Effects", width: 360, icon: "i-fx", fields: [], ok: "OK", cancel: "Cancel" };
+
 const styleDialog = (title, extra) => ({
   title: "Layer Style — " + title, width: 600, icon: "i-fx",
   fields: [

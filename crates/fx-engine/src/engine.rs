@@ -3289,6 +3289,30 @@ impl Engine {
 					styles: None,
 				})
 				.collect(),
+			// Layer Style ▸ Create Layers: the active layer's effects as layers.
+			"layer:create-effect-layers" => match active {
+				Some(id) => vec![Command::CreateEffectLayers { layer: LayerRef::Id(id) }],
+				None => return true,
+			},
+			// Layer Style ▸ Hide / Show All Effects: the selected layers' "Effects"
+			// eye, their effects kept.
+			"layer:hide-effects" | "layer:show-effects" => {
+				let visible = id == "layer:show-effects";
+				doc.doc
+					.selected
+					.iter()
+					.filter_map(|&l| {
+						let mut styles = doc.doc.layer(l)?.styles.clone()?;
+						(styles.effects_visible != visible).then(|| {
+							styles.effects_visible = visible;
+							Command::SetLayerStyle {
+								layer: LayerRef::Id(l),
+								styles: Some(styles),
+							}
+						})
+					})
+					.collect()
+			}
 			"layer:merge-visible" => return true,
 			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
 				// Nothing selected / nothing hidden: nothing to do, and no toast.

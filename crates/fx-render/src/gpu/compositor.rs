@@ -54,6 +54,8 @@ const K_BEGIN_PASS: u32 = 4;
 const K_END_ISOLATED: u32 = 5;
 const K_END_PASS: u32 = 6;
 const K_LOAD_PREFIX: u32 = 7;
+/// Blending Options ▸ Channels (`Op::EndChannels`).
+const K_END_CHANNELS: u32 = 15;
 
 const F_CLIP: u32 = 1;
 const F_MASK: u32 = 2;
@@ -535,7 +537,7 @@ impl GpuCompositor {
 			}
 			match op {
 				Op::BeginIsolated | Op::BeginPassThrough => depth += 1,
-				Op::EndIsolated { .. } | Op::EndPassThrough { .. } => depth -= 1,
+				Op::EndIsolated { .. } | Op::EndPassThrough { .. } | Op::EndChannels { .. } => depth -= 1,
 				Op::Layer { layer, .. } | Op::Adjust { layer, .. } if *layer == hot => {
 					split = Some(segment_start);
 					break;
@@ -771,6 +773,10 @@ impl GpuCompositor {
 				g.alpha = *alpha;
 				self.encode_mask(mask, &mut g);
 			}
+			Op::EndChannels { channels } => {
+				g.kind = K_END_CHANNELS;
+				g.params = [f32::from(u8::from(channels[0])), f32::from(u8::from(channels[1])), f32::from(u8::from(channels[2])), 0.0];
+			}
 		}
 		g
 	}
@@ -951,7 +957,7 @@ fn check_supported(program: &TileProgram) -> Result<(), CompositeError> {
 					return Err(CompositeError::TooDeep);
 				}
 			}
-			Op::EndIsolated { .. } | Op::EndPassThrough { .. } => depth = depth.saturating_sub(1),
+			Op::EndIsolated { .. } | Op::EndPassThrough { .. } | Op::EndChannels { .. } => depth = depth.saturating_sub(1),
 			_ => {}
 		}
 	}

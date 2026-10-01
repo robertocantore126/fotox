@@ -335,8 +335,8 @@ pub struct Layer {
 	pub kind: LayerKind,
 	/// Layer styles (M6-T08); `None` = no effects.
 	pub styles: Option<crate::styles::LayerStyles>,
-	/// Derived tile caches of the effects, indexed by
-	/// [`crate::styles::EffectKind::index`]; empty without styles.
+	/// Derived tile caches of the effects, one per
+	/// [`crate::styles::LayerStyles::slots`] entry; empty without styles.
 	pub effects: Vec<TiledImage>,
 	/// The vector mask (M10-T06), multiplied with the pixel mask.
 	pub vector_mask: Option<VectorMask>,

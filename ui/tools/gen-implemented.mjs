@@ -38,8 +38,8 @@ export function scan() {
     const src = readFileSync(file, "utf8");
     for (const m of src.matchAll(/id === "([a-z0-9-]+)"/g)) ids.add("dlg:" + m[1]);
   }
-  // The live style dialogs (styles.js EFFECTS keys).
-  for (const m of readFileSync(join(ui, "js/native/styles.js"), "utf8").matchAll(/^  "(style-[a-z0-9-]+)": \{/gm)) ids.add("dlg:" + m[1]);
+  // The Layer Style window's pages (styles.js DIALOG_KEYS).
+  for (const m of readFileSync(join(ui, "js/native/styles.js"), "utf8").matchAll(/"(style-[a-z0-9-]+)": "/g)) ids.add("dlg:" + m[1]);
   // Filter dialogs the engine previews (filters.js FILTERS keys).
   const filters = readFileSync(join(ui, "js/native/filters.js"), "utf8");
   const table = /const FILTERS = \{([\s\S]*?)\n\};/.exec(filters);

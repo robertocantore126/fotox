@@ -332,6 +332,14 @@ export function actual() {
   center();
 }
 
+/** Fill Screen (browser preview): the document covers the viewport. */
+export function fill() {
+  if (bridge.isNative || !scrollEl) return;
+  zoomMode = "custom";
+  setZoom(Math.max(scrollEl.clientWidth / state.doc.w, scrollEl.clientHeight / state.doc.h) * 100);
+  requestAnimationFrame(center);
+}
+
 export function fit() {
   if (bridge.isNative) return;
   zoomMode = "fit";

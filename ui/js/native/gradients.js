@@ -7,8 +7,8 @@
 
 import { h, icon, clear } from "../el.js";
 import { state, emit } from "../state.js";
-import { openDialog } from "../dialogs.js";
-import { openDropdown } from "../popup.js";
+import { openDialog, openColorPopover } from "../dialogs.js";
+import { openDropdown, selectButton } from "../popup.js";
 import { registerControl } from "../optionsbar.js";
 import * as bridge from "./bridge.js";
 import { UI } from "./protocol.js";
@@ -52,6 +52,26 @@ function toHex(c) {
   return "#" + c.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
 }
 
+// The UI runs in off-screen CEF, which draws neither the native colour
+// chooser of <input type="color"> nor a <select>'s popup list: the editor
+// uses the app's own colour popover and dropdowns instead.
+
+/** A colour chip: a click opens the colour popover. */
+function colorChip(hexValue, onInput) {
+  const chip = h("button", { class: "ls-color", type: "button", "data-tip": "Pick a colour", style: { background: hexValue } });
+  chip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openColorPopover(chip, hexValue, (next) => {
+      hexValue = next;
+      chip.style.background = next;
+      onInput(next);
+    });
+  });
+  return chip;
+}
+
+const choice = (pairs, value, onPick) => selectButton(pairs, value, onPick);
+
 /**
  * The Gradient Editor as a DOM node editing `g` in place; `changed()` after
  * every edit.
@@ -65,16 +85,18 @@ export function gradientEditor(g, changed = () => {}, { colorOnly = false } = {}
       anchor: e.currentTarget, items: Object.keys(PRESETS).filter((name) => !colorOnly || !PRESETS[name].opacities.length), value: "", width: 200,
       onPick: (name) => { Object.assign(g, structuredClone(PRESETS[name])); render(); changed(); },
     }) });
-    const method = h("select", { class: "pf-select" }, ...["perceptual", "linear", "classic"].map((m) => h("option", { value: m, text: m[0].toUpperCase() + m.slice(1), selected: g.method === m })));
-    method.addEventListener("change", () => { g.method = method.value; changed(); });
+    const method = choice([["perceptual", "Perceptual"], ["linear", "Linear"], ["classic", "Classic"]], g.method || "perceptual", (m) => { g.method = m; changed(); });
     root.append(h("div", { class: "dlg-line" }, presetBtn, colorOnly ? null : h("span", { class: "dlg-field-label", text: "Method:" }), colorOnly ? null : method), bar);
     // Colour stops.
     const rows = h("div", { class: "grad-stops" }, h("div", { class: "dlg-label", text: "Colour stops (location %, midpoint %)" }));
     g.colors.forEach((s, i) => {
-      const color = h("input", { type: "color", value: toHex(s.color) });
-      color.addEventListener("input", () => { s.color = hex(color.value); bar.style.background = gradientCss(g); changed(); });
-      const kind = h("select", { class: "pf-select" }, ...[["rgb", "Colour"], ["fg", "Foreground"], ["bg", "Background"]].map(([v, t]) => h("option", { value: v, text: t, selected: (typeof s.color === "string" ? s.color : "rgb") === v })));
-      kind.addEventListener("change", () => { s.color = kind.value === "rgb" ? hex(color.value) : kind.value; render(); changed(); });
+      let picked = toHex(s.color);
+      const color = colorChip(picked, (next) => { picked = next; s.color = hex(next); bar.style.background = gradientCss(g); changed(); });
+      const kind = choice([["rgb", "Colour"], ["fg", "Foreground"], ["bg", "Background"]], typeof s.color === "string" ? s.color : "rgb", (v) => {
+        s.color = v === "rgb" ? hex(picked) : v;
+        render();
+        changed();
+      });
       const loc = numBox(s.location * 100, (v) => { s.location = v / 100; g.colors.sort((a, b) => a.location - b.location); render(); changed(); });
       const mid = numBox(s.midpoint * 100, (v) => { s.midpoint = Math.min(95, Math.max(5, v)) / 100; changed(); });
       const del = h("button", { class: "pbar-btn", type: "button", "data-tip": "Delete stop", onclick: () => { if (g.colors.length > 1) { g.colors.splice(i, 1); render(); changed(); } } }, icon("i-trash", "ic sm"));

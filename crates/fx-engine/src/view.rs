@@ -113,6 +113,18 @@ impl ViewState {
 				self.view.center_y = fit.center_y;
 				return Some(Changed { view: true, cursor: None });
 			}
+			// Fill Screen: the document covers the viewport (the larger of the
+			// two fit ratios), centred; the rotation is kept as with Fit.
+			"zoom:fill" => {
+				let viewport = self.viewport?;
+				let (w, h) = (f64::from(self.doc.0.max(1)), f64::from(self.doc.1.max(1)));
+				let zoom = (f64::from(viewport.width) / w).max(f64::from(viewport.height) / h);
+				self.view.center_x = w / 2.0;
+				self.view.center_y = h / 2.0;
+				let mut changed = self.set_zoom(zoom);
+				changed.view = true;
+				return Some(changed);
+			}
 			// Rotate View ▸ Reset View (and Esc with the Rotate View tool).
 			"view:reset-rotation" => return Some(self.set_rotation(0.0)),
 			_ => return None,

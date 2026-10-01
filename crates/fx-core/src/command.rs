@@ -700,11 +700,27 @@ pub enum Command {
 		layer: LayerRef,
 		styles: Option<crate::styles::LayerStyles>,
 	},
-	/// Layer ▸ Layer Style ▸ Global Light: the document's light angle, which
-	/// every effect with "Use Global Light" follows. Every styled layer's
-	/// effects are redrawn.
+	/// Layer ▸ Layer Style ▸ Global Light: the document's light angle (and
+	/// altitude, for Bevel & Emboss), which every effect with "Use Global
+	/// Light" follows. Every styled layer's effects are redrawn.
 	SetGlobalLight {
 		angle: f64,
+		/// Degrees above the horizon; unchanged when absent.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		altitude: Option<f64>,
+	},
+	/// Layer ▸ Layer Style ▸ Scale Effects: every size and distance of the
+	/// named layers' styles times `percent` / 100.
+	ScaleEffects {
+		layers: Vec<LayerRef>,
+		percent: f64,
+	},
+	/// Layer ▸ Layer Style ▸ Create Layers: each enabled effect of the layer
+	/// becomes a pixel layer with the effect's mode and opacity (the ones
+	/// that stay inside the shape clipped to the layer), and the layer keeps
+	/// only its blending options.
+	CreateEffectLayers {
+		layer: LayerRef,
 	},
 	/// Layer ▸ Rasterize ▸ Shape / Layer / Type (M6-T06/T07): every named layer
 	/// becomes a pixel layer holding what it drew, keeping its id, position in
@@ -1017,7 +1033,9 @@ impl Command {
 			} => set_shape(doc, layer, shape.as_ref(), fill.as_ref(), stroke.as_ref(), *transform),
 			Command::SetText { layer, content, dirty } => set_text(doc, layer, content, *dirty),
 			Command::SetLayerStyle { layer, styles } => set_layer_style(doc, layer, styles.clone()),
-			Command::SetGlobalLight { angle } => set_global_light(doc, *angle),
+			Command::SetGlobalLight { angle, altitude } => set_global_light(doc, *angle, *altitude),
+			Command::ScaleEffects { layers, percent } => scale_effects(doc, layers, *percent),
+			Command::CreateEffectLayers { layer } => create_effect_layers(doc, layer, ctx),
 			Command::Rasterize { layers } => rasterize(doc, layers, ctx),
 		}?;
 		// One check for every command that can nest (Group, Move into a group,
@@ -1669,7 +1687,7 @@ fn box_of(shape: &VectorShape, transform: [f64; 6], stroke: Option<&StrokeStyle>
 /// the text inks; the engine computes `dirty` from the old and the new layout
 /// and the command carries it, which also makes undo redraw exactly the same
 /// tiles. An empty text layer draws nothing, and its tiles go Empty.
-fn set_global_light(doc: &mut Document, angle: f64) -> Result<CommandEffect, CommandError> {
+fn set_global_light(doc: &mut Document, angle: f64, altitude: Option<f64>) -> Result<CommandEffect, CommandError> {
 	if !angle.is_finite() {
 		return Err(CommandError::InvalidValue {
 			field: "angle",
@@ -1679,6 +1697,20 @@ fn set_global_light(doc: &mut Document, angle: f64) -> Result<CommandEffect, Com
 	// -180..=180, as Photoshop shows it.
 	let angle = (angle + 180.0).rem_euclid(360.0) - 180.0;
 	doc.global_light = angle;
+	if let Some(altitude) = altitude.filter(|a| a.is_finite()) {
+		doc.global_altitude = altitude.clamp(0.0, 90.0);
+	}
+	let styled = redraw_styles(doc, |_| true);
+	Ok(CommandEffect {
+		label: "Global Light".into(),
+		props_changed: styled,
+		..Default::default()
+	})
+}
+
+/// Fresh effect caches for every styled layer `pick` accepts (the effects
+/// are drawn again); their ids.
+fn redraw_styles(doc: &mut Document, mut pick: impl FnMut(LayerId) -> bool) -> Vec<LayerId> {
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	let mut styled = Vec::new();
 	doc.walk(|layer, _| {
@@ -1686,14 +1718,128 @@ fn set_global_light(doc: &mut Document, angle: f64) -> Result<CommandEffect, Com
 			styled.push(layer.id);
 		}
 	});
+	styled.retain(|&id| pick(id));
 	for &id in &styled {
 		if let Some(layer) = doc.layer_mut(id) {
-			layer.effects = crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+			layer.effects = layer.styles.as_ref().map_or_else(Vec::new, |s| s.caches(w, h, format));
 		}
 	}
+	styled
+}
+
+fn scale_effects(doc: &mut Document, layers: &[LayerRef], percent: f64) -> Result<CommandEffect, CommandError> {
+	if !(percent.is_finite() && percent > 0.0) {
+		return Err(CommandError::InvalidValue {
+			field: "percent",
+			reason: "must be above 0".into(),
+		});
+	}
+	let ids = resolve_all(doc, layers, false)?;
+	let mut changed = Vec::new();
+	for &id in &ids {
+		if let Some(styles) = doc.layer_mut(id).and_then(|l| l.styles.as_mut()) {
+			styles.scale(percent / 100.0);
+			changed.push(id);
+		}
+	}
+	if changed.is_empty() {
+		return Err(CommandError::NotAllowed("the layer has no layer style".into()));
+	}
+	redraw_styles(doc, |id| changed.contains(&id));
 	Ok(CommandEffect {
-		label: "Global Light".into(),
-		props_changed: styled,
+		label: "Scale Effects".into(),
+		props_changed: changed,
+		..Default::default()
+	})
+}
+
+fn create_effect_layers(doc: &mut Document, layer: &LayerRef, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
+	use crate::styles::GlobalLight;
+	let ops = pixel_ops(ctx, "Create Layers")?;
+	let id = resolve(doc, layer)?;
+	let source = doc.layer(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?.clone();
+	let Some(styles) = source.styles.clone() else {
+		return Err(CommandError::NotAllowed("the layer has no layer style".into()));
+	};
+	let light = GlobalLight {
+		angle: doc.global_light,
+		altitude: doc.global_altitude,
+	};
+	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
+	// Each effect alone, drawn plainly on a copy of the layer whose content
+	// is hidden (Fill 0 hides the content, not the effects).
+	let mut below = Vec::new();
+	// Above the layer, in the order the style draws them. An inner effect is
+	// clipped to the layer while nothing unclipped sits under it; above an
+	// outer one (an Outside Stroke under an Inner Bevel) it cannot be, and
+	// stays unclipped: its pixels are inside the shape already, so only the
+	// layer's own mode and opacity no longer reach it (Photoshop warns that
+	// "some aspects of the effects cannot be reproduced with layers").
+	let mut above = Vec::new();
+	let mut clipping = true;
+	for slot in styles.slots() {
+		let Some(params) = styles.effect_at(slot, light) else { continue };
+		let mut sub = doc.clone();
+		{
+			let copy = sub.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+			let only = styles.only(slot);
+			copy.effects = only.caches(w, h, format);
+			copy.styles = Some(only);
+			copy.fill = 0.0;
+			copy.opacity = 1.0;
+			copy.blend = crate::BlendMode::Normal;
+			copy.visible = true;
+			copy.clipped = false;
+		}
+		let image = ops.composite(&sub, &[id], None, ctx.tiles)?;
+		let mut made = Layer::new(doc.allocate_layer_id(), styles.layer_name(slot, &source.name), LayerKind::Pixel { image, offset: (0, 0) });
+		made.blend = params.blend;
+		made.opacity = params.opacity;
+		if slot.kind.below_content() {
+			made.clipped = source.clipped;
+			below.push(Arc::new(made));
+		} else if clipping && styles.stays_inside(slot) {
+			made.clipped = true;
+			above.push(Arc::new(made));
+		} else {
+			made.clipped = source.clipped;
+			clipping &= source.clipped;
+			above.push(Arc::new(made));
+		}
+	}
+	if below.is_empty() && above.is_empty() {
+		return Err(CommandError::NotAllowed("no effect is turned on".into()));
+	}
+	// The layer keeps its blending options, without effects.
+	let kept = crate::styles::LayerStyles {
+		blend_if: styles.blend_if,
+		channels: styles.channels,
+		interior_as_group: styles.interior_as_group,
+		layer_mask_hides: styles.layer_mask_hides,
+		vector_mask_hides: styles.vector_mask_hides,
+		..Default::default()
+	};
+	let keep = kept != crate::styles::LayerStyles::default();
+	{
+		let target = doc.layer_mut(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+		target.styles = keep.then_some(kept);
+		target.effects = Vec::new();
+	}
+	// Below the layer, the outer effects; above it, the rest (slots are
+	// bottom → top).
+	let path = doc.path_of(id).ok_or(CommandError::LayerNotFound(LayerRef::Id(id)))?;
+	let index = *path.last().expect("a path is never empty");
+	let siblings = doc.siblings_mut(&path);
+	for (k, layer) in above.into_iter().enumerate() {
+		siblings.insert(index + 1 + k, layer);
+	}
+	for (k, layer) in below.into_iter().enumerate() {
+		siblings.insert(index + k, layer);
+	}
+	Ok(CommandEffect {
+		label: "Create Layers".into(),
+		props_changed: vec![id],
+		structure_changed: true,
 		..Default::default()
 	})
 }
@@ -1706,10 +1852,7 @@ fn set_layer_style(doc: &mut Document, layer: &LayerRef, styles: Option<crate::s
 		// Groups take styles (their effects surround the group's composite).
 		return Err(CommandError::NotAllowed("an adjustment layer cannot have a layer style".into()));
 	}
-	target.effects = match &styles {
-		Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
-		None => Vec::new(),
-	};
+	target.effects = styles.as_ref().map_or_else(Vec::new, |s| s.caches(w, h, format));
 	target.styles = styles;
 	Ok(CommandEffect {
 		label: "Layer Style".into(),
@@ -2423,46 +2566,15 @@ fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
 		LayerKind::Pixel { .. } | LayerKind::Group { .. } | LayerKind::Adjustment(_) | LayerKind::Smart { .. } => {}
 	}
 	if let Some(styles) = &mut layer.styles {
-		let crate::styles::LayerStyles {
-			drop_shadow,
-			outer_glow,
-			inner_shadow,
-			color_overlay,
-			stroke,
-			bevel,
-			inner_glow,
-			satin,
-			gradient_overlay,
-			pattern_overlay: _,
-			blend_if: _,
-		} = styles;
-		if let Some(e) = drop_shadow {
-			f(&mut e.color);
-		}
-		if let Some(e) = outer_glow {
-			f(&mut e.color);
-		}
-		if let Some(e) = inner_shadow {
-			f(&mut e.color);
-		}
-		if let Some(e) = color_overlay {
-			f(&mut e.color);
-		}
-		if let Some(e) = stroke {
-			f(&mut e.color);
-		}
-		if let Some(e) = bevel {
-			f(&mut e.highlight_color);
-			f(&mut e.shadow_color);
-		}
-		if let Some(e) = inner_glow {
-			f(&mut e.color);
-		}
-		if let Some(e) = satin {
-			f(&mut e.color);
-		}
-		if let Some(e) = gradient_overlay {
+		styles.colors_mut(f);
+		for e in &mut styles.gradient_overlay {
 			gradient(&mut e.gradient.gradient, f);
+		}
+		let fills = styles.stroke.iter_mut().map(|e| &mut e.fill).chain(styles.outer_glow.iter_mut().map(|e| &mut e.fill)).chain(styles.inner_glow.iter_mut().map(|e| &mut e.fill));
+		for fill in fills {
+			if let crate::styles::EffectFill::Gradient { gradient: g, .. } = fill {
+				gradient(&mut g.gradient, f);
+			}
 		}
 	}
 	if let Some(background) = layer.artboard.as_mut().and_then(|a| a.background.as_mut()) {
@@ -5892,13 +6004,13 @@ mod tests {
 			background: Some(c),
 		});
 		group.styles = Some(crate::styles::LayerStyles {
-			drop_shadow: Some(crate::styles::DropShadow {
+			drop_shadow: vec![crate::styles::DropShadow {
 				color: c,
 				..Default::default()
-			}),
+			}],
 			..Default::default()
 		});
-		group.effects = crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+		group.effects = group.styles.as_ref().unwrap().caches(w, h, format);
 		// A Smart Object whose nested document has a solid fill.
 		let mut nested = Document::new(
 			10,
@@ -5953,8 +6065,8 @@ mod tests {
 		);
 		let group = f.doc.layer(group_id).unwrap();
 		assert_eq!(group.artboard.as_ref().unwrap().background, Some(swapped));
-		assert_eq!(group.styles.as_ref().unwrap().drop_shadow.as_ref().unwrap().color, swapped);
-		assert_eq!(group.effects.len(), crate::styles::EffectKind::ALL.len(), "the effect caches stay");
+		assert_eq!(group.styles.as_ref().unwrap().drop_shadow[0].color, swapped);
+		assert_eq!(group.effects.len(), 1, "the effect caches stay");
 		assert!(
 			matches!(f.doc.layer(child).unwrap().kind, LayerKind::SolidFill { rgba } if rgba == swapped),
 			"a group's child is converted once"

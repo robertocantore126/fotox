@@ -141,6 +141,9 @@ function modeHint(e) {
   showModeHint(index);
 }
 
+/** The shortcut actions a held key repeats. */
+const REPEATING = new Set(["hist:undo", "hist:redo", "zoom:in", "zoom:out"]);
+
 export function initShortcuts() {
   document.addEventListener("keydown", modeHint, true);
   document.addEventListener("keyup", modeHint, true);
@@ -168,6 +171,18 @@ export function initShortcuts() {
     // the hardness by 25 %, the number keys the opacity (1 = 10 % … 0 = 100 %;
     // two digits typed quickly = that exact value).
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !isDialogOpen() && brushKey(e)) {
+      e.preventDefault();
+      return;
+    }
+
+    // A held key repeats only what is meant to repeat (undo / redo, zoom
+    // in / out, and above: the viewport keys and the brush keys); toggles,
+    // tool picks, saves and dialogs fire once per press.
+    if (e.repeat) {
+      const held = combos.find(([c]) => c === comboOf(e));
+      if (held && REPEATING.has(held[2])) {
+        runAction({ label: held[1], a: held[2] });
+      }
       e.preventDefault();
       return;
     }

@@ -29,10 +29,12 @@ impl Resources {
 	}
 }
 
-/// The pattern a command or stroke reads, if any.
-fn pattern_of(command: &Command) -> Option<u64> {
+/// The patterns a command or stroke reads.
+fn patterns_of(command: &Command) -> Vec<u64> {
 	use fx_core::fill::{FillLayer, FillSource};
 	match command {
+		// A layer style's overlays, pattern strokes and glows, bevel textures.
+		Command::SetLayerStyle { styles: Some(styles), .. } => styles.patterns(),
 		Command::BucketFill {
 			source: FillSource::Pattern { pattern },
 			..
@@ -47,8 +49,8 @@ fn pattern_of(command: &Command) -> Option<u64> {
 				content: FillLayer::Pattern { pattern, .. },
 			},
 			..
-		} => Some(*pattern),
-		_ => None,
+		} => vec![*pattern],
+		_ => Vec::new(),
 	}
 }
 
@@ -111,7 +113,7 @@ impl Engine {
 
 	/// The hook `command` runs first (M8): patterns a command reads.
 	pub(super) fn before_command(&mut self, doc_id: DocId, command: &Command) {
-		if let Some(pattern) = pattern_of(command) {
+		for pattern in patterns_of(command) {
 			self.ensure_pattern(doc_id, pattern);
 		}
 	}

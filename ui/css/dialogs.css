@@ -320,3 +320,54 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .dlg-range.cp-slider::-webkit-slider-runnable-track { background: transparent; border: 0; height: 10px; }
 .dlg-range.cp-slider::-webkit-slider-thumb { margin-top: 0; }
 .cp-swatch-now { width: 26px; height: 18px; border: 1px solid var(--border); border-radius: var(--radius); }
+
+/* ---------------------------------------------- the Layer Style window */
+
+.ls-window { display: grid; grid-template-columns: 190px 1fr 112px; gap: 12px; height: min(620px, calc(100vh - 150px)); min-height: 420px; }
+.ls-sidebar { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius); background: #353535; }
+.ls-list { flex: 1; overflow-y: auto; padding: 3px 0; }
+.ls-item { display: flex; align-items: center; gap: 2px; height: 24px; padding: 0 6px; font-size: 12.5px; cursor: default; }
+.ls-item:hover { background: #454545; }
+.ls-item.sel { background: var(--bg-popup-hi); color: #fff; }
+.ls-item.sub { padding-left: 22px; }
+.ls-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ls-nobox { width: 18px; }
+.ls-plus { width: 18px; height: 18px; display: grid; place-items: center; border-radius: var(--radius); color: var(--text-dim); visibility: hidden; }
+.ls-item:hover .ls-plus, .ls-item.sel .ls-plus { visibility: visible; }
+.ls-plus:hover { background: #5a5a5a; color: #fff; }
+.ls-tools { display: flex; align-items: center; gap: 2px; padding: 4px; border-top: 1px solid var(--border); }
+.ls-mini { height: 20px; min-width: 20px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; gap: 2px; border-radius: var(--radius); color: var(--text-dim); }
+.ls-mini:hover:not(:disabled) { background: #4d4d4d; color: #fff; }
+.ls-mini:disabled { opacity: 0.35; }
+.ls-pane { overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 9px; min-height: 0; }
+.ls-title { font-size: 13px; font-weight: 600; }
+.ls-col { display: flex; flex-direction: column; gap: 9px; }
+.ls-group { display: flex; flex-direction: column; gap: 6px; padding: 8px 9px; border: 1px solid #4a4a4a; border-radius: var(--radius); background: rgba(0, 0, 0, 0.1); }
+.ls-group-title { font-size: 11.5px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; }
+.ls-row { display: flex; align-items: center; gap: 7px; min-height: 22px; flex-wrap: wrap; }
+.ls-row.top { align-items: flex-start; }
+.ls-label { width: 104px; flex: none; font-size: 12.5px; color: var(--text); }
+.ls-label.scrub { cursor: ew-resize; }
+.ls-range { flex: 1; min-width: 90px; accent-color: var(--accent); }
+.ls-color { width: 34px; height: 20px; border: 1px solid #1f1f1f; border-radius: var(--radius); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12); }
+.ls-gradient { width: 170px; height: 20px; border: 1px solid #1f1f1f; border-radius: var(--radius); }
+.ls-contour { width: 40px; height: 40px; border: 1px solid #1f1f1f; border-radius: 2px; cursor: pointer; }
+.ls-dial { flex: none; cursor: pointer; }
+.ls-dial circle { fill: #2a2a2a; stroke: #7a7a7a; stroke-width: 1; }
+.ls-dial line { stroke: #eee; stroke-width: 1.5; }
+.ls-dial .knob { fill: #fff; stroke: none; }
+.ls-patterns { max-width: 330px; }
+.ls-defaults { display: flex; gap: 8px; justify-content: center; padding: 4px 0 2px; }
+.ls-side { display: flex; flex-direction: column; gap: 7px; }
+.ls-side .btn { width: 100%; }
+.ls-swatch-box { display: grid; place-items: center; }
+.ls-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.ls-preset { padding: 3px; border: 1px solid var(--border); border-radius: var(--radius); background: #ededed; }
+.ls-preset:hover { outline: 2px solid var(--border-focus); }
+.ls-contour-body { display: flex; gap: 14px; align-items: flex-start; }
+.ls-contour-editor { border: 1px solid #1f1f1f; cursor: crosshair; }
+.plist-row .fx-rows { display: none; }
+.fx-row { display: flex; align-items: center; gap: 6px; height: 20px; padding-left: 58px; font-size: 11.5px; color: var(--text-dim); }
+.fx-row .peye { width: 18px; height: 18px; }
+.fx-row.off .fx-name { opacity: 0.45; }
+.fx-row.head { font-style: italic; }

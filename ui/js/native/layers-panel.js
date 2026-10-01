@@ -18,6 +18,7 @@ import { UI, ENGINE } from "./protocol.js";
 import { pickFile } from "./brush-settings.js";
 import { openMenuPopup } from "../menu.js";
 import { layerStyleEffects, layerStyleItems } from "../data/menus.js";
+import { openStyleDialogAt } from "./styles.js";
 
 const ROW_H = 30;
 const THUMB_SIZE = 64; // px requested from the engine (drawn at 26 px, sharp on HiDPI)
@@ -111,6 +112,7 @@ let doc = null;          // active document id
 let layers = [];         // LayerInfo[] of the active document, top → bottom
 let tree = [];           // per row: { parent, index (bottom = 0), count }
 const collapsed = new Map(); // "doc:layer" → true when a group is collapsed in the panel
+const fxClosed = new Map(); // "doc:layer" → true when a layer's effects are folded away
 const thumbs = new Map();    // "doc:layer" → data URL
 const thumbStamps = new Map(); // "doc:layer" → the shown thumbnail's `revision`
 const requested = new Set(); // "doc:layer" thumbnails already asked for
@@ -281,7 +283,26 @@ function buildTree(rows) {
   return out;
 }
 
-/** Rows shown in the panel (children of collapsed groups are hidden). */
+/** Photoshop's effects list, in its order (the Layers panel's rows). */
+const FX_ROWS = [
+  ["bevel", "Bevel & Emboss"], ["stroke", "Stroke"], ["inner_shadow", "Inner Shadow"], ["inner_glow", "Inner Glow"], ["satin", "Satin"],
+  ["color_overlay", "Color Overlay"], ["gradient_overlay", "Gradient Overlay"], ["pattern_overlay", "Pattern Overlay"], ["outer_glow", "Outer Glow"], ["drop_shadow", "Drop Shadow"],
+];
+/** A layer's effects as `[key, index, effect]`, in the panel's order. */
+function effectsOf(l) {
+  const out = [];
+  for (const [key] of FX_ROWS) {
+    const v = l.styles && l.styles[key];
+    (Array.isArray(v) ? v : v ? [v] : []).forEach((e, i) => out.push([key, i, e]));
+  }
+  return out;
+}
+
+/**
+ * Rows shown in the panel: a layer's index, or `{fx, key, i}` for a row of
+ * its effects (`key` null: the "Effects" row). Children of collapsed groups
+ * and folded effects are hidden.
+ */
 function visibleRows() {
   const out = [];
   let hideBelow = null; // depth of a collapsed group we are inside
@@ -291,10 +312,18 @@ function visibleRows() {
       hideBelow = null;
     }
     out.push(i);
+    const fx = effectsOf(l);
+    if (fx.length && !fxClosed.get(`${doc}:${l.id}`)) {
+      out.push({ fx: i, key: null });
+      for (const [key, n] of fx) out.push({ fx: i, key, i: n });
+    }
     if (l.kind === "group" && collapsed.get(`${doc}:${l.id}`)) hideBelow = l.depth;
   });
   return out;
 }
+
+/** Only the layers' rows (selection ranges). */
+const layerRows = () => visibleRows().filter((r) => typeof r === "number");
 
 function childCount(groupId) {
   return tree.filter((t) => t.parent === groupId).length;
@@ -383,7 +412,7 @@ function renderLayers() {
     barBtn("i-fx", "Add a layer style", (btn) => {
       // The engine refuses styles on groups and adjustments (FAST): say so
       // here instead of opening a dialog that cannot apply.
-      if (a && !canHaveStyles(a)) toast("Layer styles work on pixel, shape, text, fill and Smart Object layers (not on groups yet)");
+      if (a && !canHaveStyles(a)) toast("An adjustment layer cannot have a layer style");
       else openMenuPopup(btn, layerStyleItems, {});
     }),
     barBtn("i-mask", "Add layer mask (Alt: hide)", (btn, e) => {
@@ -432,7 +461,7 @@ function renderRows() {
   const height = listEl.clientHeight || 300;
   const first = Math.max(0, Math.floor(top / ROW_H) - 3);
   const last = Math.min(rows.length, Math.ceil((top + height) / ROW_H) + 3);
-  for (let v = first; v < last; v++) listEl.append(row(rows[v], v));
+  for (let v = first; v < last; v++) listEl.append(typeof rows[v] === "number" ? row(rows[v], v) : fxRow(rows[v], v));
 }
 
 function row(i, v) {
@@ -496,8 +525,15 @@ function row(i, v) {
   name.addEventListener("dblclick", (e) => { e.stopPropagation(); rename(l, name); });
 
   const meta = [];
-  // Layer styles (M6-T08): Photoshop's fx marker.
-  if (l.styles && Object.keys(l.styles).length) meta.push("fx");
+  // Layer styles (M6-T08): Photoshop's fx marker, which folds the effects
+  // listed under the layer.
+  const fxCount = effectsOf(l).length;
+  const fxMark = fxCount
+    ? h("button", {
+      class: "pmeta fx-toggle", type: "button", "data-tip": fxClosed.get(key) ? "Show the effects" : "Hide the effects in the list",
+      onclick: (e) => { e.stopPropagation(); fxClosed.set(key, !fxClosed.get(key)); renderRows(); },
+    }, h("i", { text: "fx" }), icon(fxClosed.get(key) ? "i-chevron-right" : "i-chevron-down", "ic xs"))
+    : null;
   if (l.blend !== "normal" && l.blend !== "pass_through") meta.push(blendName(l.blend));
   if (l.opacity < 1) meta.push(Math.round(l.opacity * 100) + "%");
   // The DOM's own append() would print a null child as "null": use add().
@@ -536,12 +572,119 @@ function row(i, v) {
     name,
     filters,
     meta.length ? h("span", { class: "pmeta", text: meta.join(" · ") }) : null,
+    fxMark,
     lockMark(l)]);
 
   el.addEventListener("click", (e) => { if (!swallowClick) select(l, e); });
   el.addEventListener("contextmenu", (e) => layerContextMenu(l, e));
   el.addEventListener("pointerdown", (e) => beginRowDrag(e, l));
+  // Photoshop: a double-click beside the name opens the Layer Style window.
+  el.addEventListener("dblclick", (e) => {
+    if (e.target.closest("button, input, .pthumb, .plist-label")) return;
+    if (!canHaveStyles(l)) return;
+    if (!l.selected) select(l, { shiftKey: false, ctrlKey: false, metaKey: false });
+    openStyleDialogAt(null, 0);
+  });
   return el;
+}
+
+/**
+ * A row of a layer's effects: the "Effects" row (its eye hides or shows them
+ * all; drag it onto another layer to move the style there, Alt-drag to copy
+ * it) or one effect (its eye turns it on or off; a double-click opens its
+ * page).
+ */
+function fxRow(r, v) {
+  const l = layers[r.fx];
+  const styles = l.styles || {};
+  const el = h("div", {
+    class: "plist-row nrow fx-row" + (r.key ? "" : " head"),
+    style: { top: v * ROW_H + "px", height: ROW_H + "px", paddingLeft: 30 + l.depth * 14 + "px" },
+    // A layer dropped here lands on the layer these effects belong to.
+    "data-id": String(l.id),
+  });
+  const send1 = (next) => send({ op: "set_layer_style", layer: ref(l.id), styles: next });
+  if (!r.key) {
+    const on = styles.effects_visible !== false;
+    el.classList.toggle("off", !on);
+    add(el, [
+      h("button", {
+        class: "peye" + (on ? "" : " off"), type: "button", "data-tip": on ? "Hide all effects" : "Show all effects",
+        onclick: (e) => { e.stopPropagation(); send1({ ...styles, effects_visible: !on }); },
+      }, icon(on ? "i-eye" : "i-eye-off", "ic sm")),
+      h("span", { class: "fx-name", text: "Effects", "data-tip": "Drag onto another layer to move the style there (Alt: copy it)" }),
+    ]);
+    el.addEventListener("pointerdown", (e) => beginFxDrag(e, l));
+  } else {
+    const list = Array.isArray(styles[r.key]) ? styles[r.key] : [styles[r.key]];
+    const effect = list[r.i] || {};
+    const on = effect.enabled !== false;
+    el.classList.toggle("off", !on || styles.effects_visible === false);
+    const name = (FX_ROWS.find(([k]) => k === r.key) || [])[1] || r.key;
+    add(el, [
+      h("button", {
+        class: "peye" + (on ? "" : " off"), type: "button", "data-tip": on ? "Turn off" : "Turn on",
+        onclick: (e) => {
+          e.stopPropagation();
+          const next = structuredClone(styles);
+          const arr = Array.isArray(next[r.key]) ? next[r.key] : [next[r.key]];
+          arr[r.i] = { ...arr[r.i], enabled: !on };
+          next[r.key] = arr;
+          send1(next);
+        },
+      }, icon(on ? "i-eye" : "i-eye-off", "ic sm")),
+      h("span", { class: "fx-name", text: name + (list.length > 1 ? ` ${r.i + 1}` : "") }),
+    ]);
+    el.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      if (!l.selected) select(l, { shiftKey: false, ctrlKey: false, metaKey: false });
+      openStyleDialogAt(r.key, r.i);
+    });
+  }
+  el.addEventListener("click", (e) => { if (!swallowClick && !e.target.closest("button")) select(l, e); });
+  el.addEventListener("contextmenu", (e) => layerContextMenu(l, e));
+  return el;
+}
+
+/**
+ * Drag a layer's "Effects" row onto another layer: the style moves there
+ * (Alt: is copied), as Photoshop's fx drag does.
+ */
+function beginFxDrag(e, l) {
+  if (e.button !== 0 || e.target.closest("button")) return;
+  const start = { x: e.clientX, y: e.clientY };
+  let dragging = false;
+  const rowAt = (x, y) => {
+    const r = document.elementFromPoint(x, y)?.closest(".nrow");
+    return r && listEl && listEl.contains(r) ? r : null;
+  };
+  const move = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD) return;
+      dragging = true;
+      document.body.classList.add("layer-dragging");
+    }
+    clearDropMarks();
+    const r = rowAt(ev.clientX, ev.clientY);
+    if (r && r.dataset.id !== String(l.id)) r.classList.add("drop-into");
+  };
+  const end = (ev) => {
+    window.removeEventListener("pointermove", move, true);
+    window.removeEventListener("pointerup", end, true);
+    document.body.classList.remove("layer-dragging");
+    clearDropMarks();
+    if (!dragging) return;
+    swallowClick = true;
+    setTimeout(() => { swallowClick = false; }, 0);
+    const r = rowAt(ev.clientX, ev.clientY);
+    const target = r && layers.find((x) => String(x.id) === r.dataset.id);
+    if (!target || target.id === l.id) return;
+    if (!canHaveStyles(target)) { toast("An adjustment layer cannot have a layer style"); return; }
+    send({ op: "set_layer_style", layer: ref(target.id), styles: structuredClone(l.styles) });
+    if (!ev.altKey) send({ op: "set_layer_style", layer: ref(l.id), styles: null });
+  };
+  window.addEventListener("pointermove", move, true);
+  window.addEventListener("pointerup", end, true);
 }
 
 /** A fixed 1 px element at the pointer, for the context menu to open from. */
@@ -596,7 +739,7 @@ function layerContextMenu(l, e) {
 }
 
 function select(l, e) {
-  const visible = visibleRows().map((i) => layers[i].id);
+  const visible = layerRows().map((i) => layers[i].id);
   let ids;
   if (e.shiftKey && anchor != null && visible.includes(anchor)) {
     const [a, b] = [visible.indexOf(anchor), visible.indexOf(l.id)].sort((x, y) => x - y);
@@ -765,7 +908,8 @@ function percentField(label, a, prop) {
 }
 
 /** Whether the engine takes layer styles on `l` (`set_layer_style`). */
-const canHaveStyles = (l) => l.kind !== "group" && l.kind !== "adjustment";
+// Groups take styles too (their effects surround the group's composite).
+const canHaveStyles = (l) => l.kind !== "adjustment";
 
 /** A list height the user dragged, remembered across sessions (px). */
 function savedHeight(key, fallback) {
