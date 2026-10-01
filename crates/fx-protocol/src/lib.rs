@@ -32,6 +32,10 @@ pub struct DocId(pub u32);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UiToEngine {
+	// AUDIT-FIX(D2): user chooses a discovered recovery document.
+	RecoverDocument {
+		path: String,
+	},
 	/// First message after the page loads.
 	Hello {
 		ui_version: String,
@@ -313,6 +317,10 @@ pub struct MemoryStats {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineToUi {
+	// AUDIT-FIX(D2): only inactive sessions are offered for recovery.
+	RecoveryAvailable {
+		paths: Vec<String>,
+	},
 	// AUDIT-FIX(D5): a recovered save carries a persistent, per-document warning.
 	RecoveredVersion {
 		doc: DocId,

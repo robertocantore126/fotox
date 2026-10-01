@@ -30,6 +30,8 @@ pub mod mips;
 pub mod ops;
 pub mod patterns;
 pub mod prefs;
+// AUDIT-FIX(D2): recovery snapshots are separate from temporary scratch storage.
+pub mod recovery;
 pub mod selection;
 pub mod shapes_lib;
 pub mod smart;
@@ -116,6 +118,8 @@ pub struct Modifiers {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineInput {
+	// AUDIT-FIX(D2): request best-effort snapshots while the engine is still alive.
+	EmergencyRecovery,
 	/// A decoded message from the UI.
 	Ui(UiToEngine),
 	Pointer(PointerInput),
@@ -240,6 +244,7 @@ pub(crate) fn trace_input(input: &EngineInput, moves: &mut u32) -> String {
 		EngineInput::CloseRequested => ("close requested".into(), json!({})),
 		EngineInput::DisplayProfile(p) => ("display profile".into(), json!({ "bytes": p.as_ref().map(Vec::len) })),
 		EngineInput::PasteImage { width, height, rgba8 } => ("paste image".into(), json!({ "w": width, "h": height, "bytes": rgba8.len() })),
+		EngineInput::EmergencyRecovery => ("emergency recovery".into(), json!({})),
 		EngineInput::Shutdown => ("shutdown".into(), json!({})),
 	};
 	let mut detail = detail;
@@ -332,6 +337,8 @@ impl EngineHandle {
 		}
 		let store = Arc::new(TileStore::new(config).map_err(std::io::Error::other)?);
 		let (input, inputs) = crossbeam_channel::unbounded();
+		// AUDIT-FIX(D2): the crash reporter can ask a surviving engine for emergency snapshots.
+		recovery::register(input.clone());
 		let (render_requests, render_inbox) = crossbeam_channel::unbounded();
 		let (internal, internal_rx) = crossbeam_channel::unbounded();
 		let (mips, mips_rx) = crossbeam_channel::unbounded();

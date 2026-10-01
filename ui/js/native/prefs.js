@@ -169,11 +169,16 @@ export function openPrefsDialog(id) {
     fields: [
       // AUDIT-FIX(T2): use the engine's five-GiB default, including invalid-input fallback.
       { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? 5120, w: 80 },
+      // AUDIT-FIX(D2): periodic recovery interval and edit trigger are user preferences.
+      { type: "num", label: "Recovery interval (minutes):", value: prefs.recovery_interval_minutes ?? 5, w: 70 },
+      { type: "num", label: "Recovery after edits:", value: prefs.recovery_edit_count ?? 50, w: 70 },
       { type: "text", label: "Scratch Folder:", value: prefs.scratch_dir || "", width: 260 },
       { type: "label", text: "The scratch folder must exist; it applies at the next start." },
     ],
     onOk: (v) => set({
       memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 5120)),
+      recovery_interval_minutes: Math.max(1, Number(v["Recovery interval (minutes):"]) || 5),
+      recovery_edit_count: Math.max(1, Math.round(Number(v["Recovery after edits:"]) || 50)),
       scratch_dir: String(v["Scratch Folder:"] ?? "").trim(),
     }),
   });

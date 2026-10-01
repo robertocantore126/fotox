@@ -101,6 +101,8 @@ const DISPLAY_LUT_CACHE: usize = 4;
 pub(crate) enum OpenAs {
 	/// A new document tab.
 	New,
+	// AUDIT-FIX(D2): recovered files reopen as dirty untitled documents, never as their save target.
+	Recovery,
 	/// A layer placed into this document (M7-T03).
 	Place(DocId),
 	/// File ▸ Revert: this document's new content.
@@ -109,6 +111,15 @@ pub(crate) enum OpenAs {
 
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
+	// AUDIT-FIX(D2): recovery completion and startup discovery come from a dedicated worker.
+	RecoverySaved {
+		doc: DocId,
+		generation: u64,
+		result: Result<(), String>,
+	},
+	RecoveryAvailable {
+		paths: Vec<String>,
+	},
 	// AUDIT-FIX(D4+SO2): contents save-back completes as a worker snapshot.
 	ContentsSaved {
 		child: DocId,
@@ -118,7 +129,11 @@ pub(crate) enum Internal {
 		result: Result<Box<Document>, IoError>,
 	},
 	/// Import progress, 0..=1.
-	Progress { task: u64, label: String, fraction: f32 },
+	Progress {
+		task: u64,
+		label: String,
+		fraction: f32,
+	},
 	/// An import finished (mips included) or failed.
 	Imported {
 		task: u64,
@@ -128,7 +143,11 @@ pub(crate) enum Internal {
 		target: OpenAs,
 	},
 	/// An export finished or failed (M3).
-	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
+	Exported {
+		task: u64,
+		path: PathBuf,
+		result: Result<(), IoError>,
+	},
 	/// A `.fxd` was opened lazily (M3-T05).
 	OpenedFxd {
 		task: u64,
@@ -161,7 +180,11 @@ pub(crate) enum Internal {
 		result: Result<Option<fx_core::pixels::ClipboardImage>, String>,
 	},
 	/// The B3 layers are built (M2-T08).
-	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
+	B3Built {
+		task: u64,
+		doc: DocId,
+		layers: Vec<Arc<fx_core::Layer>>,
+	},
 	/// Free Transform's source is cut out and its mips are valid (M6-T04).
 	TransformPrepared {
 		doc: DocId,
@@ -181,7 +204,11 @@ pub(crate) enum Internal {
 		tiles: Vec<((u32, u32), fx_tiles::TileBuffer)>,
 	},
 	/// A preview job failed (a tile could not be read).
-	PreviewFailed { doc: DocId, request: u64, error: TileError },
+	PreviewFailed {
+		doc: DocId,
+		request: u64,
+		error: TileError,
+	},
 	/// A pixel job (filter, merge, flatten) finished: the new document, or why not.
 	PixelJobDone {
 		task: u64,
@@ -238,6 +265,7 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::PixelJobDone { .. } => "internal pixel job done",
 		Internal::Thumbnail { .. } => "internal thumbnail",
 		Internal::Ai(_) => "internal ai done",
+		Internal::RecoverySaved { .. } | Internal::RecoveryAvailable { .. } => "internal recovery",
 		Internal::ContentsSaved { .. } => "internal contents save",
 		Internal::Derived { .. } => "internal derived tiles",
 	}
@@ -305,6 +333,12 @@ struct Engine {
 	/// A derived-tile job is running (code review 2026-09-27 R07): one at a
 	/// time. Frame requests that arrive meanwhile wait here, merged per
 	/// document; a newer content generation replaces an older one's.
+	// AUDIT-FIX(D2): periodic snapshots are generation-gated with one outstanding snapshot per doc.
+	recovery: Option<crate::recovery::Recovery>,
+	recovery_pending: std::collections::HashSet<DocId>,
+	recovery_saved: HashMap<DocId, (u64, Instant)>,
+	recovery_available: Vec<String>,
+	ui_ready: bool,
 	derived_running: bool,
 	// AUDIT-FIX(D1): watchdog state is independent of content generations.
 	derived_job: u64,
@@ -466,6 +500,10 @@ pub(crate) fn run(ctx: EngineContext) {
 		output,
 	} = ctx;
 	crate::text::warm();
+	// AUDIT-FIX(D2): session setup happens before engine ownership moves its shared handles.
+	let recovery = crate::recovery::Recovery::start(store.clone(), internal.clone())
+		.map_err(|e| tracing::error!("recovery disabled: {e}"))
+		.ok();
 	let mut engine = Engine {
 		output,
 		render,
@@ -515,6 +553,11 @@ pub(crate) fn run(ctx: EngineContext) {
 		trace_moves: 0,
 		controls: None,
 		controls_commit: false,
+		recovery,
+		recovery_pending: std::collections::HashSet::new(),
+		recovery_saved: HashMap::new(),
+		recovery_available: Vec::new(),
+		ui_ready: false,
 		derived_running: false,
 		derived_job: 0,
 		derived_started: None,
@@ -551,6 +594,7 @@ pub(crate) fn run(ctx: EngineContext) {
 			},
 			default(timeout) => {}
 		}
+		engine.schedule_recovery(false);
 		engine.expire_derived();
 		engine.flush_view_message();
 		engine.send_status_if_due();
@@ -649,6 +693,13 @@ impl Engine {
 			}
 			EngineInput::PasteImage { width, height, rgba8 } => {
 				self.paste_image(width, height, &rgba8);
+				Changed::default()
+			}
+			EngineInput::EmergencyRecovery => {
+				self.schedule_recovery(true);
+				if let Some(recovery) = &self.recovery {
+					recovery.barrier();
+				}
 				Changed::default()
 			}
 			EngineInput::Shutdown => Changed::default(),
@@ -1186,7 +1237,20 @@ impl Engine {
 
 	fn ui_message(&mut self, message: UiToEngine) -> Changed {
 		match message {
+			UiToEngine::RecoverDocument { path } => {
+				// AUDIT-FIX(D2): only paths discovered in inactive sessions may be reopened through recovery.
+				if self.recovery_available.contains(&path) {
+					self.open(PathBuf::from(path), OpenAs::Recovery);
+				}
+				Changed::default()
+			}
 			UiToEngine::Hello { ui_version } => {
+				self.ui_ready = true;
+				if !self.recovery_available.is_empty() {
+					self.to_ui(&EngineToUi::RecoveryAvailable {
+						paths: self.recovery_available.clone(),
+					});
+				}
 				tracing::info!("UI connected (ui_version {ui_version})");
 				let profiles = cmyk_profile_files()
 					.into_iter()
@@ -2404,6 +2468,30 @@ impl Engine {
 
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::RecoveryAvailable { paths } => {
+				self.recovery_available = paths;
+				if self.ui_ready && !self.recovery_available.is_empty() {
+					self.to_ui(&EngineToUi::RecoveryAvailable {
+						paths: self.recovery_available.clone(),
+					});
+				}
+			}
+			Internal::RecoverySaved { doc, generation, result } => {
+				self.recovery_pending.remove(&doc);
+				match result {
+					Ok(()) => {
+						if self.docs.get(doc).is_some() {
+							self.recovery_saved.insert(doc, (generation, Instant::now()));
+						}
+					}
+					Err(error) => {
+						tracing::error!("recovery snapshot failed: {error}");
+						self.to_ui(&EngineToUi::Error {
+							text: format!("Recovery snapshot failed: {error}. Save your document manually."),
+						});
+					}
+				}
+			}
 			Internal::PreviewTiles { doc, request, tiles } => {
 				let store = self.store.clone();
 				if let Some(open) = self.docs.get_mut(doc)
@@ -2583,11 +2671,21 @@ impl Engine {
 						// AUDIT-FIX(D5): expose rollback metadata before consuming the opened model.
 						let warning = opened.recovered.then_some(opened.file.footer());
 						let mut doc = OpenDoc::from_fxd(id, &path, *opened);
+						// AUDIT-FIX(D2): recovery is unsaved work, not a regular open file.
+						if matches!(target, OpenAs::Recovery) {
+							doc.file = None;
+							doc.path = None;
+							doc.source = None;
+							doc.dirty = true;
+							doc.name = format!("Recovered {}", doc.name);
+						}
 						if let Some(viewport) = self.virtual_view.viewport {
 							doc.view.resize(viewport.width, viewport.height);
 						}
 						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
-						self.remember_recent(&path);
+						if !matches!(target, OpenAs::Recovery) {
+							self.remember_recent(&path);
+						}
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
@@ -2635,6 +2733,13 @@ impl Engine {
 							(open.info(), open.dirty)
 						});
 						let saved_clean = saved.as_ref().is_some_and(|(_, dirty)| !dirty);
+						// AUDIT-FIX(D2): keep recovery when edits landed during Save; remove only a clean saved snapshot.
+						if saved_clean {
+							if let Some(recovery) = &self.recovery {
+								recovery.remove(doc);
+							}
+							self.recovery_saved.remove(&doc);
+						}
 						if let Some((info, _)) = saved {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
@@ -2870,6 +2975,11 @@ impl Engine {
 			self.end_transform(false);
 		}
 		if self.docs.close(id).is_some() {
+			// AUDIT-FIX(D2): a clean/discarded close removes its recovery entry after queued snapshots.
+			if let Some(recovery) = &self.recovery {
+				recovery.remove(id);
+			}
+			self.recovery_saved.remove(&id);
 			// AUDIT-FIX(D4): discard the closed contents relationship and resume its parent close.
 			self.smart_children.remove(&id);
 			self.layers_sent.remove(&id);
@@ -4292,6 +4402,26 @@ impl Engine {
 	}
 
 	// AUDIT-FIX(D1): detached expired workers cannot install results or block the queue.
+	// AUDIT-FIX(D2): snapshots clone shared layers/tiles; all disk writes happen on the recovery worker.
+	fn schedule_recovery(&mut self, force: bool) {
+		let Some(recovery) = &self.recovery else { return };
+		let minutes = self.prefs.number("recovery_interval_minutes").unwrap_or(5.0).clamp(1.0, 120.0);
+		let edits = self.prefs.number("recovery_edit_count").unwrap_or(50.0).max(1.0) as u64;
+		let interval = Duration::from_secs_f64(minutes * 60.0);
+		for open in self.docs.iter() {
+			if !open.dirty || self.recovery_pending.contains(&open.id) {
+				continue;
+			}
+			let (saved, at) = self.recovery_saved.entry(open.id).or_insert((0, Instant::now()));
+			if !force && (open.generation == *saved || (open.generation.saturating_sub(*saved) < edits && at.elapsed() < interval)) {
+				continue;
+			}
+			if recovery.snapshot(open.id, open.generation, open.name.clone(), open.doc.clone()) {
+				self.recovery_pending.insert(open.id);
+			}
+		}
+	}
+
 	fn expire_derived(&mut self) {
 		if self.derived_started.is_some_and(|at| at.elapsed() >= DERIVED_TIMEOUT) {
 			tracing::error!(job = self.derived_job, "derived job abandoned after watchdog timeout");

@@ -47,6 +47,8 @@ export const ENGINE = Object.freeze({
   DOCUMENT_OPENED: "document_opened",
   // AUDIT-FIX(D5): show recovered-save metadata in a persistent banner.
   RECOVERED_VERSION: "recovered_version",
+  // AUDIT-FIX(D2): startup recovery offer.
+  RECOVERY_AVAILABLE: "recovery_available",
   DOCUMENT_CHANGED: "document_changed",
   CLOSE_DIRTY_DOCUMENT: "close_dirty_document",
   CMYK_PROFILES: "cmyk_profiles",
