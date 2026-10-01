@@ -1,6 +1,6 @@
 //! The layer list the engine sends after each edit (2026-09-27, stress report
 //! O2): a property edit sends only the rows it changed (`layers_patch`), an
-//! edit that changes the tree sends the whole list, and `request_layers`
+//! edit that changes the tree a `layers_structure_patch`, and `request_layers`
 //! gets the whole list again. The harness applies the patches to its own
 //! copy, as the Layers panel does, and fails on one made against another list.
 
@@ -45,8 +45,14 @@ fn property_edits_send_only_the_changed_rows() {
 		});
 	}
 	let list = layers("201 layers", 201);
-	assert!(!last_frame().patch, "adding a layer changes the tree: the whole list");
+	// VERIFY-FIX(4.2): a structural edit is now a structure patch of a few rows, not the whole list.
+	let frame = last_frame();
+	assert!(frame.patch && frame.rows <= 3, "adding a layer is a small structure patch: {frame:?}");
+	harness.ui(UiToEngine::RequestLayers { doc });
+	layers("the full list", 201);
+	assert!(!last_frame().patch, "request_layers sends the whole list");
 	let full_bytes = last_frame().bytes;
+	assert!(frame.bytes * 20 < full_bytes, "{} bytes against {full_bytes} for the full list", frame.bytes);
 
 	// Hide one layer: one row, a fraction of the full list.
 	let target = list[100].id;
@@ -93,7 +99,9 @@ fn property_edits_send_only_the_changed_rows() {
 		layers: vec![LayerRef::Id(target)],
 	});
 	layers("200 layers", 200);
-	assert!(!last_frame().patch, "deleting changes the tree");
+	// VERIFY-FIX(4.2): deleting is a one-op structure patch too.
+	let frame = last_frame();
+	assert!(frame.patch && frame.rows <= 3, "deleting is a small structure patch: {frame:?}");
 
 	// The UI lost track: the whole list again.
 	harness.ui(UiToEngine::RequestLayers { doc });
