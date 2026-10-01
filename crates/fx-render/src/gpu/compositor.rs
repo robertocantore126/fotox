@@ -191,6 +191,13 @@ pub struct GpuCompositor {
 	config: CompositorConfig,
 	frame: u64,
 	hot_layer: Option<LayerId>,
+	// AUDIT-FIX(COMPCACHE): outside edits expire cache namespace, active edits retain it.
+	cache_enabled: bool,
+	cache_context: Option<(u64, LayerId, u64)>,
+	cache_signature: Option<u64>,
+	cache_epoch: u64,
+	cache_root: bool,
+	above_layers: HashSet<LayerId>,
 	stats: CompositorStats,
 }
 
@@ -349,6 +356,12 @@ impl GpuCompositor {
 			config,
 			frame: 1,
 			hot_layer: None,
+			cache_enabled: !no_composite_cache(),
+			cache_context: None,
+			cache_signature: None,
+			cache_epoch: 0,
+			cache_root: false,
+			above_layers: HashSet::new(),
 			stats: CompositorStats::default(),
 		}
 	}
@@ -386,6 +399,68 @@ impl GpuCompositor {
 		self.hot_layer = layer;
 	}
 
+	// AUDIT-FIX(COMPCACHE): scope old prefix machinery to document, active layer and outside content epoch.
+	pub fn set_cache_document(&mut self, id: u64, doc: &fx_core::Document) {
+		if !self.cache_enabled {
+			return;
+		}
+		let active = doc.active_layer();
+		self.hot_layer = active;
+		let mut h = std::collections::hash_map::DefaultHasher::new();
+		(id, active, doc.width, doc.height, doc.global_light.to_bits(), doc.global_altitude.to_bits()).hash(&mut h);
+		for layer in &doc.layers {
+			if Some(layer.id) != active {
+				(layer.id, Arc::as_ptr(layer) as usize).hash(&mut h);
+			}
+		}
+		for pattern in &doc.patterns {
+			pattern.id.hash(&mut h);
+		}
+		let signature = h.finish();
+		if self.cache_signature != Some(signature) {
+			let different_doc = self.cache_context.is_some_and(|(old, _, _)| old != id);
+			self.cache_epoch = self.cache_epoch.wrapping_add(1);
+			self.atlas.clear_composites();
+			self.cache_signature = Some(signature);
+			if different_doc {
+				self.cache.clear();
+				self.composite_slot_owner.fill(None);
+				self.composite_free = (0..self.composite_capacity).rev().collect();
+			}
+		}
+		self.cache_context = active.map(|a| (id, a, self.cache_epoch));
+		self.cache_root = active.and_then(|a| doc.path_of(a)).is_some_and(|p| p.len() == 1);
+		self.above_layers.clear();
+		if let Some(at) = active.and_then(|a| doc.layers.iter().position(|l| l.id == a)) {
+			for layer in &doc.layers[at + 1..] {
+				if layer.visible
+					&& layer.blend == fx_core::BlendMode::Normal
+					&& !layer.clipped
+					&& layer.styles.is_none()
+					&& matches!(
+						layer.kind,
+						fx_core::LayerKind::Pixel { .. } | fx_core::LayerKind::SolidFill {..} | fx_core::LayerKind::FillLayer { .. }
+					) {
+					self.above_layers.insert(layer.id);
+				}
+			}
+		}
+	}
+	pub fn forget_cache_document(&mut self) {
+		if !self.cache_enabled {
+			return;
+		}
+		self.atlas.clear_composites();
+		self.cache_context = None;
+		self.cache_signature = None;
+		self.hot_layer = None;
+		self.cache_root = false;
+		self.above_layers.clear();
+		self.cache.clear();
+		self.composite_slot_owner.fill(None);
+		self.composite_free = (0..self.composite_capacity).rev().collect();
+	}
+
 	/// Composite a batch of tiles. `hot` must never block: return the pixels
 	/// only if they are already in RAM (`TileStore::try_get_hot`).
 	pub fn composite(&mut self, programs: &[TileProgram], hot: &dyn Fn(&TileHandle) -> Option<Arc<TileBuffer>>) -> Result<Vec<TileOutcome>, CompositeError> {
@@ -393,6 +468,8 @@ impl GpuCompositor {
 		let mut uploads: Vec<(TileId, Arc<TileBuffer>)> = Vec::new();
 		let mut upload_ids: HashSet<TileId> = HashSet::new();
 		let mut runnable: Vec<usize> = Vec::new();
+		// AUDIT-FIX(COMPCACHE): pin warm cache before collecting source handles.
+		let mut warm_prefix: Vec<Option<(usize, u32)>> = vec![None; programs.len()];
 
 		for (i, program) in programs.iter().enumerate() {
 			check_supported(program)?;
@@ -411,9 +488,15 @@ impl GpuCompositor {
 				continue;
 			}
 			// Which inputs are missing from the atlas?
+			if self.cache_enabled {
+				if let Some((split, key)) = self.prefix_split(program) {
+					warm_prefix[i] = self.atlas.lookup(AtlasKey::Prefix(key)).map(|slot| (split, slot));
+				}
+			}
+			let input_ops = warm_prefix[i].map_or(&program.ops[..], |(split, _)| &program.ops[split..]);
 			let mut missing = Vec::new();
 			let mut needed: Vec<(TileId, Arc<TileBuffer>)> = Vec::new();
-			for handle in program_tiles(program) {
+			for handle in ops_tiles(input_ops) {
 				let key = AtlasKey::Tile(handle.id());
 				if self.atlas.lookup(key).is_some() || upload_ids.contains(&handle.id()) {
 					continue;
@@ -445,7 +528,8 @@ impl GpuCompositor {
 			// Atlas full this frame: defer every program that needed one of the failed tiles.
 			let failed: HashSet<TileId> = uploads.iter().zip(&slots).filter(|(_, s)| s.is_none()).map(|((id, _), _)| *id).collect();
 			runnable.retain(|&i| {
-				let blocked = program_tiles(&programs[i]).iter().any(|h| failed.contains(&h.id()));
+				let input_ops = warm_prefix[i].map_or(&programs[i].ops[..], |(split, _)| &programs[i].ops[split..]);
+				let blocked = ops_tiles(input_ops).iter().any(|h| failed.contains(&h.id()));
 				if blocked {
 					outcomes[i] = Some(TileOutcome::Deferred { missing: Vec::new() });
 				}
@@ -488,7 +572,12 @@ impl GpuCompositor {
 			let mut load_prefix: Option<u32> = None;
 
 			if let Some((split, prefix_key)) = self.prefix_split(program) {
-				if let Some(slot) = self.atlas.lookup(AtlasKey::Prefix(prefix_key)) {
+				let cached = if self.cache_enabled {
+					warm_prefix[i].map(|(_, slot)| slot)
+				} else {
+					self.atlas.lookup(AtlasKey::Prefix(prefix_key))
+				};
+				if let Some(slot) = cached {
 					self.stats.prefix_hits += 1;
 					load_prefix = Some(slot);
 					main_ops = &program.ops[split..];
@@ -546,6 +635,10 @@ impl GpuCompositor {
 	/// Split point for the prefix cache: start of the root-level segment
 	/// containing an op of the hot layer, if at least 2 ops precede it.
 	fn prefix_split(&self, program: &TileProgram) -> Option<(usize, u64)> {
+		// AUDIT-FIX(COMPCACHE): group-local substitution requires its own stack handling.
+		if self.cache_enabled && self.cache_context.is_some() && !self.cache_root {
+			return None;
+		}
 		let hot = self.hot_layer?;
 		let mut depth = 0usize;
 		let mut segment_start = 0usize;
@@ -567,6 +660,10 @@ impl GpuCompositor {
 		let split = split.filter(|s| *s >= 2)?;
 		let mut hasher = std::collections::hash_map::DefaultHasher::new();
 		(program.level, program.tx, program.ty, split).hash(&mut hasher);
+		if self.cache_enabled {
+			self.cache_context.hash(&mut hasher);
+			0u8.hash(&mut hasher);
+		}
 		crate::program::hash_ops(&program.ops[..split], &mut hasher);
 		Some((split, hasher.finish()))
 	}
@@ -990,9 +1087,9 @@ fn check_supported(program: &TileProgram) -> Result<(), CompositeError> {
 }
 
 /// All stored tiles a program reads (sources and masks).
-fn program_tiles(program: &TileProgram) -> Vec<&TileHandle> {
+fn ops_tiles(ops: &[Op]) -> Vec<&TileHandle> {
 	let mut out = Vec::new();
-	for op in &program.ops {
+	for op in ops {
 		for quad in op.quads() {
 			for slot in &quad.slots {
 				if let QuadSlot::Slot(TileSlot::Data(h)) = slot {
@@ -1030,4 +1127,10 @@ fn create_lut_texture(device: &wgpu::Device, rows: u32) -> (wgpu::Texture, wgpu:
 	});
 	let view = texture.create_view(&Default::default());
 	(texture, view)
+}
+
+// AUDIT-FIX(COMPCACHE): comparison switch read once at compositor startup.
+fn no_composite_cache() -> bool {
+	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*OLD.get_or_init(|| std::env::var("FOTOX_NO_COMPOSITE_CACHE").is_ok_and(|v| v == "1"))
 }

@@ -198,6 +198,8 @@ pub(crate) fn run(ctx: RenderContext) {
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
 				pipeline.compositor.set_hot_layer(f.hot_layer);
+				// AUDIT-FIX(COMPCACHE): document/active namespace and outside-edit epoch.
+				pipeline.compositor.set_cache_document(u64::from(id.0), doc);
 				match pipeline.frame(
 					&ctx,
 					&mut encoder,
@@ -317,6 +319,7 @@ impl TilePipeline {
 
 	/// Drop everything held for the document last drawn.
 	fn forget_document(&mut self) {
+		self.compositor.forget_cache_document();
 		self.snapshot = None;
 		self.current = None;
 		self.ready.clear();

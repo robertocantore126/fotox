@@ -130,6 +130,17 @@ impl TileAtlas {
 		self.map.contains_key(&key)
 	}
 
+	// AUDIT-FIX(COMPCACHE): context changes retire cached composites, retaining immutable source tiles.
+	pub fn clear_composites(&mut self) {
+		for (slot, entry) in self.slots.iter_mut().enumerate() {
+			if let Some((key @ AtlasKey::Prefix(_), _)) = *entry {
+				self.map.remove(&key);
+				*entry = None;
+				self.free.push(slot as u32);
+			}
+		}
+	}
+
 	/// Reserve a slot for `key` (evicting the least recently used slot not
 	/// used this frame). `None` if every slot is in use this frame.
 	pub fn allocate(&mut self, key: AtlasKey) -> Option<u32> {
