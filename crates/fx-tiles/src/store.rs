@@ -514,6 +514,7 @@ struct StoreInner {
 	signal: Arc<TrimSignal>,
 	pressure_gate: StdMutex<()>,
 	pressure: Condvar,
+	scratch_health: Mutex<crate::health::ScratchHealth>,
 }
 
 impl Drop for StoreInner {
@@ -621,10 +622,13 @@ pub struct TileStore(Arc<StoreInner>);
 impl TileStore {
 	pub fn new(config: TileStoreConfig) -> Result<Self, TileError> {
 		let _ = no_backpressure(); // AUDIT-FIX(P1): sample switch at store startup.
+		let _ = crate::health::no_scratch_guards();
+		let mut scratch_error = None;
 		let scratch = match ScratchFile::create(&config.scratch_dir, config.scratch_limit) {
 			Ok(file) => Some(file),
 			Err(e) => {
 				tracing::error!("cannot create scratch file in {:?}: {e}; tiles will stay in RAM", config.scratch_dir);
+				scratch_error = Some(format!("Scratch {} unavailable: {e}", config.scratch_dir.display()));
 				None
 			}
 		};
@@ -640,6 +644,11 @@ impl TileStore {
 			signal: signal.clone(),
 			pressure_gate: StdMutex::new(()),
 			pressure: Condvar::new(),
+			scratch_health: Mutex::new(crate::health::ScratchHealth {
+				error: scratch_error,
+				path: config.scratch_dir.display().to_string(),
+				..Default::default()
+			}),
 			config,
 		});
 		if inner.config.background_trim {
@@ -649,7 +658,38 @@ impl TileStore {
 				.spawn(move || trim_thread(weak, signal))
 				.map_err(TileError::Io)?;
 		}
-		Ok(Self(inner))
+		let store = Self(inner);
+		store.refresh_scratch_health();
+		Ok(store)
+	}
+
+	// AUDIT-FIX(X1): status readers use cached health; no filesystem query on UI/render.
+	pub fn scratch_health(&self) -> crate::health::ScratchHealth {
+		if crate::health::no_scratch_guards() {
+			return Default::default();
+		}
+		let mut health = self.0.scratch_health.lock().clone();
+		health.full |= self.0.stats.scratch_full.load(Ordering::Relaxed);
+		health
+	}
+	pub fn report_scratch_error(&self, error: String) {
+		tracing::error!("{error}");
+		self.0.scratch_health.lock().error = Some(error);
+	}
+	fn refresh_scratch_health(&self) {
+		if crate::health::no_scratch_guards() {
+			return;
+		}
+		match crate::health::disk_space(&self.0.config.scratch_dir) {
+			Ok(Some((free, total))) => {
+				let mut h = self.0.scratch_health.lock();
+				h.free_bytes = free;
+				h.reserve_bytes = (5 << 30).max(total / 20);
+				h.full = free < h.reserve_bytes;
+			}
+			Ok(None) => {}
+			Err(e) => self.report_scratch_error(format!("Cannot read scratch free space in {}: {e}", self.0.config.scratch_dir.display())),
+		}
 	}
 
 	pub fn config(&self) -> &TileStoreConfig {
@@ -767,7 +807,10 @@ impl TileStore {
 				.scratch
 				.as_ref()
 				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
-			let block = scratch.read(extent)?;
+			let block = scratch.read(extent).map_err(|e| {
+				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
+				e
+			})?;
 			let bytes = decompress(&block, tile_bytes)?;
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(backed) = copies.backed.clone() {
@@ -980,7 +1023,7 @@ impl TileStore {
 			Ok(Some(extent)) => extent,
 			Ok(None) => return false,
 			Err(e) => {
-				tracing::error!("scratch write failed: {e}");
+				self.report_scratch_error(format!("Scratch write failed in {}: {e}", inner.config.scratch_dir.display()));
 				return false;
 			}
 		};
@@ -1038,8 +1081,10 @@ fn trim_thread(store: Weak<StoreInner>, signal: Arc<TrimSignal>) {
 	loop {
 		signal.wait(Duration::from_millis(250));
 		let Some(inner) = store.upgrade() else { return };
-		if inner.over_budget() {
-			TileStore(inner).trim();
+		let store = TileStore(inner);
+		store.refresh_scratch_health();
+		if store.0.over_budget() {
+			store.trim();
 		}
 	}
 }

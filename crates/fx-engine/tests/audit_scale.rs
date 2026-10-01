@@ -86,7 +86,7 @@ impl Probe {
 			match item {
 				Seen::Ui(message) => {
 					match &message {
-						EngineToUi::Status { memory, .. } => self.status = Some(*memory),
+						EngineToUi::Status { memory, .. } => self.status = Some(memory.clone()),
 						EngineToUi::Layers { doc, layers, .. } => self.layers = Some((*doc, layers.clone())),
 						_ => {}
 					}
@@ -330,7 +330,7 @@ impl Probe {
 			std::thread::sleep(Duration::from_millis(20));
 		}
 		let mib = |b: u64| b >> 20;
-		let s = self.status.unwrap_or_default();
+		let s = self.status.clone().unwrap_or_default();
 		let p = process_counters().unwrap_or_default();
 		println!(
 			"AUDIT {} mem {label}: tiles hot {} MiB, warm {} MiB, scratch {} MiB, gpu reserved {} MiB | process WS {} MiB, private {} MiB, peak WS {} MiB, I/O read {} MiB write {} MiB",

@@ -141,7 +141,12 @@ function showStatus(s) {
   const mem = document.getElementById("statusmem");
   if (mem) {
     const m = s.memory;
-    mem.textContent = `RAM ${gb(m.hot_bytes + m.warm_bytes)} GB`;
+    // AUDIT-FIX(X1): cached scratch health makes reserve pressure and failures actionable.
+    const failed=m.scratch_full || m.scratch_error;
+    const near=!failed && m.scratch_reserve_bytes>0 && m.scratch_free_bytes<m.scratch_reserve_bytes*1.2;
+    mem.style.color=failed ? "#ff6868" : near ? "#e9b24a" : "";
+    const warning=m.scratch_error || (m.scratch_full ? `Scratch disk ${m.scratch_path || ""} is full or below its free-space reserve ? free space or choose another folder` : near ? "Scratch disk is nearly full" : "");
+    mem.textContent = warning ? `Scratch: ${failed ? "error / full" : "nearly full"}` : `RAM ${gb(m.hot_bytes + m.warm_bytes)} GB`;
     mem.title = `Tiles in RAM ${gb(m.hot_bytes)} GB · compressed ${gb(m.warm_bytes)} GB · ` +
       `scratch disk ${gb(m.scratch_bytes)} GB · GPU ${gb(m.gpu_bytes)} GB`;
   }

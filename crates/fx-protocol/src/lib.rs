@@ -310,8 +310,19 @@ pub struct CmykProfileInfo {
 	pub path: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryStats {
+	// AUDIT-FIX(X1): scratch failures and cached free space are user-visible.
+	#[serde(default)]
+	pub scratch_full: bool,
+	#[serde(default)]
+	pub scratch_error: Option<String>,
+	#[serde(default)]
+	pub scratch_free_bytes: u64,
+	#[serde(default)]
+	pub scratch_reserve_bytes: u64,
+	#[serde(default)]
+	pub scratch_path: String,
 	pub hot_bytes: u64,
 	pub warm_bytes: u64,
 	pub scratch_bytes: u64,

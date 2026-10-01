@@ -26,6 +26,7 @@
 
 pub mod budgets;
 mod format;
+pub mod health;
 mod image;
 mod mip;
 mod scratch;
