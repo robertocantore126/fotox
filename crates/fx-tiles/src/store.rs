@@ -389,6 +389,7 @@ impl Drop for TileEntry {
 			store.stats.evicted_tiles.fetch_sub(1, Ordering::Relaxed);
 		}
 		store.registry_shard(self.id).lock().remove(&self.id);
+		store.eviction_clock.lock().entries.remove(&self.id.get());
 	}
 }
 
@@ -474,11 +475,36 @@ impl TrimSignal {
 	}
 }
 
+// AUDIT-FIX(P1): live-only clock index avoids rebuilding/sorting every candidate.
+#[derive(Default)]
+struct EvictionClock {
+	entries: std::collections::BTreeMap<u64, (Weak<TileEntry>, u64)>,
+	cursor: u64,
+}
+impl EvictionClock {
+	fn next(&mut self) -> Option<(Arc<TileEntry>, bool)> {
+		let id = self
+			.entries
+			.range((std::ops::Bound::Excluded(self.cursor), std::ops::Bound::Unbounded))
+			.next()
+			.or_else(|| self.entries.first_key_value())
+			.map(|(id, _)| *id)?;
+		self.cursor = id;
+		let (weak, seen) = self.entries.get_mut(&id)?;
+		let entry = weak.upgrade()?;
+		let now = entry.last_use.load(Ordering::Relaxed);
+		let recent = now != *seen;
+		*seen = now;
+		Some((entry, recent))
+	}
+}
+
 struct StoreInner {
 	config: TileStoreConfig,
 	next_id: AtomicU64,
 	clock: AtomicU64,
 	registry: Vec<Mutex<HashMap<TileId, Weak<TileEntry>>>>,
+	eviction_clock: Mutex<EvictionClock>,
 	stats: Counters,
 	/// `None` if the scratch file could not be created: then nothing spills
 	/// to disk and RAM goes over budget (reported via `scratch_full`).
@@ -607,6 +633,7 @@ impl TileStore {
 			next_id: AtomicU64::new(1),
 			clock: AtomicU64::new(0),
 			registry: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
+			eviction_clock: Mutex::new(EvictionClock::default()),
 			stats: Counters::default(),
 			scratch,
 			trim_lock: Mutex::new(()),
@@ -662,6 +689,9 @@ impl TileStore {
 			store: Arc::downgrade(&self.0),
 		});
 		self.0.registry_shard(id).lock().insert(id, Arc::downgrade(&entry));
+		if !crate::budgets::old_budgets() {
+			self.0.eviction_clock.lock().entries.insert(id.get(), (Arc::downgrade(&entry), 0));
+		}
 		if self.0.over_budget() {
 			self.0.signal.notify();
 		}
@@ -685,6 +715,9 @@ impl TileStore {
 			store: Arc::downgrade(&self.0),
 		});
 		self.0.registry_shard(id).lock().insert(id, Arc::downgrade(&entry));
+		if !crate::budgets::old_budgets() {
+			self.0.eviction_clock.lock().entries.insert(id.get(), (Arc::downgrade(&entry), 0));
+		}
 		TileHandle(entry)
 	}
 
@@ -810,6 +843,12 @@ impl TileStore {
 			return;
 		}
 
+		// AUDIT-FIX(P1): OLD_BUDGETS keeps the original sorted trim for comparison.
+		if !crate::budgets::old_budgets() {
+			self.trim_clock(hot_target, warm_target, hot_over);
+			return;
+		}
+
 		// Snapshot `last_use` before sorting: readers keep updating it, and
 		// sorting by a key that changes mid-sort is not a total order (std
 		// panics on that). A slightly stale LRU order is fine.
@@ -845,6 +884,42 @@ impl TileStore {
 		} else {
 			inner.stats.scratch_full.store(false, Ordering::Relaxed);
 		}
+	}
+
+	fn trim_clock(&self, hot_target: u64, warm_target: u64, hot_over: bool) {
+		let inner = &*self.0;
+		let scans = inner.eviction_clock.lock().entries.len().saturating_mul(2);
+		if hot_over {
+			for class in [TileClass::Derived, TileClass::Authoritative] {
+				for _ in 0..scans {
+					if inner.stats.hot_bytes.load(Ordering::Relaxed) <= hot_target {
+						break;
+					}
+					let candidate = { inner.eviction_clock.lock().next() };
+					if let Some((entry, recent)) = candidate {
+						if !recent && entry.class == class {
+							self.demote_hot(&entry);
+						}
+					}
+				}
+			}
+		}
+		let mut full = false;
+		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
+			for _ in 0..scans {
+				if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
+					break;
+				}
+				let candidate = { inner.eviction_clock.lock().next() };
+				if let Some((entry, recent)) = candidate {
+					if !recent && !self.demote_warm(&entry) {
+						full = true;
+						break;
+					}
+				}
+			}
+		}
+		inner.stats.scratch_full.store(full, Ordering::Relaxed);
 	}
 
 	/// Remove the hot copy of one tile (compressing it first if it is the
