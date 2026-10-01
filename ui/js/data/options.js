@@ -13,7 +13,7 @@ export const optionBars = {
   _default: [{ type: "label", text: "No options for this tool" }],
 
   move: [
-    { type: "toggle", text: "Auto-Select", on: false },
+    { type: "toggle", text: "Auto-Select", on: true },
     { type: "select", key: "Select", options: ["Layer", "Group"], value: "Layer" },
     { type: "toggle", text: "Show Transform Controls", on: true },
     { type: "gap" },

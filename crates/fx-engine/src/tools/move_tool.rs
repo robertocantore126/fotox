@@ -118,9 +118,10 @@ impl Tool for MoveTool {
 		match event.kind {
 			PointerKind::Down => {
 				self.nudge = None;
-				// Off unless the option bar turns it on (Photopea, M7 decision);
-				// Ctrl inverts it while held.
-				let setting = ctx.settings.bool(TOOL, "Auto-Select").unwrap_or(false);
+				// On unless the option bar turns it off: a click on a layer's
+				// pixels picks and moves it, as in Photopea (Rob, 2026-10-01,
+				// overturning D-059); Ctrl inverts it while held.
+				let setting = ctx.settings.bool(TOOL, "Auto-Select").unwrap_or(true);
 				let auto = setting != event.modifiers.ctrl;
 				let mut deselect_on_click = None;
 				let mut selection_changed = false;
