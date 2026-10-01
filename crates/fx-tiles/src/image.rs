@@ -43,6 +43,8 @@ impl TileSlot {
 }
 
 /// The tiles of one mip level, row-major.
+// AUDIT-FIX(SPARSE): original dense layout retained for build-time comparison.
+#[cfg(feature = "dense-grid")]
 #[derive(Clone, Debug)]
 pub struct TileGrid {
 	cols: u32,
@@ -52,6 +54,7 @@ pub struct TileGrid {
 	dirty: Vec<bool>,
 }
 
+#[cfg(feature = "dense-grid")]
 impl TileGrid {
 	fn new(cols: u32, rows: u32, dirty: bool) -> Self {
 		let n = (cols * rows) as usize;
@@ -87,6 +90,144 @@ impl TileGrid {
 			.enumerate()
 			.filter(|(_, s)| !s.is_empty())
 			.map(|(i, s)| (i as u32 % self.cols, i as u32 / self.cols, s))
+	}
+	fn set_slot(&mut self, tx: u32, ty: u32, slot: TileSlot) {
+		let i = self.index(tx, ty);
+		self.slots[i] = slot;
+	}
+	fn dirty_at(&self, tx: u32, ty: u32) -> bool {
+		self.dirty[self.index(tx, ty)]
+	}
+	fn set_dirty(&mut self, tx: u32, ty: u32, dirty: bool) {
+		let i = self.index(tx, ty);
+		self.dirty[i] = dirty;
+	}
+	fn all_dirty(&mut self) {
+		self.dirty.fill(true);
+	}
+	fn dirty_coords(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+		self.dirty
+			.iter()
+			.enumerate()
+			.filter(|(_, d)| **d)
+			.map(|(i, _)| (i as u32 % self.cols, i as u32 / self.cols))
+	}
+}
+
+// AUDIT-FIX(SPARSE): 16x16 COW chunks allocate only content or dirty overrides.
+#[cfg(not(feature = "dense-grid"))]
+#[derive(Clone, Debug)]
+struct Chunk {
+	slots: [TileSlot; 256],
+	dirty: [bool; 256],
+}
+#[cfg(not(feature = "dense-grid"))]
+#[derive(Clone, Debug)]
+pub struct TileGrid {
+	cols: u32,
+	rows: u32,
+	chunk_cols: u32,
+	chunks: Vec<Option<std::sync::Arc<Chunk>>>,
+	default_dirty: bool,
+	// Clean empty chunks override an all-dirty default without allocating slots.
+	clean_empty: Vec<bool>,
+}
+#[cfg(not(feature = "dense-grid"))]
+impl TileGrid {
+	fn new(cols: u32, rows: u32, dirty: bool) -> Self {
+		let chunk_cols = cols.div_ceil(16);
+		let n = (chunk_cols as usize) * (rows.div_ceil(16) as usize);
+		Self {
+			cols,
+			rows,
+			chunk_cols,
+			chunks: vec![None; n],
+			default_dirty: dirty,
+			clean_empty: vec![false; n],
+		}
+	}
+	pub fn cols(&self) -> u32 {
+		self.cols
+	}
+	pub fn rows(&self) -> u32 {
+		self.rows
+	}
+	fn address(&self, tx: u32, ty: u32) -> (usize, usize) {
+		assert!(tx < self.cols && ty < self.rows, "tile ({tx},{ty}) outside {}x{} grid", self.cols, self.rows);
+		(((ty / 16) * self.chunk_cols + tx / 16) as usize, ((ty % 16) * 16 + tx % 16) as usize)
+	}
+	pub fn slot(&self, tx: u32, ty: u32) -> &TileSlot {
+		let (c, i) = self.address(tx, ty);
+		self.chunks[c].as_ref().map_or(&TileSlot::Empty, |chunk| &chunk.slots[i])
+	}
+	fn dirty_at(&self, tx: u32, ty: u32) -> bool {
+		let (c, i) = self.address(tx, ty);
+		self.chunks[c]
+			.as_ref()
+			.map_or(self.default_dirty && !self.clean_empty[c], |chunk| chunk.dirty[i])
+	}
+	fn new_chunk(&self, c: usize) -> Chunk {
+		let x = (c as u32 % self.chunk_cols) * 16;
+		let y = (c as u32 / self.chunk_cols) * 16;
+		let default = self.default_dirty && !self.clean_empty[c];
+		Chunk {
+			slots: std::array::from_fn(|_| TileSlot::Empty),
+			dirty: std::array::from_fn(|i| default && x + i as u32 % 16 < self.cols && y + i as u32 / 16 < self.rows),
+		}
+	}
+	fn update(&mut self, tx: u32, ty: u32, slot: Option<TileSlot>, dirty: Option<bool>) {
+		if slot.as_ref().is_none_or(|s| self.slot(tx, ty).same_as(s)) && dirty.is_none_or(|d| self.dirty_at(tx, ty) == d) {
+			return;
+		}
+		let (c, i) = self.address(tx, ty);
+		if self.chunks[c].is_none() {
+			self.chunks[c] = Some(std::sync::Arc::new(self.new_chunk(c)));
+		}
+		let chunk = std::sync::Arc::make_mut(self.chunks[c].as_mut().expect("chunk installed"));
+		if let Some(slot) = slot {
+			chunk.slots[i] = slot;
+		}
+		if let Some(dirty) = dirty {
+			chunk.dirty[i] = dirty;
+		}
+		if chunk.slots.iter().all(TileSlot::is_empty) && chunk.dirty.iter().all(|d| !*d) {
+			self.chunks[c] = None;
+			self.clean_empty[c] = self.default_dirty;
+		}
+	}
+	fn set_slot(&mut self, tx: u32, ty: u32, slot: TileSlot) {
+		self.update(tx, ty, Some(slot), None);
+	}
+	fn set_dirty(&mut self, tx: u32, ty: u32, dirty: bool) {
+		self.update(tx, ty, None, Some(dirty));
+	}
+	fn all_dirty(&mut self) {
+		self.default_dirty = true;
+		self.clean_empty.fill(false);
+		for c in 0..self.chunks.len() {
+			if self.chunks[c].as_ref().is_some_and(|v| v.slots.iter().all(TileSlot::is_empty)) {
+				self.chunks[c] = None;
+				continue;
+			}
+			let x = (c as u32 % self.chunk_cols) * 16;
+			let y = (c as u32 / self.chunk_cols) * 16;
+			if let Some(chunk) = &mut self.chunks[c] {
+				let chunk = std::sync::Arc::make_mut(chunk);
+				chunk.dirty = std::array::from_fn(|i| x + i as u32 % 16 < self.cols && y + i as u32 / 16 < self.rows);
+			}
+		}
+	}
+	pub fn non_empty(&self) -> impl Iterator<Item = (u32, u32, &TileSlot)> {
+		// Global row-major, never chunk-major: save manifest order stays identical.
+		(0..self.rows).flat_map(move |ty| {
+			(0..self.cols).filter_map(move |tx| {
+				let slot = self.slot(tx, ty);
+				(!slot.is_empty()).then_some((tx, ty, slot))
+			})
+		})
+	}
+	fn dirty_coords(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+		(0..self.rows).flat_map(move |ty| (0..self.cols).filter_map(move |tx| self.dirty_at(tx, ty).then_some((tx, ty))))
 	}
 }
 
@@ -166,7 +307,7 @@ impl TiledImage {
 	/// image changed, so all of it must be drawn again (M6-T06).
 	pub fn mark_all_dirty(&mut self) {
 		for grid in &mut self.levels {
-			grid.dirty.fill(true);
+			grid.all_dirty();
 		}
 	}
 
@@ -190,7 +331,7 @@ impl TiledImage {
 			let (tx1, ty1) = (last(x1, self.width) / span, last(y1, self.height) / span);
 			for ty in ty0..=ty1.min(grid.rows - 1) {
 				for tx in tx0..=tx1.min(grid.cols - 1) {
-					grid.dirty[(ty * grid.cols + tx) as usize] = true;
+					grid.set_dirty(tx, ty, true);
 				}
 			}
 		}
@@ -246,11 +387,10 @@ impl TiledImage {
 	/// Replace a level-0 tile and mark every mip tile above it dirty.
 	pub fn set_slot(&mut self, tx: u32, ty: u32, slot: TileSlot) {
 		let grid = &mut self.levels[0];
-		let i = grid.index(tx, ty);
-		if grid.slots[i].same_as(&slot) {
+		if grid.slot(tx, ty).same_as(&slot) {
 			return;
 		}
-		grid.slots[i] = slot;
+		grid.set_slot(tx, ty, slot);
 		self.mark_ancestors_dirty(tx, ty);
 	}
 
@@ -272,26 +412,21 @@ impl TiledImage {
 	pub fn set_derived_slot(&mut self, level: usize, tx: u32, ty: u32, slot: TileSlot) {
 		assert!(level >= 1 || self.derived, "level 0 is authoritative, use set_slot");
 		let grid = &mut self.levels[level];
-		let i = grid.index(tx, ty);
-		grid.slots[i] = slot;
-		grid.dirty[i] = false;
+		grid.set_slot(tx, ty, slot);
+		grid.set_dirty(tx, ty, false);
 	}
 
 	/// True if a tile must be recomputed before use. Never true at level 0 of
 	/// an authoritative image (level 0 *is* the truth there).
 	pub fn is_dirty(&self, level: usize, tx: u32, ty: u32) -> bool {
 		let grid = &self.levels[level];
-		grid.dirty[grid.index(tx, ty)]
+		grid.dirty_at(tx, ty)
 	}
 
 	/// Coordinates of dirty tiles at `level`.
 	pub fn dirty_tiles(&self, level: usize) -> impl Iterator<Item = (u32, u32)> + '_ {
 		let grid = &self.levels[level];
-		grid.dirty
-			.iter()
-			.enumerate()
-			.filter(|(_, d)| **d)
-			.map(|(i, _)| (i as u32 % grid.cols, i as u32 / grid.cols))
+		grid.dirty_coords()
 	}
 
 	fn mark_ancestors_dirty(&mut self, mut tx: u32, mut ty: u32) {
@@ -299,12 +434,11 @@ impl TiledImage {
 			tx /= 2;
 			ty /= 2;
 			let grid = &mut self.levels[level];
-			let i = grid.index(tx, ty);
-			if grid.dirty[i] {
+			if grid.dirty_at(tx, ty) {
 				// Everything above is already dirty.
 				break;
 			}
-			grid.dirty[i] = true;
+			grid.set_dirty(tx, ty, true);
 		}
 	}
 }
