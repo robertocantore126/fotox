@@ -111,6 +111,12 @@ pub(crate) enum OpenAs {
 
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
+	// AUDIT-FIX(X1): disk validation is asynchronous, never on engine/render.
+	PrefsValidated {
+		request: u64,
+		patch: serde_json::Value,
+		result: Result<Option<(u64, u64)>, String>,
+	},
 	// AUDIT-FIX(D2): recovery completion and startup discovery come from a dedicated worker.
 	RecoverySaved {
 		doc: DocId,
@@ -250,6 +256,7 @@ fn control_handles([x0, y0, x1, y1]: [f64; 4]) -> [(f64, f64); 8] {
 fn internal_name(message: &Internal) -> &'static str {
 	match message {
 		Internal::Progress { .. } => "internal progress",
+		Internal::PrefsValidated { .. } => "internal prefs validated",
 		Internal::Imported { .. } => "internal imported",
 		Internal::Exported { .. } => "internal exported",
 		Internal::OpenedFxd { .. } => "internal opened fxd",
@@ -322,6 +329,7 @@ struct Engine {
 	untitled: u32,
 	/// The preferences file (M7-T09).
 	prefs: crate::prefs::Prefs,
+	prefs_validation: u64,
 	/// Brush presets and patterns (M8-T01/T06).
 	resources: m8::Resources,
 	/// M9's per-document UI state (channel list signatures).
@@ -532,6 +540,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		style_clipboard: None,
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
+		prefs_validation: 0,
 		resources: m8::Resources::load(),
 		m9: m9::State::default(),
 		m13: m13::State::default(),
@@ -900,6 +909,14 @@ impl Engine {
 		self.to_ui(&EngineToUi::Preferences {
 			prefs: serde_json::Value::Object(prefs),
 		});
+	}
+
+	fn apply_prefs(&mut self, args: &serde_json::Value) {
+		self.prefs.merge(args);
+		self.prefs.save();
+		self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
+		self.send_prefs();
+		self.request_frame();
 	}
 
 	/// Remember an opened or saved file in Open Recent (M7-T09).
@@ -1342,11 +1359,29 @@ impl Engine {
 				}
 				// Preferences (M7-T09): merge, save, apply.
 				if id == "prefs:set" {
-					self.prefs.merge(&args);
-					self.prefs.save();
-					self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
-					self.send_prefs();
-					self.request_frame();
+					self.prefs_validation = self.prefs_validation.wrapping_add(1);
+					if !fx_tiles::health::no_scratch_guards() && args.get("scratch_dir").is_some() {
+						let request = self.prefs_validation;
+						let patch = args.clone();
+						let internal = self.internal.clone();
+						let path = args.get("scratch_dir").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+						let spawned = std::thread::Builder::new().name("validate-scratch".into()).spawn(move || {
+							let result = if path.is_empty() {
+								Ok(None)
+							} else {
+								fx_tiles::health::validate_folder(std::path::Path::new(&path)).map_err(|e| e.to_string())
+							};
+							let _ = internal.send(Internal::PrefsValidated { request, patch, result });
+						});
+						if let Err(e) = spawned {
+							self.to_ui(&EngineToUi::Error {
+								text: format!("Could not validate scratch folder: {e}"),
+							});
+							self.send_prefs();
+						}
+					} else {
+						self.apply_prefs(&args);
+					}
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
@@ -2532,6 +2567,25 @@ impl Engine {
 
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::PrefsValidated { request, patch, result } => {
+				if request == self.prefs_validation {
+					match result {
+						Ok(space) => {
+							self.apply_prefs(&patch);
+							if let Some((free, _)) = space {
+								self.to_ui(&EngineToUi::Toast {
+									text: format!("Scratch folder validated: {:.2} GB free; applies next start", free as f64 / 1e9),
+								});
+							}
+						}
+						Err(text) => {
+							self.to_ui(&EngineToUi::Error { text });
+							self.send_prefs();
+						}
+					}
+				}
+			}
+
 			Internal::RecoveryAvailable { paths } => {
 				self.recovery_available = paths;
 				if self.ui_ready && !self.recovery_available.is_empty() {
@@ -4963,7 +5017,7 @@ impl Engine {
 				stats.input_latency(now),
 			)
 		};
-		let scratch=self.store.scratch_health();
+		let scratch = self.store.scratch_health();
 		self.to_ui(&EngineToUi::Status {
 			memory: MemoryStats {
 				scratch_full: scratch.full,

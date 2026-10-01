@@ -330,7 +330,25 @@ impl EngineHandle {
 		let _ = std::thread::Builder::new()
 			.name("stale-save-parts".into())
 			.spawn(move || fx_io::fs_util::sweep_parts(&recent));
-		let scratch_dir = prefs.string("scratch_dir").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(scratch_dir);
+		// AUDIT-FIX(X1): invalid configured storage is disclosed, not silently filtered.
+		let mut scratch_warning = None;
+		let scratch_dir = if fx_tiles::health::no_scratch_guards() {
+			prefs.string("scratch_dir").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(scratch_dir)
+		} else if let Some(path) = prefs.string("scratch_dir").filter(|p| !p.trim().is_empty()).map(PathBuf::from) {
+			match fx_tiles::health::validate_folder(&path) {
+				Ok(_) => path,
+				Err(e) => {
+					scratch_warning = Some(format!(
+						"Configured scratch {} is unavailable ({e}); using {} instead",
+						path.display(),
+						scratch_dir.display()
+					));
+					scratch_dir
+				}
+			}
+		} else {
+			scratch_dir
+		};
 		let mut config = TileStoreConfig::reference_machine(scratch_dir);
 		if let Some(mb) = prefs.number("memory_budget_mb").filter(|mb| *mb >= 256.0) {
 			config.hot_budget = (mb as u64) << 20;
@@ -342,6 +360,9 @@ impl EngineHandle {
 			}
 		}
 		let store = Arc::new(TileStore::new(config).map_err(std::io::Error::other)?);
+		if let Some(warning) = scratch_warning {
+			store.report_scratch_error(warning);
+		}
 		let (input, inputs) = crossbeam_channel::unbounded();
 		// AUDIT-FIX(D2): the crash reporter can ask a surviving engine for emergency snapshots.
 		recovery::register(input.clone());

@@ -177,7 +177,7 @@ export function openPrefsDialog(id) {
       { type: "num", label: "Recovery interval (minutes):", value: prefs.recovery_interval_minutes ?? 5, w: 70 },
       { type: "num", label: "Recovery after edits:", value: prefs.recovery_edit_count ?? 50, w: 70 },
       { type: "text", label: "Scratch Folder:", value: prefs.scratch_dir || "", width: 260 },
-      { type: "label", text: "The scratch folder must exist; it applies at the next start." },
+      { type: "label", text: "Scratch folder is validated on OK; free space is reported. Applies next start." },
     ],
     onOk: (v) => set({
       memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || prefs._memory?.hot_mb || 5120)),
