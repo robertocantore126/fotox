@@ -718,6 +718,8 @@ pub fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileSto
 			let tile_slot = match slot {
 				SlotEntry::Solid { value, .. } => TileSlot::Solid(PixelValue(*value)),
 				SlotEntry::Tile { chunk, .. } => {
+					// AUDIT-FIX(I1): reject forged lazy tile references before inserting them into the store.
+					file.validate_chunk(*chunk)?;
 					let backed = Backed {
 						source: file.clone(),
 						offset: chunk.offset,
@@ -832,7 +834,23 @@ pub fn encode_manifest(manifest: &Manifest, level: i32) -> Result<Vec<u8>, IoErr
 pub fn decode_manifest(payload: &[u8]) -> Result<Manifest, IoError> {
 	// A manifest is small; this is a hard ceiling against a hostile frame.
 	const LIMIT: usize = 1 << 30;
-	let json = zstd::bulk::decompress(payload, LIMIT).map_err(|e| IoError::Decode(format!("manifest zstd: {e}")))?;
+	// AUDIT-FIX(P5): stream bounded blocks instead of reserving the full one-GiB ceiling.
+	use std::io::Read;
+	let decoder = zstd::stream::read::Decoder::new(payload).map_err(|e| IoError::Decode(format!("manifest zstd: {e}")))?;
+	let mut decoder = decoder.take(LIMIT as u64 + 1);
+	let mut json = Vec::new();
+	let mut block = [0u8; 64 * 1024];
+	loop {
+		let count = decoder.read(&mut block).map_err(|e| IoError::Decode(format!("manifest zstd: {e}")))?;
+		if count == 0 {
+			break;
+		}
+		if json.len().saturating_add(count) > LIMIT {
+			return Err(IoError::Decode("manifest exceeds one GiB decoded limit".into()));
+		}
+		json.try_reserve(count).map_err(|e| IoError::Decode(format!("cannot allocate manifest: {e}")))?;
+		json.extend_from_slice(&block[..count]);
+	}
 	manifest_from_json(&json)
 }
 

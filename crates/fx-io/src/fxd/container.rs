@@ -144,7 +144,7 @@ pub struct ChunkRef {
 impl ChunkRef {
 	/// End offset of the chunk (exclusive).
 	pub fn end(self) -> u64 {
-		self.offset + self.len
+		self.offset.saturating_add(self.len)
 	}
 }
 
@@ -423,9 +423,23 @@ impl FxdFile {
 		&self.path
 	}
 
+	// AUDIT-FIX(I1): validate references before allocating payloads or registering lazy backed tiles.
+	pub fn validate_chunk(&self, at: ChunkRef) -> Result<(), IoError> {
+		let len = self.file.metadata()?.len().min(self.footer.end_offset);
+		if at.offset < HEADER_LEN || at.len < CHUNK_HEADER_LEN || at.offset.checked_add(at.len).is_none_or(|end| end > len) {
+			return Err(IoError::Decode(format!(
+				"chunk at {} with length {} exceeds saved file bounds ({len} bytes)",
+				at.offset, at.len
+			)));
+		}
+		Ok(())
+	}
+
 	/// Read a chunk at `at`, verifying the payload checksum. Returns its kind
 	/// and raw payload.
 	pub fn read_chunk(&self, at: ChunkRef) -> Result<(ChunkKind, Vec<u8>), IoError> {
+		// AUDIT-FIX(I1): footer lengths are untrusted, including apparently consistent headers.
+		self.validate_chunk(at)?;
 		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
 		read_exact_at(&self.file, &mut header, at.offset)?;
 		let kind = ChunkKind::from_byte(header[0])?;
@@ -443,7 +457,13 @@ impl FxdFile {
 			)));
 		}
 		let checksum = u32::from_le_bytes(header[12..16].try_into().expect("4-byte slice"));
-		let mut payload = vec![0u8; payload_len as usize];
+		// AUDIT-FIX(I1): allocation failures at the container boundary become errors.
+		let count = usize::try_from(payload_len).map_err(|_| IoError::Decode("chunk length exceeds address space".into()))?;
+		let mut payload = Vec::new();
+		payload
+			.try_reserve_exact(count)
+			.map_err(|e| IoError::Decode(format!("cannot allocate chunk payload: {e}")))?;
+		payload.resize(count, 0);
 		read_exact_at(&self.file, &mut payload, at.offset + CHUNK_HEADER_LEN)?;
 		if crc32fast::hash(&payload) != checksum {
 			return Err(IoError::Decode(format!("corrupt chunk at {}", at.offset)));
