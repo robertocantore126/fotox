@@ -5019,6 +5019,11 @@ fn is_pixel_job(command: &Command) -> bool {
 	matches!(
 		command,
 		Command::ApplyFilter { .. }
+			// AUDIT-FIX(P2): full pixel passes use the existing worker snapshot/history path.
+			| Command::Transform { .. }
+			| Command::Fill { .. }
+			| Command::ConvertToSmartObject { .. }
+			| Command::Rasterize { .. }
 			| Command::MergeLayers { .. }
 			| Command::Flatten
 			| Command::StampVisible
@@ -5059,6 +5064,11 @@ fn is_pixel_job(command: &Command) -> bool {
 /// The progress label of a pixel job, as Photoshop names the operation.
 fn pixel_job_label(command: &Command) -> String {
 	match command {
+		// AUDIT-FIX(P2): user-facing worker labels for newly offloaded commands.
+		Command::Transform { .. } => "Free Transform".into(),
+		Command::Fill { .. } => "Fill".into(),
+		Command::ConvertToSmartObject { .. } => "Convert to Smart Object".into(),
+		Command::Rasterize { .. } => "Rasterize".into(),
 		Command::ApplyFilter { filter, .. } => filter.label().to_owned(),
 		Command::MergeLayers { .. } => "Merge Layers".to_owned(),
 		Command::Flatten => "Flatten Image".to_owned(),
