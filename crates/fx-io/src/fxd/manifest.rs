@@ -47,6 +47,9 @@ pub struct Manifest {
 	/// Global Light angle (M6-T08).
 	#[serde(default = "default_global_light")]
 	pub global_light: f64,
+	/// Global Light altitude (for Bevel & Emboss).
+	#[serde(default = "default_global_altitude")]
+	pub global_altitude: f64,
 	/// Ruler guides (M7-T06).
 	#[serde(default)]
 	pub guides: Vec<fx_core::Guide>,
@@ -309,6 +312,7 @@ fn manifest_of(doc: &Document, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef
 		selected: doc.selected.clone(),
 		layers: doc.layers.iter().map(|layer| layer_entry(layer, tile_ref)).collect(),
 		global_light: doc.global_light,
+		global_altitude: doc.global_altitude,
 		guides: doc.guides.clone(),
 		patterns: doc.patterns.clone(),
 		channels: doc
@@ -501,6 +505,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.selected = manifest.selected.iter().copied().filter(|id| ids.contains(&id.0)).collect();
 	let next_layer_id = manifest.next_layer_id.max(ids.iter().max().map_or(1, |m| m + 1));
 	doc.global_light = manifest.global_light;
+	doc.global_altitude = manifest.global_altitude;
 	doc.guides = manifest.guides.clone();
 	doc.patterns = manifest.patterns.clone();
 	doc.annotations = manifest.annotations.clone();
@@ -622,10 +627,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 	layer.artboard = entry.artboard.clone();
 	if let Some(styles) = &entry.styles {
 		layer.styles = Some(styles.clone());
-		layer.effects = fx_core::styles::EffectKind::ALL
-			.iter()
-			.map(|_| TiledImage::derived(size.0, size.1, format))
-			.collect();
+		layer.effects = styles.caches(size.0, size.1, format);
 	}
 	layer.mask = match &entry.mask {
 		Some(mask) => Some(Mask {
@@ -836,6 +838,10 @@ pub fn decode_manifest(payload: &[u8]) -> Result<Manifest, IoError> {
 
 fn default_global_light() -> f64 {
 	120.0
+}
+
+fn default_global_altitude() -> f64 {
+	30.0
 }
 
 /// The bit depth of an RGBA format (vector mask caches are grey of it).

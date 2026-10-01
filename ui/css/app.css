@@ -250,8 +250,9 @@
 
 .toolbtn {
   position: relative;
-  width: 30px;
-  height: 25px;
+  width: 40px;
+  height: 31px;
+  flex: 0 0 auto; /* a short window scrolls the column, it never squashes the icons */
   display: grid;
   place-items: center;
   border-radius: var(--radius);
@@ -259,7 +260,9 @@
 }
 .toolbtn:hover { background: #4d4d4d; }
 .toolbtn.active { background: var(--bg-popup-hi); color: #fff; }
-.toolbtn.small { width: 24px; height: 20px; }
+.toolbtn > .ic { width: 22px; height: 22px; }
+.toolbtn.small { width: 28px; height: 23px; }
+.toolbtn.small > .ic { width: 17px; height: 17px; }
 .toolbtn .flyout-dot {
   position: absolute;
   right: 2px;

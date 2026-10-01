@@ -40,8 +40,29 @@ impl ModelSpec {
 		models_dir().join(self.id).join(file)
 	}
 
+	/// Every file is there at its expected size (a truncated or replaced
+	/// file is not installed; the SHA-256 is checked when it is downloaded,
+	/// hashing hundreds of MB on every check would be too slow).
 	pub fn installed(&self) -> bool {
-		self.files.iter().all(|f| self.path(f.file).exists())
+		self.files.iter().all(|f| complete(&self.path(f.file), f))
+	}
+}
+
+fn complete(path: &std::path::Path, f: &ModelFile) -> bool {
+	std::fs::metadata(path).is_ok_and(|m| m.is_file() && (f.bytes == 0 || m.len() == f.bytes))
+}
+
+/// The models being downloaded: one download per model at a time, so two
+/// requests never write the same `.part` file.
+static DOWNLOADING: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+/// Removes the model from [`DOWNLOADING`] however the download ends.
+struct DownloadGuard(&'static str);
+
+impl Drop for DownloadGuard {
+	fn drop(&mut self) {
+		let mut list = DOWNLOADING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		list.retain(|id| *id != self.0);
 	}
 }
 
@@ -114,15 +135,28 @@ pub fn models_dir() -> PathBuf {
 }
 
 /// Download every missing file of `spec` (checksummed; a mismatch deletes
-/// the file). `progress(done, total)` returns `false` to cancel.
+/// the file). A file of the wrong size is downloaded again. A second
+/// download of a model already downloading fails at once.
+/// `progress(done, total)` returns `false` to cancel.
 pub fn download(spec: &ModelSpec, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<(), AiError> {
+	{
+		let mut list = DOWNLOADING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		if list.contains(&spec.id) {
+			return Err(AiError::Download(format!("{} is already downloading", spec.name)));
+		}
+		list.push(spec.id);
+	}
+	let _guard = DownloadGuard(spec.id);
 	let total = spec.bytes();
 	let mut done = 0u64;
 	for f in spec.files {
 		let target = spec.path(f.file);
-		if target.exists() {
+		if complete(&target, f) {
 			done += f.bytes;
 			continue;
+		}
+		if target.exists() {
+			std::fs::remove_file(&target)?;
 		}
 		std::fs::create_dir_all(target.parent().expect("under the models folder"))?;
 		let part = target.with_extension("part");

@@ -197,10 +197,17 @@ pub struct DocumentInfo {
 	/// Layer Style ▸ Global Light, degrees.
 	#[serde(default = "default_global_light")]
 	pub global_light: f64,
+	/// Layer Style ▸ Global Light ▸ Altitude, degrees.
+	#[serde(default = "default_global_altitude")]
+	pub global_altitude: f64,
 }
 
 fn default_global_light() -> f64 {
 	120.0
+}
+
+fn default_global_altitude() -> f64 {
+	30.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

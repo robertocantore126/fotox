@@ -2,7 +2,8 @@
 //!
 //! The library is looked for, in order: `FOTOX_ORT_DYLIB`; next to the
 //! executable (`onnxruntime.dll` / `libonnxruntime.so` / `.dylib`); the
-//! models folder. Without it every AI feature says so (D-092).
+//! models folder; then the operating system's library search path. Without it
+//! every AI feature says so (D-092).
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -31,7 +32,14 @@ pub fn find_library() -> Option<PathBuf> {
 	}
 	let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(lib_name())));
 	let in_models = Some(crate::models::models_dir().join(lib_name()));
-	[beside, in_models].into_iter().flatten().find(|p| p.exists())
+	[beside, in_models].into_iter().flatten().find(|p| p.exists()).or_else(|| {
+		// Windows ships ONNX Runtime with some system components. Let Fotox use
+		// an installed runtime without requiring a redundant copy or an env var.
+		let directories = std::env::var_os("PATH")
+			.map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+			.unwrap_or_default();
+		directories.into_iter().map(|directory| directory.join(lib_name())).find(|path| path.is_file())
+	})
 }
 
 /// Load and initialise ONNX Runtime (once); the library's path, or why not.

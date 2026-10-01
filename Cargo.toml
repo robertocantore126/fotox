@@ -139,7 +139,7 @@ criterion = "0.8"
 
 # M13 (D-088): ONNX Runtime, loaded at run time (no build-time download);
 # HTTP for model downloads and the ComfyUI bridge; checksums.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-22"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-17"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 sha2 = "0.10"
 

@@ -335,7 +335,8 @@ const renderers = {
       }, icon(ic, "ic")));
     }
     // The presets below are mock-ups: the app shows only what works.
-    if (bridge.isNative) return h("div", {}, h("div", { class: "pblock-title", text: "Adjustment layers" }), grid);
+    // The tab already says "Adjustments": just the buttons, to leave the dock to Layers.
+    if (bridge.isNative) return grid;
     return h("div", {}, h("div", { class: "pblock-title", text: "Adjustment layers" }), grid,
       h("div", { class: "pblock-title", text: "Presets" }),
       h("div", { class: "plist" }, ["Brightness/Contrast 1", "Levels 1", "Curves 1"].map((n) => listRow({ label: n, thumb: h("span", { class: "pthumb adj" }, icon("i-adjust", "ic sm")) }))),

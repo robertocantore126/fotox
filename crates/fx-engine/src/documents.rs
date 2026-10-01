@@ -373,6 +373,7 @@ impl OpenDoc {
 			ppi: self.doc.ppi,
 			dirty: self.dirty,
 			global_light: self.doc.global_light,
+			global_altitude: self.doc.global_altitude,
 		}
 	}
 }

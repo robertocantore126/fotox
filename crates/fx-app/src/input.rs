@@ -140,7 +140,13 @@ impl InputState {
 				};
 				// A press with nothing held decides the route of the whole drag.
 				if state.is_pressed() && self.buttons == 0 {
-					self.route = self.route_at(*position);
+					// Ctrl + right-click belongs to the element inspector, including
+					// the native viewport. Pin the release to the same UI route.
+					self.route = if mouse_button == Some(MouseButton::Right) && self.modifiers.control_key() {
+						Route::Ui
+					} else {
+						self.route_at(*position)
+					};
 				}
 				match state {
 					ElementState::Pressed => self.buttons |= bit,

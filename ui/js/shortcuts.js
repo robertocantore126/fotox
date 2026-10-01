@@ -2,8 +2,8 @@
 
 import { state, setTool, emit } from "./state.js";
 import { runAction } from "./actions.js";
-import { closeAllDialogs, isDialogOpen } from "./dialogs.js";
-import { isPopupOpen } from "./popup.js";
+import { closeTopDialog, isDialogOpen } from "./dialogs.js";
+import { closeAll as closePopups, isPopupOpen } from "./popup.js";
 import { optionValue, setOption, showModeHint } from "./optionsbar.js";
 import { toolSlots } from "./data/tools.js";
 import * as bridge from "./native/bridge.js";
@@ -141,6 +141,9 @@ function modeHint(e) {
   showModeHint(index);
 }
 
+/** The shortcut actions a held key repeats. */
+const REPEATING = new Set(["hist:undo", "hist:redo", "zoom:in", "zoom:out"]);
+
 export function initShortcuts() {
   document.addEventListener("keydown", modeHint, true);
   document.addEventListener("keyup", modeHint, true);
@@ -149,9 +152,18 @@ export function initShortcuts() {
     const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
 
     if (e.key === "Escape") {
-      if (isDialogOpen()) { closeAllDialogs(); e.preventDefault(); return; }
+      // Innermost first: an open drop-down (a blend mode in Layer Style)
+      // closes alone, then the top dialog (the Gradient Editor over Layer
+      // Style) — Escape used to cancel every dialog at once, edits and all.
+      if (isPopupOpen()) { closePopups(); e.preventDefault(); return; }
+      if (isDialogOpen()) { closeTopDialog(); e.preventDefault(); return; }
       if (typing) { e.target.blur(); return; }
     }
+
+    // A dialog is modal: no tool letters, Tab, F or menu shortcuts behind it
+    // (with a button focused they used to switch tools, hide the panels or
+    // open Levels over Layer Style). Its own fields handle their keys.
+    if (isDialogOpen()) return;
 
     // A viewport key (M5-T04): the tools get it before the menus do.
     // Arrow keys move the selection outline (Shift = 10 px): the engine
@@ -168,6 +180,18 @@ export function initShortcuts() {
     // the hardness by 25 %, the number keys the opacity (1 = 10 % … 0 = 100 %;
     // two digits typed quickly = that exact value).
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !isDialogOpen() && brushKey(e)) {
+      e.preventDefault();
+      return;
+    }
+
+    // A held key repeats only what is meant to repeat (undo / redo, zoom
+    // in / out, and above: the viewport keys and the brush keys); toggles,
+    // tool picks, saves and dialogs fire once per press.
+    if (e.repeat) {
+      const held = combos.find(([c]) => c === comboOf(e));
+      if (held && REPEATING.has(held[2])) {
+        runAction({ label: held[1], a: held[2] });
+      }
       e.preventDefault();
       return;
     }

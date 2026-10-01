@@ -33,6 +33,8 @@ import { initComps } from "./native/comps-panel.js";
 import { initOverview } from "./native/overview-panels.js";
 import { IMPLEMENTED } from "./data/implemented.js";
 
+import { initInspector, isInspectorOpen } from "./inspector.js";
+
 const UI_VERSION = "0.1.0";
 
 /* ----------------------------------------------------------------- logo */
@@ -216,6 +218,7 @@ function refreshSwatches() {
 async function boot() {
   // First, so `body.native` is set before any part of the chrome is built.
   bridge.init();
+  initInspector();
   await loadSprite();
   // Option-bar pickers of native modules (M8).
   initGradients();
@@ -305,7 +308,7 @@ async function boot() {
   // popup, menu or dialog is open (the shell routes it; M0-T06).
   let directInput = true;
   on("overlays", () => {
-    const enabled = !isPopupOpen() && !isDialogOpen();
+    const enabled = !isPopupOpen() && !isDialogOpen() && !isInspectorOpen();
     if (enabled === directInput) return;
     directInput = enabled;
     bridge.send({ type: UI.DIRECT_INPUT, enabled });

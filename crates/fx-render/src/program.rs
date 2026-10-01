@@ -21,6 +21,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use fx_core::layer::Adjustment;
+use fx_core::styles::EffectKind;
 use fx_core::{BlendMode, Document, Layer, LayerId, LayerKind, Mask};
 use fx_tiles::{TILE_SIZE, TileSlot, TiledImage};
 
@@ -144,6 +145,10 @@ pub enum Op {
 	},
 	/// Pop the result `R`; new top = lerp(top, R, alpha × mask).
 	EndPassThrough { alpha: f32, mask: Option<MaskRef> },
+	/// Blending Options ▸ Channels (after a `BeginPassThrough`): pop the
+	/// result `R`; the new top is `R` with each unticked channel put back to
+	/// the backdrop's value (straight colour, `R`'s alpha).
+	EndChannels { channels: [bool; 3] },
 }
 
 impl Op {
@@ -161,7 +166,7 @@ impl Op {
 				quads.extend(mask_quad(mask));
 			}
 			Op::Adjust { mask, .. } | Op::EndIsolated { mask, .. } | Op::EndPassThrough { mask, .. } => quads.extend(mask_quad(mask)),
-			Op::BeginIsolated | Op::BeginPassThrough => {}
+			Op::BeginIsolated | Op::BeginPassThrough | Op::EndChannels { .. } => {}
 		}
 		quads
 	}
@@ -223,7 +228,7 @@ pub enum TileRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EffectRequest {
 	pub layer: LayerId,
-	/// [`fx_core::styles::EffectKind::index`].
+	/// its position in [`fx_core::styles::LayerStyles::slots`].
 	pub effect: u8,
 	pub level: usize,
 	pub x: u32,
@@ -269,7 +274,10 @@ pub fn build_program_checked(
 		missing: Vec::new(),
 		luts,
 		evicted,
-		global_light: doc.global_light,
+		light: fx_core::styles::GlobalLight {
+			angle: doc.global_light,
+			altitude: doc.global_altitude,
+		},
 	};
 	let ops = builder.list(&doc.layers);
 	if !builder.missing.is_empty() {
@@ -296,7 +304,7 @@ struct Builder<'a> {
 	missing: Vec<TileRequest>,
 	luts: &'a mut dyn FnMut(&Adjustment) -> Arc<Lut>,
 	evicted: &'a dyn Fn(&fx_tiles::TileHandle) -> bool,
-	global_light: f64,
+	light: fx_core::styles::GlobalLight,
 }
 
 /// What a source tile is: the program asks the engine for it in a different
@@ -538,46 +546,87 @@ impl Builder<'_> {
 	/// Layer styles (M6-T08): shadows and glows under `content`, the interior
 	/// effects and the stroke over it, each with its own mode and opacity ×
 	/// the layer's (fill does not reach them). A group's effects surround its
-	/// whole composite.
-	/// FAST: ignored on clipped layers; the mask shapes the effects like the
-	/// content (VERIFY "Layer Mask Hides Effects").
+	/// whole composite. Layer effect cache `i` draws `styles.slots()[i]`.
+	///
+	/// Blending Options: *Blend Interior Effects as Group* composites the
+	/// content and the interior effects (overlays, satin, inner glow) in an
+	/// isolated group that takes the layer's mode and opacity; *Layer / Vector
+	/// Mask Hides Effects* decide whether the masks cut the effects (off, the
+	/// effects were drawn from the masked shape already, see
+	/// `fx_engine::effects`); *Channels* keeps the unticked channels of the
+	/// backdrop.
+	///
+	/// A clipped layer keeps its effects, as in Photoshop: each one is drawn
+	/// source-atop like the content, so the base's alpha bounds them too.
 	fn with_effects(&mut self, layer: &Layer, clip: bool, content: Vec<Op>) -> Vec<Op> {
-		let Some(styles) = layer
-			.styles
-			.as_ref()
-			.filter(|_| !clip && layer.effects.len() == fx_core::styles::EffectKind::ALL.len())
-		else {
+		let Some(styles) = layer.styles.as_ref() else {
 			return content;
 		};
+		let slots = styles.slots();
+		if layer.effects.len() != slots.len() {
+			return content;
+		}
+		let grouped = styles.interior_as_group && !matches!(layer.kind, LayerKind::Group { .. });
+		let interior = |kind: EffectKind| {
+			matches!(
+				kind,
+				EffectKind::PatternOverlay | EffectKind::GradientOverlay | EffectKind::ColorOverlay | EffectKind::Satin | EffectKind::InnerGlow
+			)
+		};
 		let mut below = Vec::new();
+		let mut inside = Vec::new();
 		let mut above = Vec::new();
-		for kind in fx_core::styles::EffectKind::ALL {
-			let Some(params) = styles.effect(kind, self.global_light) else { continue };
-			let ops = self.effect(layer, kind, &params);
-			if kind.below_content() {
+		for (index, slot) in slots.iter().enumerate() {
+			let Some(params) = styles.effect_at(*slot, self.light) else { continue };
+			let in_group = grouped && interior(slot.kind);
+			// Inside the group the layer's opacity applies once, at its end.
+			let alpha = if in_group { params.opacity } else { layer.opacity * params.opacity };
+			// In the interior group the group itself is clipped, not its parts.
+			let ops = self.effect(layer, index, &params, alpha, styles, clip && !in_group);
+			if slot.kind.below_content() {
 				below.extend(ops);
+			} else if in_group {
+				inside.extend(ops);
 			} else {
 				above.extend(ops);
 			}
 		}
-		below.extend(content);
-		below.extend(above);
-		below
+		let mut out = below;
+		if grouped {
+			out.push(Op::BeginIsolated);
+			out.extend(self.content(layer, BlendMode::Normal, layer.fill, false));
+			out.extend(inside);
+			out.push(Op::EndIsolated {
+				blend: layer.blend,
+				alpha: layer.opacity,
+				mask: None,
+				clip,
+			});
+		} else {
+			out.extend(content);
+		}
+		out.extend(above);
+		if styles.channels != [true; 3] && !out.is_empty() {
+			out.insert(0, Op::BeginPassThrough);
+			out.push(Op::EndChannels { channels: styles.channels });
+		}
+		out
 	}
 
-	/// The op of one layer-style effect: its cache, composited like a layer.
-	fn effect(&mut self, layer: &Layer, kind: fx_core::styles::EffectKind, params: &fx_core::styles::EffectParams) -> Vec<Op> {
-		let alpha = layer.opacity * params.opacity;
+	/// The op of one layer-style effect: its cache (`index` into the layer's
+	/// effects), composited like a layer at `alpha` (source-atop when `clip`).
+	#[allow(clippy::too_many_arguments)]
+	fn effect(&mut self, layer: &Layer, index: usize, params: &fx_core::styles::EffectParams, alpha: f32, styles: &fx_core::styles::LayerStyles, clip: bool) -> Vec<Op> {
 		if alpha <= 0.0 {
 			return Vec::new();
 		}
-		let Some((alpha, mask, second)) = self.mask(layer).apply(alpha) else {
+		let Some((alpha, mask, second)) = self.mask_with(layer, styles.layer_mask_hides, styles.vector_mask_hides).apply(alpha) else {
 			return Vec::new();
 		};
-		let Some(cache) = layer.effects.get(kind.index()) else {
+		let Some(cache) = layer.effects.get(index) else {
 			return Vec::new();
 		};
-		let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Effect(kind.index() as u8)) else {
+		let Some(quad) = self.quad(cache, (0, 0), layer.id, SourceTile::Effect(index as u8)) else {
 			return Vec::new();
 		};
 		if quad.all_empty() {
@@ -590,7 +639,7 @@ impl Builder<'_> {
 				blend: params.blend,
 				alpha,
 				mask,
-				clip: false,
+				clip,
 				blend_if: None,
 			},
 			second,
@@ -781,8 +830,14 @@ impl Builder<'_> {
 	/// The layer's masks over this tile: the pixel mask times the vector mask
 	/// (M10-T06), each with its own enable and density.
 	fn mask(&mut self, layer: &Layer) -> MaskEval {
-		let pixel = self.pixel_mask(layer);
-		let vector = match layer.vector_mask.as_ref().filter(|v| v.enabled) {
+		self.mask_with(layer, true, true)
+	}
+
+	/// The layer's masks, the pixel mask only with `pixel`, the vector mask
+	/// only with `vector` (a layer style's Mask Hides Effects).
+	fn mask_with(&mut self, layer: &Layer, pixel: bool, vector: bool) -> MaskEval {
+		let pixel = if pixel { self.pixel_mask(layer) } else { Single::Constant(1.0) };
+		let vector = match layer.vector_mask.as_ref().filter(|v| v.enabled && vector) {
 			Some(vm) => match self.quad(&vm.cache, (0, 0), layer.id, SourceTile::VectorMask) {
 				Some(quad) => self.eval_quad(quad, 1.0 - vm.density),
 				None => Single::Constant(1.0),
@@ -1044,6 +1099,7 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			alpha.to_bits().hash(h);
 			hash_mask(mask, h);
 		}
+		Op::EndChannels { channels } => channels.hash(h),
 	}
 }
 

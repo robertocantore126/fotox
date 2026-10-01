@@ -127,6 +127,18 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 				top[i] += (result[i] - top[i]) * t;
 			}
 		}
+		Op::EndChannels { channels } => {
+			let result = stack.pop().expect("balanced");
+			let top = stack.last_mut().expect("stack never empty");
+			let backdrop = unpremultiply(*top);
+			let mut c = unpremultiply(result);
+			for k in 0..3 {
+				if !channels[k] {
+					c[k] = backdrop[k];
+				}
+			}
+			*top = [c[0] * result[3], c[1] * result[3], c[2] * result[3], result[3]];
+		}
 	}
 }
 

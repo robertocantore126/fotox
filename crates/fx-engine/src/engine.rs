@@ -330,6 +330,10 @@ struct Engine {
 	/// Move tool ▸ Show Transform Controls: the box of (document, generation,
 	/// layer), cached (finding a layer's content bounds scans its tiles).
 	controls: Option<(DocId, u64, LayerId, Option<[f64; 4]>)>,
+	/// The Free Transform box up now was started by a press on those
+	/// controls' handles: it applies itself when the drag ends, as in
+	/// Photopea (no Enter or commit button). Ctrl+T boxes still wait.
+	controls_commit: bool,
 }
 
 /// How long the pointer must rest before a dragged transform is previewed at
@@ -485,6 +489,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		smart_children: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
+		controls_commit: false,
 		derived_running: false,
 		derived_waiting: HashMap::new(),
 	};
@@ -697,6 +702,7 @@ impl Engine {
 				if self.transform.is_none() {
 					return changed;
 				}
+				self.controls_commit = true;
 			}
 		}
 		// A Free Transform box takes every pointer event while it is up.
@@ -704,7 +710,12 @@ impl Engine {
 			&& *doc == doc_id
 		{
 			let zoom = self.docs.get(doc_id).map_or(1.0, |open| open.view.view.zoom);
-			let update = session.pointer(&event, zoom);
+			let mut update = session.pointer(&event, zoom);
+			// A drag on the transform controls ends: apply it now (one
+			// history step per drag); an untouched box just goes away.
+			if self.controls_commit && event.kind != PointerKind::Down && update == (TransformUpdate::Changed { dragging: false }) {
+				update = session.commit();
+			}
 			changed.cursor = Some(session.cursor());
 			self.transform_update(doc_id, update);
 			return changed;
@@ -1970,6 +1981,7 @@ impl Engine {
 	/// screen (a commit, until its job is done).
 	fn end_transform(&mut self, keep_preview: bool) {
 		self.placing = None;
+		self.controls_commit = false;
 		let Some((doc_id, _)) = self.transform.take() else { return };
 		self.transform_refine = None;
 		// Whatever preview job is running is now stale.
@@ -3289,6 +3301,30 @@ impl Engine {
 					styles: None,
 				})
 				.collect(),
+			// Layer Style ▸ Create Layers: the active layer's effects as layers.
+			"layer:create-effect-layers" => match active {
+				Some(id) => vec![Command::CreateEffectLayers { layer: LayerRef::Id(id) }],
+				None => return true,
+			},
+			// Layer Style ▸ Hide / Show All Effects: the selected layers' "Effects"
+			// eye, their effects kept.
+			"layer:hide-effects" | "layer:show-effects" => {
+				let visible = id == "layer:show-effects";
+				doc.doc
+					.selected
+					.iter()
+					.filter_map(|&l| {
+						let mut styles = doc.doc.layer(l)?.styles.clone()?;
+						(styles.effects_visible != visible).then(|| {
+							styles.effects_visible = visible;
+							Command::SetLayerStyle {
+								layer: LayerRef::Id(l),
+								styles: Some(styles),
+							}
+						})
+					})
+					.collect()
+			}
 			"layer:merge-visible" => return true,
 			"layer:group" | "layer:group-from" | "layer:duplicate" | "layer:via-copy" | "layer:delete" | "layer:delete-hidden" => {
 				// Nothing selected / nothing hidden: nothing to do, and no toast.

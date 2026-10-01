@@ -10,13 +10,14 @@
 //! Every content change of the document marks every effect cache dirty
 //! ([`invalidate`]); only the visible tiles are recomputed.
 
-use fx_core::styles::{BevelStyle, EffectExtra, EffectKind, EffectParams, StrokePosition};
+use fx_core::styles::{BevelStyle, EffectExtra, EffectKind, EffectParams, GlobalLight, StrokePosition};
 use fx_core::{Document, LayerId, LayerKind};
-use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileSlot, TileStore, TiledImage};
+use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileSlot, TileStore};
 use rayon::prelude::*;
 
 /// Mark every effect tile dirty (or rebuild the caches after a canvas size
-/// change). FAST: called on every content change, whatever layer changed.
+/// change, or when the style's list of effects changed). FAST: called on
+/// every content change, whatever layer changed.
 pub fn invalidate(doc: &mut Document) {
 	let mut ids = Vec::new();
 	doc.walk(|layer, _| {
@@ -27,9 +28,11 @@ pub fn invalidate(doc: &mut Document) {
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	for id in ids {
 		let Some(layer) = doc.layer_mut(id) else { continue };
-		let resized = layer.effects.len() != EffectKind::ALL.len() || layer.effects.iter().any(|c| c.width() != w || c.height() != h || c.format() != format);
+		let Some(styles) = &layer.styles else { continue };
+		let slots = styles.slots().len();
+		let resized = layer.effects.len() != slots || layer.effects.iter().any(|c| c.width() != w || c.height() != h || c.format() != format);
 		if resized {
-			layer.effects = EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect();
+			layer.effects = styles.caches(w, h, format);
 		} else {
 			for cache in &mut layer.effects {
 				cache.mark_all_dirty();
@@ -38,17 +41,43 @@ pub fn invalidate(doc: &mut Document) {
 	}
 }
 
-/// Compute the requested effect tiles `(layer, effect, level, tx, ty)`.
+/// Compute the requested effect tiles `(layer, effect, level, tx, ty)`;
+/// `effect` indexes the layer's [`fx_core::styles::LayerStyles::slots`].
 pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(LayerId, u8, usize, u32, u32)]) -> usize {
-	let global_light = doc.global_light;
+	let light = GlobalLight {
+		angle: doc.global_light,
+		altitude: doc.global_altitude,
+	};
 	let t = TILE_SIZE as i64;
 	let mut bounds_of: std::collections::HashMap<LayerId, Option<(f64, f64, f64, f64)>> = std::collections::HashMap::new();
+	let resolved: Vec<_> = requests
+		.iter()
+		.map(|&(id, effect, level, tx, ty)| {
+			let styles = doc.layer(id).and_then(|l| l.styles.clone());
+			let params = styles.as_ref().and_then(|s| {
+				let slot = *s.slots().get(effect as usize)?;
+				s.effect_at(slot, light)
+			});
+			let reach = params
+				.as_ref()
+				.map_or(0, |p| (fx_core::styles::LayerStyles::reach(p) / f64::from(1u32 << level)).ceil() as i64 + 1);
+			(id, effect, level, tx, ty, styles, params, reach)
+		})
+		.collect();
+	// A layer drawn alone (a group, or a mask that shapes the effects) is
+	// composited once per tile, at the widest reach its effects there need.
+	let mut alone = AloneAlpha::default();
+	for (id, _, level, tx, ty, _, params, reach) in &resolved {
+		if params.is_some() {
+			let widest = alone.reach.entry((*id, *level, *tx, *ty)).or_insert(0);
+			*widest = (*widest).max(*reach);
+		}
+	}
 	// Gather the inputs first (drawing any source tile that is missing), then
 	// compute in parallel.
 	let mut jobs = Vec::new();
-	for &(id, effect, level, tx, ty) in requests {
-		let Some(kind) = EffectKind::from_index(effect as usize) else { continue };
-		let Some(params) = doc.layer(id).and_then(|l| l.styles.as_ref()).and_then(|s| s.effect(kind, global_light)) else {
+	for (id, effect, level, tx, ty, styles, params, reach) in resolved {
+		let (Some(styles), Some(params)) = (styles, params) else {
 			// Disabled since the frame asked: leave the tile empty.
 			if let Some(cache) = doc.layer_mut(id).and_then(|l| l.effects.get_mut(effect as usize)) {
 				cache.set_derived_slot(level, tx, ty, TileSlot::Empty);
@@ -56,10 +85,8 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 			continue;
 		};
 		let scale = f64::from(1u32 << level);
-		let reach = (fx_core::styles::LayerStyles::reach(&params) / scale).ceil() as i64 + 1;
-		let (x0, y0) = (i64::from(tx) * t - reach, i64::from(ty) * t - reach);
 		let side = (t + 2 * reach) as usize;
-		let alpha = read_alpha(doc, store, id, level, (x0, y0), side);
+		let alpha = source_alpha(doc, store, &mut alone, id, &styles, (level, tx, ty), reach);
 		// Nothing to cast, glow or outline around here.
 		if alpha.iter().all(|&a| a == 0.0) {
 			if let Some(cache) = doc.layer_mut(id).and_then(|l| l.effects.get_mut(effect as usize)) {
@@ -67,43 +94,39 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 			}
 			continue;
 		}
-		// Pattern Overlay's pattern (M12-T04), looked up once.
+		// Pattern Overlay's pattern (M12-T04), a pattern-filled stroke's, or
+		// Bevel ▸ Texture's, looked up once.
 		let pattern = match &params.extra {
 			EffectExtra::Pattern { id: pid, .. } => doc.patterns.iter().find(|p| p.id == *pid).cloned(),
-			// Bevel ▸ Texture's pattern.
 			EffectExtra::Bevel { texture: Some(t), .. } => doc.patterns.iter().find(|p| p.id == t.pattern).cloned(),
 			_ => None,
 		};
 		// Align with Layer / Link with Layer: the layer's box, once per layer.
-		let textured_aligned = matches!(&params.extra, EffectExtra::Bevel { texture: Some(t), .. } if t.align);
-		let bounds = if params.extra.aligned() || textured_aligned {
+		let bounds = if params.extra.aligned() {
 			*bounds_of.entry(id).or_insert_with(|| layer_bounds(doc, store, id))
 		} else {
 			None
 		};
-		let noise = doc.layer(id).and_then(|l| l.styles.as_ref()).map_or(0.0, |s| s.noise(kind));
-		let contour = doc.layer(id).and_then(|l| l.styles.as_ref()).map_or(fx_core::styles::Contour::Linear, |s| s.contour(kind));
-		jobs.push((id, effect, level, tx, ty, params, scale, reach as usize, side, alpha, pattern, bounds, noise, contour));
+		jobs.push((id, effect, level, tx, ty, params, scale, reach as usize, side, alpha, pattern, bounds));
 	}
 	let format = doc.color.depth.rgba_format();
 	let size = (doc.width, doc.height);
 	let tiles: Vec<_> = jobs
 		.into_par_iter()
-		.map(|(id, effect, level, tx, ty, params, scale, reach, side, alpha, pattern, bounds, noise, contour)| {
+		.map(|(id, effect, level, tx, ty, params, scale, reach, side, alpha, pattern, bounds)| {
 			// Document point of the alpha window's first pixel centre.
 			let t = TILE_SIZE as f64;
 			let origin = ((f64::from(tx) * t - reach as f64 + 0.5) * scale, (f64::from(ty) * t - reach as f64 + 0.5) * scale);
 			let texture = Texture { pattern: pattern.as_ref(), origin, bounds };
 			let mut coverage = compute(&params, &alpha, side, reach, scale, &texture);
-			if contour != fx_core::styles::Contour::Linear {
-				for c in &mut coverage {
-					*c = contour.apply(f64::from(*c)) as f32;
-				}
-			}
-			if noise > 0.0 {
-				add_noise(&mut coverage, noise, (tx, ty));
+			finish(&mut coverage, &params, &alpha, side, reach);
+			let q = params.quality;
+			if q.noise > 0.0 {
+				add_noise(&mut coverage, q.noise, (tx, ty));
 			}
 			let buffer = match &params.extra {
+				// A glow's gradient: coloured along its falloff (the coverage).
+				EffectExtra::Glow { gradient: Some((g, reverse)), .. } => paint_glow(&coverage, format, g, *reverse, q.jitter, (tx, ty)),
 				// Per-pixel colour: the gradient / pattern at the document point.
 				EffectExtra::Gradient { gradient: g, .. } => {
 					let placed = match bounds {
@@ -148,6 +171,135 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 	count
 }
 
+/// The alpha an effect is drawn from. Photoshop draws a layer's effects
+/// from its masked shape unless *Layer / Vector Mask Hides Effects* is on
+/// (then the mask cuts the finished effect instead, in the compositor):
+/// with a mask that shapes the effects, the layer is composited alone with
+/// that mask; a group from its content alone; otherwise its own alpha.
+fn source_alpha(doc: &mut Document, store: &TileStore, alone: &mut AloneAlpha, id: LayerId, styles: &fx_core::styles::LayerStyles, (level, tx, ty): (usize, u32, u32), reach: i64) -> Vec<f32> {
+	let t = TILE_SIZE as i64;
+	let side = (t + 2 * reach) as usize;
+	let origin = (i64::from(tx) * t - reach, i64::from(ty) * t - reach);
+	let Some(layer) = doc.layer(id) else { return vec![0.0; side * side] };
+	let pixel = layer.mask.as_ref().is_some_and(|m| m.enabled) && !styles.layer_mask_hides;
+	let vector = layer.vector_mask.as_ref().is_some_and(|m| m.enabled) && !styles.vector_mask_hides;
+	if matches!(layer.kind, LayerKind::Group { .. }) || pixel || vector {
+		return alone.get(doc, store, (id, pixel, vector), (level, tx, ty), reach);
+	}
+	read_alpha(doc, store, id, level, origin, side)
+}
+
+/// The alpha of layers drawn alone, for one [`draw_effect_requests`] call:
+/// the stripped document is built once per layer (and mask choice), and each
+/// tile is composited once, at the widest reach any of its effects asked
+/// for; narrower effects take the middle of that window.
+#[derive(Default)]
+struct AloneAlpha {
+	/// The widest reach asked for, per `(layer, level, tx, ty)`.
+	reach: std::collections::HashMap<(LayerId, usize, u32, u32), i64>,
+	docs: std::collections::HashMap<(LayerId, bool, bool), Document>,
+	/// The composited windows: `(reach, alpha)`.
+	tiles: std::collections::HashMap<(LayerId, bool, bool, usize, u32, u32), (i64, Vec<f32>)>,
+}
+
+impl AloneAlpha {
+	fn get(&mut self, doc: &Document, store: &TileStore, (id, pixel, vector): (LayerId, bool, bool), (level, tx, ty): (usize, u32, u32), reach: i64) -> Vec<f32> {
+		let t = TILE_SIZE as i64;
+		let key = (id, pixel, vector, level, tx, ty);
+		if !self.tiles.contains_key(&key) {
+			let wide = self.reach.get(&(id, level, tx, ty)).copied().unwrap_or(reach).max(reach);
+			let sub = self.docs.entry((id, pixel, vector)).or_insert_with(|| alone_doc(doc, id, pixel, vector));
+			let side = (t + 2 * wide) as usize;
+			let origin = (i64::from(tx) * t - wide, i64::from(ty) * t - wide);
+			self.tiles.insert(key, (wide, alone_alpha(sub, store, level, origin, side)));
+		}
+		let (wide, alpha) = &self.tiles[&key];
+		let (wide_side, side) = ((t + 2 * wide) as usize, (t + 2 * reach) as usize);
+		if wide_side == side {
+			return alpha.clone();
+		}
+		let skip = (wide - reach) as usize;
+		let mut out = Vec::with_capacity(side * side);
+		for row in alpha.chunks_exact(wide_side).skip(skip).take(side) {
+			out.extend_from_slice(&row[skip..skip + side]);
+		}
+		out
+	}
+}
+
+/// The finish of a shadow's, glow's or satin's falloff: the glow's Range,
+/// the Contour (anti-aliased or not), and Layer Knocks Out Drop Shadow.
+/// `coverage` is the output tile; `alpha` the layer's alpha over the tile
+/// and its apron (`reach` wide).
+fn finish(coverage: &mut [f32], params: &EffectParams, alpha: &[f32], side: usize, reach: usize) {
+	let q = params.quality;
+	let glow = matches!(params.kind, EffectKind::OuterGlow | EffectKind::InnerGlow);
+	// Range: the part of the falloff the contour spans. Scaled so that the
+	// default 50 % is the falloff as computed. VERIFY against Photoshop.
+	let k = if glow { 0.5 / q.range.max(0.01) } else { 1.0 };
+	if k != 1.0 || q.contour != fx_core::styles::Contour::Linear {
+		for c in coverage.iter_mut() {
+			if *c > 0.0 {
+				let t = (f64::from(*c) * k).min(1.0);
+				*c = q.contour.apply_smooth(t, q.anti_aliased) as f32;
+			}
+		}
+	}
+	if params.kind == EffectKind::DropShadow && q.knocks_out {
+		let t = TILE_SIZE as usize;
+		for y in 0..t {
+			for x in 0..t {
+				let a = alpha[(y + reach) * side + x + reach];
+				coverage[y * t + x] *= 1.0 - a;
+			}
+		}
+	}
+}
+
+/// A glow painted with its gradient: each pixel's colour is the gradient at
+/// its place in the falloff (the left stop at the edge, where the glow is
+/// strongest), scattered by Jitter; the alpha is the gradient's, faded in
+/// over the glow's last reach. VERIFY the fade against Photoshop.
+fn paint_glow(coverage: &[f32], format: PixelFormat, gradient: &fx_core::gradient::Gradient, reverse: bool, jitter: f64, (tx, ty): (u32, u32)) -> TileBuffer {
+	let t = TILE_SIZE as usize;
+	let mut buffer = TileBuffer::zeroed(format);
+	for (i, &c) in coverage.iter().enumerate() {
+		if c <= 0.0 {
+			continue;
+		}
+		let mut pos = 1.0 - f64::from(c.min(1.0));
+		if jitter > 0.0 {
+			let (x, y) = (tx as usize * t + i % t, ty as usize * t + i / t);
+			let mut h = (x as u32).wrapping_mul(0x9e37_79b1) ^ (y as u32).wrapping_mul(0x85eb_ca6b);
+			h ^= h >> 15;
+			h = h.wrapping_mul(0x2c1b_3c6d);
+			h ^= h >> 12;
+			pos += (f64::from(h & 0xffff) / 65_535.0 - 0.5) * jitter;
+		}
+		let pos = pos.clamp(0.0, 1.0);
+		let rgba = gradient.eval(if reverse { 1.0 - pos } else { pos });
+		let fade = (f64::from(c) / 0.05).min(1.0);
+		let a = rgba[3] * fade;
+		match format {
+			PixelFormat::Rgba16 => {
+				let px = buffer.as_u16_mut();
+				for k in 0..3 {
+					px[i * 4 + k] = (rgba[k].clamp(0.0, 1.0) * 65535.0).round() as u16;
+				}
+				px[i * 4 + 3] = (a.clamp(0.0, 1.0) * 65535.0).round() as u16;
+			}
+			_ => {
+				let px = buffer.bytes_mut();
+				for k in 0..3 {
+					px[i * 4 + k] = (rgba[k].clamp(0.0, 1.0) * 255.0).round() as u8;
+				}
+				px[i * 4 + 3] = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+			}
+		}
+	}
+	buffer
+}
+
 /// A layer's content box at level 0, `(x, y, w, h)` in document pixels —
 /// what Align with Layer places a gradient or pattern over. Shapes and Smart
 /// Objects from their geometry; pixel layers from their tiles; text from its
@@ -176,38 +328,46 @@ fn layer_bounds(doc: &Document, store: &TileStore, id: LayerId) -> Option<(f64, 
 	}
 }
 
-/// A styled group's alpha: the composite of its content alone (drawn Normal
-/// at full opacity, without its own styles, as Photoshop computes a group's
-/// effects), over the region.
-fn group_alpha(doc: &Document, store: &TileStore, id: LayerId, level: usize, origin: (i64, i64), side: usize) -> Vec<f32> {
+/// Layer `id` alone: drawn Normal at full opacity and fill, without its own
+/// styles (as Photoshop computes a group's effects), keeping its pixel mask
+/// with `pixel_mask` and its vector mask with `vector_mask`.
+fn alone_doc(doc: &Document, id: LayerId, pixel_mask: bool, vector_mask: bool) -> Document {
 	let wanted: std::collections::HashSet<LayerId> = std::iter::once(id).collect();
 	let mut sub = doc.clone();
 	sub.layers = crate::export::keep_layers(&doc.layers, &wanted);
 	// The group itself: no styles (no recursion into its own effects), Normal,
 	// opaque, no mask; its enclosing groups likewise.
-	fn plain(layers: &mut [std::sync::Arc<fx_core::Layer>], target: LayerId) {
+	fn plain(layers: &mut [std::sync::Arc<fx_core::Layer>], target: LayerId, keep: (bool, bool)) {
 		for layer in layers {
 			let layer = std::sync::Arc::make_mut(layer);
+			let own = layer.id == target;
 			layer.styles = None;
 			layer.effects = Vec::new();
 			layer.opacity = 1.0;
 			layer.fill = 1.0;
 			layer.visible = true;
 			layer.clipped = false;
-			layer.mask = None;
-			layer.vector_mask = None;
+			if !(own && keep.0) {
+				layer.mask = None;
+			}
+			if !(own && keep.1) {
+				layer.vector_mask = None;
+			}
 			layer.blend = fx_core::BlendMode::Normal;
 			// Down the path only: the group's own children are its content.
-			if layer.id != target
-				&& let LayerKind::Group { children, .. } = &mut layer.kind
-			{
-				plain(children, target);
+			if !own && let LayerKind::Group { children, .. } = &mut layer.kind {
+				plain(children, target, keep);
 			}
 		}
 	}
-	plain(&mut sub.layers, id);
+	plain(&mut sub.layers, id, (pixel_mask, vector_mask));
+	sub
+}
+
+/// The alpha of `sub` (an [`alone_doc`]) over the region.
+fn alone_alpha(sub: &mut Document, store: &TileStore, level: usize, origin: (i64, i64), side: usize) -> Vec<f32> {
 	let rect = (origin.0, origin.1, origin.0 + side as i64, origin.1 + side as i64);
-	match crate::ai::composite_rect(&mut sub, store, level, rect) {
+	match crate::ai::composite_rect(sub, store, level, rect) {
 		Ok(pixels) => pixels.iter().map(|p| p[3]).collect(),
 		Err(error) => {
 			tracing::warn!("a group's style source failed: {error}");
@@ -223,9 +383,6 @@ fn read_alpha(doc: &mut Document, store: &TileStore, id: LayerId, level: usize, 
 	let t = TILE_SIZE as i64;
 	let scale = 1i64 << level;
 	let Some(layer) = doc.layer(id) else { return out };
-	if matches!(layer.kind, LayerKind::Group { .. }) {
-		return group_alpha(doc, store, id, level, origin, side);
-	}
 	let offset = match &layer.kind {
 		LayerKind::Pixel { offset, .. } => {
 			let off = |o: i32| (o as i64 * 2 + scale).div_euclid(scale * 2);
@@ -347,6 +504,13 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 	let morph = params.morph / scale;
 	let blur = params.blur / scale;
 	let full: Vec<f32> = match params.kind {
+		// Precise: the exact distance to the edge, so corners stay sharp
+		// (Softer blurs the matte).
+		EffectKind::OuterGlow if params.quality.precise => {
+			let feature: Vec<bool> = alpha.iter().map(|&a| a >= 0.5).collect();
+			let d = fx_ops::morph::edt_2d(&feature, side, side);
+			alpha.iter().zip(d).map(|(&a, d)| a.max(precise_falloff(d, morph, blur))).collect()
+		}
 		EffectKind::DropShadow | EffectKind::OuterGlow => {
 			let mut src: Vec<f32> = (0..side * side)
 				.map(|i| at(alpha, (i % side) as i64 - off.0, (i / side) as i64 - off.1))
@@ -370,13 +534,18 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 		// M12-T04: Inner Glow (edge source) is an inner shadow without offset;
 		// from the centre it is the rest of the inside.
 		EffectKind::InnerGlow => {
-			let mut src: Vec<f32> = alpha.iter().map(|a| 1.0 - a).collect();
-			if morph > 0.0 {
-				src = dilate(&src, side, morph);
-			}
-			let blurred = box_blur3(&src, side, blur / 2.0);
-			let center = params.extra == EffectExtra::CenterGlow;
-			blurred.iter().zip(alpha).map(|(s, a)| if center { (1.0 - s).max(0.0) * a } else { s * a }).collect()
+			let center = matches!(params.extra, EffectExtra::Glow { center: true, .. });
+			let edge: Vec<f32> = if params.quality.precise {
+				let feature: Vec<bool> = alpha.iter().map(|&a| a < 0.5).collect();
+				fx_ops::morph::edt_2d(&feature, side, side).into_iter().map(|d| precise_falloff(d, morph, blur)).collect()
+			} else {
+				let mut src: Vec<f32> = alpha.iter().map(|a| 1.0 - a).collect();
+				if morph > 0.0 {
+					src = dilate(&src, side, morph);
+				}
+				box_blur3(&src, side, blur / 2.0)
+			};
+			edge.iter().zip(alpha).map(|(s, a)| if center { (1.0 - s).max(0.0) * a } else { s * a }).collect()
 		}
 		EffectKind::Satin => {
 			let (o, invert) = match &params.extra {
@@ -404,15 +573,19 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 				highlight,
 				technique,
 				contour,
+				contour_range,
+				contour_anti_aliased,
 				gloss,
 				anti_aliased,
 				texture: tex,
+				stroke,
 			} => {
 				// The texture's relief per alpha pixel (0 = flat).
 				let relief = match (tex, texture.pattern) {
 					(Some(t), Some(p)) if t.depth.abs() > 0.0 => {
 						let k = (t.scale / 100.0).max(0.01);
 						let o = if t.align { texture.bounds.map_or((0.0, 0.0), |b| (b.0, b.1)) } else { (0.0, 0.0) };
+						let o = (o.0 + t.phase.0, o.1 + t.phase.1);
 						let amount = (t.depth / 100.0).clamp(-10.0, 10.0) as f32 * if t.invert { -1.0 } else { 1.0 };
 						let r: Vec<f32> = (0..side * side)
 							.map(|i| {
@@ -436,37 +609,23 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 					highlight: *highlight,
 					technique: *technique,
 					contour: *contour,
+					contour_range: *contour_range,
+					contour_anti_aliased: *contour_anti_aliased,
 					gloss: *gloss,
 					anti_aliased: *anti_aliased,
 				};
-				bevel(alpha, side, &shape, relief.as_deref())
+				// Stroke Emboss: the bevel follows the stroke's ring, raised
+				// like an inner bevel of it.
+				match stroke {
+					Some((size, position)) => bevel(&stroke_ring(alpha, side, size / scale, *position), side, &shape, relief.as_deref()),
+					None => bevel(alpha, side, &shape, relief.as_deref()),
+				}
 			}
 			_ => vec![0.0; side * side],
 		},
 		EffectKind::Stroke => {
 			let (size, position) = params.stroke.unwrap_or((0.0, StrokePosition::Outside));
-			let size = size / scale;
-			let (outer, inner) = match position {
-				StrokePosition::Outside => (size, 0.0),
-				StrokePosition::Inside => (0.0, size),
-				StrokePosition::Center => (size / 2.0, size / 2.0),
-			};
-			let mut cov = vec![0.0f32; side * side];
-			if outer > 0.0 {
-				let ring = dilate(alpha, side, outer);
-				for i in 0..cov.len() {
-					cov[i] += ring[i] * (1.0 - alpha[i]);
-				}
-			}
-			if inner > 0.0 {
-				let feature: Vec<bool> = alpha.iter().map(|&a| a < 0.5).collect();
-				let d = fx_ops::morph::edt_2d(&feature, side, side);
-				for i in 0..cov.len() {
-					let band = (inner + 1.0 - d[i]).clamp(0.0, 1.0) as f32;
-					cov[i] += band * alpha[i];
-				}
-			}
-			cov.iter().map(|c| c.min(1.0)).collect()
+			stroke_ring(alpha, side, size / scale, position)
 		}
 	};
 	let t = TILE_SIZE as usize;
@@ -476,6 +635,38 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 		out[y * t..(y + 1) * t].copy_from_slice(&full[row..row + t]);
 	}
 	out
+}
+
+/// A stroke's coverage: a ring `size` level pixels wide outside, inside or
+/// centred on the edge of `alpha`.
+fn stroke_ring(alpha: &[f32], side: usize, size: f64, position: StrokePosition) -> Vec<f32> {
+	let (outer, inner) = match position {
+		StrokePosition::Outside => (size, 0.0),
+		StrokePosition::Inside => (0.0, size),
+		StrokePosition::Center => (size / 2.0, size / 2.0),
+	};
+	let mut cov = vec![0.0f32; side * side];
+	if outer > 0.0 {
+		let ring = dilate(alpha, side, outer);
+		for i in 0..cov.len() {
+			cov[i] += ring[i] * (1.0 - alpha[i]);
+		}
+	}
+	if inner > 0.0 {
+		let feature: Vec<bool> = alpha.iter().map(|&a| a < 0.5).collect();
+		let d = fx_ops::morph::edt_2d(&feature, side, side);
+		for i in 0..cov.len() {
+			let band = (inner + 1.0 - d[i]).clamp(0.0, 1.0) as f32;
+			cov[i] += band * alpha[i];
+		}
+	}
+	cov.iter().map(|c| c.min(1.0)).collect()
+}
+
+/// A Precise glow's falloff at distance `d` from the edge: full over the
+/// spread (`morph`), then linear to nothing over the rest of the size.
+fn precise_falloff(d: f64, morph: f64, blur: f64) -> f32 {
+	(1.0 - (d - morph).max(0.0) / blur.max(1.0)).clamp(0.0, 1.0) as f32
 }
 
 /// Grow the coverage by `radius` pixels (round), anti-aliased over 1 px.
@@ -563,11 +754,6 @@ fn paint(coverage: &[f32], color: [u16; 4], format: PixelFormat) -> TileBuffer {
 	buffer
 }
 
-/// One pass of Bevel & Emboss (M12-T04): a height field from the distance
-/// to the edge, shaded by the light; the highlight or the shadow part.
-/// FAST: Smooth technique only, no Contour / Texture; VERIFY the shading
-/// against Photoshop.
-#[allow(clippy::too_many_arguments)]
 /// Bevel & Emboss's parameters for one pass, in level pixels.
 struct BevelShape {
 	style: BevelStyle,
@@ -579,10 +765,16 @@ struct BevelShape {
 	highlight: bool,
 	technique: fx_core::styles::BevelTechnique,
 	contour: fx_core::styles::Contour,
+	contour_range: f64,
+	contour_anti_aliased: bool,
 	gloss: fx_core::styles::Contour,
 	anti_aliased: bool,
 }
 
+/// One pass of Bevel & Emboss (M12-T04): a height field from the distance
+/// to the edge, shaped by the Technique, the Contour (over its Range) and the
+/// Texture, shaded by the light; the highlight or the shadow part. VERIFY
+/// the shading against Photoshop.
 fn bevel(alpha: &[f32], side: usize, b: &BevelShape, relief: Option<&[f32]>) -> Vec<f32> {
 	use fx_core::styles::{BevelTechnique, Contour};
 	let style = b.style;
@@ -593,12 +785,19 @@ fn bevel(alpha: &[f32], side: usize, b: &BevelShape, relief: Option<&[f32]>) -> 
 	let d_out = fx_ops::morph::edt_2d(&outside, side, side);
 	// Height 0 at the edge, 1 on the plateau (inside) or the far ground.
 	let (reach_in, reach_out) = match style {
-		BevelStyle::InnerBevel => (size, 0.0),
+		BevelStyle::InnerBevel | BevelStyle::StrokeEmboss => (size, 0.0),
 		BevelStyle::OuterBevel => (0.0, size),
 		BevelStyle::Emboss | BevelStyle::PillowEmboss => (size / 2.0, size / 2.0),
 	};
 	// Structure ▸ Contour shapes the profile (on its magnitude).
-	let profile = |v: f64| -> f64 { if b.contour == Contour::Linear { v } else { v.signum() * b.contour.apply(v.abs()) } };
+	// Contour ▸ Range: the contour spans that share of the bevel, flat past it.
+	let profile = |v: f64| -> f64 {
+		if b.contour == Contour::Linear && b.contour_range >= 1.0 {
+			v
+		} else {
+			v.signum() * b.contour.apply_smooth((v.abs() / b.contour_range).min(1.0), b.contour_anti_aliased)
+		}
+	};
 	let mut h: Vec<f32> = (0..side * side)
 		.map(|i| {
 			let v = if alpha[i] >= 0.5 {
@@ -638,7 +837,7 @@ fn bevel(alpha: &[f32], side: usize, b: &BevelShape, relief: Option<&[f32]>) -> 
 	let region = |i: usize| -> f32 {
 		let inside = alpha[i];
 		match style {
-			BevelStyle::InnerBevel => inside,
+			BevelStyle::InnerBevel | BevelStyle::StrokeEmboss => inside,
 			BevelStyle::OuterBevel => (1.0 - inside) * if d_out[i] <= reach_out + 1.0 { 1.0 } else { 0.0 },
 			_ => {
 				if alpha[i] >= 0.5 || d_out[i] <= reach_out + 1.0 {

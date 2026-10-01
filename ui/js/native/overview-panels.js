@@ -7,10 +7,14 @@
 // ask again after every edit, debounced; the newest answer wins.
 
 import { h, clear, icon } from "../el.js";
+import { openColorPopover, askText } from "../dialogs.js";
+import { selectButton } from "../popup.js";
 import { state, on, emit } from "../state.js";
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
 import { activeLayerInfo, sendCommand, BLENDS, editAdjustment } from "./layers-panel.js";
+import { stylePresets, saveStylePresets, styleSwatch } from "./styles.js";
+import { onPrefs } from "./prefs.js";
 
 let seq = 0;
 let latest = null;        // the newest overview header
@@ -173,9 +177,7 @@ const TINT = ["rgba(229,72,77,.75)", "rgba(70,190,90,.75)", "rgba(80,130,240,.75
 function drawHistogram(root) {
   const W = 256, H = 100;
   const cv = h("canvas", { class: "hist-canvas", width: W, height: H });
-  const sel = h("select", { class: "dlg-select", style: { width: "110px" } }, ...Object.keys(CHANNELS).map((c) => h("option", { value: c, text: c })));
-  sel.value = histChannel;
-  sel.addEventListener("change", () => { histChannel = sel.value; render("histogram"); });
+  const sel = selectButton(Object.keys(CHANNELS).map((c) => [c, c]), histChannel, (v) => { histChannel = v; render("histogram"); }, { style: { width: "110px" } });
   if (!latest || !latest.histogram || !latest.histogram.length) {
     root.append(cv, note(latest === null ? "Open a document." : "Reading the document…"));
     return;
@@ -305,10 +307,8 @@ function drawProperties(root) {
     }
   }
   root.append(title("Blend"));
-  const blend = h("select", { class: "dlg-select", style: { width: "140px" } },
-    ...BLENDS.filter(([id]) => id !== "pass_through" || l.kind === "group").map(([id, name]) => h("option", { value: id, text: name })));
-  blend.value = l.blend;
-  blend.addEventListener("change", () => set({ blend: blend.value }));
+  const blend = selectButton(BLENDS.filter(([id]) => id !== "pass_through" || l.kind === "group").map(([id, name]) => [id, name]), l.blend,
+    (v) => set({ blend: v }), { style: { width: "140px" } });
   root.append(h("div", { class: "pf-row" }, h("span", { class: "pf-label", text: "Mode" }), blend),
     numField("Opacity", Math.round(l.opacity * 100), "%", (v) => set({ opacity: Math.min(100, Math.max(0, v)) / 100 }), { min: 0, max: 100 }),
     numField("Fill", Math.round(l.fill * 100), "%", (v) => set({ fill: Math.min(100, Math.max(0, v)) / 100 }), { min: 0, max: 100 }));
@@ -369,14 +369,14 @@ function drawCharacter(root) {
   }
   if (!t) { root.append(note("Reading the text…")); return; }
   const families = fonts.length ? [...new Set([t.family, ...fonts])] : [t.family];
-  const family = h("select", { class: "dlg-select", style: { width: "100%" } }, ...families.map((f) => h("option", { value: f, text: f })));
-  family.value = t.family;
-  family.addEventListener("change", () => style({ family: family.value }));
-  const st = h("select", { class: "dlg-select", style: { width: "110px" } }, ...STYLES.map(([v, n]) => h("option", { value: v, text: n })));
-  st.value = t.style;
-  st.addEventListener("change", () => style({ style: st.value }));
-  const color = h("input", { type: "color", value: toHex(t.color), "data-tip": "Text colour", style: { width: "36px", height: "22px", padding: 0, border: "none", background: "none" } });
-  color.addEventListener("change", () => style({ color: fromHex(color.value) }));
+  const family = selectButton(families.map((f) => [f, f]), t.family, (v) => style({ family: v }), { style: { width: "100%" } });
+  const st = selectButton(STYLES.map(([v, n]) => [v, n]), t.style, (v) => style({ style: v }), { style: { width: "110px" } });
+  // The app's colour popover (off-screen CEF draws no native colour chooser).
+  const color = h("button", { class: "dlg-color", type: "button", "data-tip": "Text colour", style: { background: toHex(t.color) } });
+  color.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openColorPopover(color, toHex(t.color), (hex) => { color.style.background = hex; style({ color: fromHex(hex) }); });
+  });
   root.append(
     h("div", { class: "phead-row" }, family),
     h("div", { class: "phead-row" }, st, color),
@@ -408,37 +408,33 @@ export function plannedPanel(name, what) {
 
 /* ------------------------------------------------------------------ Styles */
 
-// Style presets: a name and a whole `LayerStyles`, kept in this browser
-// profile. Click applies to the active layer (one history step); + saves the
-// active layer's styles; the bin deletes the selected preset.
-const STYLE_KEY = "fotox.style-presets";
+// Style presets: a name and a whole `LayerStyles`, kept in the preferences
+// file (the Layer Style window's Styles page shows the same list). Click
+// applies to the active layer (one history step); + saves the active layer's
+// style; the bin deletes the selected preset. Presets an older build kept in
+// this browser profile are moved to the preferences once.
+const OLD_STYLE_KEY = "fotox.style-presets";
 let styleSel = -1;
 let stylesRoot = null;
+let watching = false;
 
-function loadStyles() {
+function migrateStyles() {
   try {
-    const list = JSON.parse(localStorage.getItem(STYLE_KEY) || "[]");
-    return Array.isArray(list) ? list.filter((p) => p && typeof p.name === "string" && p.styles) : [];
-  } catch { return []; }
-}
-function saveStyles(list) {
-  try { localStorage.setItem(STYLE_KEY, JSON.stringify(list)); } catch { /* not kept */ }
-}
-
-/** A swatch for a preset: the colour of its first enabled effect. */
-function styleColor(styles) {
-  for (const key of ["color_overlay", "stroke", "outer_glow", "drop_shadow", "inner_glow", "inner_shadow", "satin", "bevel"]) {
-    const e = styles[key];
-    if (e && e.enabled) {
-      const c = e.color || e.highlight_color;
-      if (c) return `rgb(${Math.round(c[0] / 257)},${Math.round(c[1] / 257)},${Math.round(c[2] / 257)})`;
+    const old = JSON.parse(localStorage.getItem(OLD_STYLE_KEY) || "[]");
+    if (Array.isArray(old) && old.length && !stylePresets().length) {
+      saveStylePresets(old.filter((p) => p && typeof p.name === "string" && p.styles));
     }
-  }
-  return "#777";
+    localStorage.removeItem(OLD_STYLE_KEY);
+  } catch { /* nothing to move */ }
 }
 
 export function stylesPanel() {
   stylesRoot = h("div", { class: "pstyles native" });
+  if (!watching) {
+    watching = true;
+    onPrefs(() => drawStyles());
+  }
+  migrateStyles();
   drawStyles();
   return stylesRoot;
 }
@@ -446,7 +442,7 @@ export function stylesPanel() {
 function drawStyles() {
   if (!stylesRoot) return;
   clear(stylesRoot);
-  const list = loadStyles();
+  const list = stylePresets();
   const layer = activeLayerInfo();
   const apply = (p) => {
     if (!layer) return;
@@ -457,28 +453,25 @@ function drawStyles() {
     rows.append(h("div", {
       class: "style-row" + (i === styleSel ? " sel" : ""), "data-tip": `${p.name} — click to apply to the active layer`,
       onclick: () => { styleSel = i; apply(p); drawStyles(); },
-    }, h("span", { class: "style-thumb", style: { background: styleColor(p.styles) } }), h("span", { class: "plist-label", text: p.name })));
+    }, styleSwatch(p.styles, 26), h("span", { class: "plist-label", text: p.name })));
   });
   if (!list.length) rows.append(note("No saved styles. Give a layer a style (Layer ▸ Layer Style), then press + to keep it here."));
   stylesRoot.append(rows, h("div", { class: "pbar" },
     barBtn("i-trash", "Clear the active layer's style", () => layer && sendCommand({ op: "set_layer_style", layer: { id: layer.id }, styles: null })),
-    barBtn("i-plus", "New style from the active layer", () => {
+    barBtn("i-plus", "New style from the active layer", async () => {
       const l = activeLayerInfo();
       if (!l || !l.styles) { emit("mock", "The active layer has no style to save"); return; }
-      const name = prompt("Style name:", `${l.name} style`);
+      const name = await askText("New Style", "Name:", `${l.name} style`);
       if (!name) return;
-      const next = loadStyles();
-      next.push({ name, styles: l.styles });
-      saveStyles(next);
+      const next = [...stylePresets(), { name, styles: l.styles }];
       styleSel = next.length - 1;
-      drawStyles();
+      saveStylePresets(next);
     }),
     barBtn("i-minus", "Delete the selected style preset", () => {
-      const next = loadStyles();
+      const next = stylePresets();
       if (styleSel < 0 || styleSel >= next.length) return;
       next.splice(styleSel, 1);
-      saveStyles(next);
       styleSel = -1;
-      drawStyles();
+      saveStylePresets(next);
     })));
 }

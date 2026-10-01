@@ -13,7 +13,8 @@
 import { h, icon, clear } from "../el.js";
 import { emit } from "../state.js";
 import { setOption, optionValue, registerControl, sizeToSlider, sliderToSize } from "../optionsbar.js";
-import { openPopup } from "../popup.js";
+import { openPopup, selectButton } from "../popup.js";
+import { askText } from "../dialogs.js";
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
 
@@ -175,8 +176,8 @@ export function brushPanel() {
   return roots.list;
 }
 
-function newPresetFromCurrent() {
-  const name = prompt("Brush name", "Brush " + (presets.length + 1));
+async function newPresetFromCurrent() {
+  const name = await askText("New Brush Preset", "Name:", "Brush " + (presets.length + 1));
   if (!name) return;
   const preset = {
     name,
@@ -206,8 +207,8 @@ function renderList() {
       list.append(h("div", {
         class: "plist-row brush-row" + (i === selected ? " sel" : ""),
         onclick: () => applyPreset(i),
-        ondblclick: () => {
-          const next = prompt("Brush name", p.name);
+        ondblclick: async () => {
+          const next = await askText("Rename Brush", "Name:", p.name);
           if (next) send("brush:rename-preset", { index: i, name: next });
         },
       },
@@ -340,8 +341,7 @@ function renderSettings() {
     return h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: label }), input, h("span", { class: "pf-unit", text: unit }));
   };
   const control = (label, key) => {
-    const sel = h("select", { class: "pf-select" }, ...CONTROLS.map(([v, t]) => h("option", { value: v, text: t, selected: d[key] === v })));
-    sel.addEventListener("change", () => { d[key] = sel.value; changed(); });
+    const sel = selectButton(CONTROLS, d[key], (v) => { d[key] = v; changed(); }, { className: "pf-select" });
     return h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: label }), sel);
   };
   const check = (label, obj, key) => {
@@ -350,10 +350,8 @@ function renderSettings() {
     return h("label", { class: "pf-row narrow" }, box, h("span", { class: "pf-label", text: label }));
   };
   const profile = () => {
-    const sel = h("select", { class: "pf-select" },
-      h("option", { value: "gaussian", text: "Photoshop soft (measured)", selected: brush.profile === "gaussian" }),
-      h("option", { value: "classic", text: "Fotox classic", selected: brush.profile !== "gaussian" }));
-    sel.addEventListener("change", () => { brush.profile = sel.value; changed(); });
+    const sel = selectButton([["gaussian", "Photoshop soft (measured)"], ["classic", "Fotox classic"]], brush.profile === "gaussian" ? "gaussian" : "classic",
+      (v) => { brush.profile = v; changed(); }, { className: "pf-select" });
     return h("div", { class: "pf-row narrow" }, h("span", { class: "pf-label", text: "Fall-off" }), sel);
   };
   const section = (title, ...rows) => h("details", { class: "bset-section", open: true }, h("summary", { class: "pblock-title", text: title }), ...rows);

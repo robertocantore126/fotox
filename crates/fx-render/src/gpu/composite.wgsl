@@ -26,6 +26,7 @@ const K_ADJUST_VIBRANCE: u32 = 11u;
 const K_ADJUST_BW: u32 = 12u;
 const K_ADJUST_LUT3D: u32 = 13u;
 const K_ADJUST_SELECTIVE: u32 = 14u;
+const K_END_CHANNELS: u32 = 15u;
 
 // op flags
 const F_CLIP: u32 = 1u;
@@ -559,6 +560,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 				sp -= 1u;
 				let t = ops[i].alpha * sample_mask(i, p);
 				stack[sp] = stack[sp] + (r - stack[sp]) * t;
+			}
+			case K_END_CHANNELS: {
+				// `reference::execute` Op::EndChannels: the unticked channels
+				// keep the backdrop's straight value, under the result's alpha.
+				let r = stack[sp];
+				sp -= 1u;
+				let b = unpremultiply(stack[sp]);
+				var c = unpremultiply(r);
+				let keep = ops[i].params.xyz;
+				c = c * keep + b * (vec3<f32>(1.0) - keep);
+				stack[sp] = vec4<f32>(c * r.a, r.a);
 			}
 			case K_LOAD_PREFIX: {
 				// premultiplied composite stored in the atlas by an earlier frame

@@ -1,7 +1,7 @@
 // Fotox — motore delle finestre di dialogo: le definizioni arrivano da
 // js/data/dialogs.js, qui c'è il rendering e l'interazione.
 
-import { h, icon, clear } from "./el.js";
+import { h, icon, clear, dragOn } from "./el.js";
 import { dialogDef } from "./data/dialogs.js";
 import { openDropdown, openPopup, popupLayer } from "./popup.js";
 import { state, emit, setColors } from "./state.js";
@@ -76,7 +76,7 @@ export function openDialog(id, overrides = {}) {
   if (cancel) footer.append(cancel);
   if (ok) footer.append(ok);
 
-  const dlg = h("div", { class: "dialog" + (def.plain ? " plain" : ""), style: { width: (def.width || 420) + "px" } }, titleBar, body, footer);
+  const dlg = h("div", { class: "dialog" + (def.plain ? " plain" : ""), dataset: { dialog: id }, style: { width: (def.width || 420) + "px" } }, titleBar, body, footer);
   const wrap = h("div", { class: "modal-wrap" },
     h("div", { class: "modal-scrim", onclick: () => close() }),
     dlg);
@@ -94,6 +94,29 @@ export function openDialog(id, overrides = {}) {
   wrap._fotoxClose = close;
   requestAnimationFrame(() => dlg.classList.add("in"));
   return wrap;
+}
+
+/**
+ * Ask for a line of text (a name) in an app dialog: resolves to the trimmed
+ * text, or null on Cancel / Escape / empty. `window.prompt` cannot be used:
+ * the off-screen CEF shell has no JS-dialog handler, so it shows nothing and
+ * returns null — every "name it" action silently did nothing.
+ */
+export function askText(title, label = "Name:", value = "") {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const wrap = openDialog("ask-text", {
+      title, width: 340, plain: true, buttons: null, ok: "OK", cancel: "Cancel",
+      fields: [{ type: "text", label, value, width: 220 }],
+      onOk: (values) => finish(String(values[label] ?? "").trim() || null),
+      onCancel: () => finish(null),
+    });
+    const input = wrap.querySelector('input.dlg-input[type="text"]');
+    const ok = wrap.querySelector(".dlg-footer .btn.primary");
+    input?.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); ok?.click(); } });
+    requestAnimationFrame(() => { input?.focus(); input?.select(); });
+  });
 }
 
 export function closeTopDialog() {
@@ -487,8 +510,7 @@ export function openColorPopover(anchor, hex, onInput) {
       changed(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)));
       sync();
     };
-    el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); move(e); });
-    el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) move(e); });
+    dragOn(el, move);
   };
   track(area, (x, y) => { sat = x; bri = 1 - y; });
   track(hueBar, (x) => { hue = Math.min(359.999, x * 360); });
@@ -813,8 +835,7 @@ function colorPickerField(f) {
       changed(clamp01((e.clientX - r.left) / r.width), clamp01((e.clientY - r.top) / r.height));
       sync();
     };
-    el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); move(e); });
-    el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) move(e); });
+    dragOn(el, move);
   };
   track(area, (x, y) => { saturation = x; brightness = 1 - y; });
   track(hue, (x) => { hueValue = Math.min(359.999, x * 360); });

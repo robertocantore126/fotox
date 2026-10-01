@@ -288,10 +288,7 @@ pub(super) fn layer_comp(doc: &mut Document, action: &CompAction) -> Result<Comm
 					layer.blend = state.blend;
 					if layer.styles != state.styles {
 						layer.styles = state.styles.clone();
-						layer.effects = match &layer.styles {
-							Some(_) => crate::styles::EffectKind::ALL.iter().map(|_| TiledImage::derived(w, h, format)).collect(),
-							None => Vec::new(),
-						};
+						layer.effects = layer.styles.as_ref().map_or_else(Vec::new, |s| s.caches(w, h, format));
 					}
 				}
 				if comp.position {

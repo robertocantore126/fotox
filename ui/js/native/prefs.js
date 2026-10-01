@@ -9,6 +9,7 @@
 // checkpoint, workflow files, Test). The engine adds `_ai` to the message.
 
 import { openDialog } from "../dialogs.js";
+import { selectButton } from "../popup.js";
 import { h } from "../el.js";
 import { menus } from "../data/menus.js";
 import * as bridge from "./bridge.js";
@@ -17,13 +18,36 @@ import { ENGINE, UI } from "./protocol.js";
 let prefs = {};
 /** The AI page's models block while the dialog is open (re-rendered on news). */
 let aiModels = null;
+/** Callbacks run when the preferences arrive (`onPrefs`). */
+const watchers = new Set();
 
 export function initPrefs() {
   bridge.on(ENGINE.PREFERENCES, (m) => {
     prefs = m.prefs || {};
     rebuildRecent(prefs.recent || []);
     if (aiModels && aiModels.isConnected) renderModels(aiModels);
+    for (const fn of watchers) fn(prefs);
   });
+}
+
+/** One preference as the engine last sent it (undefined when unset). */
+export function prefValue(key) {
+  return prefs[key];
+}
+
+/**
+ * Change preferences: kept here at once (so a panel redraws with the new
+ * value before the engine answers) and saved by the engine.
+ */
+export function setPrefs(patch) {
+  prefs = { ...prefs, ...patch };
+  set(patch);
+  for (const fn of watchers) fn(prefs);
+}
+
+/** Run `fn(prefs)` whenever the preferences change. */
+export function onPrefs(fn) {
+  watchers.add(fn);
 }
 
 function rebuildRecent(recent) {
@@ -77,10 +101,8 @@ function openAiPrefs(id) {
   const variations = input(prefs.comfy_variations ?? 3, 60);
   const fill = input(prefs.comfy_workflow_fill, 260, "bundled inpaint workflow");
   const expand = input(prefs.comfy_workflow_expand, 260, "bundled outpaint workflow");
-  const objectModel = h("select", { class: "dlg-select" },
-    h("option", { value: "birefnet", text: "BiRefNet — precise edges (default)" }),
-    h("option", { value: "sam", text: "EfficientSAM — faster, any region" }));
-  objectModel.value = prefs.ai_object_model === "sam" ? "sam" : "birefnet";
+  const objectModel = selectButton([["birefnet", "BiRefNet — precise edges (default)"], ["sam", "EfficientSAM — faster, any region"]],
+    prefs.ai_object_model === "sam" ? "sam" : "birefnet", null, { width: 260 });
   const objectBox = h("div", { class: "dlg-group" },
     h("div", { class: "dlg-group-title", text: "Object Selection tool" }),
     row("Model:", objectModel),

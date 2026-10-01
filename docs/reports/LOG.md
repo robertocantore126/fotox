@@ -485,3 +485,12 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
   - The document tab names the active layer and says "Layer Mask" when painting goes to the mask (Photoshop's title).
   - Checked: workspace check, fx-app build, fx-core/fx-engine/fx-render/fx-io lib tests, UI checks.
 - Checked: `cargo check --workspace --all-targets`, `cargo build -p fx-app`, fx-core/fx-engine/fx-render lib tests (the Move tests now turn Auto-Select on), `check-data.mjs`, `node --check` on every UI file, UI audit down from 45 to 5 (the 4 Swatches ones are the browser mock's branch; the 3D tool is a placeholder).
+
+## ONNX Runtime startup lookup (Codex, 2026-10-01)
+- Done: `fx-ai::runtime` now falls back to the operating system library path after the explicit override, app directory and models directory. `fx-engine::ai::warm` loads it on every app startup rather than merely checking for a file. The `ort` binding targets API 17, which is the Windows-provided runtime's supported API and covers Fotox's current inference calls.
+- Checked: `cargo check --workspace --all-targets`; `cargo build -p fx-app`; native `cargo xtask run` logged `ONNX Runtime loaded from C:\\WINDOWS\\system32\\onnxruntime.dll` and `AI warm-up done`.
+
+## Selection-model startup provisioning (Codex, 2026-10-01)
+- Done: `fx-engine::ai::warm` downloads any missing BiRefNet and EfficientSAM weights on startup, checksum-verifies them, then loads and warms both models. Every later launch reuses the cached files.
+- Checked: native `cargo xtask run` downloaded BiRefNet (224 MB) and EfficientSAM (41 MB), then logged `AI warm-up done in 14.53 s`.
+- FAST: first-run model download progress is logged at 25% intervals rather than shown in the UI.

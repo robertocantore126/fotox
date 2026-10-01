@@ -5,6 +5,7 @@
 // buttons fill / stroke / load / make / save / delete.
 
 import { h, icon, clear } from "../el.js";
+import { askText } from "../dialogs.js";
 import * as bridge from "./bridge.js";
 import { ENGINE, UI } from "./protocol.js";
 import { activeDocument } from "./documents.js";
@@ -32,9 +33,9 @@ function render() {
   const row = (label, target, italic) => {
     const name = h("span", { class: "plist-label", text: label, style: italic ? { fontStyle: "italic" } : null });
     if (target !== "work") {
-      name.addEventListener("dblclick", (e) => {
+      name.addEventListener("dblclick", async (e) => {
         e.stopPropagation();
-        const value = prompt("Path name", label);
+        const value = await askText("Rename Path", "Name:", label);
         if (value) send("path:rename", { target, name: value });
       });
     }

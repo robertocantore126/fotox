@@ -8,7 +8,7 @@
 
 import { h, icon, clear } from "../el.js";
 import { emit, on } from "../state.js";
-import { openDialog } from "../dialogs.js";
+import { openDialog, askText } from "../dialogs.js";
 import { openDropdown } from "../popup.js";
 import { registerControl } from "../optionsbar.js";
 import * as bridge from "./bridge.js";
@@ -62,7 +62,7 @@ function render() {
       class: "pattern-cell" + (p.id === current ? " sel" : ""), type: "button", "data-tip": `${p.name} (${p.width} × ${p.height})`,
       style: { outline: p.id === current ? "2px solid var(--accent, #4c8dff)" : "none", padding: "0", border: "0", background: "none" },
       onclick: () => use(p.id),
-      ondblclick: () => { const name = prompt("Pattern name", p.name); if (name) send("pattern:rename", { id: p.id, name }); },
+      ondblclick: async () => { const name = await askText("Rename Pattern", "Name:", p.name); if (name) send("pattern:rename", { id: p.id, name }); },
     }, thumb(p, 40)));
   }
   const btn = (ic, tip, fn) => h("button", { class: "pbar-btn", type: "button", "data-tip": tip, onclick: (e) => { e.stopPropagation(); fn(); } }, icon(ic, "ic sm"));

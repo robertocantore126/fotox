@@ -140,6 +140,28 @@ pub fn composite_rect(doc: &mut Document, store: &TileStore, level: usize, rect:
 	Ok(pixels)
 }
 
+/// `doc` reduced to layer `id`'s own content (visible, opaque, Normal, no
+/// masks or styles: [`fx_core::command::content_alone`]) over neutral grey,
+/// so the Object Selection tool sees the whole layer, the parts other layers
+/// cover included. The grey stands in for transparency: a straight read of
+/// it is black, where a dark object would vanish. `None` for an adjustment
+/// layer (it has no content of its own) or an unknown id.
+pub fn layer_alone(doc: &Document, id: fx_core::LayerId) -> Option<Document> {
+	if matches!(doc.layer(id)?.kind, fx_core::LayerKind::Adjustment(_)) {
+		return None;
+	}
+	let mut solo = fx_core::command::content_alone(doc, id)?;
+	let backdrop = fx_core::Layer::new(
+		solo.allocate_layer_id(),
+		"backdrop",
+		fx_core::LayerKind::SolidFill {
+			rgba: [32768, 32768, 32768, 65535],
+		},
+	);
+	solo.layers.insert(0, Arc::new(backdrop));
+	Some(solo)
+}
+
 /// Bilinear resize of straight RGBA (pixel centres aligned).
 pub fn resize(pixels: &[[f32; 4]], w: usize, h: usize, ow: usize, oh: usize) -> Vec<[f32; 4]> {
 	let mut out = vec![[0.0f32; 4]; ow * oh];
@@ -250,17 +272,36 @@ pub fn model(path: &std::path::Path) -> Result<Arc<Model>, AiError> {
 	Ok(m)
 }
 
-/// Load ONNX Runtime and every installed model on a background thread at
-/// start, and run BiRefNet once on a blank image, so the first Select
-/// Subject / Object Selection does not wait for the runtime, the DirectML
-/// sessions and their first-run shader compilation.
+/// Ensure the local selection models are installed, then load them on a
+/// background thread at start and run BiRefNet once on a blank image. This
+/// keeps Select Subject, Remove Background and Object Selection ready without
+/// a first-use setup step.
 pub fn warm() {
 	use fx_ai::models::{BIREFNET, EFFICIENT_SAM};
 	let spawned = std::thread::Builder::new().name("ai-warm".into()).spawn(|| {
-		if !fx_ai::runtime::available() {
+		if let Err(error) = fx_ai::runtime::ensure() {
+			tracing::warn!("AI warm-up could not load ONNX Runtime: {error}");
 			return;
 		}
 		let started = std::time::Instant::now();
+		for spec in [BIREFNET, EFFICIENT_SAM] {
+			if spec.installed() {
+				continue;
+			}
+			tracing::info!("AI startup: downloading {} ({} MB)", spec.name, spec.bytes() / 1_000_000);
+			let mut next_report = 25;
+			// FAST: the startup download reports progress to the log, not the UI.
+			if let Err(error) = fx_ai::models::download(&spec, &mut |done, total| {
+				let percent = done.saturating_mul(100) / total.max(1);
+				if percent >= next_report {
+					tracing::info!("AI startup: {} {}%", spec.name, percent);
+					next_report += 25;
+				}
+				true
+			}) {
+				tracing::warn!("AI startup: could not download {}: {error}", spec.name);
+			}
+		}
 		if BIREFNET.installed() {
 			let result = model(&BIREFNET.path(BIREFNET.files[0].file)).and_then(|m| {
 				const SIDE: usize = 1024;

@@ -53,6 +53,8 @@ pub struct Document {
 	pub revision: u64,
 	/// Photoshop's Global Light angle in degrees (M6-T08), for the shadows.
 	pub global_light: f64,
+	/// The Global Light's altitude in degrees, for Bevel & Emboss.
+	pub global_altitude: f64,
 	/// Ruler guides (M7-T06), document pixels.
 	pub guides: Vec<Guide>,
 	/// The patterns the document uses (M8-T06): Pattern Stamp, bucket and
@@ -233,6 +235,7 @@ impl Document {
 			reselect: None,
 			revision: 0,
 			global_light: 120.0,
+			global_altitude: 30.0,
 			guides: Vec::new(),
 			patterns: Vec::new(),
 			comps: Vec::new(),

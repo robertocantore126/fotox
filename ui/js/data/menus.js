@@ -41,6 +41,13 @@ export const layerStyleItems = [
   it("Copy Layer Style", "", "layer:copy-style"),
   it("Paste Layer Style", "", "layer:paste-style"),
   it("Clear Layer Style", "", "layer:clear-style"),
+  sep,
+  it("Global Light...", "", "dlg:global-light"),
+  it("Create Layers", "", "layer:create-effect-layers"),
+  it("Hide All Effects", "", "layer:hide-effects"),
+  it("Show All Effects", "", "layer:show-effects"),
+  sep,
+  it("Scale Effects...", "", "dlg:scale-effects"),
 ];
 
 export const menus = [
