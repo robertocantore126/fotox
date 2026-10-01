@@ -162,7 +162,7 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		doc: DocId,
-		result: Result<fx_tiles::TiledImage, String>,
+		result: Result<fx_core::smart::SmartSource, String>,
 	},
 	/// A save finished; `Ok` carries the reopened file (M3-T06).
 	Saved {
@@ -1808,7 +1808,14 @@ impl Engine {
 							let roots: Vec<fx_core::LayerId> = placed.layers.iter().map(|l| l.id).collect();
 							let mut image = crate::export::composite_layers(placed, &roots, None, &store, None).map_err(|e| e.to_string())?;
 							mips::ensure_all_mips(&mut image, &store).map_err(|e| e.to_string())?;
-							Ok(image)
+							// AUDIT-FIX(SO1): composite is a preview; preserve the layered embedded document.
+							Ok(fx_core::smart::SmartSource {
+								doc: Arc::new(opened.document.clone()),
+								composite: image,
+								linked: None,
+								linked_mtime: None,
+								uid: fx_core::smart::new_uid(),
+							})
 						}))
 						.unwrap_or_else(|panic| Err(format!("flattening panicked: {}", panic_text(&*panic))))
 					});
@@ -2691,7 +2698,7 @@ impl Engine {
 				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
-					Ok(image) if self.docs.get(doc).is_some() => self.place_imported(doc, &path, image),
+					Ok(source) if self.docs.get(doc).is_some() => self.place_source(doc, &path, source),
 					Ok(_) => {}
 					Err(error) => self.to_ui(&EngineToUi::Error {
 						text: format!("Could not place {}: {error}", path.display()),
@@ -4272,44 +4279,54 @@ impl Engine {
 	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc removes
 	/// the placed layer again (every step of the place is undone).
 	fn place_imported(&mut self, doc: DocId, path: &std::path::Path, image: fx_tiles::TiledImage) {
-		let (w, h) = (image.width(), image.height());
 		let Some(open) = self.docs.get(doc) else { return };
-		let (cw, ch) = (open.doc.width, open.doc.height);
-		let steps_before = open.history.labels().count();
-		let clip = fx_core::pixels::ClipboardImage {
-			image,
-			offset: (0, 0),
-			bounds: (0, 0, w as i32, h as i32),
-		};
-		// Borrow the clipboard for the paste, then put the user's back.
-		let previous = {
-			let mut slot = self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-			slot.replace(clip)
-		};
-		self.command(
+		let mut nested = Document::new(image.width(), image.height(), open.doc.color.clone(), open.doc.ppi);
+		let id = nested.allocate_layer_id();
+		nested.layers.push(Arc::new(fx_core::Layer::new(
+			id,
+			"Placed image",
+			LayerKind::Pixel {
+				image: image.clone(),
+				offset: (0, 0),
+			},
+		)));
+		nested.selected = vec![id];
+		self.place_source(
 			doc,
-			Command::Paste {
-				in_place: false,
-				center: Some((f64::from(cw) / 2.0, f64::from(ch) / 2.0)),
+			path,
+			fx_core::smart::SmartSource {
+				doc: Arc::new(nested),
+				composite: image,
+				linked: None,
+				linked_mtime: None,
+				uid: fx_core::smart::new_uid(),
 			},
 		);
-		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
-		let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-		if let Some(name) = name {
-			self.command(
-				doc,
-				Command::SetLayerProps {
-					layer: LayerRef::Active,
-					props: LayerPropsPatch {
-						name: Some(name),
-						..Default::default()
-					},
-				},
-			);
+	}
+
+	fn place_source(&mut self, doc: DocId, path: &std::path::Path, source: fx_core::smart::SmartSource) {
+		// AUDIT-FIX(SO1): install the actual Smart Object before starting transform.
+		let (w, h) = (source.composite.width(), source.composite.height());
+		let Some(open) = self.docs.get_mut(doc) else { return };
+		if open.busy.is_some() {
+			return;
 		}
-		// M12-T01: a placed file is a Smart Object (Place Embedded).
-		let placed = self.docs.get(doc).map(|o| o.doc.selected.clone()).unwrap_or_default();
-		self.convert_to_smart(doc, &placed);
+		let (cw, ch) = (open.doc.width, open.doc.height);
+		let steps_before = open.history.labels().count();
+		let before = open.doc.clone();
+		let name = path.file_stem().map_or("Placed object".into(), |s| s.to_string_lossy().into_owned());
+		fx_core::command::m12::place_source(
+			&mut open.doc,
+			name,
+			source,
+			fx_core::transform::Mapping::translation((cw as f64 - w as f64) / 2., (ch as f64 - h as f64) / 2.),
+		);
+		// FAST: snapshot history label placeholder, as with Edit Contents.
+		open.history
+			.record(before, Command::SelectLayers { layers: Vec::new() }, "Place Embedded".into());
+		open.dirty = true;
+		open.changed();
+		self.after_edit(doc, true);
 		if self.docs.active_id() != Some(doc) {
 			return;
 		}

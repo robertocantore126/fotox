@@ -73,7 +73,7 @@ pub fn smart_layer(doc: &mut Document, name: String, source: SmartSource, transf
 
 /// Layer ▸ Smart Objects ▸ Convert to Smart Object (M12-T01): the layers
 /// become the embedded document of one Smart Object, in place of the top one.
-/// FAST: the nested document has the parent's canvas (not the layers' union).
+/// AUDIT-FIX(SO1): embedded content uses its own bounds and an outer translation.
 pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	let ids = resolve_all(doc, layers, true)?;
 	if ids.is_empty() {
@@ -84,11 +84,31 @@ pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &Co
 	let mut order: Vec<LayerId> = doc.panel_order().into_iter().filter(|id| ids.contains(id)).collect();
 	order.reverse();
 	let top = *order.last().expect("not empty");
+	// AUDIT-FIX(SO1): retain complete pixel extents, including outside the parent canvas.
+	let mut bounds = None;
+	for id in &order {
+		if let Some(layer) = doc.layer(*id) {
+			union_bounds(layer, doc, &mut bounds)?;
+		}
+	}
+	let [x0, y0, x1, y1] = bounds.unwrap_or([0., 0., doc.width as f64, doc.height as f64]);
+	let (x0, y0, x1, y1) = (x0.floor(), y0.floor(), x1.ceil(), y1.ceil());
+	if ![x0, y0, x1, y1]
+		.iter()
+		.all(|x| x.is_finite() && *x >= i32::MIN as f64 + 1. && *x <= i32::MAX as f64)
+		|| x1 - x0 > i32::MAX as f64
+		|| y1 - y0 > i32::MAX as f64
+	{
+		return Err(CommandError::NotAllowed("Smart Object bounds exceed supported coordinates".into()));
+	}
+	let (w, h) = (((x1 - x0) as u32).max(1), ((y1 - y0) as u32).max(1));
 	let mut nested = Document::new(doc.width, doc.height, doc.color.clone(), doc.ppi);
 	let (next_id, counters) = doc.id_state();
 	nested = nested.with_id_state(next_id, counters);
 	nested.layers = order.iter().filter_map(|id| find_arc(&doc.layers, *id)).collect();
 	nested.selected = vec![top];
+	shift_offsets(&mut nested, -(x0 as i32), -(y0 as i32), (w, h), ctx.tiles)?;
+	set_canvas(&mut nested, w, h);
 	let composite = ops.composite(&nested, &order, None, ctx.tiles)?;
 	let name = doc.layer(top).map(|l| l.name.clone()).unwrap_or_default();
 	let source = SmartSource {
@@ -98,7 +118,7 @@ pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &Co
 		linked_mtime: None,
 		uid: new_uid(),
 	};
-	let layer = smart_layer(doc, name, source, Mapping::identity());
+	let layer = smart_layer(doc, name, source, Mapping::translation(x0, y0));
 	let new_id = layer.id;
 	let path = doc.path_of(top).expect("resolved");
 	let parent = id_at_path(doc, &path[..path.len() - 1]);
@@ -112,6 +132,59 @@ pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &Co
 		structure_changed: true,
 		..Default::default()
 	})
+}
+
+// AUDIT-FIX(SO1): geometry bounds avoid rasterising through the cropped parent canvas.
+fn union_bounds(layer: &Layer, doc: &Document, union: &mut Option<[f64; 4]>) -> Result<(), CommandError> {
+	let b = match &layer.kind {
+		LayerKind::Pixel { image, offset } => [
+			offset.0 as f64,
+			offset.1 as f64,
+			offset.0 as f64 + image.width() as f64,
+			offset.1 as f64 + image.height() as f64,
+		],
+		LayerKind::Smart { smart, .. } => {
+			let (p, s) = smart
+				.bounds()
+				.ok_or_else(|| CommandError::NotAllowed("unbounded Smart Object transform".into()))?;
+			[p.0 as f64, p.1 as f64, p.0 as f64 + s.0 as f64, p.1 as f64 + s.1 as f64]
+		}
+		LayerKind::Shape { shape, transform, stroke, .. } => {
+			let mut b = crate::vector::document_box(shape, *transform);
+			let grow = stroke
+				.as_ref()
+				.map_or(0., |s| s.width * (transform[0].hypot(transform[1]) + transform[2].hypot(transform[3])));
+			b[0] -= grow;
+			b[1] -= grow;
+			b[2] += grow;
+			b[3] += grow;
+			b
+		}
+		LayerKind::Group { children, .. } => {
+			for child in children {
+				union_bounds(child, doc, union)?;
+			}
+			return Ok(());
+		}
+		// FAST: exact font/warp bounds are engine-owned; refuse rather than silently crop.
+		LayerKind::Text { .. } => {
+			return Err(CommandError::NotAllowed(
+				"Convert text separately before converting this selection to a Smart Object".into(),
+			));
+		}
+		_ => [0., 0., doc.width as f64, doc.height as f64],
+	};
+	*union = Some(union.map_or(b, |a| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]));
+	Ok(())
+}
+
+/// Insert an already prepared embedded source without a pixel-worker race.
+pub fn place_source(doc: &mut Document, name: String, source: SmartSource, transform: Mapping) {
+	// AUDIT-FIX(SO1): Place retains source layers and inserts the Smart Object atomically.
+	let layer = smart_layer(doc, name, source, transform);
+	let id = layer.id;
+	insert_above_active(doc, layer);
+	doc.selected = vec![id];
 }
 
 fn find_arc(layers: &[Arc<Layer>], id: LayerId) -> Option<Arc<Layer>> {
