@@ -154,9 +154,15 @@ fn verify(doc: &Document, store: &TileStore) -> Verdict {
 
 /// Open `path` with a fresh store and verify it.
 fn reopen(path: &Path, scratch: &Path) -> Result<Verdict, IoError> {
+	reopen_flagged(path, scratch).map(|(verdict, _)| verdict)
+}
+
+/// VERIFY-FIX(D5): also whether `fxd::open` reported that it fell back to an
+/// older version (`recovered`), which the UI turns into a warning.
+fn reopen_flagged(path: &Path, scratch: &Path) -> Result<(Verdict, bool), IoError> {
 	let store = make_store(scratch);
 	let opened = fxd::open(path, &store)?;
-	Ok(verify(&opened.document, &store))
+	Ok((verify(&opened.document, &store), opened.recovered))
 }
 
 fn save_doc(doc: &Document, store: &TileStore, target: SaveTarget) -> Result<fxd::SavedFxd, IoError> {
@@ -289,6 +295,12 @@ fn kill_loop(mode: &str, rounds: usize) {
 		let last_ok = text.lines().rev().find(|l| l.starts_with("ok")).map(parse_versions);
 		let last_attempt = text.lines().rev().find(|l| l.starts_with("attempt")).map(parse_versions);
 		if !path.exists() {
+			// VERIFY-FIX: killed before its first save completed — nothing was
+			// confirmed, so nothing was lost (the audit counted this as missing).
+			if last_ok.is_none() && round == 0 {
+				println!("AUDIT kill-{mode} round {round}: killed before the first save completed (no confirmed save)");
+				continue;
+			}
 			no_file += 1;
 			println!("AUDIT kill-{mode} round {round}: NO FILE at the target after the kill");
 			continue;
@@ -716,18 +728,19 @@ fn single_byte_corruption_by_region() {
 	let probe = dir.join("probe.fxd");
 	let mut rng = Rng(42);
 	for (name, lo, hi) in regions {
-		let (mut newest_ok, mut rollback, mut error, mut garbage, mut open_failed) = (0, 0, 0, 0, 0);
+		let (mut newest_ok, mut rollback, mut disclosed, mut error, mut garbage, mut open_failed) = (0, 0, 0, 0, 0, 0);
 		let samples = 24.min((hi - lo) as usize);
 		for _ in 0..samples {
 			let at = lo + rng.next() % (hi - lo);
 			let mut copy = bytes.clone();
 			copy[at as usize] ^= 1 << (rng.next() % 8);
 			std::fs::write(&probe, &copy).unwrap();
-			match reopen(&probe, &dir.join("probe-scratch")) {
-				Ok(Verdict::Exact(v)) if v == newest => newest_ok += 1,
-				Ok(Verdict::Exact(_)) => rollback += 1,
-				Ok(Verdict::ReadError(_)) => error += 1,
-				Ok(Verdict::Garbage(g)) => {
+			match reopen_flagged(&probe, &dir.join("probe-scratch")) {
+				Ok((Verdict::Exact(v), _)) if v == newest => newest_ok += 1,
+				Ok((Verdict::Exact(_), true)) => disclosed += 1,
+				Ok((Verdict::Exact(_), false)) => rollback += 1,
+				Ok((Verdict::ReadError(_), _)) => error += 1,
+				Ok((Verdict::Garbage(g), _)) => {
 					garbage += 1;
 					println!("AUDIT bitflip {name} at {at}: GARBAGE {g}");
 				}
@@ -735,9 +748,10 @@ fn single_byte_corruption_by_region() {
 			}
 		}
 		println!(
-			"AUDIT bitflip {name} ({samples} samples): newest intact {newest_ok}, silent rollback to an older version {rollback}, tile read error {error}, file does not open {open_failed}, wrong pixels {garbage}"
+			"AUDIT bitflip {name} ({samples} samples): newest intact {newest_ok}, rollback reported to the user {disclosed}, silent rollback to an older version {rollback}, tile read error {error}, file does not open {open_failed}, wrong pixels {garbage}"
 		);
 		assert_eq!(garbage, 0, "a flipped byte produced wrong pixels without an error");
+		assert_eq!(rollback, 0, "an older version was opened without telling the user (D5)");
 	}
 }
 
