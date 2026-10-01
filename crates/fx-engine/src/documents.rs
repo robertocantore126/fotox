@@ -459,6 +459,11 @@ impl Documents {
 		self.docs.iter().map(|d| d.id).collect()
 	}
 
+	// AUDIT-FIX(D4): read-only tab iteration for close ordering without mutable borrows.
+	pub fn iter(&self) -> impl Iterator<Item = &OpenDoc> {
+		self.docs.iter()
+	}
+
 	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut OpenDoc> {
 		self.docs.iter_mut()
 	}

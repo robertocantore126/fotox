@@ -109,6 +109,14 @@ pub(crate) enum OpenAs {
 
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
+	// AUDIT-FIX(D4+SO2): contents save-back completes as a worker snapshot.
+	ContentsSaved {
+		child: DocId,
+		parent: DocId,
+		generation: u64,
+		parent_generation: u64,
+		result: Result<Box<Document>, IoError>,
+	},
 	/// Import progress, 0..=1.
 	Progress { task: u64, label: String, fraction: f32 },
 	/// An import finished (mips included) or failed.
@@ -230,6 +238,7 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::PixelJobDone { .. } => "internal pixel job done",
 		Internal::Thumbnail { .. } => "internal thumbnail",
 		Internal::Ai(_) => "internal ai done",
+		Internal::ContentsSaved { .. } => "internal contents save",
 		Internal::Derived { .. } => "internal derived tiles",
 	}
 }
@@ -333,6 +342,8 @@ struct Engine {
 	smart_preview: Option<(DocId, LayerId, usize)>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
+	// AUDIT-FIX(D4): a parent close resumes only after its contents tabs close.
+	close_after_child: HashMap<DocId, DocId>,
 	/// Pointer moves since the last traced input (the recorder counts them).
 	trace_moves: u32,
 	/// Move tool ▸ Show Transform Controls: the box of (document, generation,
@@ -495,6 +506,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		placing: None,
 		smart_preview: None,
 		smart_children: HashMap::new(),
+		close_after_child: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
 		controls_commit: false,
@@ -2389,6 +2401,13 @@ impl Engine {
 					});
 				}
 			}
+			Internal::ContentsSaved {
+				child,
+				parent,
+				generation,
+				parent_generation,
+				result,
+			} => self.contents_saved(child, parent, generation, parent_generation, result),
 			Internal::PixelJobDone { task, doc, command, result } => self.pixel_job_done(task, doc, *command, result),
 			Internal::Ai(done) => self.ai_done(*done),
 			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
@@ -2567,6 +2586,8 @@ impl Engine {
 						if let Some((info, _)) = saved {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
+						// AUDIT-FIX(D4): successful Save As makes orphan contents an independent document.
+						self.smart_children.remove(&doc);
 						tracing::info!("saved {}", path.display());
 						self.remember_recent(&path);
 						self.to_ui(&EngineToUi::Toast {
@@ -2613,6 +2634,16 @@ impl Engine {
 
 	fn close(&mut self, id: DocId) {
 		self.commit_live_edits();
+		// AUDIT-FIX(D4): ask about contents before closing their parent, including nested contents.
+		if let Some(child) = self
+			.smart_children
+			.iter()
+			.find_map(|(child, (parent, _))| (*parent == id && self.docs.get(*child).is_some()).then_some(*child))
+		{
+			self.close_after_child.insert(child, id);
+			self.close(child);
+			return;
+		}
 		let Some((busy, saving, dirty)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving, open.dirty)) else {
 			return;
 		};
@@ -2639,7 +2670,11 @@ impl Engine {
 	/// The user's answer to the "save changes?" prompt.
 	fn close_answer(&mut self, id: DocId, answer: CloseAnswer) {
 		match answer {
-			CloseAnswer::Cancel => self.window_close_pending = false,
+			CloseAnswer::Cancel => {
+				self.window_close_pending = false;
+				self.close_after_child.clear();
+				self.pending_close = None;
+			}
 			CloseAnswer::DontSave => {
 				if let Some(open) = self.docs.get_mut(id) {
 					open.dirty = false;
@@ -2649,7 +2684,12 @@ impl Engine {
 			}
 			CloseAnswer::Save => {
 				self.pending_close = Some(id);
-				self.save(id);
+				// AUDIT-FIX(D4): contents prompt Save must use the parent save-back path.
+				if self.smart_children.contains_key(&id) {
+					self.save_contents(id);
+				} else {
+					self.save(id);
+				}
 			}
 		}
 	}
@@ -2683,7 +2723,14 @@ impl Engine {
 			(self.output)(EngineOutput::MayClose(false));
 			return;
 		}
-		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
+		// AUDIT-FIX(D4): dirty contents are resolved before their parent during window close.
+		let dirty = self
+			.smart_children
+			.keys()
+			.filter_map(|id| self.docs.get(*id))
+			.find(|open| open.dirty)
+			.or_else(|| self.docs.iter().find(|open| open.dirty))
+			.map(|open| (open.id, open.name.clone()));
 		match dirty {
 			Some((id, name)) => {
 				self.to_ui(&EngineToUi::CloseDirtyDocument { doc: id, name });
@@ -2771,6 +2818,8 @@ impl Engine {
 			self.end_transform(false);
 		}
 		if self.docs.close(id).is_some() {
+			// AUDIT-FIX(D4): discard the closed contents relationship and resume its parent close.
+			self.smart_children.remove(&id);
 			self.layers_sent.remove(&id);
 			self.thumbs_wanted.retain(|(d, _), _| *d != id);
 			self.thumbs_last.retain(|(d, _), _| *d != id);
@@ -2778,6 +2827,9 @@ impl Engine {
 			// Dropping the document drops its tile handles: memory is freed.
 			self.to_ui(&EngineToUi::DocumentClosed { doc: id });
 			self.after_active_change();
+		}
+		if let Some(parent) = self.close_after_child.remove(&id) {
+			self.close(parent);
 		}
 	}
 
