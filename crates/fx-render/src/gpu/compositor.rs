@@ -195,6 +195,11 @@ pub struct GpuCompositor {
 }
 
 impl GpuCompositor {
+	// AUDIT-FIX(P1): report committed atlas pages plus the fixed output cache allocation.
+	pub fn allocated_bytes(&self) -> u64 {
+		self.atlas.allocated_bytes() + u64::from(self.composite_capacity) * super::atlas::TILE_BYTES_F16
+	}
+
 	pub fn new(device: &wgpu::Device, queue: &wgpu_sync::Queue, config: CompositorConfig) -> Self {
 		let module = device.create_shader_module(wgpu::include_wgsl!("composite.wgsl"));
 		let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..MAX_PAGES as u32)
@@ -775,7 +780,12 @@ impl GpuCompositor {
 			}
 			Op::EndChannels { channels } => {
 				g.kind = K_END_CHANNELS;
-				g.params = [f32::from(u8::from(channels[0])), f32::from(u8::from(channels[1])), f32::from(u8::from(channels[2])), 0.0];
+				g.params = [
+					f32::from(u8::from(channels[0])),
+					f32::from(u8::from(channels[1])),
+					f32::from(u8::from(channels[2])),
+					0.0,
+				];
 			}
 		}
 		g
@@ -828,6 +838,7 @@ impl GpuCompositor {
 		self.queue.write_buffer(&self.ops_buffer, 0, ops_bytes);
 		self.queue.write_buffer(&self.jobs_buffer, 0, jobs_bytes);
 
+		// AUDIT-FIX(P1): a fresh bind group sees any pages added since the preceding dispatch.
 		let pages = self.atlas.page_views();
 		let mut entries: Vec<wgpu::BindGroupEntry> = pages
 			.iter()

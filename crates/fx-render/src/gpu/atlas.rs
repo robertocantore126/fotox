@@ -28,6 +28,9 @@ pub enum AtlasKey {
 }
 
 pub struct TileAtlas {
+	// AUDIT-FIX(P1): retain a device for incremental page growth and one-layer placeholder bindings.
+	device: wgpu::Device,
+	placeholder: wgpu::TextureView,
 	pages: Vec<wgpu::Texture>,
 	views: Vec<wgpu::TextureView>,
 	layers_per_page: u32,
@@ -44,45 +47,57 @@ impl TileAtlas {
 	/// `budget_bytes` / 512 KiB slots, split into pages of at most
 	/// `max_texture_array_layers` (≤ 2048) layers, at most 8 pages.
 	pub fn new(device: &wgpu::Device, budget_bytes: u64) -> Self {
+		// AUDIT-FIX(P1): the ceiling follows adapter memory; only the first page is allocated now.
+		let budget_bytes = budget_bytes.min(super::hardware::gpu_budget(device));
 		let layers_per_page = device.limits().max_texture_array_layers.clamp(1, 2048);
-		let wanted = (budget_bytes / TILE_BYTES_F16).max(1);
-		let pages = wanted.div_ceil(layers_per_page as u64).min(MAX_PAGES as u64) as u32;
-		let capacity = (wanted as u32).min(pages * layers_per_page);
-		let mut page_textures = Vec::new();
-		let mut views = Vec::new();
-		for p in 0..pages {
-			let layers = (capacity - p * layers_per_page).min(layers_per_page);
-			let texture = device.create_texture(&wgpu::TextureDescriptor {
-				label: Some("fx-atlas-page"),
-				size: wgpu::Extent3d {
-					width: TILE_SIZE,
-					height: TILE_SIZE,
-					depth_or_array_layers: layers,
-				},
-				mip_level_count: 1,
-				sample_count: 1,
-				dimension: wgpu::TextureDimension::D2,
-				format: FORMAT,
-				usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-				view_formats: &[],
-			});
-			views.push(texture.create_view(&wgpu::TextureViewDescriptor {
-				dimension: Some(wgpu::TextureViewDimension::D2Array),
-				..Default::default()
-			}));
-			page_textures.push(texture);
-		}
-		Self {
-			pages: page_textures,
-			views,
+		let wanted = (budget_bytes / TILE_BYTES_F16).max(1).min(MAX_PAGES as u64 * layers_per_page as u64);
+		let capacity = wanted as u32;
+		let placeholder_texture = page_texture(device, 1);
+		let placeholder = placeholder_texture.create_view(&wgpu::TextureViewDescriptor {
+			dimension: Some(wgpu::TextureViewDimension::D2Array),
+			..Default::default()
+		});
+		let mut atlas = Self {
+			device: device.clone(),
+			placeholder,
+			pages: Vec::new(),
+			views: Vec::new(),
 			layers_per_page,
 			capacity,
 			map: HashMap::new(),
 			slots: vec![None; capacity as usize],
-			free: (0..capacity).rev().collect(),
+			free: Vec::new(),
 			hand: 0,
 			frame: 1,
+		};
+		atlas.grow();
+		atlas
+	}
+
+	// AUDIT-FIX(P1): allocate another page only when every resident slot is occupied.
+	fn grow(&mut self) -> bool {
+		let first = self.pages.len() as u32 * self.layers_per_page;
+		if first >= self.capacity {
+			return false;
 		}
+		let layers = (self.capacity - first).min(self.layers_per_page);
+		let texture = page_texture(&self.device, layers);
+		self.views.push(texture.create_view(&wgpu::TextureViewDescriptor {
+			dimension: Some(wgpu::TextureViewDimension::D2Array),
+			..Default::default()
+		}));
+		self.pages.push(texture);
+		self.free.extend((first..first + layers).rev());
+		true
+	}
+
+	// AUDIT-FIX(P1): status reports physically allocated pages rather than the maximum slot budget.
+	pub fn allocated_bytes(&self) -> u64 {
+		self.pages
+			.iter()
+			.map(|page| u64::from(page.depth_or_array_layers()) * TILE_BYTES_F16)
+			.sum::<u64>()
+			+ TILE_BYTES_F16
 	}
 
 	pub fn capacity(&self) -> u32 {
@@ -99,7 +114,7 @@ impl TileAtlas {
 
 	/// Views for the 8 page bindings (missing pages repeat page 0).
 	pub fn page_views(&self) -> [&wgpu::TextureView; MAX_PAGES] {
-		std::array::from_fn(|i| self.views.get(i).unwrap_or(&self.views[0]))
+		std::array::from_fn(|i| self.views.get(i).unwrap_or(&self.placeholder))
 	}
 
 	/// Slot of a resident key, marked as used this frame.
@@ -120,6 +135,10 @@ impl TileAtlas {
 	pub fn allocate(&mut self, key: AtlasKey) -> Option<u32> {
 		if let Some(slot) = self.lookup(key) {
 			return Some(slot);
+		}
+		// AUDIT-FIX(P1): evict only after the maximum number of pages has actually been created.
+		if self.free.is_empty() {
+			self.grow();
 		}
 		let slot = match self.free.pop() {
 			Some(slot) => slot,
@@ -200,6 +219,24 @@ impl TileAtlas {
 		}
 		slots
 	}
+}
+
+// AUDIT-FIX(P1): both real and placeholder pages use the shader's existing array texture layout.
+fn page_texture(device: &wgpu::Device, layers: u32) -> wgpu::Texture {
+	device.create_texture(&wgpu::TextureDescriptor {
+		label: Some("fx-atlas-page"),
+		size: wgpu::Extent3d {
+			width: TILE_SIZE,
+			height: TILE_SIZE,
+			depth_or_array_layers: layers,
+		},
+		mip_level_count: 1,
+		sample_count: 1,
+		dimension: wgpu::TextureDimension::D2,
+		format: FORMAT,
+		usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+		view_formats: &[],
+	})
 }
 
 /// Tile pixels → straight RGBA f16 bytes (masks: `(v, 0, 0, 1)`).

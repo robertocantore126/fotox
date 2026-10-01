@@ -296,9 +296,11 @@ impl TilePipeline {
 	fn new(ctx: &RenderContext) -> Self {
 		let config = CompositorConfig::default();
 		// Both the atlas and the composite cache are allocated up front.
-		let gpu_bytes = config.atlas_budget + u64::from(config.composite_slots) * TILE_F16_BYTES;
+		// AUDIT-FIX(P1): lazy atlas reporting begins with the actual compositor allocation.
+		let compositor = GpuCompositor::new(&ctx.device, &ctx.queue, config);
+		let gpu_bytes = compositor.allocated_bytes();
 		Self {
-			compositor: GpuCompositor::new(&ctx.device, &ctx.queue, config),
+			compositor,
 			renderer: ViewportRenderer::new(&ctx.device, &ctx.queue, VIEWPORT_FORMAT),
 			luts: LutCache::default(),
 			ready: HashMap::new(),
@@ -427,6 +429,8 @@ impl TilePipeline {
 		// Composite. `hot` never blocks: RAM-resident tiles only.
 		let store = &ctx.store;
 		let outcomes = self.compositor.composite(&programs, &|handle| store.try_get_hot(handle))?;
+		// AUDIT-FIX(P1): update reported bytes after demand-driven page growth.
+		self.gpu_bytes = self.compositor.allocated_bytes();
 		let total = self.compositor.stats().uploads;
 		self.frame_uploads = u32::try_from(total - self.total_uploads).unwrap_or(u32::MAX);
 		self.total_uploads = total;
