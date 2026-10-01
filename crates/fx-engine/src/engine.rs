@@ -1764,6 +1764,8 @@ impl Engine {
 		});
 		let reservation = path.clone();
 		let spawned = std::thread::Builder::new().name(format!("import-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let mut last = 0.0f32;
 			let mut report = |fraction: f32| {
 				// ~1 % steps are plenty for a progress bar.
@@ -1898,6 +1900,8 @@ impl Engine {
 			fraction: 0.0,
 		});
 		let spawned = std::thread::Builder::new().name(format!("export-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let mut report = |fraction: f32| {
 				let _ = internal.send(Internal::Progress {
 					task,
@@ -2429,6 +2433,8 @@ impl Engine {
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let clipboard = self.ops.clipboard.clone();
 		let spawned = std::thread::Builder::new().name(format!("pixel-job-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let progress_internal = internal.clone();
 			let progress_label = label.clone();
 			let ops = EngineOps {
@@ -3163,6 +3169,8 @@ impl Engine {
 			fraction: 0.0,
 		});
 		let spawned = std::thread::Builder::new().name(format!("save-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let mut report = |fraction: f32| {
 				let _ = internal.send(Internal::Progress {
 					task,
@@ -4547,6 +4555,8 @@ impl Engine {
 		self.derived_job = self.derived_job.wrapping_add(1);
 		let job = self.derived_job;
 		let spawned = std::thread::Builder::new().name("derived-tiles".into()).spawn(move || {
+			// AUDIT-FIX(P1): derived coordinator can yield, engine/render cannot.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::derived::fulfil(&mut computed, &store, &requests)));
 			if let Err(panic) = result {
 				tracing::warn!("derived tiles panicked: {}", panic_text(&*panic));

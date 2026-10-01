@@ -352,6 +352,8 @@ impl Engine {
 		}
 		// AUDIT-FIX(D4+SO2): composite and recursive instance propagation use the worker, never the engine loop.
 		let spawned = std::thread::Builder::new().name("save-contents".into()).spawn(move || {
+			// AUDIT-FIX(P1): save-back is a dedicated pixel producer.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 				let roots = nested.layers.iter().map(|layer| layer.id).collect::<Vec<_>>();
 				source.composite = crate::export::composite_layers(&nested, &roots, None, &store, None).map_err(|e| fx_io::IoError::Decode(e.to_string()))?;
@@ -534,6 +536,7 @@ impl Engine {
 		});
 		let internal = self.internal.clone();
 		let spawned = std::thread::Builder::new().name(format!("export-regions-{task}")).spawn(move || {
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let total = regions.len();
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), fx_io::IoError> {
 				for (i, (name, rect)) in regions.into_iter().enumerate() {

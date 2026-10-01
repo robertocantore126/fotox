@@ -21,6 +21,43 @@ use parking_lot::Mutex;
 use crate::format::{PixelFormat, PixelValue};
 use crate::scratch::{Extent, ScratchFile};
 
+// AUDIT-FIX(P1): only explicit dedicated worker scopes may wait at insertion.
+thread_local! {
+	static PRESSURE_OPT_IN: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+	static PRESSURE_LOGGED: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+}
+pub struct ProducerScope {
+	previous: bool,
+	logged: bool,
+	_thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl ProducerScope {
+	pub fn enter() -> Self {
+		Self {
+			previous: PRESSURE_OPT_IN.with(|v| v.replace(true)),
+			logged: PRESSURE_LOGGED.with(|v| v.replace(false)),
+			_thread_bound: std::marker::PhantomData,
+		}
+	}
+}
+impl Drop for ProducerScope {
+	fn drop(&mut self) {
+		PRESSURE_OPT_IN.with(|v| v.set(self.previous));
+		PRESSURE_LOGGED.with(|v| v.set(self.logged));
+	}
+}
+fn no_backpressure() -> bool {
+	static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*DISABLED.get_or_init(|| std::env::var("FOTOX_NO_BACKPRESSURE").is_ok_and(|v| v == "1"))
+}
+struct PressureNotify<'a>(&'a StoreInner);
+impl Drop for PressureNotify<'_> {
+	fn drop(&mut self) {
+		let _gate = self.0.pressure_gate.lock().unwrap_or_else(|e| e.into_inner());
+		self.0.pressure.notify_all();
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Buffers
 // ---------------------------------------------------------------------------
@@ -449,6 +486,8 @@ struct StoreInner {
 	/// Only one trim at a time (background thread vs explicit calls).
 	trim_lock: Mutex<()>,
 	signal: Arc<TrimSignal>,
+	pressure_gate: StdMutex<()>,
+	pressure: Condvar,
 }
 
 impl Drop for StoreInner {
@@ -505,6 +544,28 @@ impl StoreInner {
 		self.stats.hot_bytes.load(Ordering::Relaxed) > self.config.hot_budget || self.stats.warm_bytes.load(Ordering::Relaxed) > self.config.warm_budget
 	}
 
+	fn excessive_pressure(&self) -> bool {
+		self.stats
+			.hot_bytes
+			.load(Ordering::Relaxed)
+			.saturating_add(self.stats.warm_bytes.load(Ordering::Relaxed))
+			> self.config.hot_budget.saturating_add(self.config.warm_budget).saturating_mul(5) / 4
+	}
+	fn producer_wait(&self) {
+		if no_backpressure() || !PRESSURE_OPT_IN.with(|v| v.get()) || !self.excessive_pressure() {
+			return;
+		}
+		self.signal.notify();
+		let gate = self.pressure_gate.lock().unwrap_or_else(|e| e.into_inner());
+		let (_gate, timeout) = self
+			.pressure
+			.wait_timeout_while(gate, Duration::from_secs(2), |_| self.excessive_pressure())
+			.unwrap_or_else(|e| e.into_inner());
+		if timeout.timed_out() && self.excessive_pressure() && !PRESSURE_LOGGED.with(|v| v.replace(true)) {
+			tracing::warn!("tile producer exceeded memory pressure wait (2s); continuing this job with held tiles");
+		}
+	}
+
 	/// Snapshot of all live entries (weak refs upgraded). Shards are locked one
 	/// at a time and only while copying pointers.
 	fn live_entries(&self) -> Vec<Arc<TileEntry>> {
@@ -533,6 +594,7 @@ pub struct TileStore(Arc<StoreInner>);
 
 impl TileStore {
 	pub fn new(config: TileStoreConfig) -> Result<Self, TileError> {
+		let _ = no_backpressure(); // AUDIT-FIX(P1): sample switch at store startup.
 		let scratch = match ScratchFile::create(&config.scratch_dir, config.scratch_limit) {
 			Ok(file) => Some(file),
 			Err(e) => {
@@ -549,6 +611,8 @@ impl TileStore {
 			scratch,
 			trim_lock: Mutex::new(()),
 			signal: signal.clone(),
+			pressure_gate: StdMutex::new(()),
+			pressure: Condvar::new(),
 			config,
 		});
 		if inner.config.background_trim {
@@ -579,6 +643,8 @@ impl TileStore {
 	/// tiles for a consumer to read next (a mip level for the level above it)
 	/// holds them until they are read (code review 2026-09-27 R01).
 	pub fn insert_held(&self, buffer: TileBuffer, class: TileClass) -> (TileHandle, Arc<TileBuffer>) {
+		// AUDIT-FIX(P1): no copies/registry locks are held across the bounded wait.
+		self.0.producer_wait();
 		let id = TileId(NonZeroU64::new(self.0.next_id.fetch_add(1, Ordering::Relaxed)).expect("tile id overflow"));
 		let format = buffer.format();
 		let buffer = Arc::new(buffer);
@@ -734,6 +800,7 @@ impl TileStore {
 	/// benchmarks. Cost: one scan over all live tiles.
 	pub fn trim(&self) {
 		let inner = &*self.0;
+		let _notify = PressureNotify(inner);
 		let _guard = inner.trim_lock.lock();
 		let hot_target = inner.config.hot_budget / 10 * 9;
 		let warm_target = inner.config.warm_budget / 10 * 9;

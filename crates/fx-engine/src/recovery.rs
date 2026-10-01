@@ -61,6 +61,8 @@ impl Recovery {
 			for work in receiver {
 				match work {
 					Work::Snapshot { id, generation, name, doc } => {
+						// AUDIT-FIX(P1): reset timeout reporting per recovery save job.
+						let _pressure = fx_tiles::ProducerScope::enter();
 						let path = session.join(format!("document-{}.fxd", id.0));
 						let target = files
 							.get(&id)
