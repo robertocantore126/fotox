@@ -39,6 +39,7 @@ function makeRow(item, ctx) {
     "aria-disabled": item.dis ? "true" : "false",
     "aria-haspopup": item.sub ? "menu" : null,
     "data-label": item.label,
+    "data-action": item.a || null,
     "data-tip": item.tip || null,
   },
     h("span", { class: "mi-check" }, checked ? icon("i-check", "ic xs") : null),

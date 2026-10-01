@@ -1,5 +1,7 @@
 // Fotox — helper DOM minimale (nessuna dipendenza esterna).
 
+import { rememberSource } from "./inspector-source.js";
+
 export function h(tag, props = null, ...kids) {
   const el = document.createElement(tag);
   if (props) {
@@ -15,6 +17,7 @@ export function h(tag, props = null, ...kids) {
       else el.setAttribute(k, v === true ? "" : v);
     }
   }
+  rememberSource(el, h, props);
   add(el, kids);
   return el;
 }
@@ -35,6 +38,7 @@ export const sprite = { map: null, defaults: null };
 /** Icona dal set (assets/icons.svg), colorabile via currentColor. */
 export function icon(id, cls = "ic", extra = {}) {
   const svg = document.createElementNS(SVG_NS, "svg");
+  rememberSource(svg, icon);
   svg.setAttribute("class", cls);
   svg.setAttribute("viewBox", "0 0 20 20");
   svg.setAttribute("aria-hidden", "true");
