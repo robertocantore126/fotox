@@ -1311,8 +1311,8 @@ fn create_lut_texture(device: &wgpu::Device, rows: u32) -> (wgpu::Texture, wgpu:
 	(texture, view)
 }
 
-// AUDIT-FIX(COMPCACHE): comparison switch read once at compositor startup.
-fn no_composite_cache() -> bool {
+// AUDIT-FIX(COMPCACHE): comparison switch read once at engine startup.
+pub fn no_composite_cache() -> bool {
 	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 	*OLD.get_or_init(|| std::env::var("FOTOX_NO_COMPOSITE_CACHE").is_ok_and(|v| v == "1"))
 }

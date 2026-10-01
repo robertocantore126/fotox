@@ -512,6 +512,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		output,
 	} = ctx;
 	let _ = crate::effects::initialise_region_switch(); // AUDIT-FIX(FXREGION): sample environment at startup.
+	let _ = fx_render::gpu::compositor::no_composite_cache(); // AUDIT-FIX(COMPCACHE): freeze switch before any document opens.
 	crate::text::warm();
 	// AUDIT-FIX(D2): session setup happens before engine ownership moves its shared handles.
 	let recovery = crate::recovery::Recovery::start(store.clone(), internal.clone())
