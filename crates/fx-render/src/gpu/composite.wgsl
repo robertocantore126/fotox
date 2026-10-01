@@ -20,7 +20,7 @@ const K_END_ISOLATED: u32 = 5u;
 const K_END_PASS: u32 = 6u;
 const K_LOAD_PREFIX: u32 = 7u;
 // AUDIT-FIX(COMPCACHE): suffix cache is premultiplied Normal over.
-const K_OVER_SUFFIX:u32=15u;
+const K_OVER_SUFFIX: u32 = 16u; // VERIFY-FIX: 15 is K_END_CHANNELS
 const K_ADJUST_LUMA_LUT: u32 = 8u;
 const K_ADJUST_MATRIX: u32 = 9u;
 const K_ADJUST_BALANCE: u32 = 10u;

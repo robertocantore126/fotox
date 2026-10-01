@@ -48,7 +48,7 @@ const K_ADJUST_BW: u32 = 12;
 const K_ADJUST_LUT3D: u32 = 13;
 const K_ADJUST_SELECTIVE: u32 = 14;
 // AUDIT-FIX(COMPCACHE): cached Normal suffix is already premultiplied.
-const K_OVER_SUFFIX: u32 = 15;
+const K_OVER_SUFFIX: u32 = 16; // VERIFY-FIX: 15 is K_END_CHANNELS
 /// Adjustment flag: keep the input's luminance (`composite.wgsl` F_PRESERVE).
 const F_PRESERVE: u32 = 8;
 const K_BEGIN_ISOLATED: u32 = 3;
