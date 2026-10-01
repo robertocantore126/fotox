@@ -168,3 +168,50 @@ pub fn sweep_parts(recent: &[PathBuf]) {
 }
 #[cfg(not(windows))]
 pub fn sweep_parts(_recent: &[PathBuf]) {}
+
+// AUDIT-FIX(D8): exFAT cannot replace a target still referenced by document/history tiles.
+#[cfg(windows)]
+pub fn is_exfat(path: &Path) -> io::Result<bool> {
+	use std::os::windows::ffi::OsStrExt;
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn GetVolumePathNameW(path: *const u16, root: *mut u16, len: u32) -> i32;
+		fn GetVolumeInformationW(
+			root: *const u16,
+			name: *mut u16,
+			name_len: u32,
+			serial: *mut u32,
+			component_len: *mut u32,
+			flags: *mut u32,
+			fs: *mut u16,
+			fs_len: u32,
+		) -> i32;
+	}
+	let path = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+	let mut root = [0u16; 32768];
+	let mut fs = [0u16; 64];
+	// SAFETY: output buffers and NUL-terminated input meet the Windows API contracts; unused outputs are null.
+	if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	if unsafe {
+		GetVolumeInformationW(
+			root.as_ptr(),
+			std::ptr::null_mut(),
+			0,
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+			fs.as_mut_ptr(),
+			fs.len() as u32,
+		)
+	} == 0
+	{
+		return Err(io::Error::last_os_error());
+	}
+	Ok(String::from_utf16_lossy(&fs[..fs.iter().position(|v| *v == 0).unwrap_or(fs.len())]).eq_ignore_ascii_case("exfat"))
+}
+#[cfg(not(windows))]
+pub fn is_exfat(_path: &Path) -> io::Result<bool> {
+	Ok(false)
+}

@@ -192,7 +192,49 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	}
 
 	report.seconds = started.elapsed().as_secs_f64();
+	// AUDIT-FIX(D8): save already runs on a worker; compact there without blocking engine/render.
+	let file = if incremental && file.footer().end_offset > 256 << 20 && needs_compaction(file.footer().live_bytes, file.footer().end_offset) {
+		match compact(&request, &file, progress) {
+			Ok(Some(compacted)) => compacted,
+			Ok(None) => file,
+			Err(error) => {
+				tracing::warn!("background compaction skipped after successful save: {error}");
+				file
+			}
+		}
+	} else {
+		file
+	};
 	Ok(SavedFxd { file, report })
+}
+
+// AUDIT-FIX(D8): publish a fresh .compact only if the original target still has the checked identity.
+fn compact(request: &SaveRequest<'_>, file: &Arc<FxdFile>, progress: Progress<'_>) -> Result<Option<Arc<FxdFile>>, IoError> {
+	if crate::fs_util::is_exfat(file.path())? {
+		tracing::info!("compaction skipped on exFAT while backed handles are open");
+		return Ok(None);
+	}
+	let _lease = PathWriteLock::acquire(file.path());
+	if !file.matches_path()? {
+		return Ok(None);
+	}
+	let mut name = file.path().as_os_str().to_os_string();
+	name.push(".compact");
+	let path = PathBuf::from(name);
+	let saved = save(
+		SaveRequest {
+			doc: request.doc,
+			store: request.store,
+			preview: request.preview,
+		},
+		SaveTarget::Fresh(path.clone()),
+		progress,
+	)?;
+	if !file.matches_path()? {
+		return Err(IoError::Decode("Original path changed during compaction; compact copy retained".into()));
+	}
+	crate::fs_util::atomic_replace(&path, file.path())?;
+	Ok(Some(saved.file.rebind_path(file.path())?))
 }
 
 /// True when dead chunks exceed half the file: the engine may compact in the

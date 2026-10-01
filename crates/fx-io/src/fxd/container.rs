@@ -436,6 +436,18 @@ impl FxdFile {
 		Ok(())
 	}
 
+	// AUDIT-FIX(D8): keep the compacted backing id while rebinding its published path.
+	pub fn rebind_path(&self, path: &Path) -> Result<Arc<Self>, IoError> {
+		let rebound = Self {
+			path: path.to_path_buf(),
+			..self.clone()
+		};
+		if !rebound.matches_path()? {
+			return Err(IoError::Decode("Compacted save path changed before rebind".into()));
+		}
+		Ok(Arc::new(rebound))
+	}
+
 	// AUDIT-FIX(D3): compare OS identity rather than the pathname held by an old handle.
 	pub fn matches_path(&self) -> Result<bool, IoError> {
 		let current = match File::open(&self.path) {
