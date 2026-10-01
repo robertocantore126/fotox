@@ -71,6 +71,10 @@ pub struct OpenDoc {
 	/// A pixel job (filter, merge, flatten) is running on this document: its
 	/// label. Commands and undo wait until it is done (M4-T05).
 	pub busy: Option<String>,
+	/// VERIFY-FIX(P2): commands sent while `busy`, run in order when the job
+	/// ends. P2 made Fill and Free Transform jobs, so "Fill, then Deselect"
+	/// lost the Deselect when such commands were refused.
+	pub queued: std::collections::VecDeque<fx_core::Command>,
 	/// `(revision, preview_rev)` of `snapshot`.
 	snapshot_key: (u64, u64),
 	/// View ▸ Proof Setup (M4-T04): the press to simulate.
@@ -148,6 +152,7 @@ impl OpenDoc {
 			adjustment_preview: None,
 			derived_held: Vec::new(),
 			busy: None,
+			queued: std::collections::VecDeque::new(),
 			snapshot_key: (0, 0),
 			proof: None,
 			proof_colors: false,
@@ -183,6 +188,7 @@ impl OpenDoc {
 			adjustment_preview: None,
 			derived_held: Vec::new(),
 			busy: None,
+			queued: std::collections::VecDeque::new(),
 			snapshot_key: (0, 0),
 			proof: None,
 			proof_colors: false,
@@ -256,6 +262,7 @@ impl OpenDoc {
 			adjustment_preview: None,
 			derived_held: Vec::new(),
 			busy: None,
+			queued: std::collections::VecDeque::new(),
 			snapshot_key: (0, 0),
 			proof: None,
 			proof_colors: false,

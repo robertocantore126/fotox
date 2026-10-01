@@ -624,6 +624,7 @@ pub(crate) fn run(ctx: EngineContext) {
 			},
 			default(timeout) => {}
 		}
+		engine.run_queued_commands();
 		engine.schedule_recovery(false);
 		engine.expire_derived();
 		engine.flush_view_message();
@@ -639,6 +640,17 @@ pub(crate) fn run(ctx: EngineContext) {
 }
 
 impl Engine {
+	/// VERIFY-FIX(P2): run the commands queued while a document was busy, in
+	/// order, until one of them starts another job.
+	fn run_queued_commands(&mut self) {
+		let ready: Vec<DocId> = self.docs.iter().filter(|open| open.busy.is_none() && !open.queued.is_empty()).map(|open| open.id).collect();
+		for id in ready {
+			while let Some(command) = self.docs.get_mut(id).filter(|open| open.busy.is_none()).and_then(|open| open.queued.pop_front()) {
+				self.command(id, command);
+			}
+		}
+	}
+
 	/// The view of the active document, or of the virtual one.
 	fn view_mut(&mut self) -> &mut ViewState {
 		match self.docs.active_mut() {
@@ -3359,8 +3371,13 @@ impl Engine {
 			return;
 		};
 		if let Some(job) = &doc.busy {
-			let text = format!("Wait until {job} is finished");
-			self.to_ui(&EngineToUi::Toast { text });
+			// VERIFY-FIX(P2): queue (bounded) instead of dropping the command.
+			if doc.queued.len() < 64 {
+				doc.queued.push_back(command);
+			} else {
+				let text = format!("Wait until {job} is finished");
+				self.to_ui(&EngineToUi::Toast { text });
+			}
 			return;
 		}
 		// Heavy pixel commands run as jobs (recipe R2): the UI stays live.
