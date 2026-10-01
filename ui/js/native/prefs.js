@@ -167,12 +167,13 @@ export function openPrefsDialog(id) {
   openDialog(id, {
     title: "Preferences — Performance",
     fields: [
-      { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? 4096, w: 80 },
+      // AUDIT-FIX(T2): use the engine's five-GiB default, including invalid-input fallback.
+      { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? 5120, w: 80 },
       { type: "text", label: "Scratch Folder:", value: prefs.scratch_dir || "", width: 260 },
       { type: "label", text: "The scratch folder must exist; it applies at the next start." },
     ],
     onOk: (v) => set({
-      memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 4096)),
+      memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 5120)),
       scratch_dir: String(v["Scratch Folder:"] ?? "").trim(),
     }),
   });
