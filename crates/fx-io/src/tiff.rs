@@ -74,6 +74,8 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 			height: height.into(),
 		});
 	}
+	// AUDIT-FIX(I2): reject hostile headers before any chunk/pixel allocation.
+	crate::check_decoded_size(width, height)?;
 	let source = source(&mut decoder)?;
 	let depth = if source.sixteen { BitDepth::U16 } else { BitDepth::U8 };
 	let format = depth.rgba_format();
@@ -94,6 +96,26 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 		across: if tiled { width.div_ceil(chunk_w) } else { 1 },
 		down: height.div_ceil(chunk_h),
 	};
+	// AUDIT-FIX(I3): oversized uncompressed strips stream by row rather than by whole strip.
+	let compression = decoder.find_tag_unsigned::<u16>(Tag::Compression).map_err(decode)?.unwrap_or(1);
+	if !tiled && chunk_h > (BATCH_BANDS * BAND) as u32 && compression == 1 {
+		let image = stream_strips(path, &mut decoder, units, source, store, progress)?;
+		return Ok(ImportedImage {
+			width,
+			height,
+			depth,
+			profile,
+			ppi,
+			image,
+		});
+	}
+	// AUDIT-FIX(I2+I3): converted unit buffers must fit one band batch; huge compressed strips need a streaming decoder.
+	let unit_bytes = u64::from(width) * u64::from(chunk_h.min(height)) * if source.sixteen { 8 } else { 4 };
+	if unit_bytes > 256 << 20 {
+		return Err(IoError::Unsupported(
+			"TIFF strip/tile row exceeds the 256 MiB decode batch limit; re-save with smaller strips or tiles".into(),
+		));
+	}
 	drop(decoder);
 
 	let mut image = TiledImage::new(width, height, format);
@@ -134,11 +156,10 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 
 fn open(path: &Path) -> Result<Decoder<BufReader<File>>, IoError> {
 	let file = File::open(path)?;
-	// Our own limits (300 000 px, bands) are stricter than the crate's
-	// defaults would be for a single strip of a big file.
+	// AUDIT-FIX(I2): metadata/intermediate/chunk allocations are bounded even before header admission.
 	Ok(Decoder::new(BufReader::with_capacity(1 << 20, file))
 		.map_err(decode)?
-		.with_limits(Limits::unlimited()))
+		.with_limits(Limits::default()))
 }
 
 fn decode(error: tiff::TiffError) -> IoError {
@@ -240,8 +261,13 @@ fn decode_unit(decoder: &mut Result<Decoder<BufReader<File>>, IoError>, units: U
 	};
 	let rows = units.rows(u) as usize;
 	let width = units.width as usize;
-	let mut out16 = if source.sixteen { vec![0u16; rows * width * 4] } else { Vec::new() };
-	let mut out8 = if source.sixteen { Vec::new() } else { vec![0u8; rows * width * 4] };
+	// AUDIT-FIX(I2): fallible converted unit allocations.
+	let mut out16 = if source.sixteen {
+		crate::zeroed::<u16>(rows * width * 4)?
+	} else {
+		Vec::new()
+	};
+	let mut out8 = if source.sixteen { Vec::new() } else { crate::zeroed::<u8>(rows * width * 4)? };
 	for tx in 0..units.across {
 		let index = if units.tiled { u * units.across + tx } else { u };
 		let (data_w, data_h) = decoder.chunk_data_dimensions(index);
@@ -268,6 +294,101 @@ fn decode_unit(decoder: &mut Result<Decoder<BufReader<File>>, IoError>, units: U
 		}
 	}
 	Ok(if source.sixteen { Converted::U16(out16) } else { Converted::U8(out8) })
+}
+
+// AUDIT-FIX(I3): classic/BigTIFF strip ranges are validated, then decoded in bounded rows (8/16 bit).
+fn stream_strips(
+	path: &Path,
+	decoder: &mut Decoder<BufReader<File>>,
+	units: Units,
+	source: Source,
+	store: &TileStore,
+	progress: Progress<'_>,
+) -> Result<TiledImage, IoError> {
+	use std::io::{Read, Seek, SeekFrom};
+	let offsets = decoder
+		.find_tag_unsigned_vec::<u64>(Tag::StripOffsets)
+		.map_err(decode)?
+		.ok_or_else(|| IoError::Decode("TIFF without strip offsets".into()))?;
+	let counts = decoder
+		.find_tag_unsigned_vec::<u64>(Tag::StripByteCounts)
+		.map_err(decode)?
+		.ok_or_else(|| IoError::Decode("TIFF without strip lengths".into()))?;
+	let predictor = decoder.find_tag_unsigned::<u16>(Tag::Predictor).map_err(decode)?.unwrap_or(1);
+	let fill_order = decoder.find_tag_unsigned::<u16>(Tag::FillOrder).map_err(decode)?.unwrap_or(1);
+	let white = decoder.find_tag_unsigned::<u16>(Tag::PhotometricInterpretation).map_err(decode)? == Some(0);
+	if ![1, 2].contains(&predictor) || fill_order != 1 {
+		return Err(IoError::Unsupported("large TIFF strip predictor/fill order".into()));
+	}
+	if offsets.len() != units.down as usize || counts.len() != offsets.len() {
+		return Err(IoError::Decode("TIFF strip table length mismatch".into()));
+	}
+	let mut file = BufReader::with_capacity(1 << 20, File::open(path)?);
+	let len = file.get_ref().metadata()?.len();
+	let mut endian = [0u8; 2];
+	file.read_exact(&mut endian)?;
+	let little = endian == *b"II";
+	let samples = units.width as usize * source.samples;
+	let row_bytes = samples * if source.sixteen { 2 } else { 1 };
+	let mut raw = crate::zeroed::<u8>(row_bytes)?;
+	let mut src16 = crate::zeroed::<u16>(if source.sixteen { samples } else { 0 })?;
+	let mut out8 = crate::zeroed::<u8>(if source.sixteen { 0 } else { units.width as usize * 4 })?;
+	let mut out16 = crate::zeroed::<u16>(if source.sixteen { units.width as usize * 4 } else { 0 })?;
+	let format = if source.sixteen { BitDepth::U16 } else { BitDepth::U8 }.rgba_format();
+	let mut image = TiledImage::new(units.width, units.height, format);
+	let mut band = Band::new(format, units.width as usize * 4);
+	for unit in 0..units.down {
+		let (offset, count) = (offsets[unit as usize], counts[unit as usize]);
+		let rows = units.rows(unit);
+		if count < rows as u64 * row_bytes as u64 || offset.checked_add(count).is_none_or(|end| end > len) {
+			return Err(IoError::Decode("TIFF strip extends beyond file or has too few bytes".into()));
+		}
+		file.seek(SeekFrom::Start(offset))?;
+		for row in 0..rows {
+			let y = (unit * units.chunk_h + row) as usize;
+			if y.is_multiple_of(BAND) && !progress(y as f32 / units.height as f32) {
+				return Err(IoError::Cancelled);
+			}
+			file.read_exact(&mut raw)?;
+			if source.sixteen {
+				for (out, bytes) in src16.iter_mut().zip(raw.chunks_exact(2)) {
+					*out = if little {
+						u16::from_le_bytes([bytes[0], bytes[1]])
+					} else {
+						u16::from_be_bytes([bytes[0], bytes[1]])
+					};
+				}
+				if predictor == 2 {
+					for i in source.samples..samples {
+						src16[i] = src16[i].wrapping_add(src16[i - source.samples]);
+					}
+				}
+				if white {
+					for px in src16.chunks_exact_mut(source.samples) {
+						px[0] = u16::MAX - px[0];
+					}
+				}
+				expand(&src16, &mut out16, source, u16::MAX);
+				band.push_row(RowRef::U16(&out16), &mut image, store, y)?;
+			} else {
+				if predictor == 2 {
+					for i in source.samples..samples {
+						raw[i] = raw[i].wrapping_add(raw[i - source.samples]);
+					}
+				}
+				if white {
+					for px in raw.chunks_exact_mut(source.samples) {
+						px[0] = u8::MAX - px[0];
+					}
+				}
+				expand(&raw, &mut out8, source, u8::MAX);
+				band.push_row(RowRef::U8(&out8), &mut image, store, y)?;
+			}
+		}
+	}
+	band.flush(&mut image, store)?;
+	progress(1.0);
+	Ok(image)
 }
 
 /// Sample types the importer handles.

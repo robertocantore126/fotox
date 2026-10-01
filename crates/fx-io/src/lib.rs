@@ -53,6 +53,28 @@ pub type Progress<'a> = &'a mut dyn FnMut(f32) -> bool;
 /// Largest accepted image side, in pixels (Photoshop's PSB limit).
 pub const MAX_SIDE: u64 = 300_000;
 
+// AUDIT-FIX(I2): header-only RGBA8 size policy; even streamed foreign inputs need a bounded admitted size.
+pub(crate) fn check_decoded_size(width: u32, height: u32) -> Result<(), IoError> {
+	const CAP: u64 = 4 << 30;
+	let bytes = u64::from(width).checked_mul(u64::from(height)).and_then(|v| v.checked_mul(4));
+	if width == 0 || height == 0 || bytes.is_none_or(|v| v > CAP) {
+		return Err(IoError::Unsupported(format!(
+			"Image {width} x {height} exceeds the 4 GiB RGBA8 decoded-size limit (or has zero dimensions)"
+		)));
+	}
+	Ok(())
+}
+
+// AUDIT-FIX(I2): format-boundary allocations fail as decode errors instead of infallible Vec growth.
+pub(crate) fn zeroed<T: Clone + Default>(count: usize) -> Result<Vec<T>, IoError> {
+	let mut result = Vec::new();
+	result
+		.try_reserve_exact(count)
+		.map_err(|e| IoError::Decode(format!("Not enough memory to decode image: {e}")))?;
+	result.resize(count, T::default());
+	Ok(result)
+}
+
 /// File formats [`import_file`] recognises by their first bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sniffed {
