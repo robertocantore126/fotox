@@ -49,9 +49,17 @@ pub fn ensure_mip(image: &mut TiledImage, store: &TileStore, level: usize, tx: u
 /// reads a clean one below it). Evicted tiles are left alone: they are
 /// recomputed when something asks for them.
 pub fn ensure_all_mips(image: &mut TiledImage, store: &TileStore) -> Result<(), TileError> {
+	ensure_all_mips_with_progress(image, store, &mut || true)
+}
+
+// AUDIT-FIX(P4): importer workers may stop between bounded mip-level batches.
+pub fn ensure_all_mips_with_progress(image: &mut TiledImage, store: &TileStore, keep_going: &mut dyn FnMut() -> bool) -> Result<(), TileError> {
 	// Each level is held until the next one has read it (see `compute_levels`).
 	let mut held: Vec<Arc<TileBuffer>> = Vec::new();
 	for level in 1..image.level_count() {
+		if !keep_going() {
+			return Err(TileError::Corrupt("cancelled mip generation".into()));
+		}
 		let tiles: Vec<(u32, u32)> = image.dirty_tiles(level).collect();
 		if tiles.is_empty() {
 			continue;
@@ -94,14 +102,36 @@ impl<'a> LazyMips<'a> {
 
 	fn read(&self, level: usize, tx: u32, ty: u32) -> Result<Option<TileRef>, TileError> {
 		for _ in 0..LAZY_RETRIES {
-			let slot = {
-				let mut image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-				if level == 0 {
-					image.slot(0, tx, ty).clone()
-				} else {
-					ensure_mip(&mut image, self.store, level, tx, ty)?
-				}
+			// AUDIT-FIX(D1): snapshot only slots under the lock; recursive mip work runs unlocked.
+			let (mut slot, compute) = {
+				let image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+				(image.slot(level, tx, ty).clone(), needs_compute(&image, self.store, level, tx, ty))
 			};
+			if compute {
+				// AUDIT-FIX(D1): inline recursion also avoids nested rayon scheduling in a sampler worker.
+				let mut refs = Vec::with_capacity(4);
+				for (cx, cy) in children(tx, ty) {
+					refs.push(self.tile(level - 1, i64::from(cx), i64::from(cy))?);
+				}
+				let pixels = std::array::from_fn(|i| match &refs[i] {
+					None => ChildPixels::Empty,
+					Some(TileRef::Solid(value)) => ChildPixels::Solid(fx_tiles::PixelValue(*value)),
+					Some(TileRef::Data(buffer)) => ChildPixels::Data(buffer),
+				});
+				let (computed, held) = store_downsample(self.format, pixels, self.store);
+				let computed_slot = computed.clone();
+				let mut image = self.image.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+				if needs_compute(&image, self.store, level, tx, ty) {
+					image.set_derived_slot(level, tx, ty, computed);
+				}
+				slot = image.slot(level, tx, ty).clone();
+				// Hold the freshly inserted tile through the unlocked read below.
+				if let (TileSlot::Data(_handle), Some(buffer)) = (&slot, held) {
+					if slot.same_as(&computed_slot) {
+						return Ok(Some(TileRef::Data(buffer)));
+					}
+				}
+			}
 			match slot {
 				TileSlot::Empty => return Ok(None),
 				TileSlot::Solid(value) => return Ok(Some(TileRef::Solid(value.0))),
@@ -193,6 +223,13 @@ type Computed = (u32, u32, TileSlot, Option<Arc<TileBuffer>>);
 
 /// Compute `tiles` of `level` from level `level - 1`, in parallel.
 fn compute_tiles(image: &TiledImage, store: &TileStore, level: usize, tiles: &[(u32, u32)]) -> Result<Vec<Computed>, TileError> {
+	// AUDIT-FIX(D1): rayon workers compute mip batches inline, without stealing outer sampler tasks.
+	if rayon::current_thread_index().is_some() {
+		return tiles
+			.iter()
+			.map(|&(tx, ty)| compute_tile(image, store, level, tx, ty).map(|(slot, buffer)| (tx, ty, slot, buffer)))
+			.collect();
+	}
 	tiles
 		.par_iter()
 		.map(|&(tx, ty)| compute_tile(image, store, level, tx, ty).map(|(slot, buffer)| (tx, ty, slot, buffer)))
@@ -232,24 +269,29 @@ fn compute_tile(image: &TiledImage, store: &TileStore, level: usize, tx: u32, ty
 		}
 	});
 
+	Ok(store_downsample(format, pixels, store))
+}
+
+// AUDIT-FIX(D1): shared downsample/store step accepts held child pixels, with no image lock.
+fn store_downsample(format: PixelFormat, pixels: [ChildPixels<'_>; 4], store: &TileStore) -> (TileSlot, Option<Arc<TileBuffer>>) {
 	// All four empty → empty; all four the same solid → that solid. No pixels.
 	match pixels {
-		[ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty] => return Ok((TileSlot::Empty, None)),
+		[ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty, ChildPixels::Empty] => return (TileSlot::Empty, None),
 		[ChildPixels::Solid(a), ChildPixels::Solid(b), ChildPixels::Solid(c), ChildPixels::Solid(d)] if a == b && b == c && c == d => {
-			return Ok((TileSlot::Solid(a), None));
+			return (TileSlot::Solid(a), None);
 		}
 		_ => {}
 	}
 
 	let buffer = downsample_2x2(format, pixels);
-	Ok(match buffer.uniform_value() {
+	match buffer.uniform_value() {
 		Some(v) if v.is_transparent(format) || (!format.has_alpha() && v.0[0] == 0) => (TileSlot::Empty, None),
 		Some(v) => (TileSlot::Solid(v), None),
 		None => {
 			let (handle, held) = store.insert_held(buffer, TileClass::Derived);
 			(TileSlot::Data(handle), Some(held))
 		}
-	})
+	}
 }
 
 /// Child coordinates at the level below: `[top_left, top_right, bottom_left, bottom_right]`.

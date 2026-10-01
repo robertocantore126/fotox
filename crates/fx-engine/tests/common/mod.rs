@@ -125,6 +125,43 @@ impl Harness {
 							}),
 						}
 					}
+					// VERIFY-FIX(4.2): follow structural patches like layers-panel.js does.
+					Ok((
+						EngineToUi::LayersStructurePatch {
+							doc,
+							revision,
+							seq,
+							base,
+							ops,
+							changed,
+						},
+						_,
+					)) => {
+						frames_sink.lock().unwrap().push(LayersFrame {
+							patch: true,
+							rows: changed.len() + ops.len(),
+							bytes: frame.len(),
+						});
+						let mut lists = lists.lock().unwrap();
+						let applied = match lists.get_mut(&doc) {
+							Some((held, layers)) if *held == base => fx_protocol::apply_layers_structure_patch(layers, &ops, &changed).is_ok(),
+							_ => false,
+						};
+						match lists.get_mut(&doc) {
+							Some((held, layers)) if applied => {
+								*held = seq;
+								Seen::Ui(EngineToUi::Layers {
+									doc,
+									revision,
+									layers: layers.clone(),
+									seq,
+								})
+							}
+							held => Seen::Ui(EngineToUi::Error {
+								text: format!("layers_structure_patch against list {base}, the UI holds {:?}", held.map(|h| h.0)),
+							}),
+						}
+					}
 					Ok((message, _)) => Seen::Ui(message),
 					Err(_) => return,
 				},

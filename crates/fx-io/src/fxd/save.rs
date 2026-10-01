@@ -71,12 +71,75 @@ pub struct SaveRequest<'a> {
 /// [`FxdWriter::commit`]). A crash at any point leaves the previous version
 /// readable.
 pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>) -> Result<SavedFxd, IoError> {
+	save_with(request, target, progress, None)
+}
+
+/// VERIFY-FIX(D2): two dedicated threads for background copies.
+fn background_pool() -> &'static rayon::ThreadPool {
+	static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+	POOL.get_or_init(|| {
+		rayon::ThreadPoolBuilder::new()
+			.num_threads(2)
+			.thread_name(|i| format!("fxd-background-{i}"))
+			.build()
+			.expect("background save pool")
+	})
+}
+
+/// VERIFY-FIX(D2): the chunks a detached save's file already holds, by tile
+/// id (ids are never reused within a store, and tiles are immutable).
+#[derive(Default)]
+pub struct DetachedChunks(HashMap<u64, ChunkRef>);
+
+/// VERIFY-FIX(D2): a save that leaves the store's backing alone, for copies
+/// such as recovery snapshots. An ordinary save re-points every tile it writes
+/// at the new file, so a snapshot followed by a save to the user's file made
+/// that save rewrite the whole document (and the next snapshot too). Reuse
+/// here comes from `chunks`, which must belong to `target`'s file: pass an
+/// empty one with a fresh target. No compaction (the caller restarts the file).
+pub fn save_detached(request: SaveRequest<'_>, target: SaveTarget, chunks: &mut DetachedChunks, progress: Progress<'_>) -> Result<SavedFxd, IoError> {
+	save_with(request, target, progress, Some(chunks))
+}
+
+fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>, mut detached: Option<&mut DetachedChunks>) -> Result<SavedFxd, IoError> {
 	let started = Instant::now();
+	// AUDIT-FIX(D3): replacement invalidates chunk reuse; rewrite once and return the new backing file.
+	let target = match target {
+		SaveTarget::Incremental(file) if !file.matches_path()? => SaveTarget::Fresh(file.path().to_path_buf()),
+		other => other,
+	};
+	// VERIFY-FIX(D2): a fresh detached file starts with no reusable chunks.
+	if let (Some(chunks), SaveTarget::Fresh(_)) = (detached.as_deref_mut(), &target) {
+		chunks.0.clear();
+	}
+	let reusable = |tile: &CollectedTile, reuse: Option<_>| -> Option<ChunkRef> {
+		match &detached {
+			Some(chunks) => reuse.and(chunks.0.get(&tile.handle.id().get()).copied()),
+			None => match (reuse, tile.handle.backing()) {
+				(Some(reuse), Some((src, offset, len))) if src == reuse => Some(ChunkRef { offset, len }),
+				_ => None,
+			},
+		}
+	};
 	let _fresh_path_lock = match &target {
 		SaveTarget::Fresh(path) => Some(PathWriteLock::acquire(path)),
 		SaveTarget::Incremental(_) => None,
 	};
 	let tiles = collect_tiles(request.doc, request.preview);
+	// AUDIT-FIX(D10): conservative raw changed bytes plus manifest allowance; never probe on the render thread.
+	let reuse = match &target {
+		SaveTarget::Incremental(file) => Some(file.id()),
+		_ => None,
+	};
+	let estimate = tiles
+		.iter()
+		.filter(|tile| reusable(tile, reuse).is_none())
+		.fold(16u64 << 20, |sum, tile| sum.saturating_add(tile.format.tile_bytes() as u64 + 64));
+	let destination = match &target {
+		SaveTarget::Incremental(file) => file.path(),
+		SaveTarget::Fresh(path) => path.as_path(),
+	};
+	crate::fs_util::require_space(destination, estimate)?;
 	let mut refs: HashMap<u64, ChunkRef> = HashMap::new();
 	let mut written: Vec<(TileHandle, ChunkRef)> = Vec::new();
 	let mut report = SaveReport::default();
@@ -87,9 +150,11 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		SaveTarget::Incremental(_) => None,
 		SaveTarget::Fresh(path) => Some(part_path(path)),
 	};
+	// AUDIT-FIX(D10): the guard outlives the writer, so cleanup runs after handles close.
+	let _part_guard = part.as_ref().map(|path| crate::fs_util::PartGuard(path.clone()));
 	let (mut writer, reuse_id) = match &target {
 		SaveTarget::Incremental(file) => (FxdWriter::append_to((**file).clone())?, Some(file.id())),
-		SaveTarget::Fresh(path) => (FxdWriter::create(&part_path(path))?, None),
+		SaveTarget::Fresh(_) => (FxdWriter::create(part.as_ref().expect("fresh part assigned"))?, None),
 	};
 
 	let total = tiles.len().max(1);
@@ -97,10 +162,8 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	// on rayon, IN_FLIGHT at a time, and appended in order.
 	let mut pending: Vec<&CollectedTile> = Vec::new();
 	for tile in &tiles {
-		if let (Some(reuse_id), Some((src, offset, len))) = (reuse_id, tile.handle.backing())
-			&& src == reuse_id
-		{
-			refs.insert(tile.handle.id().get(), ChunkRef { offset, len });
+		if let Some(chunk) = reusable(tile, reuse_id) {
+			refs.insert(tile.handle.id().get(), chunk);
 			report.tiles_reused += 1;
 		} else {
 			pending.push(tile);
@@ -111,18 +174,25 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		if !progress(done as f32 / total as f32) {
 			return Err(IoError::Cancelled);
 		}
-		let compressed: Vec<Result<Option<Vec<u8>>, IoError>> = batch
-			.par_iter()
-			.map(|tile| match request.store.get(&tile.handle) {
-				Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
-					.map(Some)
-					.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
-				// A mip dropped under memory pressure is simply not stored:
-				// it is rebuilt after opening, like any missing mip.
-				Err(TileError::Evicted) if tile.derived => Ok(None),
-				Err(error) => Err(error.into()),
-			})
-			.collect();
+		let compress = || -> Vec<Result<Option<Vec<u8>>, IoError>> {
+			batch
+				.par_iter()
+				.map(|tile| match request.store.get(&tile.handle) {
+					Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
+						.map(Some)
+						.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
+					// A mip dropped under memory pressure is simply not stored:
+					// it is rebuilt after opening, like any missing mip.
+					Err(TileError::Evicted) if tile.derived => Ok(None),
+					Err(error) => Err(error.into()),
+				})
+				.collect()
+		};
+		// VERIFY-FIX(D2): background copies (recovery snapshots) compress on
+		// their own two threads, not the global pool the engine and the
+		// render loads use: on that pool they made undo at 1,000 layers 2.5×
+		// slower (6.7 ms against 2.7 ms without recovery).
+		let compressed = if detached.is_some() { background_pool().install(compress) } else { compress() };
 		for (tile, result) in batch.iter().zip(compressed) {
 			let Some(bytes) = result? else { continue };
 			let chunk = writer.tile(tile.format, Codec::Zstd, &bytes)?;
@@ -133,7 +203,10 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		}
 		done += batch.len();
 	}
-	progress(1.0);
+	// AUDIT-FIX(P4): cancellation before commit leaves the prior footer/target authoritative.
+	if !progress(1.0) {
+		return Err(IoError::Cancelled);
+	}
 
 	let mut manifest = manifest::to_manifest(request.doc, |handle| refs.get(&handle.id().get()).copied());
 	if let Some(preview) = request.preview {
@@ -142,6 +215,10 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	let payload = manifest::encode_manifest(&manifest, FRESH_LEVEL)?;
 	let manifest_chunk = writer.manifest(&payload)?;
 	let live = live_bytes(&refs, manifest_chunk.len);
+	// AUDIT-FIX(P4): honor a request that arrived during manifest encoding.
+	if !progress(1.0) {
+		return Err(IoError::Cancelled);
+	}
 	let committed = writer.commit(manifest_chunk, live)?;
 
 	// Fresh: close the `.part` handle, replace the target, reopen it.
@@ -151,12 +228,19 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 			SaveTarget::Incremental(_) => unreachable!("part is only set for Fresh"),
 		};
 		drop(committed);
-		std::fs::rename(&part, &target)?;
+		// AUDIT-FIX(D6): write-through replacement after the committed part is synced and closed.
+		crate::fs_util::atomic_replace(&part, &target)?;
 		FxdFile::open(&target)?.0
 	} else {
 		Arc::new(committed)
 	};
 
+	// VERIFY-FIX(D2): a detached save only remembers what its file now holds.
+	if let Some(chunks) = detached {
+		chunks.0 = refs;
+		report.seconds = started.elapsed().as_secs_f64();
+		return Ok(SavedFxd { file, report });
+	}
 	// From now on every tile written is backed by the new file.
 	for (handle, chunk) in &written {
 		request.store.attach_backing(
@@ -170,7 +254,94 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	}
 
 	report.seconds = started.elapsed().as_secs_f64();
+	// AUDIT-FIX(D8): save already runs on a worker; compact there without blocking engine/render.
+	let file = if incremental && file.footer().end_offset > 256 << 20 && needs_compaction(file.footer().live_bytes, file.footer().end_offset) {
+		match compact(&request, &file, progress) {
+			Ok(Some(compacted)) => compacted,
+			Ok(None) => file,
+			Err(error) => {
+				tracing::warn!("background compaction skipped after successful save: {error}");
+				file
+			}
+		}
+	} else {
+		file
+	};
 	Ok(SavedFxd { file, report })
+}
+
+/// VERIFY-FIX(D8): compaction for a file nobody has open. exFAT cannot
+/// replace a file that is open, so `save` skips compaction there and the file
+/// grew without bound; the engine calls this once a document on exFAT is
+/// closed. The newest version is copied to `<path>.compact` with a detached
+/// save (the store's backing is left alone), every handle is released, then
+/// the copy replaces `path`. `Ok(false)`: not needed, or the newest version
+/// is damaged (an older one opened), which compaction would make permanent.
+pub fn compact_closed(path: &Path, store: &TileStore) -> Result<bool, IoError> {
+	{
+		let (file, _) = FxdFile::open(path)?;
+		let footer = file.footer();
+		if !(footer.end_offset > 256 << 20 && needs_compaction(footer.live_bytes, footer.end_offset)) {
+			return Ok(false);
+		}
+	}
+	let mut name = path.as_os_str().to_os_string();
+	name.push(".compact");
+	let compact = PathBuf::from(name);
+	let result = (|| {
+		let opened = super::open(path, store)?;
+		if opened.recovered {
+			return Ok(false);
+		}
+		let mut chunks = DetachedChunks::default();
+		let saved = save_detached(
+			SaveRequest {
+				doc: &opened.document,
+				store,
+				preview: opened.preview.as_ref(),
+			},
+			SaveTarget::Fresh(compact.clone()),
+			&mut chunks,
+			&mut |_| true,
+		)?;
+		drop(saved);
+		drop(opened);
+		crate::fs_util::atomic_replace(&compact, path)?;
+		Ok(true)
+	})();
+	if !matches!(result, Ok(true)) {
+		let _ = std::fs::remove_file(&compact);
+	}
+	result
+}
+
+// AUDIT-FIX(D8): publish a fresh .compact only if the original target still has the checked identity.
+fn compact(request: &SaveRequest<'_>, file: &Arc<FxdFile>, progress: Progress<'_>) -> Result<Option<Arc<FxdFile>>, IoError> {
+	if crate::fs_util::is_exfat(file.path())? {
+		tracing::info!("compaction skipped on exFAT while backed handles are open");
+		return Ok(None);
+	}
+	let _lease = PathWriteLock::acquire(file.path());
+	if !file.matches_path()? {
+		return Ok(None);
+	}
+	let mut name = file.path().as_os_str().to_os_string();
+	name.push(".compact");
+	let path = PathBuf::from(name);
+	let saved = save(
+		SaveRequest {
+			doc: request.doc,
+			store: request.store,
+			preview: request.preview,
+		},
+		SaveTarget::Fresh(path.clone()),
+		progress,
+	)?;
+	if !file.matches_path()? {
+		return Err(IoError::Decode("Original path changed during compaction; compact copy retained".into()));
+	}
+	crate::fs_util::atomic_replace(&path, file.path())?;
+	Ok(Some(saved.file.rebind_path(file.path())?))
 }
 
 /// True when dead chunks exceed half the file: the engine may compact in the
@@ -181,9 +352,8 @@ pub fn needs_compaction(live_bytes: u64, file_len: u64) -> bool {
 
 /// `<target>.part` in the same folder, so the replace is a rename.
 fn part_path(target: &Path) -> PathBuf {
-	let mut name = target.as_os_str().to_os_string();
-	name.push(".part");
-	PathBuf::from(name)
+	// AUDIT-FIX(D10): simultaneous and restarted jobs never truncate another job's part.
+	crate::fs_util::unique_part(target)
 }
 
 /// Total bytes of live data a save would leave: header + every referenced
@@ -337,6 +507,48 @@ mod tests {
 			panic!("no data tile")
 		};
 		store.get(handle).unwrap().bytes().to_vec()
+	}
+
+	// VERIFY-FIX(D2): a detached save (recovery snapshot) must not take the
+	// tiles' backing: the next ordinary save stays incremental, and so does
+	// the next detached save to the same file.
+	#[test]
+	fn detached_saves_leave_the_backing_alone() {
+		let store = store();
+		let doc = document(&store, 41);
+		let (x, r) = (path("detached-x.fxd"), path("detached-r.fxd"));
+		let request = |doc| SaveRequest { doc, store: &store, preview: None };
+		let saved = save(request(&doc), SaveTarget::Fresh(x.clone()), &mut |_| true).unwrap();
+		let mut chunks = DetachedChunks::default();
+		let snap = save_detached(request(&doc), SaveTarget::Fresh(r.clone()), &mut chunks, &mut |_| true).unwrap();
+		assert_eq!(snap.report.tiles_written, 1);
+		let again = save(request(&doc), SaveTarget::Incremental(saved.file), &mut |_| true).unwrap();
+		assert_eq!(again.report.tiles_written, 0, "the snapshot took the tile's backing away from the document's file");
+		let snap = save_detached(request(&doc), SaveTarget::Incremental(snap.file), &mut chunks, &mut |_| true).unwrap();
+		assert_eq!(snap.report.tiles_written, 0, "a detached save forgot what its file holds");
+		let reopened = super::super::open(&r, &store).unwrap();
+		assert_eq!(store_get(&reopened.document, &store), store_get(&doc, &store));
+	}
+
+	// VERIFY-FIX(D8,D6): a fresh save replaces a file this process still has
+	// open (as compaction does). MoveFileExW refused it ("Access is denied"),
+	// so compaction never worked on NTFS. exFAT cannot do it at all: skipped.
+	#[test]
+	fn a_fresh_save_replaces_a_file_this_process_has_open() {
+		let store = store();
+		let x = path("replace-open.fxd");
+		if crate::fs_util::is_exfat(x.parent().unwrap()).unwrap_or(false) {
+			return;
+		}
+		let doc = document(&store, 7);
+		let request = |doc| SaveRequest { doc, store: &store, preview: None };
+		let first = save(request(&doc), SaveTarget::Fresh(x.clone()), &mut |_| true).unwrap();
+		let held = first.file.clone();
+		let doc2 = document(&store, 8);
+		save(request(&doc2), SaveTarget::Fresh(x.clone()), &mut |_| true).expect("replacing a file this process has open");
+		drop(held);
+		let reopened = super::super::open(&x, &store).unwrap();
+		assert_eq!(store_get(&reopened.document, &store), store_get(&doc2, &store));
 	}
 
 	#[test]

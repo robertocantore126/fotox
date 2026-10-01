@@ -41,6 +41,8 @@ pub struct OpenDoc {
 	snapshot: Option<Arc<Document>>,
 	/// Derived data (mips) changed without a new revision.
 	snapshot_stale: bool,
+	// AUDIT-FIX(4.1): compare shared layer identities against last edited state.
+	effects_baseline: Option<Document>,
 	/// The open `.fxd` this document was loaded from or last saved to (M3,
 	/// D-027), shared by its backed tiles. `None` for a flat import not yet
 	/// saved: Save then needs a path.
@@ -69,6 +71,10 @@ pub struct OpenDoc {
 	/// A pixel job (filter, merge, flatten) is running on this document: its
 	/// label. Commands and undo wait until it is done (M4-T05).
 	pub busy: Option<String>,
+	/// VERIFY-FIX(P2): commands sent while `busy`, run in order when the job
+	/// ends. P2 made Fill and Free Transform jobs, so "Fill, then Deselect"
+	/// lost the Deselect when such commands were refused.
+	pub queued: std::collections::VecDeque<fx_core::Command>,
 	/// `(revision, preview_rev)` of `snapshot`.
 	snapshot_key: (u64, u64),
 	/// View ▸ Proof Setup (M4-T04): the press to simulate.
@@ -136,6 +142,7 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			effects_baseline: None,
 			file: None,
 			path: None,
 			source: Some(path.to_path_buf()),
@@ -145,6 +152,7 @@ impl OpenDoc {
 			adjustment_preview: None,
 			derived_held: Vec::new(),
 			busy: None,
+			queued: std::collections::VecDeque::new(),
 			snapshot_key: (0, 0),
 			proof: None,
 			proof_colors: false,
@@ -170,6 +178,7 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			effects_baseline: None,
 			file: None,
 			path: None,
 			source: None,
@@ -179,6 +188,7 @@ impl OpenDoc {
 			adjustment_preview: None,
 			derived_held: Vec::new(),
 			busy: None,
+			queued: std::collections::VecDeque::new(),
 			snapshot_key: (0, 0),
 			proof: None,
 			proof_colors: false,
@@ -242,6 +252,7 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			effects_baseline: None,
 			file: Some(opened.file),
 			path: Some(path.to_path_buf()),
 			source: Some(path.to_path_buf()),
@@ -251,6 +262,7 @@ impl OpenDoc {
 			adjustment_preview: None,
 			derived_held: Vec::new(),
 			busy: None,
+			queued: std::collections::VecDeque::new(),
 			snapshot_key: (0, 0),
 			proof: None,
 			proof_colors: false,
@@ -320,7 +332,8 @@ impl OpenDoc {
 	pub fn changed(&mut self) {
 		self.generation += 1;
 		// Layer-style effects follow the content (M6-T08).
-		crate::effects::invalidate(&mut self.doc);
+		crate::effects::invalidate(&mut self.doc, self.effects_baseline.as_ref());
+		self.effects_baseline = Some(self.doc.clone());
 		// Undo can bring back an earlier revision number: never trust it alone.
 		self.snapshot_stale = true;
 	}
@@ -457,6 +470,11 @@ impl Documents {
 
 	pub fn ids(&self) -> Vec<DocId> {
 		self.docs.iter().map(|d| d.id).collect()
+	}
+
+	// AUDIT-FIX(D4): read-only tab iteration for close ordering without mutable borrows.
+	pub fn iter(&self) -> impl Iterator<Item = &OpenDoc> {
+		self.docs.iter()
 	}
 
 	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut OpenDoc> {

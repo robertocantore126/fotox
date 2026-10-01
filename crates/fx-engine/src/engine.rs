@@ -40,6 +40,9 @@ use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, Point
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// How often the `status` message (memory, frame statistics) goes out.
+// AUDIT-FIX(D1): abandon unresponsive derived jobs after one minute.
+const DERIVED_TIMEOUT: Duration = Duration::from_secs(60);
+
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A repeat of the same edit within this interval replaces the previous
@@ -98,6 +101,8 @@ const DISPLAY_LUT_CACHE: usize = 4;
 pub(crate) enum OpenAs {
 	/// A new document tab.
 	New,
+	// AUDIT-FIX(D2): recovered files reopen as dirty untitled documents, never as their save target.
+	Recovery,
 	/// A layer placed into this document (M7-T03).
 	Place(DocId),
 	/// File ▸ Revert: this document's new content.
@@ -106,8 +111,35 @@ pub(crate) enum OpenAs {
 
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
+	// AUDIT-FIX(X1): disk validation is asynchronous, never on engine/render.
+	PrefsValidated {
+		request: u64,
+		patch: serde_json::Value,
+		result: Result<Option<(u64, u64)>, String>,
+	},
+	// AUDIT-FIX(D2): recovery completion and startup discovery come from a dedicated worker.
+	RecoverySaved {
+		doc: DocId,
+		generation: u64,
+		result: Result<(), String>,
+	},
+	RecoveryAvailable {
+		paths: Vec<String>,
+	},
+	// AUDIT-FIX(D4+SO2): contents save-back completes as a worker snapshot.
+	ContentsSaved {
+		child: DocId,
+		parent: DocId,
+		generation: u64,
+		parent_generation: u64,
+		result: Result<Box<Document>, IoError>,
+	},
 	/// Import progress, 0..=1.
-	Progress { task: u64, label: String, fraction: f32 },
+	Progress {
+		task: u64,
+		label: String,
+		fraction: f32,
+	},
 	/// An import finished (mips included) or failed.
 	Imported {
 		task: u64,
@@ -117,7 +149,11 @@ pub(crate) enum Internal {
 		target: OpenAs,
 	},
 	/// An export finished or failed (M3).
-	Exported { task: u64, path: PathBuf, result: Result<(), IoError> },
+	Exported {
+		task: u64,
+		path: PathBuf,
+		result: Result<(), IoError>,
+	},
 	/// A `.fxd` was opened lazily (M3-T05).
 	OpenedFxd {
 		task: u64,
@@ -132,7 +168,7 @@ pub(crate) enum Internal {
 		task: u64,
 		path: PathBuf,
 		doc: DocId,
-		result: Result<fx_tiles::TiledImage, String>,
+		result: Result<fx_core::smart::SmartSource, String>,
 	},
 	/// A save finished; `Ok` carries the reopened file (M3-T06).
 	Saved {
@@ -150,7 +186,11 @@ pub(crate) enum Internal {
 		result: Result<Option<fx_core::pixels::ClipboardImage>, String>,
 	},
 	/// The B3 layers are built (M2-T08).
-	B3Built { task: u64, doc: DocId, layers: Vec<Arc<fx_core::Layer>> },
+	B3Built {
+		task: u64,
+		doc: DocId,
+		layers: Vec<Arc<fx_core::Layer>>,
+	},
 	/// Free Transform's source is cut out and its mips are valid (M6-T04).
 	TransformPrepared {
 		doc: DocId,
@@ -170,7 +210,11 @@ pub(crate) enum Internal {
 		tiles: Vec<((u32, u32), fx_tiles::TileBuffer)>,
 	},
 	/// A preview job failed (a tile could not be read).
-	PreviewFailed { doc: DocId, request: u64, error: TileError },
+	PreviewFailed {
+		doc: DocId,
+		request: u64,
+		error: TileError,
+	},
 	/// A pixel job (filter, merge, flatten) finished: the new document, or why not.
 	PixelJobDone {
 		task: u64,
@@ -191,6 +235,8 @@ pub(crate) enum Internal {
 	/// is the worker's copy of document `doc` at content `generation`, with
 	/// the tiles the frame asked for, for the layers `layers`.
 	Derived {
+		// AUDIT-FIX(D1): independent job generation rejects abandoned workers.
+		job: u64,
 		doc: DocId,
 		generation: u64,
 		computed: Box<Document>,
@@ -210,6 +256,7 @@ fn control_handles([x0, y0, x1, y1]: [f64; 4]) -> [(f64, f64); 8] {
 fn internal_name(message: &Internal) -> &'static str {
 	match message {
 		Internal::Progress { .. } => "internal progress",
+		Internal::PrefsValidated { .. } => "internal prefs validated",
 		Internal::Imported { .. } => "internal imported",
 		Internal::Exported { .. } => "internal exported",
 		Internal::OpenedFxd { .. } => "internal opened fxd",
@@ -225,6 +272,8 @@ fn internal_name(message: &Internal) -> &'static str {
 		Internal::PixelJobDone { .. } => "internal pixel job done",
 		Internal::Thumbnail { .. } => "internal thumbnail",
 		Internal::Ai(_) => "internal ai done",
+		Internal::RecoverySaved { .. } | Internal::RecoveryAvailable { .. } => "internal recovery",
+		Internal::ContentsSaved { .. } => "internal contents save",
 		Internal::Derived { .. } => "internal derived tiles",
 	}
 }
@@ -280,6 +329,7 @@ struct Engine {
 	untitled: u32,
 	/// The preferences file (M7-T09).
 	prefs: crate::prefs::Prefs,
+	prefs_validation: u64,
 	/// Brush presets and patterns (M8-T01/T06).
 	resources: m8::Resources,
 	/// M9's per-document UI state (channel list signatures).
@@ -291,7 +341,20 @@ struct Engine {
 	/// A derived-tile job is running (code review 2026-09-27 R07): one at a
 	/// time. Frame requests that arrive meanwhile wait here, merged per
 	/// document; a newer content generation replaces an older one's.
+	// AUDIT-FIX(D2): periodic snapshots are generation-gated with one outstanding snapshot per doc.
+	recovery: Option<crate::recovery::Recovery>,
+	recovery_pending: std::collections::HashSet<DocId>,
+	recovery_saved: HashMap<DocId, (u64, Instant)>,
+	// AUDIT-FIX(D2): bounded retry cadence after a snapshot failure.
+	recovery_retry: HashMap<DocId, Instant>,
+	recovery_available: Vec<String>,
+	// VERIFY-FIX(D2): documents reopened from a dead session's recovery file.
+	recovered_from: HashMap<DocId, PathBuf>,
+	ui_ready: bool,
 	derived_running: bool,
+	// AUDIT-FIX(D1): watchdog state is independent of content generations.
+	derived_job: u64,
+	derived_started: Option<Instant>,
 	derived_waiting: HashMap<DocId, MipWork>,
 	/// The window is closing: after each dirty document is answered, ask about
 	/// the next one (M3-T06).
@@ -325,6 +388,13 @@ struct Engine {
 	smart_preview: Option<(DocId, LayerId, usize)>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
+	// AUDIT-FIX(D4): a parent close resumes only after its contents tabs close.
+	close_after_child: HashMap<DocId, DocId>,
+	// AUDIT-FIX(D3+D11): reserve paths while opens/saves are on workers. Open tabs form the live registry.
+	opening_paths: std::collections::HashSet<PathBuf>,
+	// AUDIT-FIX(P4): per-task cancellation is polled by worker progress callbacks.
+	task_cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
+	saving_paths: HashMap<DocId, PathBuf>,
 	/// Pointer moves since the last traced input (the recorder counts them).
 	trace_moves: u32,
 	/// Move tool ▸ Show Transform Controls: the box of (document, generation,
@@ -443,7 +513,13 @@ pub(crate) fn run(ctx: EngineContext) {
 		stats,
 		output,
 	} = ctx;
+	let _ = crate::effects::initialise_region_switch(); // AUDIT-FIX(FXREGION): sample environment at startup.
+	let _ = fx_render::gpu::compositor::no_composite_cache(); // AUDIT-FIX(COMPCACHE): freeze switch before any document opens.
 	crate::text::warm();
+	// AUDIT-FIX(D2): session setup happens before engine ownership moves its shared handles.
+	let recovery = crate::recovery::Recovery::start(store.clone(), internal.clone())
+		.map_err(|e| tracing::error!("recovery disabled: {e}"))
+		.ok();
 	let mut engine = Engine {
 		output,
 		render,
@@ -470,6 +546,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		style_clipboard: None,
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
+		prefs_validation: 0,
 		resources: m8::Resources::load(),
 		m9: m9::State::default(),
 		m13: m13::State::default(),
@@ -487,10 +564,23 @@ pub(crate) fn run(ctx: EngineContext) {
 		placing: None,
 		smart_preview: None,
 		smart_children: HashMap::new(),
+		close_after_child: HashMap::new(),
+		opening_paths: std::collections::HashSet::new(),
+		task_cancels: HashMap::new(),
+		saving_paths: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
 		controls_commit: false,
+		recovery,
+		recovery_pending: std::collections::HashSet::new(),
+		recovery_saved: HashMap::new(),
+		recovery_retry: HashMap::new(),
+		recovery_available: Vec::new(),
+		recovered_from: HashMap::new(),
+		ui_ready: false,
 		derived_running: false,
+		derived_job: 0,
+		derived_started: None,
 		derived_waiting: HashMap::new(),
 	};
 
@@ -507,7 +597,17 @@ pub(crate) fn run(ctx: EngineContext) {
 		let timeout = deadline.saturating_duration_since(Instant::now());
 		select_biased! {
 			recv(inputs) -> input => match input {
-				Ok(EngineInput::Shutdown) | Err(_) => break,
+				// VERIFY-FIX(D2): a clean shutdown with nothing unsaved removes
+				// this session's recovery folder; any other end keeps it.
+				Ok(EngineInput::Shutdown) => {
+					if let Some(recovery) = &engine.recovery
+						&& !engine.docs.iter().any(|open| open.dirty)
+					{
+						recovery.finish(Duration::from_secs(2));
+					}
+					break;
+				}
+				Err(_) => break,
 				Ok(input) => {
 					let what = crate::trace_input(&input, &mut engine.trace_moves);
 					trace::busy(trace::Thread::Engine, &what);
@@ -524,6 +624,9 @@ pub(crate) fn run(ctx: EngineContext) {
 			},
 			default(timeout) => {}
 		}
+		engine.run_queued_commands();
+		engine.schedule_recovery(false);
+		engine.expire_derived();
 		engine.flush_view_message();
 		engine.send_status_if_due();
 		engine.cool_hot_layer();
@@ -536,7 +639,46 @@ pub(crate) fn run(ctx: EngineContext) {
 	tracing::debug!("engine thread finished");
 }
 
+/// VERIFY-FIX(D8): on exFAT, wait (on a thread) until `file` has no other
+/// user (tiles, history, a queued save), then compact it if it needs it. Not
+/// on NTFS, where `fxd::save` compacts while the document is open.
+fn compact_when_released(file: Arc<fx_io::fxd::FxdFile>, path: PathBuf, store: Arc<TileStore>) {
+	if !fx_io::fs_util::is_exfat(&path).unwrap_or(false) {
+		return;
+	}
+	let footer = file.footer();
+	if !(footer.end_offset > 256 << 20 && fx_io::fxd::needs_compaction(footer.live_bytes, footer.end_offset)) {
+		return;
+	}
+	let _ = std::thread::Builder::new().name("compact-closed".into()).spawn(move || {
+		let deadline = Instant::now() + Duration::from_secs(120);
+		while Arc::strong_count(&file) > 1 {
+			if Instant::now() > deadline {
+				tracing::info!("compaction of {} skipped: the file is still in use", path.display());
+				return;
+			}
+			std::thread::sleep(Duration::from_millis(200));
+		}
+		drop(file);
+		match fx_io::fxd::compact_closed(&path, &store) {
+			Ok(done) => tracing::info!("compaction of closed {}: {done}", path.display()),
+			Err(error) => tracing::warn!("compaction of closed {} failed: {error}", path.display()),
+		}
+	});
+}
+
 impl Engine {
+	/// VERIFY-FIX(P2): run the commands queued while a document was busy, in
+	/// order, until one of them starts another job.
+	fn run_queued_commands(&mut self) {
+		let ready: Vec<DocId> = self.docs.iter().filter(|open| open.busy.is_none() && !open.queued.is_empty()).map(|open| open.id).collect();
+		for id in ready {
+			while let Some(command) = self.docs.get_mut(id).filter(|open| open.busy.is_none()).and_then(|open| open.queued.pop_front()) {
+				self.command(id, command);
+			}
+		}
+	}
+
 	/// The view of the active document, or of the virtual one.
 	fn view_mut(&mut self) -> &mut ViewState {
 		match self.docs.active_mut() {
@@ -621,6 +763,13 @@ impl Engine {
 			}
 			EngineInput::PasteImage { width, height, rgba8 } => {
 				self.paste_image(width, height, &rgba8);
+				Changed::default()
+			}
+			EngineInput::EmergencyRecovery => {
+				self.schedule_recovery(true);
+				if let Some(recovery) = &self.recovery {
+					recovery.barrier();
+				}
 				Changed::default()
 			}
 			EngineInput::Shutdown => Changed::default(),
@@ -809,9 +958,23 @@ impl Engine {
 		// `_ai` (M13): the runtime and models, for Preferences ▸ AI; not saved.
 		let mut prefs = self.prefs.0.clone();
 		prefs.insert("_ai".into(), m13::ai_info());
+		// AUDIT-FIX(P1): report effective startup values separately from persisted preferences.
+		prefs.insert(
+			"_memory".into(),
+			serde_json::json!({"total_mb":fx_tiles::budgets::total_ram()>>20,
+			"hot_mb":self.store.config().hot_budget>>20,"warm_mb":self.store.config().warm_budget>>20, "gpu_mb":self.stats.lock().expect("render stats poisoned").gpu_budget_bytes>>20}),
+		);
 		self.to_ui(&EngineToUi::Preferences {
 			prefs: serde_json::Value::Object(prefs),
 		});
+	}
+
+	fn apply_prefs(&mut self, args: &serde_json::Value) {
+		self.prefs.merge(args);
+		self.prefs.save();
+		self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
+		self.send_prefs();
+		self.request_frame();
 	}
 
 	/// Remember an opened or saved file in Open Recent (M7-T09).
@@ -1158,7 +1321,37 @@ impl Engine {
 
 	fn ui_message(&mut self, message: UiToEngine) -> Changed {
 		match message {
+			UiToEngine::CancelTask { task } => {
+				// AUDIT-FIX(P4): requesting cancel never blocks on the worker.
+				if let Some(cancel) = self.task_cancels.get(&task) {
+					cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+				}
+				Changed::default()
+			}
+			UiToEngine::RecoverDocument { path } => {
+				// AUDIT-FIX(D2): only paths discovered in inactive sessions may be reopened through recovery.
+				if self.recovery_available.contains(&path) {
+					self.open(PathBuf::from(path), OpenAs::Recovery);
+				}
+				Changed::default()
+			}
+			UiToEngine::DiscardRecovery { paths } => {
+				// VERIFY-FIX(D2): discarded recovery files are not offered again.
+				for path in paths {
+					if let Some(at) = self.recovery_available.iter().position(|p| *p == path) {
+						self.recovery_available.remove(at);
+						crate::recovery::consume(std::path::Path::new(&path));
+					}
+				}
+				Changed::default()
+			}
 			UiToEngine::Hello { ui_version } => {
+				self.ui_ready = true;
+				if !self.recovery_available.is_empty() {
+					self.to_ui(&EngineToUi::RecoveryAvailable {
+						paths: self.recovery_available.clone(),
+					});
+				}
 				tracing::info!("UI connected (ui_version {ui_version})");
 				let profiles = cmyk_profile_files()
 					.into_iter()
@@ -1234,11 +1427,29 @@ impl Engine {
 				}
 				// Preferences (M7-T09): merge, save, apply.
 				if id == "prefs:set" {
-					self.prefs.merge(&args);
-					self.prefs.save();
-					self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
-					self.send_prefs();
-					self.request_frame();
+					self.prefs_validation = self.prefs_validation.wrapping_add(1);
+					if !fx_tiles::health::no_scratch_guards() && args.get("scratch_dir").is_some() {
+						let request = self.prefs_validation;
+						let patch = args.clone();
+						let internal = self.internal.clone();
+						let path = args.get("scratch_dir").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+						let spawned = std::thread::Builder::new().name("validate-scratch".into()).spawn(move || {
+							let result = if path.is_empty() {
+								Ok(None)
+							} else {
+								fx_tiles::health::validate_folder(std::path::Path::new(&path)).map_err(|e| e.to_string())
+							};
+							let _ = internal.send(Internal::PrefsValidated { request, patch, result });
+						});
+						if let Err(e) = spawned {
+							self.to_ui(&EngineToUi::Error {
+								text: format!("Could not validate scratch folder: {e}"),
+							});
+							self.send_prefs();
+						}
+					} else {
+						self.apply_prefs(&args);
+					}
 					return Changed::default();
 				}
 				// M8: brushes, patterns, the History Brush source, gradients.
@@ -1605,13 +1816,44 @@ impl Engine {
 
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
+	// AUDIT-FIX(D3+D11): consult tab source/save bindings and in-flight saves before opening/replacing a path.
+	fn doc_for_path(&self, path: &std::path::Path) -> Option<DocId> {
+		self.docs
+			.iter()
+			.find(|open| open.path.as_ref().or(open.source.as_ref()).is_some_and(|bound| same_file(bound, path)))
+			.map(|open| open.id)
+			.or_else(|| self.saving_paths.iter().find(|(_, bound)| same_file(bound, path)).map(|(id, _)| *id))
+	}
+
+	// AUDIT-FIX(P4): only tasks with cooperative callbacks expose a Cancel button.
+	fn cancellable_task(&mut self, task: u64) -> Arc<std::sync::atomic::AtomicBool> {
+		let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		self.task_cancels.insert(task, cancel.clone());
+		self.to_ui(&EngineToUi::TaskCancelable { task });
+		cancel
+	}
+
 	fn open(&mut self, path: PathBuf, target: OpenAs) {
 		// Brush and pattern files go to their libraries (M8-T01/T06).
 		if self.open_resource(&path) {
 			return;
 		}
+		// AUDIT-FIX(D11): a second open activates the existing tab; concurrent opens share a reservation.
+		if matches!(target, OpenAs::New) {
+			if let Some(id) = self.doc_for_path(&path) {
+				self.commit_live_edits();
+				self.docs.activate(id);
+				self.after_active_change();
+				return;
+			}
+			if self.opening_paths.iter().any(|p| same_file(p, &path)) {
+				return;
+			}
+			self.opening_paths.insert(path.clone());
+		}
 		self.next_task += 1;
 		let task = self.next_task;
+		let cancel = self.cancellable_task(task);
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Opening {}",
@@ -1623,7 +1865,10 @@ impl Engine {
 			label: label.clone(),
 			fraction: 0.0,
 		});
+		let reservation = path.clone();
 		let spawned = std::thread::Builder::new().name(format!("import-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let mut last = 0.0f32;
 			let mut report = |fraction: f32| {
 				// ~1 % steps are plenty for a progress bar.
@@ -1635,7 +1880,7 @@ impl Engine {
 						fraction: fraction * 0.9,
 					});
 				}
-				true
+				!cancel.load(std::sync::atomic::Ordering::Relaxed)
 			};
 			// A native `.fxd` opens lazily, reading only the manifest (M3-T05);
 			// every other file imports band by band.
@@ -1647,8 +1892,20 @@ impl Engine {
 					label: format!("{label}: reading the manifest"),
 					fraction: 0.5,
 				});
-				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fxd::open(&path, &store).map(Box::new)))
-					.unwrap_or_else(|panic| Err(panicked(panic)));
+				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+					if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+						Err(IoError::Cancelled)
+					} else {
+						fxd::open(&path, &store).and_then(|opened| {
+							if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+								Err(IoError::Cancelled)
+							} else {
+								Ok(Box::new(opened))
+							}
+						})
+					}
+				}))
+				.unwrap_or_else(|panic| Err(panicked(panic)));
 				if let OpenAs::Place(doc) = target {
 					// Place: the file's composite becomes one layer.
 					let _ = internal.send(Internal::Progress {
@@ -1662,7 +1919,14 @@ impl Engine {
 							let roots: Vec<fx_core::LayerId> = placed.layers.iter().map(|l| l.id).collect();
 							let mut image = crate::export::composite_layers(placed, &roots, None, &store, None).map_err(|e| e.to_string())?;
 							mips::ensure_all_mips(&mut image, &store).map_err(|e| e.to_string())?;
-							Ok(image)
+							// AUDIT-FIX(SO1): composite is a preview; preserve the layered embedded document.
+							Ok(fx_core::smart::SmartSource {
+								doc: Arc::new(opened.document.clone()),
+								composite: image,
+								linked: None,
+								linked_mtime: None,
+								uid: fx_core::smart::new_uid(),
+							})
 						}))
 						.unwrap_or_else(|panic| Err(format!("flattening panicked: {}", panic_text(&*panic))))
 					});
@@ -1679,7 +1943,16 @@ impl Engine {
 						label: format!("{label}: building previews"),
 						fraction: 0.9,
 					});
-					mips::ensure_all_mips(&mut imported.image, &store)?;
+					// AUDIT-FIX(P4): mip preview generation checks cancellation between levels.
+					mips::ensure_all_mips_with_progress(&mut imported.image, &store, &mut || !cancel.load(std::sync::atomic::Ordering::Relaxed)).map_err(
+						|e| {
+							if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+								IoError::Cancelled
+							} else {
+								e.into()
+							}
+						},
+					)?;
 					Ok(imported)
 				})
 			}))
@@ -1687,6 +1960,8 @@ impl Engine {
 			let _ = internal.send(Internal::Imported { task, path, result, target });
 		});
 		if let Err(error) = spawned {
+			self.opening_paths.remove(&reservation);
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the import: {error}"),
@@ -1715,6 +1990,7 @@ impl Engine {
 		}
 		self.next_task += 1;
 		let task = self.next_task;
+		let cancel = self.cancellable_task(task);
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Exporting {}",
@@ -1727,13 +2003,15 @@ impl Engine {
 			fraction: 0.0,
 		});
 		let spawned = std::thread::Builder::new().name(format!("export-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let mut report = |fraction: f32| {
 				let _ = internal.send(Internal::Progress {
 					task,
 					label: label.clone(),
 					fraction,
 				});
-				true
+				!cancel.load(std::sync::atomic::Ordering::Relaxed)
 			};
 			// An opaque document is written without alpha (a quarter smaller for RGB).
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1746,6 +2024,7 @@ impl Engine {
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the export: {error}"),
@@ -2203,7 +2482,9 @@ impl Engine {
 		if let Some((d, _, steps)) = self.smart_preview.take() {
 			self.undo_to(d, steps);
 		}
-		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else { return };
+		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else {
+			return;
+		};
 		let command = self.smart_filter_rewrite(
 			id,
 			Command::ApplyFilter {
@@ -2255,6 +2536,8 @@ impl Engine {
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let clipboard = self.ops.clipboard.clone();
 		let spawned = std::thread::Builder::new().name(format!("pixel-job-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let progress_internal = internal.clone();
 			let progress_label = label.clone();
 			let ops = EngineOps {
@@ -2291,6 +2574,7 @@ impl Engine {
 			if let Some(open) = self.docs.get_mut(id) {
 				open.busy = None;
 			}
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the job: {error}"),
@@ -2300,6 +2584,7 @@ impl Engine {
 
 	/// A pixel job finished: install its document as a history step.
 	fn pixel_job_done(&mut self, task: u64, id: DocId, command: Command, result: Result<(Box<Document>, CommandEffect), CommandError>) {
+		self.task_cancels.remove(&task);
 		self.to_ui(&EngineToUi::ProgressDone { task });
 		if let Some(latest) = self.preview_latest.get(&id) {
 			latest.fetch_add(1, Ordering::Relaxed);
@@ -2350,6 +2635,55 @@ impl Engine {
 
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::PrefsValidated { request, patch, result } => {
+				if request == self.prefs_validation {
+					match result {
+						Ok(space) => {
+							self.apply_prefs(&patch);
+							if let Some((free, _)) = space {
+								self.to_ui(&EngineToUi::Toast {
+									text: format!("Scratch folder validated: {:.2} GB free; applies next start", free as f64 / 1e9),
+								});
+							}
+						}
+						Err(text) => {
+							self.to_ui(&EngineToUi::Error { text });
+							self.send_prefs();
+						}
+					}
+				}
+			}
+
+			Internal::RecoveryAvailable { paths } => {
+				self.recovery_available = paths;
+				if self.ui_ready && !self.recovery_available.is_empty() {
+					self.to_ui(&EngineToUi::RecoveryAvailable {
+						paths: self.recovery_available.clone(),
+					});
+				}
+			}
+			Internal::RecoverySaved { doc, generation, result } => {
+				self.recovery_pending.remove(&doc);
+				match result {
+					Ok(()) => {
+						if self.docs.get(doc).is_some() {
+							self.recovery_retry.remove(&doc);
+							self.recovery_saved.insert(doc, (generation, Instant::now()));
+						}
+						// VERIFY-FIX(D2): this session now has its own copy.
+						if let Some(path) = self.recovered_from.remove(&doc) {
+							crate::recovery::consume(&path);
+						}
+					}
+					Err(error) => {
+						self.recovery_retry.insert(doc, Instant::now() + Duration::from_secs(30));
+						tracing::error!("recovery snapshot failed: {error}");
+						self.to_ui(&EngineToUi::Error {
+							text: format!("Recovery snapshot failed: {error}. Save your document manually."),
+						});
+					}
+				}
+			}
 			Internal::PreviewTiles { doc, request, tiles } => {
 				let store = self.store.clone();
 				if let Some(open) = self.docs.get_mut(doc)
@@ -2376,18 +2710,27 @@ impl Engine {
 					});
 				}
 			}
+			Internal::ContentsSaved {
+				child,
+				parent,
+				generation,
+				parent_generation,
+				result,
+			} => self.contents_saved(child, parent, generation, parent_generation, result),
 			Internal::PixelJobDone { task, doc, command, result } => self.pixel_job_done(task, doc, *command, result),
 			Internal::Ai(done) => self.ai_done(*done),
 			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
 			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
 			Internal::Derived {
+				job,
 				doc,
 				generation,
 				computed,
 				layers,
 				held,
-			} => self.derived_done(doc, generation, &computed, &layers, held),
+			} => self.derived_done(job, doc, generation, &computed, &layers, held),
 			Internal::Exported { task, path, result } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(()) => {
@@ -2406,6 +2749,7 @@ impl Engine {
 				}
 			}
 			Internal::Copied { task, result } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(Some(clip)) => self.set_clipboard(clip),
@@ -2416,6 +2760,7 @@ impl Engine {
 				}
 			}
 			Internal::B3Built { task, doc, layers } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				let Some(open) = self.docs.get_mut(doc) else { return };
 				// Built outside the history on purpose (a benchmark setup, not
@@ -2447,6 +2792,9 @@ impl Engine {
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
 			Internal::Imported { task, path, result, target } => {
+				// AUDIT-FIX(D11): release open reservation on success or failure.
+				self.opening_paths.remove(&path);
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let (OpenAs::Place(doc), Ok(imported)) = (target, &result)
 					&& self.docs.get(doc).is_some()
@@ -2487,9 +2835,10 @@ impl Engine {
 				(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &pixels)));
 			}
 			Internal::PlacedFxd { task, path, doc, result } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
-					Ok(image) if self.docs.get(doc).is_some() => self.place_imported(doc, &path, image),
+					Ok(source) if self.docs.get(doc).is_some() => self.place_source(doc, &path, source),
 					Ok(_) => {}
 					Err(error) => self.to_ui(&EngineToUi::Error {
 						text: format!("Could not place {}: {error}", path.display()),
@@ -2497,24 +2846,58 @@ impl Engine {
 				}
 			}
 			Internal::OpenedFxd { task, path, result, target } => {
+				// AUDIT-FIX(D11): release open reservation on success or failure.
+				self.opening_paths.remove(&path);
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let OpenAs::Revert(doc) = target {
+					let warning = result.as_ref().ok().filter(|opened| opened.recovered).map(|opened| opened.file.footer());
 					self.finish_revert(doc, &path, result.map(|opened| OpenDoc::from_fxd(doc, &path, *opened)));
+					if let Some(footer) = warning {
+						self.to_ui(&EngineToUi::RecoveredVersion {
+							doc,
+							saved_at: footer.saved_at,
+							save_counter: footer.save_counter,
+						});
+					}
 					return;
 				}
 				match result {
 					Ok(opened) => {
 						self.commit_live_edits();
 						let id = self.docs.allocate_id();
+						// AUDIT-FIX(D5): expose rollback metadata before consuming the opened model.
+						let warning = opened.recovered.then_some(opened.file.footer());
 						let mut doc = OpenDoc::from_fxd(id, &path, *opened);
+						// AUDIT-FIX(D2): recovery is unsaved work, not a regular open file.
+						if matches!(target, OpenAs::Recovery) {
+							doc.file = None;
+							doc.path = None;
+							doc.source = None;
+							doc.dirty = true;
+							doc.name = format!("Recovered {}", doc.name);
+							// VERIFY-FIX(D2): consumed once this session holds the work itself.
+							self.recovered_from.insert(id, path.clone());
+							let shown = path.to_string_lossy();
+							self.recovery_available.retain(|p| *p != shown);
+						}
 						if let Some(viewport) = self.virtual_view.viewport {
 							doc.view.resize(viewport.width, viewport.height);
 						}
 						tracing::info!("opened {} as {id:?} ({} × {})", path.display(), doc.doc.width, doc.doc.height);
-						self.remember_recent(&path);
+						if !matches!(target, OpenAs::Recovery) {
+							self.remember_recent(&path);
+						}
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
+						if let Some(footer) = warning {
+							self.to_ui(&EngineToUi::RecoveredVersion {
+								doc: id,
+								saved_at: footer.saved_at,
+								save_counter: footer.save_counter,
+							});
+						}
 						self.after_active_change();
 					}
 					Err(IoError::Cancelled) => {}
@@ -2533,6 +2916,9 @@ impl Engine {
 				generation,
 				result,
 			} => {
+				// AUDIT-FIX(D3): every save completion releases its path reservation.
+				self.saving_paths.remove(&doc);
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let Some(open) = self.docs.get_mut(doc) {
 					open.saving = false;
@@ -2550,9 +2936,22 @@ impl Engine {
 							(open.info(), open.dirty)
 						});
 						let saved_clean = saved.as_ref().is_some_and(|(_, dirty)| !dirty);
+						// AUDIT-FIX(D2): keep recovery when edits landed during Save; remove only a clean saved snapshot.
+						if saved_clean {
+							if let Some(recovery) = &self.recovery {
+								recovery.remove(doc);
+							}
+							if let Some(path) = self.recovered_from.remove(&doc) {
+								crate::recovery::consume(&path);
+							}
+							self.recovery_saved.remove(&doc);
+							self.recovery_retry.remove(&doc);
+						}
 						if let Some((info, _)) = saved {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
 						}
+						// AUDIT-FIX(D4): successful Save As makes orphan contents an independent document.
+						self.smart_children.remove(&doc);
 						tracing::info!("saved {}", path.display());
 						self.remember_recent(&path);
 						self.to_ui(&EngineToUi::Toast {
@@ -2599,6 +2998,16 @@ impl Engine {
 
 	fn close(&mut self, id: DocId) {
 		self.commit_live_edits();
+		// AUDIT-FIX(D4): ask about contents before closing their parent, including nested contents.
+		if let Some(child) = self
+			.smart_children
+			.iter()
+			.find_map(|(child, (parent, _))| (*parent == id && self.docs.get(*child).is_some()).then_some(*child))
+		{
+			self.close_after_child.insert(child, id);
+			self.close(child);
+			return;
+		}
 		let Some((busy, saving, dirty)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving, open.dirty)) else {
 			return;
 		};
@@ -2625,7 +3034,11 @@ impl Engine {
 	/// The user's answer to the "save changes?" prompt.
 	fn close_answer(&mut self, id: DocId, answer: CloseAnswer) {
 		match answer {
-			CloseAnswer::Cancel => self.window_close_pending = false,
+			CloseAnswer::Cancel => {
+				self.window_close_pending = false;
+				self.close_after_child.clear();
+				self.pending_close = None;
+			}
 			CloseAnswer::DontSave => {
 				if let Some(open) = self.docs.get_mut(id) {
 					open.dirty = false;
@@ -2635,7 +3048,12 @@ impl Engine {
 			}
 			CloseAnswer::Save => {
 				self.pending_close = Some(id);
-				self.save(id);
+				// AUDIT-FIX(D4): contents prompt Save must use the parent save-back path.
+				if self.smart_children.contains_key(&id) {
+					self.save_contents(id);
+				} else {
+					self.save(id);
+				}
 			}
 		}
 	}
@@ -2669,7 +3087,25 @@ impl Engine {
 			(self.output)(EngineOutput::MayClose(false));
 			return;
 		}
-		let dirty = self.docs.iter_mut().find(|open| open.dirty).map(|open| (open.id, open.name.clone()));
+		// AUDIT-FIX(D4): dirty contents are resolved before their parent during window close.
+		let dirty = self
+			.smart_children
+			.keys()
+			.filter_map(|id| self.docs.get(*id))
+			.filter(|open| open.dirty)
+			.max_by_key(|open| {
+				// AUDIT-FIX(D4): resolve deepest nested Contents before ancestors.
+				let mut id = open.id;
+				let mut depth = 0;
+				for _ in 0..self.smart_children.len() {
+					let Some((parent, _)) = self.smart_children.get(&id) else { break };
+					id = *parent;
+					depth += 1;
+				}
+				depth
+			})
+			.or_else(|| self.docs.iter().find(|open| open.dirty))
+			.map(|open| (open.id, open.name.clone()));
 		match dirty {
 			Some((id, name)) => {
 				self.to_ui(&EngineToUi::CloseDirtyDocument { doc: id, name });
@@ -2756,7 +3192,25 @@ impl Engine {
 		if matches!(self.transform, Some((doc, _)) if doc == id) {
 			self.end_transform(false);
 		}
-		if self.docs.close(id).is_some() {
+		if let Some(closed) = self.docs.close(id) {
+			// VERIFY-FIX(D8): on exFAT `save` cannot compact an open file, so
+			// a closed document's file is compacted once nothing uses it.
+			if let (Some(file), Some(path)) = (closed.file.clone(), closed.path.clone()) {
+				compact_when_released(file, path, self.store.clone());
+			}
+			drop(closed);
+			// AUDIT-FIX(D2): a clean/discarded close removes its recovery entry after queued snapshots.
+			if let Some(recovery) = &self.recovery {
+				recovery.remove(id);
+			}
+			// VERIFY-FIX(D2): closed without keeping it: the user is done with it.
+			if let Some(path) = self.recovered_from.remove(&id) {
+				crate::recovery::consume(&path);
+			}
+			self.recovery_saved.remove(&id);
+			self.recovery_retry.remove(&id);
+			// AUDIT-FIX(D4): discard the closed contents relationship and resume its parent close.
+			self.smart_children.remove(&id);
 			self.layers_sent.remove(&id);
 			self.thumbs_wanted.retain(|(d, _), _| *d != id);
 			self.thumbs_last.retain(|(d, _), _| *d != id);
@@ -2764,6 +3218,9 @@ impl Engine {
 			// Dropping the document drops its tile handles: memory is freed.
 			self.to_ui(&EngineToUi::DocumentClosed { doc: id });
 			self.after_active_change();
+		}
+		if let Some(parent) = self.close_after_child.remove(&id) {
+			self.close(parent);
 		}
 	}
 
@@ -2807,6 +3264,18 @@ impl Engine {
 	/// and the document's backed tiles keep it open (D-027).
 	fn save_as(&mut self, id: DocId, path: PathBuf) {
 		self.commit_live_edits();
+		// AUDIT-FIX(D3): refuse replacement of another tab or pending open; no work is silently discarded.
+		if self.doc_for_path(&path).is_some_and(|other| other != id) || self.opening_paths.iter().any(|p| same_file(p, &path)) {
+			self.pending_close = None;
+			self.window_close_pending = false;
+			self.to_ui(&EngineToUi::Error {
+				text: format!(
+					"{} is open in another tab (or opening). Choose another save path or close that tab first.",
+					path.display()
+				),
+			});
+			return;
+		}
 		let own = self.docs.get_mut(id).and_then(|open| {
 			let same = open.path.as_ref().is_some_and(|p| same_file(p, &path));
 			if same { open.file.clone() } else { None }
@@ -2842,8 +3311,10 @@ impl Engine {
 			SaveTarget::Incremental(file) => file.path().to_path_buf(),
 			SaveTarget::Fresh(path) => path.clone(),
 		};
+		self.saving_paths.insert(id, path.clone());
 		self.next_task += 1;
 		let task = self.next_task;
+		let cancel = self.cancellable_task(task);
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Saving {}",
@@ -2856,13 +3327,15 @@ impl Engine {
 			fraction: 0.0,
 		});
 		let spawned = std::thread::Builder::new().name(format!("save-{task}")).spawn(move || {
+			// AUDIT-FIX(P1): dedicated job thread only; shared rayon remains unopted.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let mut report = |fraction: f32| {
 				let _ = internal.send(Internal::Progress {
 					task,
 					label: label.clone(),
 					fraction,
 				});
-				true
+				!cancel.load(std::sync::atomic::Ordering::Relaxed)
 			};
 			// The composite preview (D-026) needs the engine's compositor; a
 			// later card can render it and pass it here.
@@ -2888,9 +3361,11 @@ impl Engine {
 			});
 		});
 		if let Err(error) = spawned {
+			self.saving_paths.remove(&id);
 			if let Some(open) = self.docs.get_mut(id) {
 				open.saving = false;
 			}
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.pending_close = None;
 			self.to_ui(&EngineToUi::Error {
@@ -2930,8 +3405,13 @@ impl Engine {
 			return;
 		};
 		if let Some(job) = &doc.busy {
-			let text = format!("Wait until {job} is finished");
-			self.to_ui(&EngineToUi::Toast { text });
+			// VERIFY-FIX(P2): queue (bounded) instead of dropping the command.
+			if doc.queued.len() < 64 {
+				doc.queued.push_back(command);
+			} else {
+				let text = format!("Wait until {job} is finished");
+				self.to_ui(&EngineToUi::Toast { text });
+			}
 			return;
 		}
 		// Heavy pixel commands run as jobs (recipe R2): the UI stays live.
@@ -3935,6 +4415,7 @@ impl Engine {
 			let _ = internal.send(Internal::Copied { task, result });
 		});
 		if let Err(error) = spawned {
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot copy: {error}"),
@@ -3975,44 +4456,54 @@ impl Engine {
 	/// (Photoshop's "Resize Image During Place"). Enter resamples, Esc removes
 	/// the placed layer again (every step of the place is undone).
 	fn place_imported(&mut self, doc: DocId, path: &std::path::Path, image: fx_tiles::TiledImage) {
-		let (w, h) = (image.width(), image.height());
 		let Some(open) = self.docs.get(doc) else { return };
-		let (cw, ch) = (open.doc.width, open.doc.height);
-		let steps_before = open.history.labels().count();
-		let clip = fx_core::pixels::ClipboardImage {
-			image,
-			offset: (0, 0),
-			bounds: (0, 0, w as i32, h as i32),
-		};
-		// Borrow the clipboard for the paste, then put the user's back.
-		let previous = {
-			let mut slot = self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-			slot.replace(clip)
-		};
-		self.command(
+		let mut nested = Document::new(image.width(), image.height(), open.doc.color.clone(), open.doc.ppi);
+		let id = nested.allocate_layer_id();
+		nested.layers.push(Arc::new(fx_core::Layer::new(
+			id,
+			"Placed image",
+			LayerKind::Pixel {
+				image: image.clone(),
+				offset: (0, 0),
+			},
+		)));
+		nested.selected = vec![id];
+		self.place_source(
 			doc,
-			Command::Paste {
-				in_place: false,
-				center: Some((f64::from(cw) / 2.0, f64::from(ch) / 2.0)),
+			path,
+			fx_core::smart::SmartSource {
+				doc: Arc::new(nested),
+				composite: image,
+				linked: None,
+				linked_mtime: None,
+				uid: fx_core::smart::new_uid(),
 			},
 		);
-		*self.ops.clipboard.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
-		let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-		if let Some(name) = name {
-			self.command(
-				doc,
-				Command::SetLayerProps {
-					layer: LayerRef::Active,
-					props: LayerPropsPatch {
-						name: Some(name),
-						..Default::default()
-					},
-				},
-			);
+	}
+
+	fn place_source(&mut self, doc: DocId, path: &std::path::Path, source: fx_core::smart::SmartSource) {
+		// AUDIT-FIX(SO1): install the actual Smart Object before starting transform.
+		let (w, h) = (source.composite.width(), source.composite.height());
+		let Some(open) = self.docs.get_mut(doc) else { return };
+		if open.busy.is_some() {
+			return;
 		}
-		// M12-T01: a placed file is a Smart Object (Place Embedded).
-		let placed = self.docs.get(doc).map(|o| o.doc.selected.clone()).unwrap_or_default();
-		self.convert_to_smart(doc, &placed);
+		let (cw, ch) = (open.doc.width, open.doc.height);
+		let steps_before = open.history.labels().count();
+		let before = open.doc.clone();
+		let name = path.file_stem().map_or("Placed object".into(), |s| s.to_string_lossy().into_owned());
+		fx_core::command::m12::place_source(
+			&mut open.doc,
+			name,
+			source,
+			fx_core::transform::Mapping::translation((cw as f64 - w as f64) / 2., (ch as f64 - h as f64) / 2.),
+		);
+		// FAST: snapshot history label placeholder, as with Edit Contents.
+		open.history
+			.record(before, Command::SelectLayers { layers: Vec::new() }, "Place Embedded".into());
+		open.dirty = true;
+		open.changed();
+		self.after_edit(doc, true);
 		if self.docs.active_id() != Some(doc) {
 			return;
 		}
@@ -4079,6 +4570,7 @@ impl Engine {
 			let _ = internal.send(Internal::B3Built { task, doc: id, layers });
 		});
 		if let Err(error) = spawned {
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot build B3: {error}"),
@@ -4124,6 +4616,19 @@ impl Engine {
 				base,
 				changed,
 			},
+			None if !full && self.layers_sent.contains_key(&id) => {
+				// AUDIT-FIX(4.2): add/delete/group/order use structural operations.
+				let (base, old) = &self.layers_sent[&id];
+				let (ops, changed) = fx_protocol::structural_layers_patch(old, &layers);
+				EngineToUi::LayersStructurePatch {
+					doc: id,
+					revision,
+					seq,
+					base: *base,
+					ops,
+					changed,
+				}
+			}
 			None => EngineToUi::Layers {
 				doc: id,
 				revision,
@@ -4159,6 +4664,50 @@ impl Engine {
 		self.start_derived(work);
 	}
 
+	// AUDIT-FIX(D1): detached expired workers cannot install results or block the queue.
+	// AUDIT-FIX(D2): snapshots clone shared layers/tiles; all disk writes happen on the recovery worker.
+	fn schedule_recovery(&mut self, force: bool) {
+		let Some(recovery) = &self.recovery else { return };
+		let minutes = self.prefs.number("recovery_interval_minutes").unwrap_or(5.0).clamp(1.0, 120.0);
+		let edits = self.prefs.number("recovery_edit_count").unwrap_or(50.0).max(1.0) as u64;
+		let interval = Duration::from_secs_f64(minutes * 60.0);
+		for open in self.docs.iter() {
+			if !open.dirty || self.recovery_pending.contains(&open.id) {
+				continue;
+			}
+			// AUDIT-FIX(D2): generation zero may already be dirty (recovered/untitled).
+			if !force && self.recovery_retry.get(&open.id).is_some_and(|until| Instant::now() < *until) {
+				continue;
+			}
+			let (saved, at) = self.recovery_saved.entry(open.id).or_insert((u64::MAX, Instant::now()));
+			let since_saved = if *saved == u64::MAX {
+				open.generation
+			} else {
+				open.generation.saturating_sub(*saved)
+			};
+			if !force && (open.generation == *saved || (since_saved < edits && at.elapsed() < interval)) {
+				continue;
+			}
+			if recovery.snapshot(open.id, open.generation, open.name.clone(), open.doc.clone()) {
+				self.recovery_pending.insert(open.id);
+			}
+		}
+	}
+
+	fn expire_derived(&mut self) {
+		if self.derived_started.is_some_and(|at| at.elapsed() >= DERIVED_TIMEOUT) {
+			tracing::error!(job = self.derived_job, "derived job abandoned after watchdog timeout");
+			self.derived_job = self.derived_job.wrapping_add(1);
+			self.derived_running = false;
+			self.derived_started = None;
+			if let Some(id) = self.derived_waiting.keys().next().copied() {
+				if let Some(work) = self.derived_waiting.remove(&id) {
+					self.start_derived(work);
+				}
+			}
+		}
+	}
+
 	fn start_derived(&mut self, work: MipWork) {
 		let store = self.store.clone();
 		let Some(open) = self.docs.get(work.doc) else { return };
@@ -4175,13 +4724,18 @@ impl Engine {
 		let layers: std::collections::HashSet<LayerId> = work.requests.iter().map(TileRequest::layer).collect();
 		let internal = self.internal.clone();
 		let requests = work.requests;
+		self.derived_job = self.derived_job.wrapping_add(1);
+		let job = self.derived_job;
 		let spawned = std::thread::Builder::new().name("derived-tiles".into()).spawn(move || {
+			// AUDIT-FIX(P1): derived coordinator can yield, engine/render cannot.
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::derived::fulfil(&mut computed, &store, &requests)));
 			if let Err(panic) = result {
 				tracing::warn!("derived tiles panicked: {}", panic_text(&*panic));
 			}
 			let held = crate::derived::hold(&computed, &store, &requests);
 			let _ = internal.send(Internal::Derived {
+				job,
 				doc,
 				generation,
 				computed: Box::new(computed),
@@ -4190,7 +4744,10 @@ impl Engine {
 			});
 		});
 		match spawned {
-			Ok(_) => self.derived_running = true,
+			Ok(_) => {
+				self.derived_running = true;
+				self.derived_started = Some(Instant::now());
+			}
 			Err(error) => tracing::warn!("cannot start the derived-tile job: {error}"),
 		}
 	}
@@ -4199,12 +4756,18 @@ impl Engine {
 	/// the next waiting one.
 	fn derived_done(
 		&mut self,
+		job: u64,
 		doc: DocId,
 		generation: u64,
 		computed: &Document,
 		layers: &std::collections::HashSet<LayerId>,
 		held: Vec<Arc<fx_tiles::TileBuffer>>,
 	) {
+		// AUDIT-FIX(D1): late completion must not clear a replacement job.
+		if job != self.derived_job || !self.derived_running {
+			return;
+		}
+		self.derived_started = None;
 		self.derived_running = false;
 		let store = self.store.clone();
 		if let Some(open) = self.docs.get_mut(doc) {
@@ -4572,8 +5135,15 @@ impl Engine {
 				stats.input_latency(now),
 			)
 		};
+		let scratch = self.store.scratch_health();
 		self.to_ui(&EngineToUi::Status {
 			memory: MemoryStats {
+				gpu_budget_bytes: self.stats.lock().expect("render stats poisoned").gpu_budget_bytes,
+				scratch_full: scratch.full,
+				scratch_error: scratch.error,
+				scratch_free_bytes: scratch.free_bytes,
+				scratch_reserve_bytes: scratch.reserve_bytes,
+				scratch_path: scratch.path,
 				hot_bytes: tiles.hot_bytes,
 				warm_bytes: tiles.warm_bytes,
 				scratch_bytes: tiles.cold_bytes,
@@ -4730,6 +5300,11 @@ fn is_pixel_job(command: &Command) -> bool {
 	matches!(
 		command,
 		Command::ApplyFilter { .. }
+			// AUDIT-FIX(P2): full pixel passes use the existing worker snapshot/history path.
+			| Command::Transform { .. }
+			| Command::Fill { .. }
+			| Command::ConvertToSmartObject { .. }
+			| Command::Rasterize { .. }
 			| Command::MergeLayers { .. }
 			| Command::Flatten
 			| Command::StampVisible
@@ -4770,6 +5345,11 @@ fn is_pixel_job(command: &Command) -> bool {
 /// The progress label of a pixel job, as Photoshop names the operation.
 fn pixel_job_label(command: &Command) -> String {
 	match command {
+		// AUDIT-FIX(P2): user-facing worker labels for newly offloaded commands.
+		Command::Transform { .. } => "Free Transform".into(),
+		Command::Fill { .. } => "Fill".into(),
+		Command::ConvertToSmartObject { .. } => "Convert to Smart Object".into(),
+		Command::Rasterize { .. } => "Rasterize".into(),
 		Command::ApplyFilter { filter, .. } => filter.label().to_owned(),
 		Command::MergeLayers { .. } => "Merge Layers".to_owned(),
 		Command::Flatten => "Flatten Image".to_owned(),

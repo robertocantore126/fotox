@@ -1,0 +1,125 @@
+=== FOTOX_AUDIT_DIR=C:\Users\39389\AppData\Local\Temp/fotox-audit-c
+test cancel_at_every_batch_boundary ... AUDIT cancel incremental after 1 progress calls: cancelled → file 8390050 B, reopens Exact([1, 1, 1, 1]) (ok); .part []
+AUDIT cancel incremental after 2 progress calls: completed → file 16780042 B, reopens Exact([2, 2, 2, 2]) (ok); .part []
+AUDIT cancel incremental after 3 progress calls: completed → file 25170027 B, reopens Exact([3, 3, 3, 3]) (ok); .part []
+AUDIT cancel incremental after 4 progress calls: completed → file 33560013 B, reopens Exact([4, 4, 4, 4]) (ok); .part []
+AUDIT cancel incremental after 5 progress calls: completed → file 41949999 B, reopens Exact([5, 5, 5, 5]) (ok); .part []
+AUDIT cancel incremental after 6 progress calls: completed → file 50339978 B, reopens Exact([6, 6, 6, 6]) (ok); .part []
+AUDIT cancel incremental after 7 progress calls: completed → file 58729959 B, reopens Exact([7, 7, 7, 7]) (ok); .part []
+AUDIT cancel incremental after 8 progress calls: completed → file 67119945 B, reopens Exact([8, 8, 8, 8]) (ok); .part []
+AUDIT cancel incremental after 9 progress calls: completed → file 75509929 B, reopens Exact([9, 9, 9, 9]) (ok); .part []
+AUDIT cancel incremental after 10 progress calls: completed → file 83899917 B, reopens Exact([10, 10, 10, 10]) (ok); .part []
+AUDIT cancel incremental after 11 progress calls: completed → file 92289905 B, reopens Exact([11, 11, 11, 11]) (ok); .part []
+AUDIT cancel fresh after 1 progress calls: cancelled → file 92289905 B, reopens Exact([11, 11, 11, 11]) (ok); .part ["x.fxd.part"]
+AUDIT cancel fresh after 2 progress calls: completed → file 8390050 B, reopens Exact([12, 12, 12, 12]) (ok); .part []
+AUDIT cancel fresh after 3 progress calls: completed → file 8390050 B, reopens Exact([13, 13, 13, 13]) (ok); .part []
+AUDIT cancel fresh after 4 progress calls: completed → file 8390050 B, reopens Exact([14, 14, 14, 14]) (ok); .part []
+AUDIT cancel fresh after 5 progress calls: completed → file 8390050 B, reopens Exact([15, 15, 15, 15]) (ok); .part []
+AUDIT cancel fresh after 6 progress calls: completed → file 8390049 B, reopens Exact([16, 16, 16, 16]) (ok); .part []
+AUDIT cancel fresh after 7 progress calls: completed → file 8390050 B, reopens Exact([17, 17, 17, 17]) (ok); .part []
+AUDIT cancel fresh after 8 progress calls: completed → file 8390050 B, reopens Exact([18, 18, 18, 18]) (ok); .part []
+AUDIT cancel fresh after 9 progress calls: completed → file 8390050 B, reopens Exact([19, 19, 19, 19]) (ok); .part []
+AUDIT cancel fresh after 10 progress calls: completed → file 8390050 B, reopens Exact([20, 20, 20, 20]) (ok); .part []
+AUDIT cancel fresh after 11 progress calls: completed → file 8390050 B, reopens Exact([21, 21, 21, 21]) (ok); .part []
+AUDIT cancel: a save after the cancellations → Exact([22, 22, 22, 22])
+test child_saver ... ok
+test chunks_lost_footer_kept ... AUDIT zeroed newest chunks, footer kept: Err(Decode("unknown chunk kind 0")) (an older complete version is still in the file: [2, 2, 2, 2])
+test exact_round_trip_8_and_16_bit ... AUDIT round-trip U8 700²: fresh save 0.01 s (24 tiles), reopened identical true, incremental (0 written, 24 reused) reopened identical true
+AUDIT round-trip U8 2048²: fresh save 0.05 s (167 tiles), reopened identical true, incremental (0 written, 167 reused) reopened identical true
+AUDIT round-trip U16 700²: fresh save 0.02 s (25 tiles), reopened identical true, incremental (0 written, 25 reused) reopened identical true
+AUDIT round-trip U16 2048²: fresh save 0.09 s (172 tiles), reopened identical true, incremental (0 written, 172 reused) reopened identical true
+test kill_during_fresh_saves ... AUDIT kill-fresh on C:: 20 kills in 23 s → previous version 18, the interrupted save 2, older than the last confirmed save 0, read/open errors 0, garbage 0, missing file 0; .part left: ["doc.fxd.part"]; file 128 MiB
+test kill_during_incremental_saves ... AUDIT kill-incremental round 0: NO FILE at the target after the kill
+AUDIT kill-incremental on C:: 20 kills in 23 s → previous version 16, the interrupted save 3, older than the last confirmed save 0, read/open errors 0, garbage 0, missing file 1; .part left: []; file 3072 MiB
+thread 'kill_during_incremental_saves' (573136) panicked at crates\fx-io\tests\audit_save.rs:329:5:
+assertion `left == right` failed: a process kill lost or corrupted a confirmed save
+test replace_refused_by_the_os ... AUDIT replace-refused (held open, share read) on C:: Err("Access is denied. (os error 5)"); .part ["x.fxd.part"]
+AUDIT replace-refused: X reopens Exact([1, 1, 1, 1])
+AUDIT replace-refused (read-only target): Err("Access is denied. (os error 5)"); .part ["x.fxd.part"]
+AUDIT read-only .fxd: open → Err("Access is denied. (os error 5)")
+test save_as_over_a_file_another_document_has_open ... AUDIT replace-open on C:: Save As A over X while B has X open → Ok("ok")
+AUDIT replace-open: .part files now []
+AUDIT replace-open: B's incremental save → Ok(64)
+AUDIT replace-open: X now holds Exact([500, 500, 500, 500])
+AUDIT replace-open: after B closed, X holds Exact([500, 500, 500, 500])
+thread 'save_as_over_a_file_another_document_has_open' (2716) panicked at crates\fx-io\tests\audit_save.rs:380:9:
+assertion `left == right` failed: B's save reported success but B's content is not in the file B was saved to
+test save_throughput ... AUDIT throughput on C:: 4 × 4096² 16-bit noise = 512 MiB raw → fresh save 4.03 s (127 MiB/s raw), file 512 MiB; unchanged incremental save 0.002 s (1024 tiles reused)
+test single_byte_corruption_by_region ... AUDIT bitflip header (24 samples): newest intact 21, silent rollback to an older version 0, tile read error 0, file does not open 3, wrong pixels 0
+AUDIT bitflip older chunks (24 samples): newest intact 17, silent rollback to an older version 0, tile read error 7, file does not open 0, wrong pixels 0
+AUDIT bitflip older footer (24 samples): newest intact 24, silent rollback to an older version 0, tile read error 0, file does not open 0, wrong pixels 0
+AUDIT bitflip newest tile chunks (24 samples): newest intact 0, silent rollback to an older version 0, tile read error 24, file does not open 0, wrong pixels 0
+AUDIT bitflip newest manifest (24 samples): newest intact 0, silent rollback to an older version 0, tile read error 0, file does not open 24, wrong pixels 0
+AUDIT bitflip newest footer (24 samples): newest intact 0, silent rollback to an older version 24, tile read error 0, file does not open 0, wrong pixels 0
+test truncation_at_every_offset_class ... AUDIT truncation: 1203 cut points over a 18437 KiB file with 6 versions → 1203 recovered the newest complete version, 0 did not
+test two_documents_from_one_file_saved_from_two_threads ... AUDIT two-threads on C:: A ended ["L0 v104", "L1 v105", "L2 v106", "L3 v107"], B ended ["L0 v204", "L1 v205", "L2 v206", "L3 v207"], X holds Exact([204, 205, 206, 207])
+test two_processes_saving_one_file ... AUDIT two-processes on C: round 0: saves confirmed A 17 B 17, A exited early None, B exited early None, file → Ok(Exact([6, 5, 5, 5]))
+AUDIT two-processes on C: round 1: saves confirmed A 16 B 16, A exited early None, B exited early None, file → Ok(Exact([10, 9, 9, 9]))
+AUDIT two-processes on C: round 2: saves confirmed A 16 B 16, A exited early None, B exited early None, file → Ok(Exact([14, 13, 13, 13]))
+AUDIT two-processes on C: round 3: saves confirmed A 16 B 16, A exited early None, B exited early None, file → Ok(Exact([18, 17, 17, 17]))
+AUDIT two-processes on C: round 4: saves confirmed A 15 B 15, A exited early None, B exited early None, file → Ok(Exact([21, 21, 21, 21]))
+test unreadable_tile_mid_save ... AUDIT unreadable-tile incremental: save → Err("corrupted tile data: decode error: corrupt chunk at 133704979"); X reopens Exact([1, 1, 1, 1]); .part []
+AUDIT unreadable-tile fresh: save → Err("corrupted tile data: decode error: corrupt chunk at 133704979"); X reopens Exact([1, 1, 1, 1]); .part ["x.fxd.part"]
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 113.87s
+=== FOTOX_AUDIT_DIR=E:/fotox-audit-run
+test cancel_at_every_batch_boundary ... AUDIT cancel incremental after 1 progress calls: cancelled → file 8390050 B, reopens Exact([1, 1, 1, 1]) (ok); .part []
+AUDIT cancel incremental after 2 progress calls: completed → file 16780042 B, reopens Exact([2, 2, 2, 2]) (ok); .part []
+AUDIT cancel incremental after 3 progress calls: completed → file 25170027 B, reopens Exact([3, 3, 3, 3]) (ok); .part []
+AUDIT cancel incremental after 4 progress calls: completed → file 33560013 B, reopens Exact([4, 4, 4, 4]) (ok); .part []
+AUDIT cancel incremental after 5 progress calls: completed → file 41949999 B, reopens Exact([5, 5, 5, 5]) (ok); .part []
+AUDIT cancel incremental after 6 progress calls: completed → file 50339978 B, reopens Exact([6, 6, 6, 6]) (ok); .part []
+AUDIT cancel incremental after 7 progress calls: completed → file 58729959 B, reopens Exact([7, 7, 7, 7]) (ok); .part []
+AUDIT cancel incremental after 8 progress calls: completed → file 67119945 B, reopens Exact([8, 8, 8, 8]) (ok); .part []
+AUDIT cancel incremental after 9 progress calls: completed → file 75509929 B, reopens Exact([9, 9, 9, 9]) (ok); .part []
+AUDIT cancel incremental after 10 progress calls: completed → file 83899917 B, reopens Exact([10, 10, 10, 10]) (ok); .part []
+AUDIT cancel incremental after 11 progress calls: completed → file 92289905 B, reopens Exact([11, 11, 11, 11]) (ok); .part []
+AUDIT cancel fresh after 1 progress calls: cancelled → file 92289905 B, reopens Exact([11, 11, 11, 11]) (ok); .part ["x.fxd.part"]
+AUDIT cancel fresh after 2 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 3 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 4 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 5 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 6 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 7 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 8 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 9 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 10 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel fresh after 11 progress calls: Access is denied. (os error 5) → file 92289905 B, reopens Exact([11, 11, 11, 11]) (WRONG); .part ["x.fxd.part"]
+AUDIT cancel: a save after the cancellations → Exact([12, 12, 12, 12])
+thread 'cancel_at_every_batch_boundary' (759072) panicked at crates\fx-io\tests\audit_save.rs:543:5:
+assertion `left == right` failed
+test child_saver ... ok
+test chunks_lost_footer_kept ... AUDIT zeroed newest chunks, footer kept: Err(Decode("unknown chunk kind 0")) (an older complete version is still in the file: [2, 2, 2, 2])
+test exact_round_trip_8_and_16_bit ... AUDIT round-trip U8 700²: fresh save 0.02 s (24 tiles), reopened identical true, incremental (0 written, 24 reused) reopened identical true
+AUDIT round-trip U8 2048²: fresh save 0.08 s (167 tiles), reopened identical true, incremental (0 written, 167 reused) reopened identical true
+AUDIT round-trip U16 700²: fresh save 0.04 s (25 tiles), reopened identical true, incremental (0 written, 25 reused) reopened identical true
+AUDIT round-trip U16 2048²: fresh save 0.16 s (172 tiles), reopened identical true, incremental (0 written, 172 reused) reopened identical true
+test kill_during_fresh_saves ... AUDIT kill-fresh round 0: NO FILE at the target after the kill
+AUDIT kill-fresh on E:: 20 kills in 20 s → previous version 19, the interrupted save 0, older than the last confirmed save 0, read/open errors 0, garbage 0, missing file 1; .part left: ["doc.fxd.part"]; file 128 MiB
+thread 'kill_during_fresh_saves' (543720) panicked at crates\fx-io\tests\audit_save.rs:329:5:
+assertion `left == right` failed: a process kill lost or corrupted a confirmed save
+test kill_during_incremental_saves ... AUDIT kill-incremental round 0: NO FILE at the target after the kill
+AUDIT kill-incremental on E:: 20 kills in 21 s → previous version 14, the interrupted save 5, older than the last confirmed save 0, read/open errors 0, garbage 0, missing file 1; .part left: []; file 5568 MiB
+thread 'kill_during_incremental_saves' (151932) panicked at crates\fx-io\tests\audit_save.rs:329:5:
+assertion `left == right` failed: a process kill lost or corrupted a confirmed save
+test replace_refused_by_the_os ... AUDIT replace-refused (held open, share read) on E:: Err("Access is denied. (os error 5)"); .part ["x.fxd.part"]
+AUDIT replace-refused: X reopens Exact([1, 1, 1, 1])
+AUDIT replace-refused (read-only target): Err("Cannot create a file when that file already exists. (os error 183)"); .part ["x.fxd.part"]
+AUDIT read-only .fxd: open → Err("Access is denied. (os error 5)")
+test save_as_over_a_file_another_document_has_open ... AUDIT replace-open on E:: Save As A over X while B has X open → Err(Io(Os { code: 5, kind: PermissionDenied, message: "Access is denied." }))
+AUDIT replace-open: .part files now ["x.fxd.part"]
+AUDIT replace-open: B's incremental save → Ok(64)
+AUDIT replace-open: X now holds Exact([2, 1, 1, 1])
+AUDIT replace-open: after B closed, X holds Exact([2, 1, 1, 1])
+test save_throughput ... AUDIT throughput on E:: 4 × 4096² 16-bit noise = 512 MiB raw → fresh save 1.10 s (467 MiB/s raw), file 512 MiB; unchanged incremental save 0.004 s (1024 tiles reused)
+test single_byte_corruption_by_region ... AUDIT bitflip header (24 samples): newest intact 21, silent rollback to an older version 0, tile read error 0, file does not open 3, wrong pixels 0
+AUDIT bitflip older chunks (24 samples): newest intact 17, silent rollback to an older version 0, tile read error 7, file does not open 0, wrong pixels 0
+AUDIT bitflip older footer (24 samples): newest intact 24, silent rollback to an older version 0, tile read error 0, file does not open 0, wrong pixels 0
+AUDIT bitflip newest tile chunks (24 samples): newest intact 0, silent rollback to an older version 0, tile read error 24, file does not open 0, wrong pixels 0
+AUDIT bitflip newest manifest (24 samples): newest intact 0, silent rollback to an older version 0, tile read error 0, file does not open 24, wrong pixels 0
+AUDIT bitflip newest footer (24 samples): newest intact 0, silent rollback to an older version 24, tile read error 0, file does not open 0, wrong pixels 0
+test truncation_at_every_offset_class ... AUDIT truncation: 1203 cut points over a 18437 KiB file with 6 versions → 1203 recovered the newest complete version, 0 did not
+test two_documents_from_one_file_saved_from_two_threads ... AUDIT two-threads on E:: A ended ["L0 v104", "L1 v105", "L2 v106", "L3 v107"], B ended ["L0 v204", "L1 v205", "L2 v206", "L3 v207"], X holds Exact([104, 105, 106, 107])
+test two_processes_saving_one_file ... AUDIT two-processes on E: round 0: saves confirmed A 15 B 18, A exited early None, B exited early None, file → Ok(ReadError("layer 2 tile (0,0): corrupted tile data: decode error: unknown chunk kind 0"))
+test unreadable_tile_mid_save ... AUDIT unreadable-tile incremental: save → Err("corrupted tile data: decode error: corrupt chunk at 133704979"); X reopens Exact([1, 1, 1, 1]); .part []
+AUDIT unreadable-tile fresh: save → Err("corrupted tile data: decode error: corrupt chunk at 133704979"); X reopens Exact([1, 1, 1, 1]); .part ["x.fxd.part"]
+test result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 121.65s

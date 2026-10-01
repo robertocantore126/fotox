@@ -1,0 +1,63 @@
+test edit_contents_when_the_parent_goes_away ... AUDIT orphan/closed: closing the parent → ["close-dirty prompt DocId(1) noise.tif", "closed DocId(1)"]
+AUDIT orphan/closed: saving the contents → ["toast: The document of this Smart Object was closed"]
+AUDIT orphan/closed: closing the edited contents tab → ["closed DocId(2)"]
+AUDIT orphan/deleted: delete the SO → Delete Layer
+AUDIT orphan/deleted: saving the contents → ["changed DocId(3) dirty=true"]
+AUDIT orphan/deleted: closing the edited contents tab → ["closed DocId(4)"]
+AUDIT contents-close: close → ["close-dirty prompt DocId(6) Background.psb"]
+AUDIT contents-close: answer Save → ["NEED SAVE PATH DocId(6)"]
+thread 'edit_contents_when_the_parent_goes_away' (590352) panicked at crates\fx-engine\tests\audit_smart.rs:527:5:
+test editing_contents_updates_every_instance ... AUDIT convert → Convert to Smart Object
+AUDIT duplicate → Duplicate Layer
+AUDIT child invert → New Invert Adjustment Layer
+AUDIT save contents → Edit Contents
+AUDIT edited instance vs inverted original: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT other instance (same source) vs inverted original: max |Δ| 65535 / 65535, mean |Δ| 24614.05, PSNR 6.0 dB
+AUDIT other instance vs the unedited original: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+thread 'editing_contents_updates_every_instance' (639596) panicked at crates\fx-engine\tests\audit_smart.rs:461:5:
+test edits_during_a_save_and_failed_saves ... AUDIT save-during-edit (6000² 16-bit noise): edits answered after 54 ms (Opacity Change, New Layer), save finished after 0.6 s (Saved E:/fotox-audit-run\fx-audit-save-during-edit-398396\during.fxd); dirty right after the save: Ok(true)
+AUDIT the file holds the state at save start: 1 layer(s), opacity [1.0]
+AUDIT save to a missing folder → ["error: Could not save E:/fotox-audit-run\\fx-audit-save-during-edit-398396\\no-such-folder\\x.fxd: The system cannot find the path specified. (os error 3)"]
+AUDIT save over a file held open elsewhere → ["error: Could not save E:/fotox-audit-run\\fx-audit-save-during-edit-398396\\held.fxd: Access is denied. (os error 5)"]; target now Ok("someone else's file"); .part left ["held.fxd.part"]
+test nested_smart_objects_propagate ... AUDIT nested: inner invert → New Invert Adjustment Layer
+AUDIT nested: inner saved → Edit Contents
+AUDIT nested: outer saved → toast: The Smart Object was updated
+AUDIT nested SO after inner edit vs inverted: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT nested: undo → Convert to Smart Object
+AUDIT nested SO after Undo vs before: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+test placed_picture_keeps_its_resolution ... AUDIT place step → Paste
+AUDIT place step → Rename Layer
+AUDIT place step → Convert to Smart Object
+AUDIT place commit → Free Transform
+AUDIT placed SO covers 334 of 1000 columns on row 400 (a 3000 px picture fitted to 1000 px covers ~1000)
+AUDIT scale ×3 → Free Transform
+AUDIT placed 3000×2400 picture, fitted then scaled back to 100 %, vs the picture's centre crop: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+test smart_filters_are_reeditable ... AUDIT filter 1 → Sharpen
+AUDIT filter 2 → Despeckle
+AUDIT two smart filters vs none (must differ): max |Δ| 65517 / 65535, mean |Δ| 5888.60, PSNR 17.1 dB
+AUDIT stack eye off → Smart Filters
+AUDIT filters off vs no filters: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT stack eye on → Smart Filters
+AUDIT filters back on vs before: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT reorder → Smart Filters
+AUDIT reordered vs original order (differs if order matters): max |Δ| 65535 / 65535, mean |Δ| 2708.04, PSNR 18.6 dB
+AUDIT opacity 50 % on the first → Smart Filters
+AUDIT filter opacity 50 % vs 100 %: max |Δ| 48154 / 65535, mean |Δ| 2209.73, PSNR 20.6 dB
+AUDIT two undos vs the original order: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT redo vs reordered: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT reopened .fxd vs before saving: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT reopened smart info: [Some(SmartInfo { linked: false, filters: [("Despeckle", true, 1.0), ("Sharpen", true, 1.0)], filters_enabled: true })]
+AUDIT rasterize → Rasterize Layer
+AUDIT rasterized vs the Smart Object: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+test smart_object_transforms_do_not_degrade ... AUDIT convert → Convert to Smart Object
+AUDIT SO identity export vs source noise: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT SO mid-way (scaled to 10 %) vs identity: must differ: max |Δ| 65535 / 65535, mean |Δ| 40676.34, PSNR 3.0 dB
+AUDIT SO after 5 × scale 10% → 1000% (0.2 s): max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT SO after 1 × rotate 7 × 51.43° (0.1 s): max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT layer via copy → Duplicate Layer
+AUDIT unlock → Lock Change
+AUDIT pixel identity export vs source noise: max |Δ| 0 / 65535, mean |Δ| 0.00, PSNR inf dB
+AUDIT pixel mid-way (scaled to 10 %) vs identity: must differ: max |Δ| 61222 / 65535, mean |Δ| 136.81, PSNR 30.9 dB
+AUDIT pixel layer after 5 × scale 10% → 1000% (0.3 s): max |Δ| 55083 / 65535, mean |Δ| 12627.39, PSNR 11.7 dB
+AUDIT pixel layer after 1 × rotate 7 × 51.43° (0.5 s): max |Δ| 55085 / 65535, mean |Δ| 12627.18, PSNR 11.7 dB
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.27s

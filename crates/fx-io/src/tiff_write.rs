@@ -274,6 +274,8 @@ impl TiffWriter {
 			file.write_all(&(ifd_offset as u32).to_le_bytes())?;
 		}
 		file.flush()?;
+		// AUDIT-FIX(D6): TIFF header patches must reach disk before export replacement.
+		file.sync_all()?;
 		Ok(total)
 	}
 }

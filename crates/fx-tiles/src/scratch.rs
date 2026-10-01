@@ -23,6 +23,8 @@ pub(crate) struct Extent {
 	pub len: u32,
 	/// Allocated length (multiple of 4 KiB, ≥ `len`).
 	pub alloc: u64,
+	// AUDIT-FIX(X1): integrity stored in each live extent, no disk format change.
+	pub crc32: u32,
 }
 
 /// Free-list allocator. Pure bookkeeping, no I/O, unit-tested on its own.
@@ -51,14 +53,24 @@ impl Allocator {
 			if free_size > size {
 				self.insert_free(offset + size, free_size - size);
 			}
-			return Some(Extent { offset, len, alloc: size });
+			return Some(Extent {
+				offset,
+				len,
+				alloc: size,
+				crc32: 0,
+			});
 		}
 		if self.end + size > self.limit {
 			return None;
 		}
 		let offset = self.end;
 		self.end += size;
-		Some(Extent { offset, len, alloc: size })
+		Some(Extent {
+			offset,
+			len,
+			alloc: size,
+			crc32: 0,
+		})
 	}
 
 	pub fn free(&mut self, extent: Extent) {
@@ -127,19 +139,38 @@ impl ScratchFile {
 	/// Reserve space and write `data` there. `None` = the limit is reached.
 	pub fn write(&self, data: &[u8]) -> std::io::Result<Option<Extent>> {
 		let len = u32::try_from(data.len()).map_err(|_| std::io::Error::other("block larger than 4 GiB"))?;
-		let Some(extent) = self.allocator.lock().alloc(len) else {
+		// AUDIT-FIX(X1): allocator's logical end may shrink while physical EOF does not.
+		// Conservatively admit every write, including reused extents, against volume reserve.
+		if !crate::health::no_scratch_guards() {
+			if let Some((free, total)) = crate::health::disk_space(self.path.parent().unwrap_or(Path::new(".")))? {
+				let reserve = (5u64 << 30).max(total / 20);
+				let growth = (len as u64).div_ceil(ALIGN).max(1) * ALIGN;
+				if free < reserve.saturating_add(growth) {
+					return Ok(None);
+				}
+			}
+		}
+
+		let Some(mut extent) = self.allocator.lock().alloc(len) else {
 			return Ok(None);
 		};
 		if let Err(e) = write_all_at(&self.file, data, extent.offset) {
 			self.allocator.lock().free(extent);
 			return Err(e);
 		}
+		if !crate::health::no_scratch_guards() {
+			extent.crc32 = crc32fast::hash(data);
+		}
 		Ok(Some(extent))
 	}
 
-	pub fn read(&self, extent: Extent) -> std::io::Result<Vec<u8>> {
+	pub fn read(&self, extent: Extent) -> Result<Vec<u8>, crate::TileError> {
 		let mut buf = vec![0u8; extent.len as usize];
 		read_exact_at(&self.file, &mut buf, extent.offset)?;
+		// AUDIT-FIX(X1): verify compressed bytes before any LZ4 decode.
+		if !crate::health::no_scratch_guards() && crc32fast::hash(&buf) != extent.crc32 {
+			return Err(crate::TileError::Corrupt(format!("scratch CRC mismatch at offset {}", extent.offset)));
+		}
 		Ok(buf)
 	}
 

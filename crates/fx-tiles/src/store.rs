@@ -21,6 +21,43 @@ use parking_lot::Mutex;
 use crate::format::{PixelFormat, PixelValue};
 use crate::scratch::{Extent, ScratchFile};
 
+// AUDIT-FIX(P1): only explicit dedicated worker scopes may wait at insertion.
+thread_local! {
+	static PRESSURE_OPT_IN: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+	static PRESSURE_LOGGED: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+}
+pub struct ProducerScope {
+	previous: bool,
+	logged: bool,
+	_thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl ProducerScope {
+	pub fn enter() -> Self {
+		Self {
+			previous: PRESSURE_OPT_IN.with(|v| v.replace(true)),
+			logged: PRESSURE_LOGGED.with(|v| v.replace(false)),
+			_thread_bound: std::marker::PhantomData,
+		}
+	}
+}
+impl Drop for ProducerScope {
+	fn drop(&mut self) {
+		PRESSURE_OPT_IN.with(|v| v.set(self.previous));
+		PRESSURE_LOGGED.with(|v| v.set(self.logged));
+	}
+}
+fn no_backpressure() -> bool {
+	static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*DISABLED.get_or_init(|| std::env::var("FOTOX_NO_BACKPRESSURE").is_ok_and(|v| v == "1"))
+}
+struct PressureNotify<'a>(&'a StoreInner);
+impl Drop for PressureNotify<'_> {
+	fn drop(&mut self) {
+		let _gate = self.0.pressure_gate.lock().unwrap_or_else(|e| e.into_inner());
+		self.0.pressure.notify_all();
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Buffers
 // ---------------------------------------------------------------------------
@@ -184,8 +221,17 @@ impl TileStoreConfig {
 	pub fn reference_machine(scratch_dir: PathBuf) -> Self {
 		const GIB: u64 = 1 << 30;
 		Self {
-			hot_budget: 5 * GIB,
-			warm_budget: 3 * GIB,
+			// AUDIT-FIX(P1): explicit old switch retains reference-machine defaults.
+			hot_budget: if crate::budgets::old_budgets() {
+				5 * GIB
+			} else {
+				crate::budgets::total_ram() / 4
+			},
+			warm_budget: if crate::budgets::old_budgets() {
+				3 * GIB
+			} else {
+				crate::budgets::total_ram() / 10
+			},
 			scratch_dir,
 			scratch_limit: 60 * GIB,
 			background_trim: true,
@@ -343,6 +389,7 @@ impl Drop for TileEntry {
 			store.stats.evicted_tiles.fetch_sub(1, Ordering::Relaxed);
 		}
 		store.registry_shard(self.id).lock().remove(&self.id);
+		store.eviction_clock.lock().entries.remove(&self.id.get());
 	}
 }
 
@@ -428,11 +475,36 @@ impl TrimSignal {
 	}
 }
 
+// AUDIT-FIX(P1): live-only clock index avoids rebuilding/sorting every candidate.
+#[derive(Default)]
+struct EvictionClock {
+	entries: std::collections::BTreeMap<u64, (Weak<TileEntry>, u64)>,
+	cursor: u64,
+}
+impl EvictionClock {
+	fn next(&mut self) -> Option<(Arc<TileEntry>, bool)> {
+		let id = self
+			.entries
+			.range((std::ops::Bound::Excluded(self.cursor), std::ops::Bound::Unbounded))
+			.next()
+			.or_else(|| self.entries.first_key_value())
+			.map(|(id, _)| *id)?;
+		self.cursor = id;
+		let (weak, seen) = self.entries.get_mut(&id)?;
+		let entry = weak.upgrade()?;
+		let now = entry.last_use.load(Ordering::Relaxed);
+		let recent = now != *seen;
+		*seen = now;
+		Some((entry, recent))
+	}
+}
+
 struct StoreInner {
 	config: TileStoreConfig,
 	next_id: AtomicU64,
 	clock: AtomicU64,
 	registry: Vec<Mutex<HashMap<TileId, Weak<TileEntry>>>>,
+	eviction_clock: Mutex<EvictionClock>,
 	stats: Counters,
 	/// `None` if the scratch file could not be created: then nothing spills
 	/// to disk and RAM goes over budget (reported via `scratch_full`).
@@ -440,6 +512,9 @@ struct StoreInner {
 	/// Only one trim at a time (background thread vs explicit calls).
 	trim_lock: Mutex<()>,
 	signal: Arc<TrimSignal>,
+	pressure_gate: StdMutex<()>,
+	pressure: Condvar,
+	scratch_health: Mutex<crate::health::ScratchHealth>,
 }
 
 impl Drop for StoreInner {
@@ -496,6 +571,28 @@ impl StoreInner {
 		self.stats.hot_bytes.load(Ordering::Relaxed) > self.config.hot_budget || self.stats.warm_bytes.load(Ordering::Relaxed) > self.config.warm_budget
 	}
 
+	fn excessive_pressure(&self) -> bool {
+		self.stats
+			.hot_bytes
+			.load(Ordering::Relaxed)
+			.saturating_add(self.stats.warm_bytes.load(Ordering::Relaxed))
+			> self.config.hot_budget.saturating_add(self.config.warm_budget).saturating_mul(5) / 4
+	}
+	fn producer_wait(&self) {
+		if no_backpressure() || !PRESSURE_OPT_IN.with(|v| v.get()) || !self.excessive_pressure() {
+			return;
+		}
+		self.signal.notify();
+		let gate = self.pressure_gate.lock().unwrap_or_else(|e| e.into_inner());
+		let (_gate, timeout) = self
+			.pressure
+			.wait_timeout_while(gate, Duration::from_secs(2), |_| self.excessive_pressure())
+			.unwrap_or_else(|e| e.into_inner());
+		if timeout.timed_out() && self.excessive_pressure() && !PRESSURE_LOGGED.with(|v| v.replace(true)) {
+			tracing::warn!("tile producer exceeded memory pressure wait (2s); continuing this job with held tiles");
+		}
+	}
+
 	/// Snapshot of all live entries (weak refs upgraded). Shards are locked one
 	/// at a time and only while copying pointers.
 	fn live_entries(&self) -> Vec<Arc<TileEntry>> {
@@ -524,10 +621,14 @@ pub struct TileStore(Arc<StoreInner>);
 
 impl TileStore {
 	pub fn new(config: TileStoreConfig) -> Result<Self, TileError> {
+		let _ = no_backpressure(); // AUDIT-FIX(P1): sample switch at store startup.
+		let _ = crate::health::no_scratch_guards();
+		let mut scratch_error = None;
 		let scratch = match ScratchFile::create(&config.scratch_dir, config.scratch_limit) {
 			Ok(file) => Some(file),
 			Err(e) => {
 				tracing::error!("cannot create scratch file in {:?}: {e}; tiles will stay in RAM", config.scratch_dir);
+				scratch_error = Some(format!("Scratch {} unavailable: {e}", config.scratch_dir.display()));
 				None
 			}
 		};
@@ -536,10 +637,18 @@ impl TileStore {
 			next_id: AtomicU64::new(1),
 			clock: AtomicU64::new(0),
 			registry: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
+			eviction_clock: Mutex::new(EvictionClock::default()),
 			stats: Counters::default(),
 			scratch,
 			trim_lock: Mutex::new(()),
 			signal: signal.clone(),
+			pressure_gate: StdMutex::new(()),
+			pressure: Condvar::new(),
+			scratch_health: Mutex::new(crate::health::ScratchHealth {
+				error: scratch_error,
+				path: config.scratch_dir.display().to_string(),
+				..Default::default()
+			}),
 			config,
 		});
 		if inner.config.background_trim {
@@ -549,7 +658,38 @@ impl TileStore {
 				.spawn(move || trim_thread(weak, signal))
 				.map_err(TileError::Io)?;
 		}
-		Ok(Self(inner))
+		let store = Self(inner);
+		store.refresh_scratch_health();
+		Ok(store)
+	}
+
+	// AUDIT-FIX(X1): status readers use cached health; no filesystem query on UI/render.
+	pub fn scratch_health(&self) -> crate::health::ScratchHealth {
+		if crate::health::no_scratch_guards() {
+			return Default::default();
+		}
+		let mut health = self.0.scratch_health.lock().clone();
+		health.full |= self.0.stats.scratch_full.load(Ordering::Relaxed);
+		health
+	}
+	pub fn report_scratch_error(&self, error: String) {
+		tracing::error!("{error}");
+		self.0.scratch_health.lock().error = Some(error);
+	}
+	fn refresh_scratch_health(&self) {
+		if crate::health::no_scratch_guards() {
+			return;
+		}
+		match crate::health::disk_space(&self.0.config.scratch_dir) {
+			Ok(Some((free, total))) => {
+				let mut h = self.0.scratch_health.lock();
+				h.free_bytes = free;
+				h.reserve_bytes = (5 << 30).max(total / 20);
+				h.full = free < h.reserve_bytes;
+			}
+			Ok(None) => {}
+			Err(e) => self.report_scratch_error(format!("Cannot read scratch free space in {}: {e}", self.0.config.scratch_dir.display())),
+		}
 	}
 
 	pub fn config(&self) -> &TileStoreConfig {
@@ -570,6 +710,8 @@ impl TileStore {
 	/// tiles for a consumer to read next (a mip level for the level above it)
 	/// holds them until they are read (code review 2026-09-27 R01).
 	pub fn insert_held(&self, buffer: TileBuffer, class: TileClass) -> (TileHandle, Arc<TileBuffer>) {
+		// AUDIT-FIX(P1): no copies/registry locks are held across the bounded wait.
+		self.0.producer_wait();
 		let id = TileId(NonZeroU64::new(self.0.next_id.fetch_add(1, Ordering::Relaxed)).expect("tile id overflow"));
 		let format = buffer.format();
 		let buffer = Arc::new(buffer);
@@ -587,6 +729,9 @@ impl TileStore {
 			store: Arc::downgrade(&self.0),
 		});
 		self.0.registry_shard(id).lock().insert(id, Arc::downgrade(&entry));
+		if !crate::budgets::old_budgets() {
+			self.0.eviction_clock.lock().entries.insert(id.get(), (Arc::downgrade(&entry), 0));
+		}
 		if self.0.over_budget() {
 			self.0.signal.notify();
 		}
@@ -610,6 +755,9 @@ impl TileStore {
 			store: Arc::downgrade(&self.0),
 		});
 		self.0.registry_shard(id).lock().insert(id, Arc::downgrade(&entry));
+		if !crate::budgets::old_budgets() {
+			self.0.eviction_clock.lock().entries.insert(id.get(), (Arc::downgrade(&entry), 0));
+		}
 		TileHandle(entry)
 	}
 
@@ -659,7 +807,10 @@ impl TileStore {
 				.scratch
 				.as_ref()
 				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
-			let block = scratch.read(extent)?;
+			let block = scratch.read(extent).map_err(|e| {
+				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
+				e
+			})?;
 			let bytes = decompress(&block, tile_bytes)?;
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(backed) = copies.backed.clone() {
@@ -725,12 +876,19 @@ impl TileStore {
 	/// benchmarks. Cost: one scan over all live tiles.
 	pub fn trim(&self) {
 		let inner = &*self.0;
+		let _notify = PressureNotify(inner);
 		let _guard = inner.trim_lock.lock();
 		let hot_target = inner.config.hot_budget / 10 * 9;
 		let warm_target = inner.config.warm_budget / 10 * 9;
 		let hot_over = inner.stats.hot_bytes.load(Ordering::Relaxed) > inner.config.hot_budget;
 		let warm_over = inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget;
 		if !hot_over && !warm_over {
+			return;
+		}
+
+		// AUDIT-FIX(P1): OLD_BUDGETS keeps the original sorted trim for comparison.
+		if !crate::budgets::old_budgets() {
+			self.trim_clock(hot_target, warm_target, hot_over);
 			return;
 		}
 
@@ -742,7 +900,7 @@ impl TileStore {
 		let entries: Vec<Arc<TileEntry>> = keyed.into_iter().map(|(_, e)| e).collect();
 
 		if hot_over {
-			// Derived tiles first: dropping them is free.
+			// Derived tiles first (VERIFY-FIX(P1): compressed, not dropped).
 			for pass_class in [TileClass::Derived, TileClass::Authoritative] {
 				for entry in entries.iter().filter(|e| e.class == pass_class) {
 					if inner.stats.hot_bytes.load(Ordering::Relaxed) <= hot_target {
@@ -756,19 +914,61 @@ impl TileStore {
 		// Demoting hot tiles may have pushed warm over budget.
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
 			let mut scratch_full = false;
-			for entry in &entries {
-				if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
-					break;
-				}
-				if !self.demote_warm(entry) {
-					scratch_full = true;
-					break;
+			'passes: for pass_class in [TileClass::Derived, TileClass::Authoritative] {
+				for entry in entries.iter().filter(|e| e.class == pass_class) {
+					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
+						break 'passes;
+					}
+					if !self.demote_warm(entry) {
+						scratch_full = true;
+						break 'passes;
+					}
 				}
 			}
 			inner.stats.scratch_full.store(scratch_full, Ordering::Relaxed);
 		} else {
 			inner.stats.scratch_full.store(false, Ordering::Relaxed);
 		}
+	}
+
+	fn trim_clock(&self, hot_target: u64, warm_target: u64, hot_over: bool) {
+		let inner = &*self.0;
+		let scans = inner.eviction_clock.lock().entries.len().saturating_mul(2);
+		if hot_over {
+			for class in [TileClass::Derived, TileClass::Authoritative] {
+				for _ in 0..scans {
+					if inner.stats.hot_bytes.load(Ordering::Relaxed) <= hot_target {
+						break;
+					}
+					let candidate = { inner.eviction_clock.lock().next() };
+					if let Some((entry, recent)) = candidate {
+						if !recent && entry.class == class {
+							self.demote_hot(&entry);
+						}
+					}
+				}
+			}
+		}
+		let mut full = false;
+		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
+			// VERIFY-FIX(P1): drop derived warm copies before writing
+			// authoritative tiles to scratch.
+			'passes: for class in [TileClass::Derived, TileClass::Authoritative] {
+				for _ in 0..scans {
+					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
+						break 'passes;
+					}
+					let candidate = { inner.eviction_clock.lock().next() };
+					if let Some((entry, recent)) = candidate {
+						if !recent && entry.class == class && !self.demote_warm(&entry) {
+							full = true;
+							break 'passes;
+						}
+					}
+				}
+			}
+		}
+		inner.stats.scratch_full.store(full, Ordering::Relaxed);
 	}
 
 	/// Remove the hot copy of one tile (compressing it first if it is the
@@ -782,7 +982,12 @@ impl TileStore {
 			if Arc::strong_count(&buffer) > 2 {
 				return;
 			}
-			if entry.class == TileClass::Derived || copies.warm.is_some() || copies.cold.is_some() || copies.backed.is_some() {
+			// VERIFY-FIX(P1): a derived tile is compressed like any other, not
+			// dropped: "dropping them is free" is false for mips, whose
+			// recompute reads every level-0 tile below them. Dropping made
+			// every frame at fit rebuild every layer's pyramid (each level-0
+			// tile read back ~30 times while building 400 layers at 16K).
+			if copies.warm.is_some() || copies.cold.is_some() || copies.backed.is_some() {
 				copies.hot = None;
 				inner.account_hot(entry.format, true, false);
 				if copies.is_empty() {
@@ -815,6 +1020,16 @@ impl TileStore {
 		let block = {
 			let mut copies = entry.copies.lock();
 			let Some(block) = copies.warm.clone() else { return true };
+			// VERIFY-FIX(P1): a derived tile leaves the warm tier by being dropped
+			// (it can be recomputed); only authoritative tiles go to scratch.
+			if entry.class == TileClass::Derived {
+				copies.warm = None;
+				inner.account_warm(block.len(), false);
+				if copies.is_empty() {
+					inner.stats.evicted_tiles.fetch_add(1, Ordering::Relaxed);
+				}
+				return true;
+			}
 			if copies.cold.is_some() || copies.backed.is_some() {
 				copies.warm = None;
 				inner.account_warm(block.len(), false);
@@ -829,7 +1044,7 @@ impl TileStore {
 			Ok(Some(extent)) => extent,
 			Ok(None) => return false,
 			Err(e) => {
-				tracing::error!("scratch write failed: {e}");
+				self.report_scratch_error(format!("Scratch write failed in {}: {e}", inner.config.scratch_dir.display()));
 				return false;
 			}
 		};
@@ -887,8 +1102,10 @@ fn trim_thread(store: Weak<StoreInner>, signal: Arc<TrimSignal>) {
 	loop {
 		signal.wait(Duration::from_millis(250));
 		let Some(inner) = store.upgrade() else { return };
-		if inner.over_budget() {
-			TileStore(inner).trim();
+		let store = TileStore(inner);
+		store.refresh_scratch_health();
+		if store.0.over_budget() {
+			store.trim();
 		}
 	}
 }
@@ -960,6 +1177,48 @@ mod tests {
 		for (i, handle) in derived.iter().enumerate() {
 			match store.get(handle) {
 				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, 100 + i as u8).bytes()),
+				Err(TileError::Evicted) => {}
+				Err(e) => panic!("unexpected error {e}"),
+			}
+		}
+	}
+
+	/// A compressible tile (a ramp), like most mips of real art.
+	fn ramp(format: PixelFormat, seed: u8) -> TileBuffer {
+		let bytes: Vec<u8> = (0..format.tile_bytes()).map(|i| (i / 64) as u8 ^ seed).collect();
+		TileBuffer::from_bytes(format, bytes.into_boxed_slice()).unwrap()
+	}
+
+	// VERIFY-FIX(P1): over the hot budget, derived tiles (mips) are compressed
+	// like authoritative ones instead of dropped; dropping them made every
+	// frame rebuild every layer's pyramid from level 0.
+	#[test]
+	fn trim_compresses_derived_tiles_before_dropping_them() {
+		let store = store(); // hot and warm budgets = 4 RGBA16 tiles each
+		let derived: Vec<_> = (0..8).map(|i| store.insert(ramp(PixelFormat::Rgba16, i), TileClass::Derived)).collect();
+		store.trim();
+		let stats = store.stats();
+		assert!(stats.hot_bytes <= store.config().hot_budget);
+		assert_eq!(stats.evicted_tiles, 0, "compressible derived tiles fit the warm tier: none dropped");
+		for (i, handle) in derived.iter().enumerate() {
+			assert_eq!(store.get(handle).unwrap().bytes(), ramp(PixelFormat::Rgba16, i as u8).bytes());
+		}
+	}
+
+	// VERIFY-FIX(P1): past the warm budget a derived tile is dropped, never
+	// written to scratch (only authoritative tiles go there).
+	#[test]
+	fn derived_tiles_never_reach_scratch() {
+		let store = store();
+		let derived: Vec<_> = (0..12).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Derived)).collect();
+		store.trim();
+		store.trim();
+		let stats = store.stats();
+		assert_eq!(stats.cold_bytes, 0, "a derived tile was written to scratch");
+		assert!(stats.evicted_tiles >= 1, "incompressible derived tiles past the warm budget are dropped");
+		for (i, handle) in derived.iter().enumerate() {
+			match store.get(handle) {
+				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, i as u8).bytes()),
 				Err(TileError::Evicted) => {}
 				Err(e) => panic!("unexpected error {e}"),
 			}
@@ -1218,3 +1477,4 @@ mod tests {
 		assert_eq!(source.reads(), 1, "one read fills the hot copy for every waiter");
 	}
 }
+

@@ -427,6 +427,9 @@ mod tests {
 		std::fs::create_dir_all(&dir).unwrap();
 		let mut config = TileStoreConfig::for_tests(dir);
 		config.hot_budget = 0;
+		// VERIFY-FIX(P1): derived tiles are compressed before being dropped;
+		// no warm room either, so this still exercises a dropped tile.
+		config.warm_budget = 0;
 		let store = TileStore::new(config).unwrap();
 		let mut d = doc(512, 512);
 		let shape = fx_core::vector::VectorShape::Ellipse { w: 300.0, h: 200.0 };
@@ -482,6 +485,9 @@ mod tests {
 		std::fs::create_dir_all(&dir).unwrap();
 		let mut config = TileStoreConfig::for_tests(dir);
 		config.hot_budget = 0;
+		// VERIFY-FIX(P1): derived tiles are compressed before being dropped;
+		// no warm room either, so this still exercises a dropped tile.
+		config.warm_budget = 0;
 		let store = TileStore::new(config).unwrap();
 		let mut d = doc(512, 512);
 		let mut image = TiledImage::new(512, 512, PixelFormat::Rgba8);

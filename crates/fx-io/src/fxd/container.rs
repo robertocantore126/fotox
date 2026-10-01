@@ -144,7 +144,7 @@ pub struct ChunkRef {
 impl ChunkRef {
 	/// End offset of the chunk (exclusive).
 	pub fn end(self) -> u64 {
-		self.offset + self.len
+		self.offset.saturating_add(self.len)
 	}
 }
 
@@ -159,6 +159,9 @@ pub struct Footer {
 	pub end_offset: u64,
 	/// Bytes of live data after this save.
 	pub live_bytes: u64,
+	// AUDIT-FIX(D5): zero means unknown for legacy files; reserved bytes remain backwards compatible.
+	pub save_counter: u64,
+	pub saved_at: u64,
 }
 
 impl Footer {
@@ -169,6 +172,9 @@ impl Footer {
 		bytes[16..24].copy_from_slice(&self.manifest_len.to_le_bytes());
 		bytes[24..32].copy_from_slice(&self.end_offset.to_le_bytes());
 		bytes[32..40].copy_from_slice(&self.live_bytes.to_le_bytes());
+		// AUDIT-FIX(D5): persist save identity in formerly reserved footer bytes.
+		bytes[40..48].copy_from_slice(&self.save_counter.to_le_bytes());
+		bytes[48..56].copy_from_slice(&self.saved_at.to_le_bytes());
 		let checksum = crc32fast::hash(&bytes[0..60]);
 		bytes[60..64].copy_from_slice(&checksum.to_le_bytes());
 		bytes
@@ -189,6 +195,8 @@ impl Footer {
 			manifest_len: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
 			end_offset: u64::from_le_bytes(bytes[24..32].try_into().ok()?),
 			live_bytes: u64::from_le_bytes(bytes[32..40].try_into().ok()?),
+			save_counter: u64::from_le_bytes(bytes[40..48].try_into().ok()?),
+			saved_at: u64::from_le_bytes(bytes[48..56].try_into().ok()?),
 		})
 	}
 }
@@ -374,7 +382,8 @@ impl std::fmt::Debug for FxdFile {
 impl FxdFile {
 	/// Open a `.fxd` read+write and return it with the newest valid footer.
 	pub fn open(path: &Path) -> Result<(Arc<FxdFile>, Footer), IoError> {
-		let file = OpenOptions::new().read(true).write(true).open(path)?;
+		// AUDIT-FIX(D10): opening documents requires only read access; upgrade at append time.
+		let file = OpenOptions::new().read(true).open(path)?;
 		let len = file.metadata()?.len();
 		if len < HEADER_LEN {
 			return Err(IoError::Decode(format!("not a complete .fxd: file is {len} bytes, header needs {HEADER_LEN}")));
@@ -398,6 +407,57 @@ impl FxdFile {
 		Ok((fxd, footer))
 	}
 
+	// AUDIT-FIX(D5): search strictly before this footer after a manifest/structure failure.
+	pub fn previous(&self) -> Result<Option<Arc<Self>>, IoError> {
+		let end = self.footer.end_offset.saturating_sub(FOOTER_LEN);
+		let previous = find_footer(&self.file, end)?;
+		Ok(previous.map(|(_, footer)| Arc::new(Self { footer, ..self.clone() })))
+	}
+
+	// AUDIT-FIX(D5): uncommitted/damaged tails are visible instead of silently rolling back.
+	pub fn has_newer_tail(&self) -> Result<bool, IoError> {
+		Ok(self.file.metadata()?.len() > self.footer.end_offset)
+	}
+
+	// AUDIT-FIX(D5): lazy open checks tile framing without reading/decompressing tile pixels.
+	pub fn validate_tile_structure(&self, at: ChunkRef) -> Result<(), IoError> {
+		self.validate_chunk(at)?;
+		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
+		read_exact_at(&self.file, &mut header, at.offset)?;
+		let kind = ChunkKind::from_byte(header[0])?;
+		let payload_len = u64::from_le_bytes(header[4..12].try_into().expect("8-byte slice"));
+		if !matches!(kind, ChunkKind::Tile | ChunkKind::PreviewTile)
+			|| header[1] != 0
+			|| payload_len.checked_add(CHUNK_HEADER_LEN) != Some(at.len)
+			|| payload_len < 4
+		{
+			return Err(IoError::Decode("invalid backed tile chunk structure".into()));
+		}
+		Ok(())
+	}
+
+	// AUDIT-FIX(D8): keep the compacted backing id while rebinding its published path.
+	pub fn rebind_path(&self, path: &Path) -> Result<Arc<Self>, IoError> {
+		let rebound = Self {
+			path: path.to_path_buf(),
+			..self.clone()
+		};
+		if !rebound.matches_path()? {
+			return Err(IoError::Decode("Compacted save path changed before rebind".into()));
+		}
+		Ok(Arc::new(rebound))
+	}
+
+	// AUDIT-FIX(D3): compare OS identity rather than the pathname held by an old handle.
+	pub fn matches_path(&self) -> Result<bool, IoError> {
+		let current = match File::open(&self.path) {
+			Ok(file) => file,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+			Err(error) => return Err(error.into()),
+		};
+		Ok(file_identity(&self.file)? == file_identity(&current)?)
+	}
+
 	/// The newest valid footer.
 	pub fn footer(&self) -> Footer {
 		self.footer
@@ -413,9 +473,23 @@ impl FxdFile {
 		&self.path
 	}
 
+	// AUDIT-FIX(I1): validate references before allocating payloads or registering lazy backed tiles.
+	pub fn validate_chunk(&self, at: ChunkRef) -> Result<(), IoError> {
+		let len = self.file.metadata()?.len().min(self.footer.end_offset);
+		if at.offset < HEADER_LEN || at.len < CHUNK_HEADER_LEN || at.offset.checked_add(at.len).is_none_or(|end| end > len) {
+			return Err(IoError::Decode(format!(
+				"chunk at {} with length {} exceeds saved file bounds ({len} bytes)",
+				at.offset, at.len
+			)));
+		}
+		Ok(())
+	}
+
 	/// Read a chunk at `at`, verifying the payload checksum. Returns its kind
 	/// and raw payload.
 	pub fn read_chunk(&self, at: ChunkRef) -> Result<(ChunkKind, Vec<u8>), IoError> {
+		// AUDIT-FIX(I1): footer lengths are untrusted, including apparently consistent headers.
+		self.validate_chunk(at)?;
 		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
 		read_exact_at(&self.file, &mut header, at.offset)?;
 		let kind = ChunkKind::from_byte(header[0])?;
@@ -433,7 +507,13 @@ impl FxdFile {
 			)));
 		}
 		let checksum = u32::from_le_bytes(header[12..16].try_into().expect("4-byte slice"));
-		let mut payload = vec![0u8; payload_len as usize];
+		// AUDIT-FIX(I1): allocation failures at the container boundary become errors.
+		let count = usize::try_from(payload_len).map_err(|_| IoError::Decode("chunk length exceeds address space".into()))?;
+		let mut payload = Vec::new();
+		payload
+			.try_reserve_exact(count)
+			.map_err(|e| IoError::Decode(format!("cannot allocate chunk payload: {e}")))?;
+		payload.resize(count, 0);
 		read_exact_at(&self.file, &mut payload, at.offset + CHUNK_HEADER_LEN)?;
 		if crc32fast::hash(&payload) != checksum {
 			return Err(IoError::Decode(format!("corrupt chunk at {}", at.offset)));
@@ -473,6 +553,44 @@ impl TileSource for FxdFile {
 	}
 }
 
+// AUDIT-FIX(D3): Windows volume serial + file index identify the handle across pathname replacement.
+#[cfg(windows)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+	use std::os::windows::io::AsRawHandle;
+	#[repr(C)]
+	#[derive(Default)]
+	struct Info {
+		attributes: u32,
+		creation: [u32; 2],
+		access: [u32; 2],
+		write: [u32; 2],
+		volume: u32,
+		size_high: u32,
+		size_low: u32,
+		links: u32,
+		index_high: u32,
+		index_low: u32,
+	}
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, info: *mut Info) -> i32;
+	}
+	let mut info = Info::default();
+	// SAFETY: the handle is borrowed from a live File and Info matches the Windows ABI.
+	if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok((u64::from(info.volume), (u64::from(info.index_high) << 32) | u64::from(info.index_low)))
+}
+
+// AUDIT-FIX(D3): equivalent identity for supported Unix filesystems.
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+	use std::os::unix::fs::MetadataExt;
+	let metadata = file.metadata()?;
+	Ok((metadata.dev(), metadata.ino()))
+}
+
 // ---------------------------------------------------------------------------
 // Writer
 // ---------------------------------------------------------------------------
@@ -486,6 +604,8 @@ pub struct FxdWriter {
 	_lease: PathWriteLock,
 	/// Offset of the next chunk / the footer.
 	pos: u64,
+	// AUDIT-FIX(D5): inherited save sequence, incremented only by commit.
+	save_counter: u64,
 }
 
 impl FxdWriter {
@@ -501,6 +621,7 @@ impl FxdWriter {
 			path: path.to_path_buf(),
 			_lease: lease,
 			pos: HEADER_LEN,
+			save_counter: 0,
 		})
 	}
 
@@ -508,14 +629,24 @@ impl FxdWriter {
 	/// that footer are overwritten by the next save.
 	pub fn append_to(file: FxdFile) -> Result<Self, IoError> {
 		let lease = PathWriteLock::acquire(&file.path);
+		// AUDIT-FIX(D3): never append into an orphaned handle, including a replace racing the save decision.
+		if !file.matches_path()? {
+			return Err(IoError::Decode("The save path was replaced; save again to rebind the document".into()));
+		}
+		// AUDIT-FIX(D10): acquire a writable handle lazily and verify it still names the same file.
+		let writable = OpenOptions::new().read(true).write(true).open(&file.path)?;
+		if file_identity(&writable)? != file_identity(&file.file)? {
+			return Err(IoError::Decode("The target changed while preparing Save; try again".into()));
+		}
 		let len = file.file.metadata()?.len();
 		let (_, footer) = find_footer(&file.file, len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
 		Ok(FxdWriter {
-			file: file.file,
+			file: Arc::new(writable),
 			id: file.id,
 			path: file.path,
 			_lease: lease,
 			pos: footer.end_offset,
+			save_counter: footer.save_counter,
 		})
 	}
 
@@ -576,6 +707,8 @@ impl FxdWriter {
 			manifest_len: manifest.len,
 			end_offset: self.pos + FOOTER_LEN,
 			live_bytes,
+			save_counter: self.save_counter.saturating_add(1),
+			saved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
 		};
 		write_all_at(&self.file, &footer.to_bytes(), self.pos)?;
 		self.file.sync_data()?;

@@ -28,3 +28,7 @@ pollster = { workspace = true }
 
 [lints]
 workspace = true
+
+# AUDIT-FIX(P1): DXGI memory of the selected wgpu adapter sizes the atlas ceiling.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }

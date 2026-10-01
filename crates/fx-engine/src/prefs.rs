@@ -7,6 +7,7 @@
 //! * `memory_budget_mb`, `scratch_dir` — read at start, applied at the next;
 //! * `recent` — up to 10 paths, newest first (File ▸ Open Recent).
 
+// AUDIT-FIX(D7): load synced backups on malformed main JSON; saves use durable sibling replacement.
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -26,7 +27,7 @@ impl Prefs {
 	/// Read the file; a missing or broken one gives the defaults.
 	pub fn load() -> Self {
 		let Some(path) = path() else { return Self::default() };
-		match std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()) {
+		match fx_io::fs_util::read_json::<Value>(&path) {
 			Some(Value::Object(map)) => Self(map),
 			_ => Self::default(),
 		}
@@ -45,7 +46,7 @@ impl Prefs {
 		}
 		match serde_json::to_string_pretty(&Value::Object(map)) {
 			Ok(text) => {
-				if let Err(error) = std::fs::write(&path, text) {
+				if let Err(error) = fx_io::fs_util::write_json(&path, text.as_bytes()) {
 					tracing::warn!("cannot write {}: {error}", path.display());
 				}
 			}

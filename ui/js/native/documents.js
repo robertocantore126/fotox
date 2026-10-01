@@ -20,6 +20,29 @@ let addButton = null;
 
 /** Take over the tab strip `tabs`; `add` is the "+" button kept at its end. */
 export function initDocumentTabs(tabs, add) {
+  // AUDIT-FIX(D5): recovery warnings follow the active tab and persist until dismissed/closed.
+  const recoveryWarnings = new Map();
+  const banner = h("div", { style: "position:fixed;top:100px;left:80px;right:320px;z-index:20;background:#66501d;color:white;padding:8px;display:none" });
+  document.body.append(banner);
+  const showRecovery = () => {
+    const text = recoveryWarnings.get(active);
+    banner.replaceChildren();
+    banner.style.display = text ? "block" : "none";
+    if (text) banner.append(document.createTextNode(text), h("button", { onclick: () => { recoveryWarnings.delete(active); showRecovery(); }, style: "margin-left:12px" }, "Dismiss"));
+  };
+  // AUDIT-FIX(D2): recovery reopens dirty untitled tabs; Later preserves files for another restart.
+  bridge.on(ENGINE.RECOVERY_AVAILABLE, ({ paths }) => openDialog("recovery-documents", {
+    title: "Recover unsaved documents",
+    fields: [{ type: "label", text: `${paths.length} recovery document(s) from an earlier session were found.` }, ...paths.map(path => ({ type: "label", text: path }))],
+    // VERIFY-FIX(D2): "Discard" stops them being offered again.
+    buttons: [{ text: "Reopen documents", primary: true, onClick: () => { for (const path of paths) bridge.send({ type: "recover_document", path }); } }, { text: "Discard", onClick: () => bridge.send({ type: "discard_recovery", paths }) }, { text: "Later" }],
+  }));
+  bridge.on(ENGINE.RECOVERED_VERSION, ({ doc, saved_at, save_counter }) => {
+    const when = saved_at ? new Date(saved_at * 1000).toLocaleString() : "an unknown time";
+    recoveryWarnings.set(doc, `Recovered the version saved at ${when}${save_counter ? ` (save ${save_counter})` : ""}; the latest save was damaged or interrupted.`);
+    showRecovery();
+  });
+
   strip = tabs;
   addButton = add;
   strip.replaceChildren(addButton);
@@ -49,10 +72,12 @@ export function initDocumentTabs(tabs, add) {
     if (!d) return;
     d.tab.remove();
     docs.delete(doc);
+    recoveryWarnings.delete(doc); showRecovery();
   });
 
   bridge.on(ENGINE.ACTIVE_DOCUMENT, ({ doc }) => {
     active = doc;
+    showRecovery();
     for (const [id, d] of docs) d.tab.classList.toggle("active", id === doc);
     const d = doc == null ? null : docs.get(doc);
     const size = document.getElementById("statusdocsize");
@@ -60,7 +85,7 @@ export function initDocumentTabs(tabs, add) {
   });
 
   // The tab names the active layer and whether its mask is the target.
-  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH]) {
+  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH, ENGINE.LAYERS_STRUCTURE_PATCH]) {
     bridge.on(type, (msg) => { if (msg.doc === active) queueMicrotask(() => refresh(active)); });
   }
 

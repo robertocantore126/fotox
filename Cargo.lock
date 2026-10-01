@@ -1160,12 +1160,14 @@ dependencies = [
  "tracing",
  "wgpu",
  "wgpu-sync",
+ "windows 0.62.2",
 ]
 
 [[package]]
 name = "fx-tiles"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "lz4_flex",
  "parking_lot",
  "serde",

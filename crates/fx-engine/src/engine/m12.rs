@@ -309,14 +309,96 @@ impl Engine {
 
 	/// Save an Edit Contents tab back into its parent: a new source, the
 	/// cache redrawn, one "Edit Contents" step in the parent's history.
-	fn save_contents(&mut self, child: DocId) {
+	// AUDIT-FIX(D4+SO2): validate the parent before saving; install all source instances atomically.
+	pub(super) fn save_contents(&mut self, child: DocId) {
+		self.commit_live_edits();
 		let Some(&(parent, layer_id)) = self.smart_children.get(&child) else { return };
-		let store = self.store.clone();
-		let Some(open) = self.docs.get_mut(child) else { return };
-		let nested = open.doc.clone();
-		let roots: Vec<LayerId> = nested.layers.iter().map(|l| l.id).collect();
-		let composite = match crate::export::composite_layers(&nested, &roots, None, &store, None) {
-			Ok(image) => image,
+		let source = self
+			.docs
+			.get(parent)
+			.and_then(|open| open.doc.layer(layer_id))
+			.and_then(|layer| match &layer.kind {
+				LayerKind::Smart { smart, .. } => Some(smart.source.clone()),
+				_ => None,
+			});
+		let Some(mut source) = source else {
+			// AUDIT-FIX(D4): orphan contents retain dirty state and can be saved independently.
+			self.to_ui(&EngineToUi::Error {
+				text: "The Smart Object parent or layer is gone. Save as new document to keep these edits.".into(),
+			});
+			if let Some(open) = self.docs.get(child) {
+				self.ask_save_path(child, &open.name);
+			}
+			return;
+		};
+		if [child, parent]
+			.iter()
+			.any(|id| self.docs.get(*id).is_some_and(|open| open.busy.is_some() || open.saving))
+		{
+			self.to_ui(&EngineToUi::Toast {
+				text: "Wait for the contents and parent jobs to finish before saving".into(),
+			});
+			return;
+		}
+		let Some(open) = self.docs.get(child) else { return };
+		let (nested, generation) = (open.doc.clone(), open.generation);
+		let Some(open) = self.docs.get(parent) else { return };
+		let (mut updated, parent_generation) = (open.doc.clone(), open.generation);
+		let (store, internal) = (self.store.clone(), self.internal.clone());
+		for id in [child, parent] {
+			if let Some(open) = self.docs.get_mut(id) {
+				open.busy = Some("Edit Contents".into());
+			}
+		}
+		// AUDIT-FIX(D4+SO2): composite and recursive instance propagation use the worker, never the engine loop.
+		let spawned = std::thread::Builder::new().name("save-contents".into()).spawn(move || {
+			// AUDIT-FIX(P1): save-back is a dedicated pixel producer.
+			let _pressure = fx_tiles::ProducerScope::enter();
+			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let roots = nested.layers.iter().map(|layer| layer.id).collect::<Vec<_>>();
+				source.composite = crate::export::composite_layers(&nested, &roots, None, &store, None).map_err(|e| fx_io::IoError::Decode(e.to_string()))?;
+				source.doc = Arc::new(nested);
+				update_instances(&mut updated, &source, &store)?;
+				updated.revision += 1;
+				Ok::<_, fx_io::IoError>(Box::new(updated))
+			}))
+			.unwrap_or_else(|panic| Err(fx_io::IoError::Decode(super::panic_text(&*panic))));
+			let _ = internal.send(Internal::ContentsSaved {
+				child,
+				parent,
+				generation,
+				parent_generation,
+				result,
+			});
+		});
+		if let Err(error) = spawned {
+			for id in [child, parent] {
+				if let Some(open) = self.docs.get_mut(id) {
+					open.busy = None;
+				}
+			}
+			self.to_ui(&EngineToUi::Error {
+				text: format!("Edit Contents: {error}"),
+			});
+		}
+	}
+
+	// AUDIT-FIX(D4+SO2): dirty clears only after a current result was installed in one history step.
+	pub(super) fn contents_saved(
+		&mut self,
+		child: DocId,
+		parent: DocId,
+		generation: u64,
+		parent_generation: u64,
+		result: Result<Box<fx_core::Document>, fx_io::IoError>,
+	) {
+		for id in [child, parent] {
+			if let Some(open) = self.docs.get_mut(id) {
+				open.busy = None;
+			}
+		}
+		let updated = match result {
+			Ok(updated) => updated,
 			Err(error) => {
 				self.to_ui(&EngineToUi::Error {
 					text: format!("Edit Contents: {error}"),
@@ -324,31 +406,35 @@ impl Engine {
 				return;
 			}
 		};
-		open.dirty = false;
-		let Some(open) = self.docs.get_mut(parent) else {
-			self.to_ui(&EngineToUi::Toast {
-				text: "The document of this Smart Object was closed".into(),
+		if !self.docs.get(parent).is_some_and(|open| open.generation == parent_generation) {
+			self.to_ui(&EngineToUi::Error {
+				text: "The parent changed during Edit Contents save; edits remain unsaved. Save again or Save as new document.".into(),
 			});
 			return;
-		};
-		let before = open.doc.clone();
-		let (w, h, format) = (open.doc.width, open.doc.height, open.doc.color.depth.rgba_format());
-		let Some(layer) = open.doc.layer_mut(layer_id) else { return };
-		let LayerKind::Smart { smart, cache } = &mut layer.kind else { return };
-		smart.source.doc = Arc::new(nested);
-		smart.source.composite = composite;
-		*cache = fx_tiles::TiledImage::derived(w, h, format);
-		// FAST: the history entry's command is a placeholder (history is by
-		// snapshots); instances sharing the source are not updated.
+		}
+		let Some(open) = self.docs.get_mut(parent) else { return };
+		let before = std::mem::replace(&mut open.doc, *updated);
+		// FAST: command is a history label placeholder; undo uses complete snapshots.
 		open.history
 			.record(before, Command::SelectLayers { layers: Vec::new() }, "Edit Contents".into());
 		open.dirty = true;
 		open.changed();
+		if let Some(open) = self.docs.get_mut(child) {
+			open.dirty = open.generation != generation;
+		}
 		self.after_edit(parent, true);
-		self.refresh_thumbnail(parent, layer_id);
-		self.to_ui(&EngineToUi::Toast {
-			text: "The Smart Object was updated".into(),
-		});
+		self.after_edit(child, true);
+		self.layers_sent.remove(&parent);
+		self.send_layer_list(parent, true);
+		let wanted = self.thumbs_wanted.keys().filter(|(id, _)| *id == parent).map(|(_, id)| *id).collect::<Vec<_>>();
+		for id in wanted {
+			self.refresh_thumbnail(parent, id);
+		}
+		if self.pending_close == Some(child) && self.docs.get(child).is_some_and(|open| !open.dirty) {
+			self.pending_close = None;
+			self.force_close(child);
+		}
+		self.continue_window_close();
 	}
 
 	/// The active Smart Object's filters and stack eye.
@@ -450,6 +536,7 @@ impl Engine {
 		});
 		let internal = self.internal.clone();
 		let spawned = std::thread::Builder::new().name(format!("export-regions-{task}")).spawn(move || {
+			let _pressure = fx_tiles::ProducerScope::enter();
 			let total = regions.len();
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), fx_io::IoError> {
 				for (i, (name, rect)) in regions.into_iter().enumerate() {
@@ -475,4 +562,55 @@ impl Engine {
 			});
 		}
 	}
+}
+
+// AUDIT-FIX(SO2): recurse through groups and embedded documents; enclosing composites follow changed sources.
+fn update_instances(doc: &mut fx_core::Document, source: &fx_core::smart::SmartSource, store: &fx_tiles::TileStore) -> Result<bool, fx_io::IoError> {
+	fn layers(
+		items: &mut [Arc<fx_core::Layer>],
+		source: &fx_core::smart::SmartSource,
+		store: &fx_tiles::TileStore,
+		size: (u32, u32, fx_tiles::PixelFormat),
+	) -> Result<bool, fx_io::IoError> {
+		let mut changed = false;
+		for item in items {
+			// Clone this branch before mutation so errors cannot alter the parent snapshot.
+			let mut layer = (**item).clone();
+			let touched = match &mut layer.kind {
+				LayerKind::Group { children, .. } => layers(children, source, store, size)?,
+				LayerKind::Smart { smart, cache } => {
+					let touched = if smart.source.uid == source.uid {
+						smart.source = source.clone();
+						true
+					} else {
+						let mut nested = (*smart.source.doc).clone();
+						if update_instances(&mut nested, source, store)? {
+							let roots = nested.layers.iter().map(|l| l.id).collect::<Vec<_>>();
+							smart.source.composite =
+								crate::export::composite_layers(&nested, &roots, None, store, None).map_err(|e| fx_io::IoError::Decode(e.to_string()))?;
+							smart.source.doc = Arc::new(nested);
+							true
+						} else {
+							false
+						}
+					};
+					if touched {
+						*cache = fx_tiles::TiledImage::derived(size.0, size.1, size.2);
+					}
+					touched
+				}
+				_ => false,
+			};
+			if touched {
+				for cache in &mut layer.effects {
+					cache.mark_all_dirty();
+				}
+				*item = Arc::new(layer);
+				changed = true;
+			}
+		}
+		Ok(changed)
+	}
+	let size = (doc.width, doc.height, doc.color.depth.rgba_format());
+	layers(&mut doc.layers, source, store, size)
 }

@@ -45,6 +45,10 @@ export const UI = Object.freeze({
 /** Engine → UI message types (`EngineToUi`). */
 export const ENGINE = Object.freeze({
   DOCUMENT_OPENED: "document_opened",
+  // AUDIT-FIX(D5): show recovered-save metadata in a persistent banner.
+  RECOVERED_VERSION: "recovered_version",
+  // AUDIT-FIX(D2): startup recovery offer.
+  RECOVERY_AVAILABLE: "recovery_available",
   DOCUMENT_CHANGED: "document_changed",
   CLOSE_DIRTY_DOCUMENT: "close_dirty_document",
   CMYK_PROFILES: "cmyk_profiles",
@@ -55,11 +59,15 @@ export const ENGINE = Object.freeze({
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
   LAYERS_PATCH: "layers_patch",
+  // AUDIT-FIX(4.2): tree edits are sequential insert/remove/move patches.
+  LAYERS_STRUCTURE_PATCH: "layers_structure_patch",
   HISTORY: "history",
   VIEW: "view",
   STATUS: "status",
   PROGRESS: "progress",
   PROGRESS_DONE: "progress_done",
+  // AUDIT-FIX(P4): task cancellation capability.
+  TASK_CANCELABLE: "task_cancelable",
   TOAST: "toast",
   ERROR: "error",
   COLOR_PICKED: "color_picked",

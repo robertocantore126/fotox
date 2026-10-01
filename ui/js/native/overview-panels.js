@@ -52,7 +52,7 @@ export function requestOverview(delay = 200) {
 
 export function initOverview() {
   if (!bridge.isNative) return;
-  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH, ENGINE.HISTORY, ENGINE.ACTIVE_DOCUMENT]) {
+  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH, ENGINE.LAYERS_STRUCTURE_PATCH, ENGINE.HISTORY, ENGINE.ACTIVE_DOCUMENT]) {
     bridge.on(type, () => requestOverview());
   }
   bridge.on(ENGINE.ACTIVE_DOCUMENT, ({ doc }) => {

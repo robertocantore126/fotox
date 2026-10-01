@@ -30,6 +30,35 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 	decoder.decode_headers().map_err(decode)?;
 	let info = decoder.info().ok_or_else(|| IoError::Decode("JPEG without a frame header".into()))?;
 	let (src_w, src_h) = (u32::from(info.width), u32::from(info.height));
+	// AUDIT-FIX(I2): reject hostile dimensions before zune allocates decode buffers.
+	crate::check_decoded_size(src_w, src_h)?;
+	// VERIFY-FIX(I2): the 4 GiB RGBA cap let a 600-byte header claiming 30 000²
+	// commit > 6 GB (decoder buffers come on top of the RGBA output). Two more
+	// header-only checks: the file must be long enough to hold its scan (Huffman
+	// coding needs at least 1 bit per 8×8 luma block, even with EOB runs), and
+	// the estimated decode peak must fit in half the machine's RAM.
+	let px = u64::from(src_w) * u64::from(src_h);
+	let file_len = std::fs::metadata(path)?.len();
+	if file_len < px.div_ceil(64).div_ceil(8) {
+		return Err(IoError::Decode(format!(
+			"JPEG declares {src_w} × {src_h} but the file ({file_len} bytes) is too short to hold it"
+		)));
+	}
+	// RGBA output, plus 2 bytes per coefficient per component held for a
+	// progressive image's later passes.
+	let components = u64::from(info.components.max(1));
+	let peak = px * (4 + if info.sof.is_progressive() { 2 * components } else { 0 });
+	let limit = fx_tiles::budgets::total_ram() / 2;
+	if peak > limit {
+		return Err(IoError::Unsupported(format!(
+			"Decoding this {src_w} × {src_h} JPEG needs about {:.1} GB of memory; this PC allows {:.1} GB",
+			peak as f64 / 1e9,
+			limit as f64 / 1e9
+		)));
+	}
+	if !progress(0.0) {
+		return Err(IoError::Cancelled);
+	}
 	let ppi = match (info.pixel_density, info.x_density) {
 		(1, d) if d > 0 => f32::from(d),
 		(2, d) if d > 0 => f32::from(d) * 2.54,
@@ -41,7 +70,12 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 	};
 	let orientation = decoder.exif().and_then(|exif| exif_orientation(exif)).unwrap_or(1);
 
-	let pixels = decoder.decode().map_err(decode)?;
+	// AUDIT-FIX(I2): supply a fallibly allocated output rather than decoder.decode's infallible Vec.
+	let size = decoder
+		.output_buffer_size()
+		.ok_or_else(|| IoError::Decode("JPEG output size overflow".into()))?;
+	let mut pixels = crate::zeroed::<u8>(size)?;
+	decoder.decode_into(&mut pixels).map_err(decode)?;
 	if pixels.len() != src_w as usize * src_h as usize * 4 {
 		return Err(IoError::Decode(format!(
 			"JPEG decoded to {} bytes, expected {src_w} × {src_h} × 4",
@@ -56,7 +90,8 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 	let format = BitDepth::U8.rgba_format();
 	let mut image = TiledImage::new(width, height, format);
 	let mut band = Band::new(format, width as usize * 4);
-	let mut row = vec![0u8; width as usize * 4];
+	// AUDIT-FIX(I2): fallible scanline allocation.
+	let mut row = crate::zeroed::<u8>(width as usize * 4)?;
 	for y in 0..height {
 		for x in 0..width {
 			let (sx, sy) = source_position(orientation, x, y, src_w, src_h);

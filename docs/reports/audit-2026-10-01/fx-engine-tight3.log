@@ -1,0 +1,11 @@
+test frame_larger_than_the_hot_budget ... AUDIT [tight budget] mem before layer 0: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 98 MiB, private 6975 MiB, peak WS 146 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [tight budget] clouds on layer 0 (job): 877.0 ms
+AUDIT [tight budget] mem before layer 1: tiles hot 615 MiB, warm 221 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 668 MiB, private 7551 MiB, peak WS 966 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [tight budget] clouds on layer 1 (job): 884.8 ms
+AUDIT [tight budget] mem before layer 2: tiles hot 635 MiB, warm 655 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1182 MiB, private 8061 MiB, peak WS 1432 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [tight budget] clouds on layer 2 (job): 944.6 ms
+AUDIT [tight budget] mem before layer 3: tiles hot 826 MiB, warm 1041 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 2880 MiB, private 9764 MiB, peak WS 3183 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [tight budget] clouds on layer 3 (job): 1093.6 ms
+AUDIT [tight budget] mem before layer 4: tiles hot 599 MiB, warm 1547 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 2078 MiB, private 8962 MiB, peak WS 3274 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [tight budget] clouds on layer 4 (job): 1300.2 ms
+AUDIT [tight budget] mem before layer 5: tiles hot 1988 MiB, warm 1941 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 4488 MiB, private 11387 MiB, peak WS 4555 MiB, I/O read 0 MiB write 0 MiB

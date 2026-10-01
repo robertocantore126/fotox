@@ -30,6 +30,8 @@ pub mod mips;
 pub mod ops;
 pub mod patterns;
 pub mod prefs;
+// AUDIT-FIX(D2): recovery snapshots are separate from temporary scratch storage.
+pub mod recovery;
 pub mod selection;
 pub mod shapes_lib;
 pub mod smart;
@@ -116,6 +118,8 @@ pub struct Modifiers {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineInput {
+	// AUDIT-FIX(D2): request best-effort snapshots while the engine is still alive.
+	EmergencyRecovery,
 	/// A decoded message from the UI.
 	Ui(UiToEngine),
 	Pointer(PointerInput),
@@ -240,6 +244,7 @@ pub(crate) fn trace_input(input: &EngineInput, moves: &mut u32) -> String {
 		EngineInput::CloseRequested => ("close requested".into(), json!({})),
 		EngineInput::DisplayProfile(p) => ("display profile".into(), json!({ "bytes": p.as_ref().map(Vec::len) })),
 		EngineInput::PasteImage { width, height, rgba8 } => ("paste image".into(), json!({ "w": width, "h": height, "bytes": rgba8.len() })),
+		EngineInput::EmergencyRecovery => ("emergency recovery".into(), json!({})),
 		EngineInput::Shutdown => ("shutdown".into(), json!({})),
 	};
 	let mut detail = detail;
@@ -320,13 +325,47 @@ impl EngineHandle {
 		let output: OutputSink = Arc::new(output);
 		// The preferences' memory budget and scratch folder apply at start (M7-T09).
 		let prefs = prefs::Prefs::load();
-		let scratch_dir = prefs.string("scratch_dir").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(scratch_dir);
+		// AUDIT-FIX(D10): stale-part cleanup is confined to recent-document folders and runs on a worker.
+		let recent = prefs.recent();
+		let _ = std::thread::Builder::new()
+			.name("stale-save-parts".into())
+			.spawn(move || fx_io::fs_util::sweep_parts(&recent));
+		// AUDIT-FIX(X1): invalid configured storage is disclosed, not silently filtered.
+		let mut scratch_warning = None;
+		let scratch_dir = if fx_tiles::health::no_scratch_guards() {
+			prefs.string("scratch_dir").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(scratch_dir)
+		} else if let Some(path) = prefs.string("scratch_dir").filter(|p| !p.trim().is_empty()).map(PathBuf::from) {
+			match fx_tiles::health::validate_folder(&path) {
+				Ok(_) => path,
+				Err(e) => {
+					scratch_warning = Some(format!(
+						"Configured scratch {} is unavailable ({e}); using {} instead",
+						path.display(),
+						scratch_dir.display()
+					));
+					scratch_dir
+				}
+			}
+		} else {
+			scratch_dir
+		};
 		let mut config = TileStoreConfig::reference_machine(scratch_dir);
 		if let Some(mb) = prefs.number("memory_budget_mb").filter(|mb| *mb >= 256.0) {
 			config.hot_budget = (mb as u64) << 20;
 		}
+		// AUDIT-FIX(P1): warm residency is independently configurable, hot override remains unchanged.
+		if !fx_tiles::budgets::old_budgets() {
+			if let Some(mb) = prefs.number("warm_budget_mb").filter(|mb| mb.is_finite() && *mb >= 64.) {
+				config.warm_budget = (mb as u64).saturating_mul(1 << 20);
+			}
+		}
 		let store = Arc::new(TileStore::new(config).map_err(std::io::Error::other)?);
+		if let Some(warning) = scratch_warning {
+			store.report_scratch_error(warning);
+		}
 		let (input, inputs) = crossbeam_channel::unbounded();
+		// AUDIT-FIX(D2): the crash reporter can ask a surviving engine for emergency snapshots.
+		recovery::register(input.clone());
 		let (render_requests, render_inbox) = crossbeam_channel::unbounded();
 		let (internal, internal_rx) = crossbeam_channel::unbounded();
 		let (mips, mips_rx) = crossbeam_channel::unbounded();

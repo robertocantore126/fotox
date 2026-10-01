@@ -106,10 +106,18 @@ pub fn export_image(path: &Path, width: u32, height: u32, options: ExportOptions
 	}
 	let _lease = crate::fxd::PathWriteLock::acquire(path);
 	let part = part_path(path);
-	let result = write(&part, width, height, &options, render, progress);
+	// AUDIT-FIX(D6+D10): cleanup covers sync/rename errors too; sync the completed part before publication.
+	let _part_guard = crate::fs_util::PartGuard(part.clone());
+	let result = write(&part, width, height, &options, render, &mut *progress);
+	// AUDIT-FIX(P4): do not publish a cancelled export even if its final progress callback was ignored.
+	let result = result.and_then(|()| if progress(1.0) { Ok(()) } else { Err(IoError::Cancelled) });
+	let result = result.and_then(|()| {
+		std::fs::OpenOptions::new().write(true).open(&part)?.sync_all()?;
+		Ok(())
+	});
 	match result {
 		Ok(()) => {
-			std::fs::rename(&part, path)?;
+			crate::fs_util::atomic_replace(&part, path)?;
 			Ok(())
 		}
 		Err(e) => {
@@ -441,7 +449,8 @@ mod tests {
 			true
 		})
 		.unwrap();
-		assert_eq!(calls, 3, "one progress call per band");
+		// VERIFY-FIX(P4): one call per band, plus the cancel check before the part file is published.
+		assert_eq!(calls, 4, "one progress call per band + the final cancel check");
 		let leftovers = std::fs::read_dir(path.parent().unwrap())
 			.unwrap()
 			.filter_map(|e| e.ok())

@@ -38,6 +38,25 @@ pub struct EngineOps {
 }
 
 impl PixelOps for EngineOps {
+	fn text_bounds(&self, content: &fx_core::text::TextContent, ppi: f32) -> Result<Option<[f64; 4]>, CommandError> {
+		// AUDIT-FIX(SO1): use actual post-warp outlines; one antialias pixel conservatively padded.
+		Ok(crate::text::layout_uncached(content, ppi).outline_box().map(|b| {
+			let mut rect = crate::text::doc_box(
+				content.transform,
+				fx_render::TextRect {
+					x: b[0],
+					y: b[1],
+					w: b[2] - b[0],
+					h: b[3] - b[1],
+				},
+			);
+			rect[0] -= 1.;
+			rect[1] -= 1.;
+			rect[2] += 1.;
+			rect[3] += 1.;
+			rect
+		}))
+	}
 	fn filter(&self, image: &TiledImage, offset: (i32, i32), canvas: (u32, u32), filter: &FilterParams, store: &TileStore) -> Result<TiledImage, CommandError> {
 		let geometry = Geometry {
 			offset,

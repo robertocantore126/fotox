@@ -43,6 +43,8 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 			height: height.into(),
 		});
 	}
+	// AUDIT-FIX(I2): refuse hostile dimensions before allocating bands/pixel output.
+	crate::check_decoded_size(width, height)?;
 	let (color, depth) = reader.output_color_type();
 	let gray = match color {
 		ColorType::GrayscaleAlpha => true,
@@ -58,8 +60,9 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 	let mut image = TiledImage::new(width, height, doc_depth.rgba_format());
 	let row_samples = width as usize * 4;
 	let mut band = Band::new(doc_depth.rgba_format(), row_samples);
-	let mut rgba8 = vec![0u8; if sixteen { 0 } else { row_samples }];
-	let mut rgba16 = vec![0u16; if sixteen { row_samples } else { 0 }];
+	// AUDIT-FIX(I2): fallible format-boundary buffers.
+	let mut rgba8 = crate::zeroed::<u8>(if sixteen { 0 } else { row_samples })?;
+	let mut rgba16 = crate::zeroed::<u16>(if sixteen { row_samples } else { 0 })?;
 
 	let mut push = |y: usize, data: &[u8], band: &mut Band, image: &mut TiledImage| -> Result<(), IoError> {
 		let row = if sixteen {
@@ -79,7 +82,8 @@ pub(crate) fn import(path: &Path, store: &TileStore, progress: Progress<'_>) -> 
 			)));
 		}
 		let size = reader.output_buffer_size().ok_or_else(|| IoError::Decode("PNG output size overflows".into()))?;
-		let mut whole = vec![0u8; size];
+		// AUDIT-FIX(I2): interlaced output allocation can return an error.
+		let mut whole = crate::zeroed::<u8>(size)?;
 		let frame = reader.next_frame(&mut whole).map_err(decode)?;
 		for y in 0..height as usize {
 			push(y, &whole[y * frame.line_size..][..frame.line_size], &mut band, &mut image)?;

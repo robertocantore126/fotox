@@ -26,11 +26,33 @@ pub struct OpenedFxd {
 	pub preview: Option<TiledImage>,
 	/// The manifest, for callers that need the raw model (e.g. diagnostics).
 	pub manifest: Manifest,
+	// AUDIT-FIX(D5): consumers must disclose an older recovered version.
+	pub recovered: bool,
 }
 
 /// Open a `.fxd`: footer → manifest → backed document. No pixel is read.
 pub fn open(path: &Path, store: &TileStore) -> Result<OpenedFxd, IoError> {
-	let (file, footer) = FxdFile::open(path)?;
+	// AUDIT-FIX(D5): try older complete saves when the newest manifest/structure is damaged.
+	let (mut file, _) = FxdFile::open(path)?;
+	let mut recovered = file.has_newer_tail()?;
+	loop {
+		match open_version(file.clone(), store, recovered) {
+			Ok(opened) => return Ok(opened),
+			Err(error) => match file.previous()? {
+				Some(previous) => {
+					tracing::warn!("damaged .fxd version: {error}; trying earlier footer");
+					file = previous;
+					recovered = true;
+				}
+				None => return Err(error),
+			},
+		}
+	}
+}
+
+// AUDIT-FIX(D5): all lazy structure construction belongs to the attempted footer, including nested sources.
+fn open_version(file: Arc<FxdFile>, store: &TileStore, recovered: bool) -> Result<OpenedFxd, IoError> {
+	let footer = file.footer();
 	let (kind, payload) = file.read_chunk(ChunkRef {
 		offset: footer.manifest_offset,
 		len: footer.manifest_len,
@@ -49,6 +71,7 @@ pub fn open(path: &Path, store: &TileStore) -> Result<OpenedFxd, IoError> {
 		file,
 		preview,
 		manifest,
+		recovered,
 	})
 }
 

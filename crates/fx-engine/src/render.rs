@@ -49,9 +49,6 @@ const ANTS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(125)
 /// are reported with this slot and their draws are dropped before rendering.
 const EMPTY_SLOT: u32 = u32::MAX;
 
-/// Bytes of one tile in the compositor's `Rgba16Float` textures.
-const TILE_F16_BYTES: u64 = (TILE_SIZE as u64) * (TILE_SIZE as u64) * 8;
-
 /// What to draw.
 #[derive(Clone)]
 pub(crate) struct Frame {
@@ -201,6 +198,8 @@ pub(crate) fn run(ctx: RenderContext) {
 			Some((id, doc)) => {
 				let pipeline = tiles.get_or_insert_with(|| TilePipeline::new(&ctx));
 				pipeline.compositor.set_hot_layer(f.hot_layer);
+				// AUDIT-FIX(COMPCACHE): document/active namespace and outside-edit epoch.
+				pipeline.compositor.set_cache_document(u64::from(id.0), doc);
 				match pipeline.frame(
 					&ctx,
 					&mut encoder,
@@ -296,9 +295,13 @@ impl TilePipeline {
 	fn new(ctx: &RenderContext) -> Self {
 		let config = CompositorConfig::default();
 		// Both the atlas and the composite cache are allocated up front.
-		let gpu_bytes = config.atlas_budget + u64::from(config.composite_slots) * TILE_F16_BYTES;
+		// AUDIT-FIX(P1): lazy atlas reporting begins with the actual compositor allocation.
+		let compositor = GpuCompositor::new(&ctx.device, &ctx.queue, config);
+		let gpu_bytes = compositor.allocated_bytes();
+		// AUDIT-FIX(P1): publish GPU ceiling as soon as compositor is initialized.
+		ctx.stats.lock().expect("render stats poisoned").gpu_budget_bytes = compositor.budget_bytes();
 		Self {
-			compositor: GpuCompositor::new(&ctx.device, &ctx.queue, config),
+			compositor,
 			renderer: ViewportRenderer::new(&ctx.device, &ctx.queue, VIEWPORT_FORMAT),
 			luts: LutCache::default(),
 			ready: HashMap::new(),
@@ -316,6 +319,7 @@ impl TilePipeline {
 
 	/// Drop everything held for the document last drawn.
 	fn forget_document(&mut self) {
+		self.compositor.forget_cache_document();
 		self.snapshot = None;
 		self.current = None;
 		self.ready.clear();
@@ -427,6 +431,8 @@ impl TilePipeline {
 		// Composite. `hot` never blocks: RAM-resident tiles only.
 		let store = &ctx.store;
 		let outcomes = self.compositor.composite(&programs, &|handle| store.try_get_hot(handle))?;
+		// AUDIT-FIX(P1): update reported bytes after demand-driven page growth.
+		self.gpu_bytes = self.compositor.allocated_bytes();
 		let total = self.compositor.stats().uploads;
 		self.frame_uploads = u32::try_from(total - self.total_uploads).unwrap_or(u32::MAX);
 		self.total_uploads = total;

@@ -15,18 +15,104 @@ use fx_core::{Document, LayerId, LayerKind};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileSlot, TileStore};
 use rayon::prelude::*;
 
+// AUDIT-FIX(FXREGION): retain exact whole-layer fallback behind startup switch.
+pub fn initialise_region_switch() -> bool {
+	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*OLD.get_or_init(|| std::env::var("FOTOX_NO_REGION_EFFECTS").is_ok_and(|v| v == "1"))
+}
+/// Conservative level-zero reach, including the actual renderer's morphology/blur support.
+pub fn apron(styles: &fx_core::styles::LayerStyles) -> u32 {
+	styles
+		.slots()
+		.into_iter()
+		.filter_map(|slot| styles.effect_at(slot, GlobalLight::default()))
+		.map(|p| {
+			let reach = fx_core::styles::LayerStyles::reach(&p) + p.offset.0.hypot(p.offset.1) - p.offset.0.abs().max(p.offset.1.abs());
+			if reach.is_finite() { reach.ceil().max(0.) as u32 } else { u32::MAX }
+		})
+		.max()
+		.unwrap_or(0)
+}
+fn pixel_edit_region(old: &fx_core::Layer, new: &fx_core::Layer) -> Option<[f64; 4]> {
+	// Unknown style/mask/geometry/backdrop dependencies take the whole-layer path.
+	if old.styles != new.styles
+		|| old.mask.is_some()
+		|| new.mask.is_some()
+		|| old.vector_mask.is_some()
+		|| new.vector_mask.is_some()
+		|| (old.visible, old.opacity, old.fill, old.blend, old.clipped) != (new.visible, new.opacity, new.fill, new.blend, new.clipped)
+	{
+		return None;
+	}
+	let styles = new.styles.as_ref()?;
+	if styles
+		.slots()
+		.into_iter()
+		.filter_map(|s| styles.effect_at(s, GlobalLight::default()))
+		.any(|p| p.extra.aligned())
+	{
+		return None;
+	}
+	let (LayerKind::Pixel { image: a, offset: ao }, LayerKind::Pixel { image: b, offset: bo }) = (&old.kind, &new.kind) else {
+		return None;
+	};
+	if ao != bo || (a.width(), a.height(), a.format()) != (b.width(), b.height(), b.format()) {
+		return None;
+	}
+	let mut rect: Option<[f64; 4]> = None;
+	let t = TILE_SIZE as f64;
+	for ty in 0..a.grid(0).rows() {
+		for tx in 0..a.grid(0).cols() {
+			if !a.slot(0, tx, ty).same_as(b.slot(0, tx, ty)) {
+				let q = [
+					tx as f64 * t + ao.0 as f64,
+					ty as f64 * t + ao.1 as f64,
+					(tx + 1) as f64 * t + ao.0 as f64,
+					(ty + 1) as f64 * t + ao.1 as f64,
+				];
+				rect = Some(rect.map_or(q, |r| [r[0].min(q[0]), r[1].min(q[1]), r[2].max(q[2]), r[3].max(q[3])]));
+			}
+		}
+	}
+	rect
+}
+
 /// Mark every effect tile dirty (or rebuild the caches after a canvas size
 /// change, or when the style's list of effects changed). FAST: called on
 /// every content change, whatever layer changed.
-pub fn invalidate(doc: &mut Document) {
+pub fn invalidate(doc: &mut Document, previous: Option<&Document>) {
+	// AUDIT-FIX(4.1): unchanged shared layers retain their effect tiles; group identity includes children.
+	fn identities(layers: &[std::sync::Arc<fx_core::Layer>], out: &mut std::collections::HashMap<LayerId, usize>) {
+		for layer in layers {
+			out.insert(layer.id, std::sync::Arc::as_ptr(layer) as usize);
+			if let LayerKind::Group { children, .. } = &layer.kind {
+				identities(children, out);
+			}
+		}
+	}
+	let mut old = std::collections::HashMap::new();
+	let global = previous.is_none_or(|p| {
+		(p.width, p.height, p.color.depth, p.global_light, p.global_altitude) != (doc.width, doc.height, doc.color.depth, doc.global_light, doc.global_altitude)
+			|| p.patterns.iter().map(|p| p.id).ne(doc.patterns.iter().map(|p| p.id))
+	});
+	if let Some(p) = previous {
+		identities(&p.layers, &mut old);
+	}
+
 	let mut ids = Vec::new();
 	doc.walk(|layer, _| {
-		if layer.styles.is_some() {
+		if layer.styles.is_some() && (global || old.get(&layer.id).copied() != Some(layer as *const fx_core::Layer as usize)) {
 			ids.push(layer.id);
 		}
 	});
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	for id in ids {
+		// AUDIT-FIX(FXREGION): compare authoritative identities before mutating effect cache Arcs.
+		let region = if !global && !initialise_region_switch() {
+			previous.and_then(|p| p.layer(id)).zip(doc.layer(id)).and_then(|(a, b)| pixel_edit_region(a, b))
+		} else {
+			None
+		};
 		let Some(layer) = doc.layer_mut(id) else { continue };
 		let Some(styles) = &layer.styles else { continue };
 		let slots = styles.slots().len();
@@ -34,8 +120,17 @@ pub fn invalidate(doc: &mut Document) {
 		if resized {
 			layer.effects = styles.caches(w, h, format);
 		} else {
+			let grown = region.map(|r| {
+				let coarse = 1u64 << fx_tiles::level_count_for(w, h).saturating_sub(1).min(31);
+				let grow = (u64::from(apron(styles)).div_ceil(u64::from(TILE_SIZE)) * u64::from(TILE_SIZE) + coarse) as f64;
+				[r[0] - grow, r[1] - grow, r[2] + grow, r[3] + grow]
+			});
 			for cache in &mut layer.effects {
-				cache.mark_all_dirty();
+				if let Some(rect) = grown {
+					cache.mark_rect_dirty(rect);
+				} else {
+					cache.mark_all_dirty();
+				}
 			}
 		}
 	}
@@ -116,8 +211,15 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 		.map(|(id, effect, level, tx, ty, params, scale, reach, side, alpha, pattern, bounds)| {
 			// Document point of the alpha window's first pixel centre.
 			let t = TILE_SIZE as f64;
-			let origin = ((f64::from(tx) * t - reach as f64 + 0.5) * scale, (f64::from(ty) * t - reach as f64 + 0.5) * scale);
-			let texture = Texture { pattern: pattern.as_ref(), origin, bounds };
+			let origin = (
+				(f64::from(tx) * t - reach as f64 + 0.5) * scale,
+				(f64::from(ty) * t - reach as f64 + 0.5) * scale,
+			);
+			let texture = Texture {
+				pattern: pattern.as_ref(),
+				origin,
+				bounds,
+			};
 			let mut coverage = compute(&params, &alpha, side, reach, scale, &texture);
 			finish(&mut coverage, &params, &alpha, side, reach);
 			let q = params.quality;
@@ -126,7 +228,9 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 			}
 			let buffer = match &params.extra {
 				// A glow's gradient: coloured along its falloff (the coverage).
-				EffectExtra::Glow { gradient: Some((g, reverse)), .. } => paint_glow(&coverage, format, g, *reverse, q.jitter, (tx, ty)),
+				EffectExtra::Glow {
+					gradient: Some((g, reverse)), ..
+				} => paint_glow(&coverage, format, g, *reverse, q.jitter, (tx, ty)),
 				// Per-pixel colour: the gradient / pattern at the document point.
 				EffectExtra::Gradient { gradient: g, .. } => {
 					let placed = match bounds {
@@ -176,7 +280,15 @@ pub fn draw_effect_requests(doc: &mut Document, store: &TileStore, requests: &[(
 /// (then the mask cuts the finished effect instead, in the compositor):
 /// with a mask that shapes the effects, the layer is composited alone with
 /// that mask; a group from its content alone; otherwise its own alpha.
-fn source_alpha(doc: &mut Document, store: &TileStore, alone: &mut AloneAlpha, id: LayerId, styles: &fx_core::styles::LayerStyles, (level, tx, ty): (usize, u32, u32), reach: i64) -> Vec<f32> {
+fn source_alpha(
+	doc: &mut Document,
+	store: &TileStore,
+	alone: &mut AloneAlpha,
+	id: LayerId,
+	styles: &fx_core::styles::LayerStyles,
+	(level, tx, ty): (usize, u32, u32),
+	reach: i64,
+) -> Vec<f32> {
 	let t = TILE_SIZE as i64;
 	let side = (t + 2 * reach) as usize;
 	let origin = (i64::from(tx) * t - reach, i64::from(ty) * t - reach);
@@ -203,7 +315,14 @@ struct AloneAlpha {
 }
 
 impl AloneAlpha {
-	fn get(&mut self, doc: &Document, store: &TileStore, (id, pixel, vector): (LayerId, bool, bool), (level, tx, ty): (usize, u32, u32), reach: i64) -> Vec<f32> {
+	fn get(
+		&mut self,
+		doc: &Document,
+		store: &TileStore,
+		(id, pixel, vector): (LayerId, bool, bool),
+		(level, tx, ty): (usize, u32, u32),
+		reach: i64,
+	) -> Vec<f32> {
 		let t = TILE_SIZE as i64;
 		let key = (id, pixel, vector, level, tx, ty);
 		if !self.tiles.contains_key(&key) {
@@ -309,7 +428,10 @@ fn layer_bounds(doc: &Document, store: &TileStore, id: LayerId) -> Option<(f64, 
 	let layer = doc.layer(id)?;
 	let rect = |b: (i32, i32, i32, i32)| (f64::from(b.0), f64::from(b.1), f64::from(b.2 - b.0), f64::from(b.3 - b.1));
 	match &layer.kind {
-		LayerKind::Pixel { image, offset } => content_bounds(Placed { image, offset: *offset }, Content::Opaque, store).ok().flatten().map(rect),
+		LayerKind::Pixel { image, offset } => content_bounds(Placed { image, offset: *offset }, Content::Opaque, store)
+			.ok()
+			.flatten()
+			.map(rect),
 		LayerKind::Shape { shape, stroke, transform, .. } => {
 			let (w, h) = shape.bounds();
 			let [a, b, c, d, e, f] = *transform;
@@ -322,7 +444,10 @@ fn layer_bounds(doc: &Document, store: &TileStore, id: LayerId) -> Option<(f64, 
 		LayerKind::Smart { smart, .. } => smart.bounds().map(|((x, y), (w, h))| (f64::from(x), f64::from(y), f64::from(w), f64::from(h))),
 		LayerKind::Text { .. } => {
 			let drawn = crate::derived::layer_content(doc, store, id).ok()?;
-			content_bounds(Placed { image: &drawn, offset: (0, 0) }, Content::Opaque, store).ok().flatten().map(rect)
+			content_bounds(Placed { image: &drawn, offset: (0, 0) }, Content::Opaque, store)
+				.ok()
+				.flatten()
+				.map(rect)
 		}
 		_ => None,
 	}
@@ -537,7 +662,10 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 			let center = matches!(params.extra, EffectExtra::Glow { center: true, .. });
 			let edge: Vec<f32> = if params.quality.precise {
 				let feature: Vec<bool> = alpha.iter().map(|&a| a < 0.5).collect();
-				fx_ops::morph::edt_2d(&feature, side, side).into_iter().map(|d| precise_falloff(d, morph, blur)).collect()
+				fx_ops::morph::edt_2d(&feature, side, side)
+					.into_iter()
+					.map(|d| precise_falloff(d, morph, blur))
+					.collect()
 			} else {
 				let mut src: Vec<f32> = alpha.iter().map(|a| 1.0 - a).collect();
 				if morph > 0.0 {
@@ -545,7 +673,10 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 				}
 				box_blur3(&src, side, blur / 2.0)
 			};
-			edge.iter().zip(alpha).map(|(s, a)| if center { (1.0 - s).max(0.0) * a } else { s * a }).collect()
+			edge.iter()
+				.zip(alpha)
+				.map(|(s, a)| if center { (1.0 - s).max(0.0) * a } else { s * a })
+				.collect()
 		}
 		EffectKind::Satin => {
 			let (o, invert) = match &params.extra {
@@ -584,7 +715,11 @@ fn compute(params: &EffectParams, alpha: &[f32], side: usize, reach: usize, scal
 				let relief = match (tex, texture.pattern) {
 					(Some(t), Some(p)) if t.depth.abs() > 0.0 => {
 						let k = (t.scale / 100.0).max(0.01);
-						let o = if t.align { texture.bounds.map_or((0.0, 0.0), |b| (b.0, b.1)) } else { (0.0, 0.0) };
+						let o = if t.align {
+							texture.bounds.map_or((0.0, 0.0), |b| (b.0, b.1))
+						} else {
+							(0.0, 0.0)
+						};
 						let o = (o.0 + t.phase.0, o.1 + t.phase.1);
 						let amount = (t.depth / 100.0).clamp(-10.0, 10.0) as f32 * if t.invert { -1.0 } else { 1.0 };
 						let r: Vec<f32> = (0..side * side)
@@ -859,7 +994,11 @@ fn bevel(alpha: &[f32], side: usize, b: &BevelShape, relief: Option<&[f32]>) -> 
 			let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
 			let shade = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / len;
 			// Gloss Contour: the lighting (-1..1) through the curve.
-			let shade = if gloss == Contour::Linear { shade } else { (gloss.apply(f64::from((shade + 1.0) / 2.0)) * 2.0 - 1.0) as f32 };
+			let shade = if gloss == Contour::Linear {
+				shade
+			} else {
+				(gloss.apply(f64::from((shade + 1.0) / 2.0)) * 2.0 - 1.0) as f32
+			};
 			let v = if highlight { (shade - flat) * 2.0 } else { (flat - shade) * 2.0 };
 			v.clamp(0.0, 1.0) * region(i)
 		})

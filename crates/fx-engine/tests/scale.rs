@@ -134,7 +134,7 @@ impl Probe {
 		for item in seen {
 			if let Seen::Ui(message) = item {
 				match &message {
-					EngineToUi::Status { memory, .. } => self.status = Some(*memory),
+					EngineToUi::Status { memory, .. } => self.status = Some(memory.clone()),
 					EngineToUi::Layers { doc, layers, .. } => self.layers = Some((*doc, layers.clone())),
 					EngineToUi::Thumbnail { .. } => self.thumbnails += 1,
 					_ => {}
@@ -325,7 +325,7 @@ impl Probe {
 		}
 		self.inbox.retain(|m| !matches!(m, EngineToUi::Status { .. }));
 		let mib = |b: u64| b as f64 / (1 << 20) as f64;
-		if let Some(m) = self.status {
+		if let Some(m) = self.status.clone() {
 			self.record(format!("{label}: tiles hot"), mib(m.hot_bytes), "MiB");
 			self.record(format!("{label}: tiles warm (lz4)"), mib(m.warm_bytes), "MiB");
 			self.record(format!("{label}: tiles scratch"), mib(m.scratch_bytes), "MiB");
@@ -864,13 +864,13 @@ fn huge_canvas() {
 	let t = p.save_as(doc, &fxd);
 	p.record_time("save as .fxd", t);
 	p.record("saved file size", file_mib(&fxd), "MiB");
-	let before_close = p.status.map_or(0, |m| m.hot_bytes + m.warm_bytes);
+	let before_close = p.status.as_ref().map_or(0, |m| m.hot_bytes + m.warm_bytes);
 	p.close(doc);
 	// Closing the only document gives its tiles back (the render thread held
 	// the last frame's snapshot, 2026-09-27).
 	std::thread::sleep(Duration::from_secs(2));
 	p.record_memory("after closing");
-	let after_close = p.status.map_or(0, |m| m.hot_bytes + m.warm_bytes);
+	let after_close = p.status.as_ref().map_or(0, |m| m.hot_bytes + m.warm_bytes);
 	assert!(
 		after_close < before_close / 10,
 		"closing the only document freed its tiles: {} MiB before, {} MiB after",

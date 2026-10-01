@@ -32,6 +32,18 @@ pub struct DocId(pub u32);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UiToEngine {
+	// AUDIT-FIX(P4): cancel a worker cooperatively by its task id.
+	CancelTask {
+		task: u64,
+	},
+	// AUDIT-FIX(D2): user chooses a discovered recovery document.
+	RecoverDocument {
+		path: String,
+	},
+	// VERIFY-FIX(D2): the user discards discovered recovery documents.
+	DiscardRecovery {
+		paths: Vec<String>,
+	},
 	/// First message after the page loads.
 	Hello {
 		ui_version: String,
@@ -302,8 +314,22 @@ pub struct CmykProfileInfo {
 	pub path: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryStats {
+	// AUDIT-FIX(P1): Preferences can show the GPU ceiling after first-frame initialisation.
+	#[serde(default)]
+	pub gpu_budget_bytes: u64,
+	// AUDIT-FIX(X1): scratch failures and cached free space are user-visible.
+	#[serde(default)]
+	pub scratch_full: bool,
+	#[serde(default)]
+	pub scratch_error: Option<String>,
+	#[serde(default)]
+	pub scratch_free_bytes: u64,
+	#[serde(default)]
+	pub scratch_reserve_bytes: u64,
+	#[serde(default)]
+	pub scratch_path: String,
 	pub hot_bytes: u64,
 	pub warm_bytes: u64,
 	pub scratch_bytes: u64,
@@ -313,6 +339,20 @@ pub struct MemoryStats {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineToUi {
+	// AUDIT-FIX(P4): only explicitly cancellable jobs expose cancellation.
+	TaskCancelable {
+		task: u64,
+	},
+	// AUDIT-FIX(D2): only inactive sessions are offered for recovery.
+	RecoveryAvailable {
+		paths: Vec<String>,
+	},
+	// AUDIT-FIX(D5): a recovered save carries a persistent, per-document warning.
+	RecoveredVersion {
+		doc: DocId,
+		saved_at: u64,
+		save_counter: u64,
+	},
 	DocumentOpened {
 		info: DocumentInfo,
 	},
@@ -348,6 +388,16 @@ pub enum EngineToUi {
 		base: u64,
 		changed: Vec<LayerInfo>,
 	},
+	// AUDIT-FIX(4.2): structural diffs preserve sequence resynchronisation and omit unchanged rows.
+	LayersStructurePatch {
+		doc: DocId,
+		revision: u64,
+		seq: u64,
+		base: u64,
+		ops: Vec<LayerListOp>,
+		changed: Vec<LayerInfo>,
+	},
+
 	History {
 		doc: DocId,
 		labels: Vec<String>,
@@ -533,6 +583,83 @@ pub enum EngineToUi {
 	},
 }
 
+// AUDIT-FIX(4.2): sequential indexes refer to the list after earlier operations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum LayerListOp {
+	Remove { id: fx_core::LayerId },
+	Insert { index: usize, row: LayerInfo },
+	Move { id: fx_core::LayerId, index: usize },
+}
+
+pub fn structural_layers_patch(old: &[LayerInfo], new: &[LayerInfo]) -> (Vec<LayerListOp>, Vec<LayerInfo>) {
+	let wanted: std::collections::HashSet<_> = new.iter().map(|l| l.id).collect();
+	let old_rows: std::collections::HashMap<_, _> = old.iter().map(|l| (l.id, l)).collect();
+	let mut ids: Vec<_> = old.iter().map(|l| l.id).collect();
+	let mut ops = Vec::new();
+	ids.retain(|id| {
+		if wanted.contains(id) {
+			true
+		} else {
+			ops.push(LayerListOp::Remove { id: *id });
+			false
+		}
+	});
+	for (index, row) in new.iter().enumerate() {
+		if ids.get(index) == Some(&row.id) {
+			continue;
+		}
+		if let Some(at) = ids.iter().position(|id| *id == row.id) {
+			ids.remove(at);
+			ids.insert(index, row.id);
+			ops.push(LayerListOp::Move { id: row.id, index });
+		} else {
+			ids.insert(index, row.id);
+			ops.push(LayerListOp::Insert { index, row: row.clone() });
+		}
+	}
+	let changed = new
+		.iter()
+		.filter(|row| old_rows.get(&row.id).is_some_and(|old| *old != *row))
+		.cloned()
+		.collect();
+	(ops, changed)
+}
+
+// VERIFY-FIX(4.2): the Rust twin of `layers-panel.js`'s structure-patch
+// handler, so tests (and any Rust UI) can follow `LayersStructurePatch`.
+/// Apply a [`EngineToUi::LayersStructurePatch`] to the list it was made
+/// against: `ops` in order, then `changed` rows by id. `Err` when an op does
+/// not fit the list (the UI then asks for the full list).
+pub fn apply_layers_structure_patch(list: &mut Vec<LayerInfo>, ops: &[LayerListOp], changed: &[LayerInfo]) -> Result<(), ()> {
+	let mut next = list.clone();
+	for op in ops {
+		match op {
+			LayerListOp::Remove { id } => {
+				let at = next.iter().position(|l| l.id == *id).ok_or(())?;
+				next.remove(at);
+			}
+			LayerListOp::Move { id, index } => {
+				let at = next.iter().position(|l| l.id == *id).ok_or(())?;
+				if *index >= next.len() {
+					return Err(());
+				}
+				let row = next.remove(at);
+				next.insert(*index, row);
+			}
+			LayerListOp::Insert { index, row } => {
+				if *index > next.len() || next.iter().any(|l| l.id == row.id) {
+					return Err(());
+				}
+				next.insert(*index, row.clone());
+			}
+		}
+	}
+	apply_layers_patch(&mut next, changed);
+	*list = next;
+	Ok(())
+}
+
 /// Apply a [`EngineToUi::LayersPatch`]'s `changed` rows to the list it was
 /// made against: each row replaces the one with its id. (The UI does the same
 /// in `layers-panel.js`.)
@@ -606,6 +733,61 @@ pub fn decode<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<(T, &[u8]), 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn row(id: u64, depth: u32, name: &str) -> LayerInfo {
+		serde_json::from_value(serde_json::json!({
+			"id": id, "name": name, "kind": "pixel", "depth": depth, "visible": true,
+			"opacity": 1.0, "fill": 1.0, "blend": "normal", "clipped": false,
+			"has_mask": false, "locked": false, "expanded": true, "selected": false,
+		}))
+		.unwrap()
+	}
+
+	// VERIFY-FIX(4.2): differential gate — for random edits, the structure
+	// patch applied to the old list must give exactly the new list.
+	#[test]
+	fn structure_patch_rebuilds_the_new_list() {
+		let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+		let mut rand = |n: u64| {
+			seed ^= seed << 13;
+			seed ^= seed >> 7;
+			seed ^= seed << 17;
+			seed % n.max(1)
+		};
+		let mut next_id = 1000;
+		for case in 0..2000 {
+			let len = rand(40) as usize;
+			let old: Vec<LayerInfo> = (0..len as u64).map(|i| row(i, (i % 3) as u32, "a")).collect();
+			let mut new = old.clone();
+			for _ in 0..=rand(6) {
+				match rand(5) {
+					0 if !new.is_empty() => {
+						new.remove(rand(new.len() as u64) as usize);
+					}
+					1 => {
+						next_id += 1;
+						let at = rand(new.len() as u64 + 1) as usize;
+						new.insert(at, row(next_id, rand(4) as u32, "new"));
+					}
+					2 if new.len() > 1 => {
+						let from = rand(new.len() as u64) as usize;
+						let r = new.remove(from);
+						new.insert(rand(new.len() as u64 + 1) as usize, r);
+					}
+					3 if !new.is_empty() => {
+						let at = rand(new.len() as u64) as usize;
+						new[at].name = format!("renamed {case}");
+						new[at].depth = rand(4) as u32;
+					}
+					_ => new.reverse(),
+				}
+			}
+			let (ops, changed) = structural_layers_patch(&old, &new);
+			let mut ui = old.clone();
+			apply_layers_structure_patch(&mut ui, &ops, &changed).unwrap_or_else(|()| panic!("case {case}: an op did not fit"));
+			assert_eq!(ui, new, "case {case}: ops {ops:?}");
+		}
+	}
 
 	#[test]
 	fn json_roundtrip() {

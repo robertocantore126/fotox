@@ -49,13 +49,17 @@ pub(crate) fn report(crash: &Crash) -> bool {
 			std::thread::park();
 		}
 	}
+	// AUDIT-FIX(D2): a surviving engine gets a bounded best-effort recovery request before exiting.
+	if crash.thread != "engine" {
+		fx_engine::recovery::emergency(Duration::from_secs(5));
+	}
 	let restart = should_restart();
 	let log = fx_engine::trace::session_file().map_or_else(|| "(no log was recorded)".to_owned(), |path| path.display().to_string());
 	let text = format!(
 		"Fotox stopped because of an internal error.\n\n\
 		 Where: the {} thread\n\
 		 Error: {}\n\n\
-		 Changes that were not saved are lost.\n\
+		 Unsaved changes may be available from recovery snapshots after restart.\n\
 		 What happened is in the session log:\n{}\n\n{}",
 		crash.thread,
 		fx_engine::trace::cut(crash.message.trim(), MESSAGE_CHARS),
@@ -81,10 +85,7 @@ pub(crate) fn restart() {
 		}
 	};
 	tracing::info!("restarting {} after a crash", exe.display());
-	let spawned = std::process::Command::new(exe)
-		.arg("--after-crash")
-		.arg(std::process::id().to_string())
-		.spawn();
+	let spawned = std::process::Command::new(exe).arg("--after-crash").arg(std::process::id().to_string()).spawn();
 	if let Err(error) = spawned {
 		tracing::error!("failed to restart: {error}");
 	}
@@ -115,7 +116,12 @@ fn message_box(text: &str) {
 	use windows::core::HSTRING;
 	// SAFETY: plain Win32 call with owned, NUL-terminated strings.
 	unsafe {
-		MessageBoxW(None, &HSTRING::from(text), &HSTRING::from("Fotox"), MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+		MessageBoxW(
+			None,
+			&HSTRING::from(text),
+			&HSTRING::from("Fotox"),
+			MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST,
+		);
 	}
 }
 
