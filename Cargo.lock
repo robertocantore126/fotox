@@ -1167,6 +1167,7 @@ dependencies = [
 name = "fx-tiles"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "lz4_flex",
  "parking_lot",
  "serde",

@@ -12,6 +12,7 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 lz4_flex = { workspace = true }
+crc32fast = { workspace = true }
 
 [dev-dependencies]
 
