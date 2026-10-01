@@ -41,6 +41,7 @@ pub struct TileAtlas {
 	free: Vec<u32>,
 	hand: u32,
 	frame: u64,
+	prefer_composites: bool,
 }
 
 impl TileAtlas {
@@ -69,6 +70,7 @@ impl TileAtlas {
 			free: Vec::new(),
 			hand: 0,
 			frame: 1,
+			prefer_composites: false,
 		};
 		atlas.grow();
 		atlas
@@ -141,6 +143,11 @@ impl TileAtlas {
 		}
 	}
 
+	// AUDIT-FIX(COMPCACHE): preserve original clock policy for the comparison path.
+	pub fn prefer_composite_eviction(&mut self, enabled: bool) {
+		self.prefer_composites = enabled;
+	}
+
 	/// Reserve a slot for `key` (evicting the least recently used slot not
 	/// used this frame). `None` if every slot is in use this frame.
 	pub fn allocate(&mut self, key: AtlasKey) -> Option<u32> {
@@ -164,6 +171,21 @@ impl TileAtlas {
 	/// pass by being aged; the first slot found older than the previous frame
 	/// is evicted. Slots used in the current frame are never evicted.
 	fn evict(&mut self) -> Option<u32> {
+		// AUDIT-FIX(COMPCACHE): stale cached composites are cheaper to regenerate than source uploads.
+		if self.prefer_composites {
+			for offset in 0..self.capacity {
+				let slot = (self.hand + offset) % self.capacity;
+				if let Some((key @ AtlasKey::Prefix(_), last)) = self.slots[slot as usize] {
+					if last < self.frame {
+						self.hand = (slot + 1) % self.capacity;
+						self.map.remove(&key);
+						self.slots[slot as usize] = None;
+						return Some(slot);
+					}
+				}
+			}
+		}
+
 		for _ in 0..2 * self.capacity {
 			let slot = self.hand;
 			self.hand = (self.hand + 1) % self.capacity;

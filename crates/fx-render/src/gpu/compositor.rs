@@ -299,7 +299,9 @@ impl GpuCompositor {
 			composite_capacity = composite_capacity.min((ceiling / 4 / bytes).max(1) as u32);
 			config.atlas_budget.min(ceiling.saturating_sub((composite_capacity as u64 + 1) * bytes))
 		};
-		let atlas = TileAtlas::new(device, atlas_budget);
+		let cache_enabled = !no_composite_cache();
+		let mut atlas = TileAtlas::new(device, atlas_budget);
+		atlas.prefer_composite_eviction(cache_enabled);
 		let composite_texture = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("fx-composites"),
 			size: wgpu::Extent3d {
@@ -359,7 +361,7 @@ impl GpuCompositor {
 			config,
 			frame: 1,
 			hot_layer: None,
-			cache_enabled: !no_composite_cache(),
+			cache_enabled,
 			cache_context: None,
 			cache_signature: None,
 			cache_epoch: 0,

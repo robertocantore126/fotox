@@ -22,6 +22,11 @@ let aiModels = null;
 const watchers = new Set();
 
 export function initPrefs() {
+  // AUDIT-FIX(P1): first-frame GPU initialisation arrives after the startup preferences.
+  bridge.on(ENGINE.STATUS, (m) => {
+    prefs._memory={...prefs._memory,gpu_mb:Math.floor((m.memory?.gpu_budget_bytes||0)/1048576)};
+    prefs._scratch=m.memory;
+  });
   bridge.on(ENGINE.PREFERENCES, (m) => {
     prefs = m.prefs || {};
     rebuildRecent(prefs.recent || []);
@@ -176,6 +181,7 @@ export function openPrefsDialog(id) {
       // AUDIT-FIX(D2): periodic recovery interval and edit trigger are user preferences.
       { type: "num", label: "Recovery interval (minutes):", value: prefs.recovery_interval_minutes ?? 5, w: 70 },
       { type: "num", label: "Recovery after edits:", value: prefs.recovery_edit_count ?? 50, w: 70 },
+      { type: "label", text: `Active scratch: ${prefs._scratch?.scratch_path || "default"}; ${prefs._scratch?.scratch_free_bytes ? (prefs._scratch.scratch_free_bytes/1e9).toFixed(2) + " GB free" : "free space unknown"}` },
       { type: "text", label: "Scratch Folder:", value: prefs.scratch_dir || "", width: 260 },
       { type: "label", text: "Scratch folder is validated on OK; free space is reported. Applies next start." },
     ],

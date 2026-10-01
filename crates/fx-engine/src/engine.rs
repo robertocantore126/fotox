@@ -5021,6 +5021,7 @@ impl Engine {
 		let scratch = self.store.scratch_health();
 		self.to_ui(&EngineToUi::Status {
 			memory: MemoryStats {
+				gpu_budget_bytes: self.stats.lock().expect("render stats poisoned").gpu_budget_bytes,
 				scratch_full: scratch.full,
 				scratch_error: scratch.error,
 				scratch_free_bytes: scratch.free_bytes,

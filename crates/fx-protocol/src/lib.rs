@@ -312,6 +312,9 @@ pub struct CmykProfileInfo {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryStats {
+	// AUDIT-FIX(P1): Preferences can show the GPU ceiling after first-frame initialisation.
+	#[serde(default)]
+	pub gpu_budget_bytes: u64,
 	// AUDIT-FIX(X1): scratch failures and cached free space are user-visible.
 	#[serde(default)]
 	pub scratch_full: bool,
