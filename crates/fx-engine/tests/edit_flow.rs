@@ -191,3 +191,38 @@ fn switching_tools_mid_stroke_ends_the_gesture_and_hover_does_not_paint() {
 	assert_eq!(current, 0, "hover after switching back did not create a second stroke");
 	harness.engine.shutdown();
 }
+
+// VERIFY-FIX(P2): Fill now runs as a background job. A command sent while it
+// runs (here Deselect, as after Ctrl+D) waits in a queue and runs after it;
+// it was refused with "Wait until Fill is finished" and lost.
+#[test]
+fn commands_sent_during_a_job_run_after_it_in_order() {
+	let Some((device, queue)) = gpu() else {
+		eprintln!("no GPU adapter: test skipped");
+		return;
+	};
+	let dir = std::env::temp_dir().join(format!("fx-engine-edit-queue-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let harness = Harness::start(device, queue, &dir);
+	harness.engine.send(EngineInput::Open(vec![tiff(&dir, "big.tif", 3000, 3000)]));
+	let doc = opened(&harness);
+	let command = |command| harness.ui(UiToEngine::Command { doc, command });
+	command(fx_core::Command::Select {
+		shape: fx_core::SelectionShape::Rect { x: 100.0, y: 100.0, w: 2500.0, h: 2500.0 },
+		mode: fx_core::SelectMode::Replace,
+		feather: 0.0,
+		anti_alias: true,
+	});
+	command(fx_core::Command::Fill {
+		layer: fx_core::LayerRef::Active,
+		color: [30000, 20000, 10000, 65535],
+		mode: fx_core::BlendMode::Multiply,
+		opacity: 0.5,
+		preserve_transparency: false,
+	});
+	command(fx_core::Command::Deselect);
+	let steps: Vec<String> = (0..3).map(|_| last_step(&harness, doc)).collect();
+	assert_eq!(steps, ["Rectangular Marquee", "Fill", "Deselect"]);
+	harness.engine.shutdown();
+	let _ = std::fs::remove_dir_all(&dir);
+}

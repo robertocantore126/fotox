@@ -509,6 +509,48 @@ mod tests {
 		store.get(handle).unwrap().bytes().to_vec()
 	}
 
+	// VERIFY-FIX(D2): a detached save (recovery snapshot) must not take the
+	// tiles' backing: the next ordinary save stays incremental, and so does
+	// the next detached save to the same file.
+	#[test]
+	fn detached_saves_leave_the_backing_alone() {
+		let store = store();
+		let doc = document(&store, 41);
+		let (x, r) = (path("detached-x.fxd"), path("detached-r.fxd"));
+		let request = |doc| SaveRequest { doc, store: &store, preview: None };
+		let saved = save(request(&doc), SaveTarget::Fresh(x.clone()), &mut |_| true).unwrap();
+		let mut chunks = DetachedChunks::default();
+		let snap = save_detached(request(&doc), SaveTarget::Fresh(r.clone()), &mut chunks, &mut |_| true).unwrap();
+		assert_eq!(snap.report.tiles_written, 1);
+		let again = save(request(&doc), SaveTarget::Incremental(saved.file), &mut |_| true).unwrap();
+		assert_eq!(again.report.tiles_written, 0, "the snapshot took the tile's backing away from the document's file");
+		let snap = save_detached(request(&doc), SaveTarget::Incremental(snap.file), &mut chunks, &mut |_| true).unwrap();
+		assert_eq!(snap.report.tiles_written, 0, "a detached save forgot what its file holds");
+		let reopened = super::super::open(&r, &store).unwrap();
+		assert_eq!(store_get(&reopened.document, &store), store_get(&doc, &store));
+	}
+
+	// VERIFY-FIX(D8,D6): a fresh save replaces a file this process still has
+	// open (as compaction does). MoveFileExW refused it ("Access is denied"),
+	// so compaction never worked on NTFS. exFAT cannot do it at all: skipped.
+	#[test]
+	fn a_fresh_save_replaces_a_file_this_process_has_open() {
+		let store = store();
+		let x = path("replace-open.fxd");
+		if crate::fs_util::is_exfat(x.parent().unwrap()).unwrap_or(false) {
+			return;
+		}
+		let doc = document(&store, 7);
+		let request = |doc| SaveRequest { doc, store: &store, preview: None };
+		let first = save(request(&doc), SaveTarget::Fresh(x.clone()), &mut |_| true).unwrap();
+		let held = first.file.clone();
+		let doc2 = document(&store, 8);
+		save(request(&doc2), SaveTarget::Fresh(x.clone()), &mut |_| true).expect("replacing a file this process has open");
+		drop(held);
+		let reopened = super::super::open(&x, &store).unwrap();
+		assert_eq!(store_get(&reopened.document, &store), store_get(&doc2, &store));
+	}
+
 	#[test]
 	fn clean_mips_are_stored_and_dirty_ones_are_not() {
 		let store = store();
