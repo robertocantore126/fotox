@@ -957,3 +957,55 @@ fn save_throughput() {
 		again.report.tiles_reused
 	);
 }
+
+/// VERIFY-FIX(D8): repaint one layer per save, 40 incremental saves of a
+/// 128 MiB document (4 × 2048² 16-bit noise): the file must stay bounded
+/// (compaction past 256 MB), no `.compact` copy may be left behind, saves must
+/// stay incremental in cost, and the newest version must reopen exactly.
+#[test]
+#[ignore = "audit: writes ~1.5 GB"]
+fn compaction_bounds_growth() {
+	let dir = fresh_dir("compaction");
+	let store = make_store(&dir.join("scratch"));
+	let mut versions = vec![1u64; LAYERS];
+	let mut doc = versioned_document(&store, &versions);
+	let x = dir.join("doc.fxd");
+	let mut file = save_doc(&doc, &store, SaveTarget::Fresh(x.clone())).unwrap().file;
+	let live = std::fs::metadata(&x).unwrap().len();
+	let (mut largest, mut slowest, mut times) = (0u64, 0f64, Vec::new());
+	for save in 0..40u64 {
+		let layer = (save as usize) % LAYERS;
+		versions[layer] += 1;
+		doc.layers[layer] = pixel_layer(&store, &mut doc.clone(), layer, versions[layer]);
+		let t = Instant::now();
+		let saved = save_doc(&doc, &store, SaveTarget::Incremental(file.clone())).unwrap();
+		let secs = t.elapsed().as_secs_f64();
+		file = saved.file;
+		let len = std::fs::metadata(&x).unwrap().len();
+		largest = largest.max(len);
+		slowest = slowest.max(secs);
+		times.push(secs);
+		if save % 5 == 4 {
+			println!("AUDIT compaction save {}: file {} MiB, {:.2} s", save + 1, len >> 20, secs);
+		}
+	}
+	let leftovers: Vec<String> = std::fs::read_dir(&dir)
+		.unwrap()
+		.filter_map(Result::ok)
+		.map(|e| e.file_name().to_string_lossy().into_owned())
+		.filter(|n| n.contains(".compact") || n.ends_with(".part"))
+		.collect();
+	times.sort_by(f64::total_cmp);
+	let verdict = reopen(&x, &dir.join("verify-scratch"));
+	println!(
+		"AUDIT compaction on {}: live {} MiB, largest file {} MiB, final {} MiB; save p50 {:.2} s, max {slowest:.2} s; leftovers {leftovers:?}; reopen {verdict:?}",
+		fs_name(&dir),
+		live >> 20,
+		largest >> 20,
+		std::fs::metadata(&x).unwrap().len() >> 20,
+		times[times.len() / 2]
+	);
+	assert_eq!(verdict.unwrap(), Verdict::Exact(versions), "the compacted file lost the newest version");
+	assert!(leftovers.is_empty(), "compaction left files behind: {leftovers:?}");
+	assert!(largest <= (256 << 20).max(live * 5 / 2) + (64 << 20), "the file grew without compaction");
+}

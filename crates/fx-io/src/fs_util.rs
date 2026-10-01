@@ -20,21 +20,17 @@ pub fn unique_part(path: &Path) -> PathBuf {
 	path.with_file_name(name)
 }
 
-// AUDIT-FIX(D6): Windows replacement includes write-through; no remove-then-rename gap.
+// VERIFY-FIX(D6+D8): `std::fs::rename`, not MoveFileExW. Rust renames with
+// POSIX semantics (FileRenameInfoEx, replace-if-exists) on NTFS, so it can
+// replace a file this process still has open (a compacted document, whose old
+// handles stay valid); MoveFileExW refuses that with "Access is denied", which
+// made every compaction fail and rewrite the whole document on each save.
+// MOVEFILE_WRITE_THROUGH added nothing here: it only waits for cross-volume
+// copies; a same-volume rename is a journaled metadata change, and callers
+// `sync_all` the part file before replacing.
 #[cfg(windows)]
 pub fn atomic_replace(from: &Path, to: &Path) -> io::Result<()> {
-	use std::os::windows::ffi::OsStrExt;
-	#[link(name = "kernel32")]
-	unsafe extern "system" {
-		fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
-	}
-	let from = from.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-	let to = to.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-	// SAFETY: both strings are live NUL-terminated UTF-16; flags are REPLACE_EXISTING|WRITE_THROUGH.
-	if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 1 | 8) } == 0 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(())
+	std::fs::rename(from, to)
 }
 #[cfg(not(windows))]
 pub fn atomic_replace(from: &Path, to: &Path) -> io::Result<()> {
