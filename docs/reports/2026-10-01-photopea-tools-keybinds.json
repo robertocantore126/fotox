@@ -1,0 +1,182 @@
+{
+  "generated": "2026-10-01",
+  "subject": "Photopea (https://www.photopea.com) — tools, keybinds, workflow capture",
+  "sources": [
+    "https://www.photopea.com/api/environment  (official tool IDs, plus Move/Magic Wand/Crop tool option formats)",
+    "https://www.photopea.com/learn/scripts   (Script window, global `app`, App.open / App.echoToOE / App.UI, Document.saveToOE)",
+    "https://www.photopea.com/api/plugins     (plugins are iframes; window.parent.postMessage(script|ArrayBuffer, '*') and Live Messaging)",
+    "https://www.photopea.com/api/live        (Live Messaging: app.echoToOE / Document.saveToOE)",
+    "https://www.photopea.com/learn/actions   (Actions panel: Record, Apply, Export as .ATN)",
+    "https://defkey.com/photopea-5-4-shortcuts (v5.4 shortcut listing)",
+    "https://gist.github.com/milnak/2dfe03c6eaa5a56c2fac29906ea5dd7a (2025 shortcut listing)"
+  ],
+  "notes": [
+    "Tool IDs and their order are taken from the official Environment API page (authoritative).",
+    "Key letters are cross-checked between two independent listings; where they disagree or omit, the entry is marked unconfirmed.",
+    "Photopea's in-app window Edit > Keyboard Shortcuts is the ground truth; the app reflects updates the docs may lag on.",
+    "This was produced outside the app: the live preview in this environment reported 'Ad blocking detected' and the editor's top-level `window.app` was not reachable, so DOM scraping of the shortcut window was not reliable here."
+  ],
+
+  "tools": [
+    { "id": 0,  "name": "Move Tool",              "keys": ["V"], "group": "move" },
+    { "id": 70, "name": "Artboard Tool",          "keys": ["V"], "group": "move" },
+    { "id": 1,  "name": "Rectangle Select",       "keys": ["M"], "group": "marquee" },
+    { "id": 2,  "name": "Ellipse Select",         "keys": ["M"], "group": "marquee" },
+    { "id": 5,  "name": "Lasso Select",           "keys": ["L"], "group": "lasso" },
+    { "id": 6,  "name": "Polygonal Lasso Select", "keys": ["L"], "group": "lasso" },
+    { "id": 7,  "name": "Magnetic Lasso Select",  "keys": ["L"], "group": "lasso" },
+    { "id": 9,  "name": "Magic Wand",             "keys": ["W"], "group": "select" },
+    { "id": 8,  "name": "Quick Selection",        "keys": ["W"], "group": "select" },
+    { "id": 3,  "name": "Object Selection",       "keys": ["W"], "group": "select" },
+    { "id": 10, "name": "Crop Tool",              "keys": ["C"], "group": "crop" },
+    { "id": 11, "name": "Perspective Crop",       "keys": ["C"], "group": "crop" },
+    { "id": 12, "name": "Slice Tool",             "keys": ["C"], "group": "crop" },
+    { "id": 13, "name": "Slice Select Tool",      "keys": ["C"], "group": "crop" },
+    { "id": 14, "name": "Eyedropper",             "keys": ["I"], "group": "sample" },
+    { "id": 15, "name": "Color Sampler",          "keys": ["I"], "group": "sample" },
+    { "id": 16, "name": "Ruler",                  "keys": ["I"], "group": "sample" },
+    { "id": 18, "name": "Spot Healing Brush Tool","keys": ["J"], "group": "heal" },
+    { "id": 19, "name": "Healing Brush Tool",     "keys": ["J"], "group": "heal" },
+    { "id": 90, "name": "Magic Replace",          "keys": ["J"], "group": "heal" },
+    { "id": 20, "name": "Patch Tool",             "keys": ["J"], "group": "heal" },
+    { "id": 21, "name": "Content-Aware Move Tool","keys": ["J"], "group": "heal" },
+    { "id": 22, "name": "Red Eye Tool",           "keys": ["J"], "group": "heal" },
+    { "id": 23, "name": "Brush Tool",             "keys": ["B"], "group": "paint" },
+    { "id": 24, "name": "Pencil Tool",            "keys": ["B"], "group": "paint" },
+    { "id": 25, "name": "Color Replacement",      "keys": ["B"], "group": "paint" },
+    { "id": 27, "name": "Clone Tool",             "keys": ["S"], "group": "clone" },
+    { "id": 31, "name": "Eraser Tool",            "keys": ["E"], "group": "eraser" },
+    { "id": 32, "name": "Background Eraser",      "keys": ["E"], "group": "eraser" },
+    { "id": 33, "name": "Magic Eraser",           "keys": ["E"], "group": "eraser" },
+    { "id": 34, "name": "Gradient Tool",          "keys": ["G"], "group": "fill" },
+    { "id": 35, "name": "Paint Bucket Tool",      "keys": ["G"], "group": "fill" },
+    { "id": 36, "name": "Blur Tool",              "keys": [],    "group": "focus", "unconfirmed": true },
+    { "id": 37, "name": "Sharpen Tool",           "keys": [],    "group": "focus", "unconfirmed": true },
+    { "id": 38, "name": "Smudge Tool",            "keys": [],    "group": "focus", "unconfirmed": true },
+    { "id": 39, "name": "Dodge Tool",             "keys": ["O"], "group": "tone" },
+    { "id": 40, "name": "Burn Tool",              "keys": ["O"], "group": "tone" },
+    { "id": 41, "name": "Sponge Tool",            "keys": ["O"], "group": "tone" },
+    { "id": 47, "name": "Type Tool",              "keys": ["T"], "group": "type" },
+    { "id": 48, "name": "Vertical Type Tool",     "keys": ["T"], "group": "type" },
+    { "id": 42, "name": "Pen",                    "keys": ["P"], "group": "pen" },
+    { "id": 43, "name": "Free Pen",               "keys": ["P"], "group": "pen" },
+    { "id": 44, "name": "Curvature Pen",          "keys": ["P"], "group": "pen" },
+    { "id": 45, "name": "Add Anchor Point",       "keys": ["P"], "group": "pen" },
+    { "id": 46, "name": "Delete Anchor Point",    "keys": ["P"], "group": "pen" },
+    { "id": 72, "name": "Convert Point",          "keys": ["P"], "group": "pen" },
+    { "id": 51, "name": "Path Select",            "keys": ["A"], "group": "path" },
+    { "id": 52, "name": "Direct Select",          "keys": ["A"], "group": "path" },
+    { "id": 54, "name": "Rectangle Shape",        "keys": ["U"], "group": "shape" },
+    { "id": 55, "name": "Ellipse Shape",          "keys": ["U"], "group": "shape" },
+    { "id": 57, "name": "Line Shape",             "keys": ["U"], "group": "shape" },
+    { "id": 56, "name": "Parametric Shape",       "keys": ["U"], "group": "shape" },
+    { "id": 58, "name": "Custom Shape",           "keys": ["U"], "group": "shape" },
+    { "id": 59, "name": "Hand Tool",              "keys": ["H"], "group": "view" },
+    { "id": 60, "name": "Rotate View",            "keys": ["H"], "group": "view" },
+    { "id": 61, "name": "Zoom Tool",              "keys": ["Z"], "group": "view" }
+  ],
+
+  "selection_modes": {
+    "note": "The tool-option formats documented for the Environment API; useful for reading Photopea's option-bar state.",
+    "move": "Options [autoSelect, transformControls, distances]; menu flags [Auto-Select, Transformation controls, Distances, Quick Save (Get PNG...), Vertical Align, Horizontal Align].",
+    "magic_wand": "Options [combiningOperation, feather, [tolerance, antiAlias, contiguous]]."
+  },
+
+  "keybinds": {
+    "file": [
+      { "command": "New Project", "keys": ["Alt+Ctrl+N"], "unconfirmed": true },
+      { "command": "Open", "keys": ["Ctrl+O"] },
+      { "command": "Save", "keys": ["Ctrl+S"] },
+      { "command": "Save as PSD", "keys": ["Shift+Ctrl+S"] },
+      { "command": "Export as", "keys": ["Alt+Shift+Ctrl+S"] }
+    ],
+    "edit": [
+      { "command": "Step Forward", "keys": ["Shift+Ctrl+Z"] },
+      { "command": "Step Backward", "keys": ["Ctrl+Z"] },
+      { "command": "Cut", "keys": ["Ctrl+X"] },
+      { "command": "Copy", "keys": ["Ctrl+C"] },
+      { "command": "Paste", "keys": ["Ctrl+V"] },
+      { "command": "Clear", "keys": ["Del"] },
+      { "command": "Fill", "keys": ["Alt+Backspace"] },
+      { "command": "Free Transform", "keys": ["Alt+Ctrl+T"] },
+      { "command": "Preferences", "keys": ["Ctrl+K"] },
+      { "command": "Find", "keys": ["Ctrl+F"] }
+    ],
+    "adjustments": [
+      { "command": "Levels", "keys": ["Ctrl+L"] },
+      { "command": "Curves", "keys": ["Ctrl+M"] },
+      { "command": "Hue/Saturation", "keys": ["Ctrl+U"] },
+      { "command": "Invert", "keys": ["Ctrl+I"] }
+    ],
+    "layer": [
+      { "command": "New Layer", "keys": ["Shift+Ctrl+N"] },
+      { "command": "Layer via Copy", "keys": ["Ctrl+J"] },
+      { "command": "Clipping Mask", "keys": ["Alt+Ctrl+G"] },
+      { "command": "Group Layers", "keys": ["Ctrl+G"] },
+      { "command": "Merge Down", "keys": ["Ctrl+E"] }
+    ],
+    "select": [
+      { "command": "All", "keys": ["Ctrl+A"] },
+      { "command": "Deselect", "keys": ["Ctrl+D"] },
+      { "command": "Inverse", "keys": ["Shift+Ctrl+I"] }
+    ],
+    "view": [
+      { "command": "Zoom In", "keys": ["Ctrl++"] },
+      { "command": "Zoom Out", "keys": ["Ctrl+-"] },
+      { "command": "Rulers", "keys": ["Ctrl+R"] },
+      { "command": "Guides", "keys": ["Ctrl+;"] },
+      { "command": "Grid", "keys": ["Ctrl+'"] },
+      { "command": "Show Keyboard Shortcuts", "keys": ["?"] }
+    ],
+    "brush": [
+      { "command": "Decrease Brush Size", "keys": ["["] },
+      { "command": "Increase Brush Size", "keys": ["]"] },
+      { "command": "Decrease Hardness", "keys": ["{"] },
+      { "command": "Increase Hardness", "keys": ["}"] }
+    ],
+    "other": [
+      { "command": "Default Colours (white/black)", "keys": ["D"] },
+      { "command": "Swap Colours", "keys": ["X"] },
+      { "command": "Quick Mask Mode", "keys": ["Q"] }
+    ],
+    "navigation_and_held": [
+      { "command": "Vertical scroll", "keys": ["Wheel"] },
+      { "command": "Horizontal scroll", "keys": ["Ctrl+Wheel"] },
+      { "command": "Zoom", "keys": ["Alt+Wheel"] },
+      { "command": "Move tool (held)", "keys": ["Ctrl"], "note": "Press and hold." },
+      { "command": "Hand tool (held)", "keys": ["Space"], "note": "Press and hold." },
+      { "command": "Zoom tool (held)", "keys": ["Ctrl+Space"], "note": "Press and hold." }
+    ]
+  },
+
+  "workflow_capture": {
+    "summary": "Photopea exposes no public stream of semantic UI commands. To get a JSON of 'what happened' you either (A) use the built-in Actions recorder and convert its .ATN export, (B) drive/observe an embedded Photopea through Live Messaging with an injected recorder, or (C) capture browser-level input + document-state snapshots.",
+    "methods": [
+      {
+        "id": "A",
+        "name": "Actions panel recording (built-in, semantic)",
+        "how": "Window > Actions. New Action Set, New Action, Record, perform the workflow, stop recording, then Export the set as an .ATN file.",
+        "output": ".ATN (Adobe action format, binary) — one action set, ordered Steps. Parse to JSON.",
+        "pros": ["No code injection", "Semantic operation names", "Replayable in Photopea itself"],
+        "cons": ["Not every interaction is recorded (freehand strokes and some tool gestures are not action-able)", "Binary format needs a parser", "Steps are Photopea/Photoshop operation names, not low-level edits"]
+      },
+      {
+        "id": "B",
+        "name": "Live Messaging OE harness (scriptable)",
+        "how": "Embed Photopea in your own page (iframe, https://www.photopea.com/#{...}), send a recorder script with iframe.contentWindow.postMessage(script, '*'), and receive events with app.echoToOE(JSON.stringify(evt)).",
+        "output": "JSON lines, one per captured event.",
+        "pros": ["You control both ends", "Can hook the public API, DOM key/mouse events and poll document state in one place", "Same channel Photopea plugins use"],
+        "cons": ["Only public-API calls and DOM events are observable; the internal UI emits no public command event", "Requires you to host the harness page"]
+      },
+      {
+        "id": "C",
+        "name": "Browser input capture + state diffing",
+        "how": "In the Photopea tab, record keydown/click and read menu labels to reconstruct commands from the keybind map above; snapshot app.activeDocument (layers, names, selection presence, size) on a timer and diff.",
+        "output": "JSON event log with before/after state.",
+        "pros": ["Captures everything the user actually pressed", "Works without the app exposing hooks"],
+        "cons": ["Input-level, not semantic", "Measuring 'what changed' needs diffing heuristics"]
+      }
+    ],
+    "recommended": "A for a replayable, semantic list of menu operations; B (with a small API/DOM recorder) when you need a continuous JSON log of a live session; combine A+B when you want both."
+  }
+}
