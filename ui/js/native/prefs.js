@@ -170,6 +170,7 @@ export function openPrefsDialog(id) {
       // AUDIT-FIX(T2): use the engine's five-GiB default, including invalid-input fallback.
       { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? prefs._memory?.hot_mb ?? 5120, w: 80 },
       // AUDIT-FIX(P1): defaults displayed are the engine effective machine budgets.
+      { type: "label", text: `Effective GPU ceiling (atlas + output cache): ${prefs._memory?.gpu_mb || "not initialised"} MB` },
       { type: "num", label: "Warm Budget (MB):", value: prefs.warm_budget_mb ?? prefs._memory?.warm_mb ?? 3072, w: 80 },
       { type: "label", text: `Physical RAM: ${prefs._memory?.total_mb ?? "unknown"} MB; effective hot/warm: ${prefs._memory?.hot_mb ?? "?"} / ${prefs._memory?.warm_mb ?? "?"} MB` },
       // AUDIT-FIX(D2): periodic recovery interval and edit trigger are user preferences.

@@ -49,9 +49,6 @@ const ANTS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(125)
 /// are reported with this slot and their draws are dropped before rendering.
 const EMPTY_SLOT: u32 = u32::MAX;
 
-/// Bytes of one tile in the compositor's `Rgba16Float` textures.
-const TILE_F16_BYTES: u64 = (TILE_SIZE as u64) * (TILE_SIZE as u64) * 8;
-
 /// What to draw.
 #[derive(Clone)]
 pub(crate) struct Frame {
@@ -299,6 +296,8 @@ impl TilePipeline {
 		// AUDIT-FIX(P1): lazy atlas reporting begins with the actual compositor allocation.
 		let compositor = GpuCompositor::new(&ctx.device, &ctx.queue, config);
 		let gpu_bytes = compositor.allocated_bytes();
+		// AUDIT-FIX(P1): publish GPU ceiling as soon as compositor is initialized.
+		ctx.stats.lock().expect("render stats poisoned").gpu_budget_bytes = compositor.budget_bytes();
 		Self {
 			compositor,
 			renderer: ViewportRenderer::new(&ctx.device, &ctx.queue, VIEWPORT_FORMAT),

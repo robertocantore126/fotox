@@ -18,6 +18,8 @@ pub struct RenderStats {
 	pub pending_loads: u32,
 	/// VRAM the compositor holds (atlas + composite cache), in bytes.
 	pub gpu_bytes: u64,
+	// AUDIT-FIX(P1): shared ceiling includes output slots and source atlas.
+	pub gpu_budget_bytes: u64,
 	/// Input → pixels latency of the frames that showed stroke pixels
 	/// (M5-T11): when, and how long (ms).
 	inputs: VecDeque<(Instant, f32)>,

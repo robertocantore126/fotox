@@ -200,6 +200,11 @@ impl GpuCompositor {
 		self.atlas.allocated_bytes() + u64::from(self.composite_capacity) * super::atlas::TILE_BYTES_F16
 	}
 
+	pub fn budget_bytes(&self) -> u64 {
+		// AUDIT-FIX(P1): expose actual slot ceiling, not just currently allocated pages.
+		(u64::from(self.atlas.capacity()) + u64::from(self.composite_capacity) + 1) * super::atlas::TILE_BYTES_F16
+	}
+
 	pub fn new(device: &wgpu::Device, queue: &wgpu_sync::Queue, config: CompositorConfig) -> Self {
 		let module = device.create_shader_module(wgpu::include_wgsl!("composite.wgsl"));
 		let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..MAX_PAGES as u32)
@@ -274,8 +279,17 @@ impl GpuCompositor {
 			cache: None,
 		});
 
-		let atlas = TileAtlas::new(device, config.atlas_budget);
-		let composite_capacity = config.composite_slots.clamp(1, device.limits().max_texture_array_layers);
+		// AUDIT-FIX(P1): output cache and atlas share one adapter ceiling, including placeholder.
+		let bytes = super::atlas::TILE_BYTES_F16;
+		let ceiling = super::hardware::gpu_budget(device);
+		let mut composite_capacity = config.composite_slots.clamp(1, device.limits().max_texture_array_layers);
+		let atlas_budget = if fx_tiles::budgets::old_budgets() {
+			config.atlas_budget
+		} else {
+			composite_capacity = composite_capacity.min((ceiling / 4 / bytes).max(1) as u32);
+			config.atlas_budget.min(ceiling.saturating_sub((composite_capacity as u64 + 1) * bytes))
+		};
+		let atlas = TileAtlas::new(device, atlas_budget);
 		let composite_texture = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("fx-composites"),
 			size: wgpu::Extent3d {

@@ -895,7 +895,7 @@ impl Engine {
 		prefs.insert(
 			"_memory".into(),
 			serde_json::json!({"total_mb":fx_tiles::budgets::total_ram()>>20,
-			"hot_mb":self.store.config().hot_budget>>20,"warm_mb":self.store.config().warm_budget>>20}),
+			"hot_mb":self.store.config().hot_budget>>20,"warm_mb":self.store.config().warm_budget>>20, "gpu_mb":self.stats.lock().expect("render stats poisoned").gpu_budget_bytes>>20}),
 		);
 		self.to_ui(&EngineToUi::Preferences {
 			prefs: serde_json::Value::Object(prefs),
