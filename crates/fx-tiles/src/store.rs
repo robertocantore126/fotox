@@ -184,8 +184,17 @@ impl TileStoreConfig {
 	pub fn reference_machine(scratch_dir: PathBuf) -> Self {
 		const GIB: u64 = 1 << 30;
 		Self {
-			hot_budget: 5 * GIB,
-			warm_budget: 3 * GIB,
+			// AUDIT-FIX(P1): explicit old switch retains reference-machine defaults.
+			hot_budget: if crate::budgets::old_budgets() {
+				5 * GIB
+			} else {
+				crate::budgets::total_ram() / 4
+			},
+			warm_budget: if crate::budgets::old_budgets() {
+				3 * GIB
+			} else {
+				crate::budgets::total_ram() / 10
+			},
 			scratch_dir,
 			scratch_limit: 60 * GIB,
 			background_trim: true,

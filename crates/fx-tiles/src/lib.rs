@@ -24,6 +24,7 @@
 //!    [`TileSlot::Empty`], a single-colour tile is [`TileSlot::Solid`]. Only
 //!    tiles with real content become [`TileSlot::Data`].
 
+pub mod budgets;
 mod format;
 mod image;
 mod mip;

@@ -335,6 +335,12 @@ impl EngineHandle {
 		if let Some(mb) = prefs.number("memory_budget_mb").filter(|mb| *mb >= 256.0) {
 			config.hot_budget = (mb as u64) << 20;
 		}
+		// AUDIT-FIX(P1): warm residency is independently configurable, hot override remains unchanged.
+		if !fx_tiles::budgets::old_budgets() {
+			if let Some(mb) = prefs.number("warm_budget_mb").filter(|mb| mb.is_finite() && *mb >= 64.) {
+				config.warm_budget = (mb as u64).saturating_mul(1 << 20);
+			}
+		}
 		let store = Arc::new(TileStore::new(config).map_err(std::io::Error::other)?);
 		let (input, inputs) = crossbeam_channel::unbounded();
 		// AUDIT-FIX(D2): the crash reporter can ask a surviving engine for emergency snapshots.

@@ -168,7 +168,10 @@ export function openPrefsDialog(id) {
     title: "Preferences — Performance",
     fields: [
       // AUDIT-FIX(T2): use the engine's five-GiB default, including invalid-input fallback.
-      { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? 5120, w: 80 },
+      { type: "num", label: "Memory Budget (MB):", value: prefs.memory_budget_mb ?? prefs._memory?.hot_mb ?? 5120, w: 80 },
+      // AUDIT-FIX(P1): defaults displayed are the engine effective machine budgets.
+      { type: "num", label: "Warm Budget (MB):", value: prefs.warm_budget_mb ?? prefs._memory?.warm_mb ?? 3072, w: 80 },
+      { type: "label", text: `Physical RAM: ${prefs._memory?.total_mb ?? "unknown"} MB; effective hot/warm: ${prefs._memory?.hot_mb ?? "?"} / ${prefs._memory?.warm_mb ?? "?"} MB` },
       // AUDIT-FIX(D2): periodic recovery interval and edit trigger are user preferences.
       { type: "num", label: "Recovery interval (minutes):", value: prefs.recovery_interval_minutes ?? 5, w: 70 },
       { type: "num", label: "Recovery after edits:", value: prefs.recovery_edit_count ?? 50, w: 70 },
@@ -176,9 +179,10 @@ export function openPrefsDialog(id) {
       { type: "label", text: "The scratch folder must exist; it applies at the next start." },
     ],
     onOk: (v) => set({
-      memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || 5120)),
+      memory_budget_mb: Math.max(256, Math.round(Number(v["Memory Budget (MB):"]) || prefs._memory?.hot_mb || 5120)),
       recovery_interval_minutes: Math.max(1, Number(v["Recovery interval (minutes):"]) || 5),
       recovery_edit_count: Math.max(1, Math.round(Number(v["Recovery after edits:"]) || 50)),
+      warm_budget_mb: Math.max(64, Math.round(Number(v["Warm Budget (MB):"]) || prefs._memory?.warm_mb || 3072)),
       scratch_dir: String(v["Scratch Folder:"] ?? "").trim(),
     }),
   });

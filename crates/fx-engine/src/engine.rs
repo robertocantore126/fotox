@@ -891,6 +891,12 @@ impl Engine {
 		// `_ai` (M13): the runtime and models, for Preferences ▸ AI; not saved.
 		let mut prefs = self.prefs.0.clone();
 		prefs.insert("_ai".into(), m13::ai_info());
+		// AUDIT-FIX(P1): report effective startup values separately from persisted preferences.
+		prefs.insert(
+			"_memory".into(),
+			serde_json::json!({"total_mb":fx_tiles::budgets::total_ram()>>20,
+			"hot_mb":self.store.config().hot_budget>>20,"warm_mb":self.store.config().warm_budget>>20}),
+		);
 		self.to_ui(&EngineToUi::Preferences {
 			prefs: serde_json::Value::Object(prefs),
 		});
