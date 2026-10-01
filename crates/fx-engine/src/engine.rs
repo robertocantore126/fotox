@@ -40,6 +40,9 @@ use crate::{CursorShape, EngineInput, EngineOutput, Modifiers, OutputSink, Point
 const VIEW_MESSAGE_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// How often the `status` message (memory, frame statistics) goes out.
+// AUDIT-FIX(D1): abandon unresponsive derived jobs after one minute.
+const DERIVED_TIMEOUT: Duration = Duration::from_secs(60);
+
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A repeat of the same edit within this interval replaces the previous
@@ -191,6 +194,8 @@ pub(crate) enum Internal {
 	/// is the worker's copy of document `doc` at content `generation`, with
 	/// the tiles the frame asked for, for the layers `layers`.
 	Derived {
+		// AUDIT-FIX(D1): independent job generation rejects abandoned workers.
+		job: u64,
 		doc: DocId,
 		generation: u64,
 		computed: Box<Document>,
@@ -292,6 +297,9 @@ struct Engine {
 	/// time. Frame requests that arrive meanwhile wait here, merged per
 	/// document; a newer content generation replaces an older one's.
 	derived_running: bool,
+	// AUDIT-FIX(D1): watchdog state is independent of content generations.
+	derived_job: u64,
+	derived_started: Option<Instant>,
 	derived_waiting: HashMap<DocId, MipWork>,
 	/// The window is closing: after each dirty document is answered, ask about
 	/// the next one (M3-T06).
@@ -491,6 +499,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		controls: None,
 		controls_commit: false,
 		derived_running: false,
+		derived_job: 0,
+		derived_started: None,
 		derived_waiting: HashMap::new(),
 	};
 
@@ -524,6 +534,7 @@ pub(crate) fn run(ctx: EngineContext) {
 			},
 			default(timeout) => {}
 		}
+		engine.expire_derived();
 		engine.flush_view_message();
 		engine.send_status_if_due();
 		engine.cool_hot_layer();
@@ -2203,7 +2214,9 @@ impl Engine {
 		if let Some((d, _, steps)) = self.smart_preview.take() {
 			self.undo_to(d, steps);
 		}
-		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else { return };
+		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else {
+			return;
+		};
 		let command = self.smart_filter_rewrite(
 			id,
 			Command::ApplyFilter {
@@ -2381,12 +2394,13 @@ impl Engine {
 			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
 			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
 			Internal::Derived {
+				job,
 				doc,
 				generation,
 				computed,
 				layers,
 				held,
-			} => self.derived_done(doc, generation, &computed, &layers, held),
+			} => self.derived_done(job, doc, generation, &computed, &layers, held),
 			Internal::Exported { task, path, result } => {
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
@@ -4159,6 +4173,21 @@ impl Engine {
 		self.start_derived(work);
 	}
 
+	// AUDIT-FIX(D1): detached expired workers cannot install results or block the queue.
+	fn expire_derived(&mut self) {
+		if self.derived_started.is_some_and(|at| at.elapsed() >= DERIVED_TIMEOUT) {
+			tracing::error!(job = self.derived_job, "derived job abandoned after watchdog timeout");
+			self.derived_job = self.derived_job.wrapping_add(1);
+			self.derived_running = false;
+			self.derived_started = None;
+			if let Some(id) = self.derived_waiting.keys().next().copied() {
+				if let Some(work) = self.derived_waiting.remove(&id) {
+					self.start_derived(work);
+				}
+			}
+		}
+	}
+
 	fn start_derived(&mut self, work: MipWork) {
 		let store = self.store.clone();
 		let Some(open) = self.docs.get(work.doc) else { return };
@@ -4175,6 +4204,8 @@ impl Engine {
 		let layers: std::collections::HashSet<LayerId> = work.requests.iter().map(TileRequest::layer).collect();
 		let internal = self.internal.clone();
 		let requests = work.requests;
+		self.derived_job = self.derived_job.wrapping_add(1);
+		let job = self.derived_job;
 		let spawned = std::thread::Builder::new().name("derived-tiles".into()).spawn(move || {
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::derived::fulfil(&mut computed, &store, &requests)));
 			if let Err(panic) = result {
@@ -4182,6 +4213,7 @@ impl Engine {
 			}
 			let held = crate::derived::hold(&computed, &store, &requests);
 			let _ = internal.send(Internal::Derived {
+				job,
 				doc,
 				generation,
 				computed: Box::new(computed),
@@ -4190,7 +4222,10 @@ impl Engine {
 			});
 		});
 		match spawned {
-			Ok(_) => self.derived_running = true,
+			Ok(_) => {
+				self.derived_running = true;
+				self.derived_started = Some(Instant::now());
+			}
 			Err(error) => tracing::warn!("cannot start the derived-tile job: {error}"),
 		}
 	}
@@ -4199,12 +4234,18 @@ impl Engine {
 	/// the next waiting one.
 	fn derived_done(
 		&mut self,
+		job: u64,
 		doc: DocId,
 		generation: u64,
 		computed: &Document,
 		layers: &std::collections::HashSet<LayerId>,
 		held: Vec<Arc<fx_tiles::TileBuffer>>,
 	) {
+		// AUDIT-FIX(D1): late completion must not clear a replacement job.
+		if job != self.derived_job || !self.derived_running {
+			return;
+		}
+		self.derived_started = None;
 		self.derived_running = false;
 		let store = self.store.clone();
 		if let Some(open) = self.docs.get_mut(doc) {
