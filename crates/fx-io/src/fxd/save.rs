@@ -71,11 +71,43 @@ pub struct SaveRequest<'a> {
 /// [`FxdWriter::commit`]). A crash at any point leaves the previous version
 /// readable.
 pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>) -> Result<SavedFxd, IoError> {
+	save_with(request, target, progress, None)
+}
+
+/// VERIFY-FIX(D2): the chunks a detached save's file already holds, by tile
+/// id (ids are never reused within a store, and tiles are immutable).
+#[derive(Default)]
+pub struct DetachedChunks(HashMap<u64, ChunkRef>);
+
+/// VERIFY-FIX(D2): a save that leaves the store's backing alone, for copies
+/// such as recovery snapshots. An ordinary save re-points every tile it writes
+/// at the new file, so a snapshot followed by a save to the user's file made
+/// that save rewrite the whole document (and the next snapshot too). Reuse
+/// here comes from `chunks`, which must belong to `target`'s file: pass an
+/// empty one with a fresh target. No compaction (the caller restarts the file).
+pub fn save_detached(request: SaveRequest<'_>, target: SaveTarget, chunks: &mut DetachedChunks, progress: Progress<'_>) -> Result<SavedFxd, IoError> {
+	save_with(request, target, progress, Some(chunks))
+}
+
+fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>, mut detached: Option<&mut DetachedChunks>) -> Result<SavedFxd, IoError> {
 	let started = Instant::now();
 	// AUDIT-FIX(D3): replacement invalidates chunk reuse; rewrite once and return the new backing file.
 	let target = match target {
 		SaveTarget::Incremental(file) if !file.matches_path()? => SaveTarget::Fresh(file.path().to_path_buf()),
 		other => other,
+	};
+	// VERIFY-FIX(D2): a fresh detached file starts with no reusable chunks.
+	if let (Some(chunks), SaveTarget::Fresh(_)) = (detached.as_deref_mut(), &target) {
+		chunks.0.clear();
+	}
+	let reusable = |tile: &CollectedTile, reuse: Option<_>| -> Option<ChunkRef> {
+		match &detached {
+			Some(chunks) => reuse.and(chunks.0.get(&tile.handle.id().get()).copied()),
+			None => match (reuse, tile.handle.backing()) {
+				(Some(reuse), Some((src, offset, len))) if src == reuse => Some(ChunkRef { offset, len }),
+				_ => None,
+			},
+		}
 	};
 	let _fresh_path_lock = match &target {
 		SaveTarget::Fresh(path) => Some(PathWriteLock::acquire(path)),
@@ -89,7 +121,7 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	};
 	let estimate = tiles
 		.iter()
-		.filter(|tile| !tile.handle.backing().is_some_and(|(id, _, _)| Some(id) == reuse))
+		.filter(|tile| reusable(tile, reuse).is_none())
 		.fold(16u64 << 20, |sum, tile| sum.saturating_add(tile.format.tile_bytes() as u64 + 64));
 	let destination = match &target {
 		SaveTarget::Incremental(file) => file.path(),
@@ -118,10 +150,8 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	// on rayon, IN_FLIGHT at a time, and appended in order.
 	let mut pending: Vec<&CollectedTile> = Vec::new();
 	for tile in &tiles {
-		if let (Some(reuse_id), Some((src, offset, len))) = (reuse_id, tile.handle.backing())
-			&& src == reuse_id
-		{
-			refs.insert(tile.handle.id().get(), ChunkRef { offset, len });
+		if let Some(chunk) = reusable(tile, reuse_id) {
+			refs.insert(tile.handle.id().get(), chunk);
 			report.tiles_reused += 1;
 		} else {
 			pending.push(tile);
@@ -186,6 +216,12 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		Arc::new(committed)
 	};
 
+	// VERIFY-FIX(D2): a detached save only remembers what its file now holds.
+	if let Some(chunks) = detached {
+		chunks.0 = refs;
+		report.seconds = started.elapsed().as_secs_f64();
+		return Ok(SavedFxd { file, report });
+	}
 	// From now on every tile written is backed by the new file.
 	for (handle, chunk) in &written {
 		request.store.attach_backing(

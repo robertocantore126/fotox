@@ -37,6 +37,9 @@ enum Work {
 	},
 	Remove(DocId),
 	Barrier,
+	// VERIFY-FIX(D2): a clean shutdown with nothing unsaved: delete this
+	// session's files and folder, then acknowledge.
+	Finish(Sender<()>),
 }
 pub(crate) struct Recovery {
 	sender: Sender<Work>,
@@ -54,36 +57,47 @@ impl Recovery {
 		let lease = lock_session(&session)?;
 		let (sender, receiver) = crossbeam_channel::unbounded();
 		std::thread::Builder::new().name("recovery".into()).spawn(move || {
-			let _lease = lease;
+			let mut lease = Some(lease);
 			let available = discover(&root, &session);
 			let _ = internal.send(Internal::RecoveryAvailable { paths: available });
-			let mut files = std::collections::HashMap::<DocId, Arc<fxd::FxdFile>>::new();
+			// VERIFY-FIX(D2): each recovery file with the chunks it already holds;
+			// snapshots are detached so they never take the tiles' backing away
+			// from the user's own file.
+			let mut files = std::collections::HashMap::<DocId, (Arc<fxd::FxdFile>, fxd::DetachedChunks)>::new();
 			for work in receiver {
 				match work {
 					Work::Snapshot { id, generation, name, doc } => {
 						// AUDIT-FIX(P1): reset timeout reporting per recovery save job.
 						let _pressure = fx_tiles::ProducerScope::enter();
 						let path = session.join(format!("document-{}.fxd", id.0));
-						let target = files
-							.get(&id)
-							.cloned()
-							.map(SaveTarget::Incremental)
-							.unwrap_or_else(|| SaveTarget::Fresh(path.clone()));
+						// VERIFY-FIX(D2): restart a recovery file that is mostly dead
+						// chunks (there is no compaction for detached saves).
+						if files.get(&id).is_some_and(|(file, _)| {
+							let footer = file.footer();
+							footer.end_offset > 256 << 20 && fxd::needs_compaction(footer.live_bytes, footer.end_offset)
+						}) {
+							files.remove(&id);
+						}
+						let (target, mut chunks) = match files.remove(&id) {
+							Some((file, chunks)) => (SaveTarget::Incremental(file), chunks),
+							None => (SaveTarget::Fresh(path.clone()), fxd::DetachedChunks::default()),
+						};
 						let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-							fxd::save(
+							fxd::save_detached(
 								SaveRequest {
 									doc: &doc,
 									store: &store,
 									preview: None,
 								},
 								target,
+								&mut chunks,
 								&mut |_| true,
 							)
 						}))
 						.map_err(|panic| format!("recovery panicked: {}", super::engine::panic_text(&*panic)))
 						.and_then(|r| r.map_err(|e| e.to_string()));
 						let result = result.map(|saved| {
-							files.insert(id, saved.file);
+							files.insert(id, (saved.file, chunks));
 							let _ = fx_io::fs_util::write_json(
 								&path.with_extension("json"),
 								serde_json::json!({"name":name,"generation":generation}).to_string().as_bytes(),
@@ -99,6 +113,13 @@ impl Recovery {
 					}
 					Work::Barrier => {
 						let _ = ACK.get_or_init(|| crossbeam_channel::bounded(1)).0.try_send(());
+					}
+					Work::Finish(done) => {
+						files.clear();
+						lease.take();
+						let _ = std::fs::remove_dir_all(&session);
+						let _ = done.send(());
+						break;
 					}
 				}
 			}
@@ -121,6 +142,33 @@ impl Recovery {
 	pub fn barrier(&self) {
 		let _ = self.sender.send(Work::Barrier);
 	}
+	/// VERIFY-FIX(D2): clean shutdown with no unsaved documents: remove this
+	/// session's recovery folder (waits up to `timeout` for queued work).
+	pub fn finish(&self, timeout: Duration) {
+		let (done, wait) = crossbeam_channel::bounded(1);
+		if self.sender.send(Work::Finish(done)).is_ok() {
+			let _ = wait.recv_timeout(timeout);
+		}
+	}
+}
+
+/// VERIFY-FIX(D2): a dead session's recovery file the user no longer needs:
+/// it was recovered (and the new session holds its own copy, or the document
+/// was saved or closed), or discarded. Deleted now if possible, else at the
+/// next start (a recovered document may still be reading tiles from it).
+pub(crate) fn consume(path: &Path) {
+	let marker = consumed_marker(path);
+	let _ = std::fs::write(&marker, b"");
+	if std::fs::remove_file(path).is_ok() {
+		let _ = std::fs::remove_file(path.with_extension("json"));
+		let _ = std::fs::remove_file(&marker);
+	}
+}
+
+fn consumed_marker(path: &Path) -> PathBuf {
+	let mut name = path.as_os_str().to_os_string();
+	name.push(".consumed");
+	PathBuf::from(name)
 }
 fn root() -> Option<PathBuf> {
 	std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Fotox/recovery"))
@@ -144,13 +192,28 @@ fn discover(root: &Path, own: &Path) -> Vec<String> {
 		if dir == own || !dir.is_dir() {
 			continue;
 		}
-		let Ok(_lease) = lock_session(&dir) else { continue };
+		let Ok(lease) = lock_session(&dir) else { continue };
 		let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+		let mut kept = 0;
 		for entry in entries.flatten() {
 			let path = entry.path();
 			if path.extension().is_some_and(|ext| ext == "fxd") {
+				// VERIFY-FIX(D2): files already recovered or discarded go now.
+				if consumed_marker(&path).exists() {
+					consume(&path);
+					if !path.exists() {
+						continue;
+					}
+				}
+				kept += 1;
 				paths.push(path.to_string_lossy().into_owned());
 			}
+		}
+		// VERIFY-FIX(D2): a dead session with nothing left to offer (a crash
+		// with no unsaved documents, or everything consumed) is removed.
+		if kept == 0 {
+			drop(lease);
+			let _ = std::fs::remove_dir_all(&dir);
 		}
 	}
 	paths.sort();

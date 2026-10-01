@@ -1009,3 +1009,46 @@ fn compaction_bounds_growth() {
 	assert!(leftovers.is_empty(), "compaction left files behind: {leftovers:?}");
 	assert!(largest <= (256 << 20).max(live * 5 / 2) + (64 << 20), "the file grew without compaction");
 }
+
+/// VERIFY(D2): the engine's recovery snapshots are ordinary `fxd::save`s into
+/// another file, through the same store. Does a snapshot steal the tiles'
+/// backing, so that the next save to the user's file rewrites everything
+/// (and the next snapshot rewrites everything again)?
+#[test]
+#[ignore = "audit"]
+fn recovery_snapshots_and_saves_stay_incremental() {
+	let dir = fresh_dir("recovery-pingpong");
+	let store = make_store(&dir.join("scratch"));
+	let mut versions = vec![1u64; LAYERS];
+	let mut doc = versioned_document(&store, &versions);
+	let x = dir.join("doc.fxd");
+	let r = dir.join("recovery.fxd");
+	let mut file = save_doc(&doc, &store, SaveTarget::Fresh(x.clone())).unwrap().file;
+	// As the engine's recovery worker does (VERIFY-FIX D2): detached saves.
+	let mut chunks = fxd::DetachedChunks::default();
+	let detached = |doc: &Document, target: SaveTarget, chunks: &mut fxd::DetachedChunks| {
+		fxd::save_detached(SaveRequest { doc, store: &store, preview: None }, target, chunks, &mut |_| true).unwrap()
+	};
+	let first = detached(&doc, SaveTarget::Fresh(r.clone()), &mut chunks);
+	println!("AUDIT ping-pong: first snapshot wrote {} tiles", first.report.tiles_written);
+	let mut snapshot = first.file;
+	let total = (side() / 256).pow(2) as usize * LAYERS;
+	for round in 0..3 {
+		versions[0] += 1;
+		doc.layers[0] = pixel_layer(&store, &mut doc.clone(), 0, versions[0]);
+		let saved = save_doc(&doc, &store, SaveTarget::Incremental(file.clone())).unwrap();
+		let snap = detached(&doc, SaveTarget::Incremental(snapshot.clone()), &mut chunks);
+		println!(
+			"AUDIT ping-pong round {round}: one layer of {LAYERS} repainted ({} of {total} tiles); save wrote {}, snapshot wrote {}",
+			total / LAYERS,
+			saved.report.tiles_written,
+			snap.report.tiles_written
+		);
+		assert_eq!(saved.report.tiles_written as usize, total / LAYERS, "a recovery snapshot made the save rewrite unchanged tiles");
+		assert_eq!(snap.report.tiles_written as usize, total / LAYERS, "the snapshot rewrote unchanged tiles");
+		file = saved.file;
+		snapshot = snap.file;
+	}
+	assert_eq!(reopen(&x, &dir.join("v1")).unwrap(), Verdict::Exact(versions.clone()));
+	assert_eq!(reopen(&r, &dir.join("v2")).unwrap(), Verdict::Exact(versions));
+}

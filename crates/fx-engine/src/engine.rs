@@ -348,6 +348,8 @@ struct Engine {
 	// AUDIT-FIX(D2): bounded retry cadence after a snapshot failure.
 	recovery_retry: HashMap<DocId, Instant>,
 	recovery_available: Vec<String>,
+	// VERIFY-FIX(D2): documents reopened from a dead session's recovery file.
+	recovered_from: HashMap<DocId, PathBuf>,
 	ui_ready: bool,
 	derived_running: bool,
 	// AUDIT-FIX(D1): watchdog state is independent of content generations.
@@ -574,6 +576,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		recovery_saved: HashMap::new(),
 		recovery_retry: HashMap::new(),
 		recovery_available: Vec::new(),
+		recovered_from: HashMap::new(),
 		ui_ready: false,
 		derived_running: false,
 		derived_job: 0,
@@ -594,7 +597,17 @@ pub(crate) fn run(ctx: EngineContext) {
 		let timeout = deadline.saturating_duration_since(Instant::now());
 		select_biased! {
 			recv(inputs) -> input => match input {
-				Ok(EngineInput::Shutdown) | Err(_) => break,
+				// VERIFY-FIX(D2): a clean shutdown with nothing unsaved removes
+				// this session's recovery folder; any other end keeps it.
+				Ok(EngineInput::Shutdown) => {
+					if let Some(recovery) = &engine.recovery
+						&& !engine.docs.iter().any(|open| open.dirty)
+					{
+						recovery.finish(Duration::from_secs(2));
+					}
+					break;
+				}
+				Err(_) => break,
 				Ok(input) => {
 					let what = crate::trace_input(&input, &mut engine.trace_moves);
 					trace::busy(trace::Thread::Engine, &what);
@@ -1279,6 +1292,16 @@ impl Engine {
 				// AUDIT-FIX(D2): only paths discovered in inactive sessions may be reopened through recovery.
 				if self.recovery_available.contains(&path) {
 					self.open(PathBuf::from(path), OpenAs::Recovery);
+				}
+				Changed::default()
+			}
+			UiToEngine::DiscardRecovery { paths } => {
+				// VERIFY-FIX(D2): discarded recovery files are not offered again.
+				for path in paths {
+					if let Some(at) = self.recovery_available.iter().position(|p| *p == path) {
+						self.recovery_available.remove(at);
+						crate::recovery::consume(std::path::Path::new(&path));
+					}
 				}
 				Changed::default()
 			}
@@ -2607,6 +2630,10 @@ impl Engine {
 							self.recovery_retry.remove(&doc);
 							self.recovery_saved.insert(doc, (generation, Instant::now()));
 						}
+						// VERIFY-FIX(D2): this session now has its own copy.
+						if let Some(path) = self.recovered_from.remove(&doc) {
+							crate::recovery::consume(&path);
+						}
 					}
 					Err(error) => {
 						self.recovery_retry.insert(doc, Instant::now() + Duration::from_secs(30));
@@ -2809,6 +2836,10 @@ impl Engine {
 							doc.source = None;
 							doc.dirty = true;
 							doc.name = format!("Recovered {}", doc.name);
+							// VERIFY-FIX(D2): consumed once this session holds the work itself.
+							self.recovered_from.insert(id, path.clone());
+							let shown = path.to_string_lossy();
+							self.recovery_available.retain(|p| *p != shown);
 						}
 						if let Some(viewport) = self.virtual_view.viewport {
 							doc.view.resize(viewport.width, viewport.height);
@@ -2869,6 +2900,9 @@ impl Engine {
 						if saved_clean {
 							if let Some(recovery) = &self.recovery {
 								recovery.remove(doc);
+							}
+							if let Some(path) = self.recovered_from.remove(&doc) {
+								crate::recovery::consume(&path);
 							}
 							self.recovery_saved.remove(&doc);
 							self.recovery_retry.remove(&doc);
@@ -3122,6 +3156,10 @@ impl Engine {
 			// AUDIT-FIX(D2): a clean/discarded close removes its recovery entry after queued snapshots.
 			if let Some(recovery) = &self.recovery {
 				recovery.remove(id);
+			}
+			// VERIFY-FIX(D2): closed without keeping it: the user is done with it.
+			if let Some(path) = self.recovered_from.remove(&id) {
+				crate::recovery::consume(&path);
 			}
 			self.recovery_saved.remove(&id);
 			self.recovery_retry.remove(&id);

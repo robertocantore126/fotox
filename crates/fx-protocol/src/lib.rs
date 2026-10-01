@@ -40,6 +40,10 @@ pub enum UiToEngine {
 	RecoverDocument {
 		path: String,
 	},
+	// VERIFY-FIX(D2): the user discards discovered recovery documents.
+	DiscardRecovery {
+		paths: Vec<String>,
+	},
 	/// First message after the page loads.
 	Hello {
 		ui_version: String,

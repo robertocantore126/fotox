@@ -34,7 +34,8 @@ export function initDocumentTabs(tabs, add) {
   bridge.on(ENGINE.RECOVERY_AVAILABLE, ({ paths }) => openDialog("recovery-documents", {
     title: "Recover unsaved documents",
     fields: [{ type: "label", text: `${paths.length} recovery document(s) from an earlier session were found.` }, ...paths.map(path => ({ type: "label", text: path }))],
-    buttons: [{ text: "Reopen documents", primary: true, onClick: () => { for (const path of paths) bridge.send({ type: "recover_document", path }); } }, { text: "Later" }],
+    // VERIFY-FIX(D2): "Discard" stops them being offered again.
+    buttons: [{ text: "Reopen documents", primary: true, onClick: () => { for (const path of paths) bridge.send({ type: "recover_document", path }); } }, { text: "Discard", onClick: () => bridge.send({ type: "discard_recovery", paths }) }, { text: "Later" }],
   }));
   bridge.on(ENGINE.RECOVERED_VERSION, ({ doc, saved_at, save_counter }) => {
     const when = saved_at ? new Date(saved_at * 1000).toLocaleString() : "an unknown time";
