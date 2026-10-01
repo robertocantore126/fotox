@@ -72,6 +72,11 @@ pub struct SaveRequest<'a> {
 /// readable.
 pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>) -> Result<SavedFxd, IoError> {
 	let started = Instant::now();
+	// AUDIT-FIX(D3): replacement invalidates chunk reuse; rewrite once and return the new backing file.
+	let target = match target {
+		SaveTarget::Incremental(file) if !file.matches_path()? => SaveTarget::Fresh(file.path().to_path_buf()),
+		other => other,
+	};
 	let _fresh_path_lock = match &target {
 		SaveTarget::Fresh(path) => Some(PathWriteLock::acquire(path)),
 		SaveTarget::Incremental(_) => None,

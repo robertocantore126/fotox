@@ -398,6 +398,16 @@ impl FxdFile {
 		Ok((fxd, footer))
 	}
 
+	// AUDIT-FIX(D3): compare OS identity rather than the pathname held by an old handle.
+	pub fn matches_path(&self) -> Result<bool, IoError> {
+		let current = match File::open(&self.path) {
+			Ok(file) => file,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+			Err(error) => return Err(error.into()),
+		};
+		Ok(file_identity(&self.file)? == file_identity(&current)?)
+	}
+
 	/// The newest valid footer.
 	pub fn footer(&self) -> Footer {
 		self.footer
@@ -473,6 +483,44 @@ impl TileSource for FxdFile {
 	}
 }
 
+// AUDIT-FIX(D3): Windows volume serial + file index identify the handle across pathname replacement.
+#[cfg(windows)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+	use std::os::windows::io::AsRawHandle;
+	#[repr(C)]
+	#[derive(Default)]
+	struct Info {
+		attributes: u32,
+		creation: [u32; 2],
+		access: [u32; 2],
+		write: [u32; 2],
+		volume: u32,
+		size_high: u32,
+		size_low: u32,
+		links: u32,
+		index_high: u32,
+		index_low: u32,
+	}
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, info: *mut Info) -> i32;
+	}
+	let mut info = Info::default();
+	// SAFETY: the handle is borrowed from a live File and Info matches the Windows ABI.
+	if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok((u64::from(info.volume), (u64::from(info.index_high) << 32) | u64::from(info.index_low)))
+}
+
+// AUDIT-FIX(D3): equivalent identity for supported Unix filesystems.
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+	use std::os::unix::fs::MetadataExt;
+	let metadata = file.metadata()?;
+	Ok((metadata.dev(), metadata.ino()))
+}
+
 // ---------------------------------------------------------------------------
 // Writer
 // ---------------------------------------------------------------------------
@@ -508,6 +556,10 @@ impl FxdWriter {
 	/// that footer are overwritten by the next save.
 	pub fn append_to(file: FxdFile) -> Result<Self, IoError> {
 		let lease = PathWriteLock::acquire(&file.path);
+		// AUDIT-FIX(D3): never append into an orphaned handle, including a replace racing the save decision.
+		if !file.matches_path()? {
+			return Err(IoError::Decode("The save path was replaced; save again to rebind the document".into()));
+		}
 		let len = file.file.metadata()?.len();
 		let (_, footer) = find_footer(&file.file, len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
 		Ok(FxdWriter {

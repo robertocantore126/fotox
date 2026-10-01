@@ -344,6 +344,9 @@ struct Engine {
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
 	// AUDIT-FIX(D4): a parent close resumes only after its contents tabs close.
 	close_after_child: HashMap<DocId, DocId>,
+	// AUDIT-FIX(D3+D11): reserve paths while opens/saves are on workers. Open tabs form the live registry.
+	opening_paths: std::collections::HashSet<PathBuf>,
+	saving_paths: HashMap<DocId, PathBuf>,
 	/// Pointer moves since the last traced input (the recorder counts them).
 	trace_moves: u32,
 	/// Move tool ▸ Show Transform Controls: the box of (document, generation,
@@ -507,6 +510,8 @@ pub(crate) fn run(ctx: EngineContext) {
 		smart_preview: None,
 		smart_children: HashMap::new(),
 		close_after_child: HashMap::new(),
+		opening_paths: std::collections::HashSet::new(),
+		saving_paths: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
 		controls_commit: false,
@@ -1628,10 +1633,32 @@ impl Engine {
 
 	/// Import `path` as a job: decode + mip pyramid on worker threads, with
 	/// `progress` messages; the document appears when it is complete.
+	// AUDIT-FIX(D3+D11): consult tab source/save bindings and in-flight saves before opening/replacing a path.
+	fn doc_for_path(&self, path: &std::path::Path) -> Option<DocId> {
+		self.docs
+			.iter()
+			.find(|open| open.path.as_ref().or(open.source.as_ref()).is_some_and(|bound| same_file(bound, path)))
+			.map(|open| open.id)
+			.or_else(|| self.saving_paths.iter().find(|(_, bound)| same_file(bound, path)).map(|(id, _)| *id))
+	}
+
 	fn open(&mut self, path: PathBuf, target: OpenAs) {
 		// Brush and pattern files go to their libraries (M8-T01/T06).
 		if self.open_resource(&path) {
 			return;
+		}
+		// AUDIT-FIX(D11): a second open activates the existing tab; concurrent opens share a reservation.
+		if matches!(target, OpenAs::New) {
+			if let Some(id) = self.doc_for_path(&path) {
+				self.commit_live_edits();
+				self.docs.activate(id);
+				self.after_active_change();
+				return;
+			}
+			if self.opening_paths.iter().any(|p| same_file(p, &path)) {
+				return;
+			}
+			self.opening_paths.insert(path.clone());
 		}
 		self.next_task += 1;
 		let task = self.next_task;
@@ -1646,6 +1673,7 @@ impl Engine {
 			label: label.clone(),
 			fraction: 0.0,
 		});
+		let reservation = path.clone();
 		let spawned = std::thread::Builder::new().name(format!("import-{task}")).spawn(move || {
 			let mut last = 0.0f32;
 			let mut report = |fraction: f32| {
@@ -1710,6 +1738,7 @@ impl Engine {
 			let _ = internal.send(Internal::Imported { task, path, result, target });
 		});
 		if let Err(error) = spawned {
+			self.opening_paths.remove(&reservation);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the import: {error}"),
@@ -2480,6 +2509,8 @@ impl Engine {
 			},
 			Internal::Progress { task, label, fraction } => self.to_ui(&EngineToUi::Progress { task, label, fraction }),
 			Internal::Imported { task, path, result, target } => {
+				// AUDIT-FIX(D11): release open reservation on success or failure.
+				self.opening_paths.remove(&path);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let (OpenAs::Place(doc), Ok(imported)) = (target, &result)
 					&& self.docs.get(doc).is_some()
@@ -2530,6 +2561,8 @@ impl Engine {
 				}
 			}
 			Internal::OpenedFxd { task, path, result, target } => {
+				// AUDIT-FIX(D11): release open reservation on success or failure.
+				self.opening_paths.remove(&path);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let OpenAs::Revert(doc) = target {
 					self.finish_revert(doc, &path, result.map(|opened| OpenDoc::from_fxd(doc, &path, *opened)));
@@ -2566,6 +2599,8 @@ impl Engine {
 				generation,
 				result,
 			} => {
+				// AUDIT-FIX(D3): every save completion releases its path reservation.
+				self.saving_paths.remove(&doc);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let Some(open) = self.docs.get_mut(doc) {
 					open.saving = false;
@@ -2873,6 +2908,18 @@ impl Engine {
 	/// and the document's backed tiles keep it open (D-027).
 	fn save_as(&mut self, id: DocId, path: PathBuf) {
 		self.commit_live_edits();
+		// AUDIT-FIX(D3): refuse replacement of another tab or pending open; no work is silently discarded.
+		if self.doc_for_path(&path).is_some_and(|other| other != id) || self.opening_paths.iter().any(|p| same_file(p, &path)) {
+			self.pending_close = None;
+			self.window_close_pending = false;
+			self.to_ui(&EngineToUi::Error {
+				text: format!(
+					"{} is open in another tab (or opening). Choose another save path or close that tab first.",
+					path.display()
+				),
+			});
+			return;
+		}
 		let own = self.docs.get_mut(id).and_then(|open| {
 			let same = open.path.as_ref().is_some_and(|p| same_file(p, &path));
 			if same { open.file.clone() } else { None }
@@ -2908,6 +2955,7 @@ impl Engine {
 			SaveTarget::Incremental(file) => file.path().to_path_buf(),
 			SaveTarget::Fresh(path) => path.clone(),
 		};
+		self.saving_paths.insert(id, path.clone());
 		self.next_task += 1;
 		let task = self.next_task;
 		let (store, internal) = (self.store.clone(), self.internal.clone());
@@ -2954,6 +3002,7 @@ impl Engine {
 			});
 		});
 		if let Err(error) = spawned {
+			self.saving_paths.remove(&id);
 			if let Some(open) = self.docs.get_mut(id) {
 				open.saving = false;
 			}
