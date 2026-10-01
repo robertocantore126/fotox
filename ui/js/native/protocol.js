@@ -59,6 +59,8 @@ export const ENGINE = Object.freeze({
   ACTIVE_DOCUMENT: "active_document",
   LAYERS: "layers",
   LAYERS_PATCH: "layers_patch",
+  // AUDIT-FIX(4.2): tree edits are sequential insert/remove/move patches.
+  LAYERS_STRUCTURE_PATCH: "layers_structure_patch",
   HISTORY: "history",
   VIEW: "view",
   STATUS: "status",

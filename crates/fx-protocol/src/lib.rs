@@ -370,6 +370,16 @@ pub enum EngineToUi {
 		base: u64,
 		changed: Vec<LayerInfo>,
 	},
+	// AUDIT-FIX(4.2): structural diffs preserve sequence resynchronisation and omit unchanged rows.
+	LayersStructurePatch {
+		doc: DocId,
+		revision: u64,
+		seq: u64,
+		base: u64,
+		ops: Vec<LayerListOp>,
+		changed: Vec<LayerInfo>,
+	},
+
 	History {
 		doc: DocId,
 		labels: Vec<String>,
@@ -553,6 +563,49 @@ pub enum EngineToUi {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		text: Option<serde_json::Value>,
 	},
+}
+
+// AUDIT-FIX(4.2): sequential indexes refer to the list after earlier operations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum LayerListOp {
+	Remove { id: fx_core::LayerId },
+	Insert { index: usize, row: LayerInfo },
+	Move { id: fx_core::LayerId, index: usize },
+}
+
+pub fn structural_layers_patch(old: &[LayerInfo], new: &[LayerInfo]) -> (Vec<LayerListOp>, Vec<LayerInfo>) {
+	let wanted: std::collections::HashSet<_> = new.iter().map(|l| l.id).collect();
+	let old_rows: std::collections::HashMap<_, _> = old.iter().map(|l| (l.id, l)).collect();
+	let mut ids: Vec<_> = old.iter().map(|l| l.id).collect();
+	let mut ops = Vec::new();
+	ids.retain(|id| {
+		if wanted.contains(id) {
+			true
+		} else {
+			ops.push(LayerListOp::Remove { id: *id });
+			false
+		}
+	});
+	for (index, row) in new.iter().enumerate() {
+		if ids.get(index) == Some(&row.id) {
+			continue;
+		}
+		if let Some(at) = ids.iter().position(|id| *id == row.id) {
+			ids.remove(at);
+			ids.insert(index, row.id);
+			ops.push(LayerListOp::Move { id: row.id, index });
+		} else {
+			ids.insert(index, row.id);
+			ops.push(LayerListOp::Insert { index, row: row.clone() });
+		}
+	}
+	let changed = new
+		.iter()
+		.filter(|row| old_rows.get(&row.id).is_some_and(|old| *old != *row))
+		.cloned()
+		.collect();
+	(ops, changed)
 }
 
 /// Apply a [`EngineToUi::LayersPatch`]'s `changed` rows to the list it was

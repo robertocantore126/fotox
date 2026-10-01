@@ -4439,6 +4439,19 @@ impl Engine {
 				base,
 				changed,
 			},
+			None if !full && self.layers_sent.contains_key(&id) => {
+				// AUDIT-FIX(4.2): add/delete/group/order use structural operations.
+				let (base, old) = &self.layers_sent[&id];
+				let (ops, changed) = fx_protocol::structural_layers_patch(old, &layers);
+				EngineToUi::LayersStructurePatch {
+					doc: id,
+					revision,
+					seq,
+					base: *base,
+					ops,
+					changed,
+				}
+			}
 			None => EngineToUi::Layers {
 				doc: id,
 				revision,

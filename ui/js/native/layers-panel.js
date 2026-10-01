@@ -169,6 +169,27 @@ export function initNativePanels() {
     const byId = new Map(msg.changed.map((l) => [l.id, l]));
     showLayers(layers.map((l) => byId.get(l.id) || l));
   });
+  // AUDIT-FIX(4.2): apply to a copy and resync on malformed/stale operations.
+  bridge.on(ENGINE.LAYERS_STRUCTURE_PATCH, (msg) => {
+    if (msg.doc !== doc) return;
+    const resync = () => { if (!resyncing) {resyncing=true; bridge.send({type:UI.REQUEST_LAYERS,doc});} };
+    if (msg.base !== layersSeq) {resync();return;}
+    const next=layers.slice();
+    for (const op of msg.ops) {
+      const at=next.findIndex(l=>l.id===op.id);
+      if (op.op === "remove") {if(at<0){resync();return;} next.splice(at,1);}
+      else if(op.op === "move") {
+        if(at<0 || op.index<0 || op.index>=next.length){resync();return;}
+        const [row]=next.splice(at,1);next.splice(op.index,0,row);
+      } else if(op.op === "insert") {
+        if(op.index<0 || op.index>next.length || next.some(l=>l.id===op.row.id)){resync();return;}
+        next.splice(op.index,0,op.row);
+      } else {resync();return;}
+    }
+    const changed=new Map(msg.changed.map(l=>[l.id,l]));
+    layersSeq=msg.seq;
+    showLayers(next.map(l=>changed.get(l.id)||l));
+  });
   function showLayers(list) {
     layers = list;
     tree = buildTree(layers);

@@ -84,7 +84,7 @@ export function initDocumentTabs(tabs, add) {
   });
 
   // The tab names the active layer and whether its mask is the target.
-  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH]) {
+  for (const type of [ENGINE.LAYERS, ENGINE.LAYERS_PATCH, ENGINE.LAYERS_STRUCTURE_PATCH]) {
     bridge.on(type, (msg) => { if (msg.doc === active) queueMicrotask(() => refresh(active)); });
   }
 
