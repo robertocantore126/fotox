@@ -20,6 +20,22 @@ let addButton = null;
 
 /** Take over the tab strip `tabs`; `add` is the "+" button kept at its end. */
 export function initDocumentTabs(tabs, add) {
+  // AUDIT-FIX(D5): recovery warnings follow the active tab and persist until dismissed/closed.
+  const recoveryWarnings = new Map();
+  const banner = h("div", { style: "position:fixed;top:100px;left:80px;right:320px;z-index:20;background:#66501d;color:white;padding:8px;display:none" });
+  document.body.append(banner);
+  const showRecovery = () => {
+    const text = recoveryWarnings.get(active);
+    banner.replaceChildren();
+    banner.style.display = text ? "block" : "none";
+    if (text) banner.append(document.createTextNode(text), h("button", { onclick: () => { recoveryWarnings.delete(active); showRecovery(); }, style: "margin-left:12px" }, "Dismiss"));
+  };
+  bridge.on(ENGINE.RECOVERED_VERSION, ({ doc, saved_at, save_counter }) => {
+    const when = saved_at ? new Date(saved_at * 1000).toLocaleString() : "an unknown time";
+    recoveryWarnings.set(doc, `Recovered the version saved at ${when}${save_counter ? ` (save ${save_counter})` : ""}; the latest save was damaged or interrupted.`);
+    showRecovery();
+  });
+
   strip = tabs;
   addButton = add;
   strip.replaceChildren(addButton);
@@ -49,10 +65,12 @@ export function initDocumentTabs(tabs, add) {
     if (!d) return;
     d.tab.remove();
     docs.delete(doc);
+    recoveryWarnings.delete(doc); showRecovery();
   });
 
   bridge.on(ENGINE.ACTIVE_DOCUMENT, ({ doc }) => {
     active = doc;
+    showRecovery();
     for (const [id, d] of docs) d.tab.classList.toggle("active", id === doc);
     const d = doc == null ? null : docs.get(doc);
     const size = document.getElementById("statusdocsize");

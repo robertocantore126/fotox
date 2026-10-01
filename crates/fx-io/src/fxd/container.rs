@@ -159,6 +159,9 @@ pub struct Footer {
 	pub end_offset: u64,
 	/// Bytes of live data after this save.
 	pub live_bytes: u64,
+	// AUDIT-FIX(D5): zero means unknown for legacy files; reserved bytes remain backwards compatible.
+	pub save_counter: u64,
+	pub saved_at: u64,
 }
 
 impl Footer {
@@ -169,6 +172,9 @@ impl Footer {
 		bytes[16..24].copy_from_slice(&self.manifest_len.to_le_bytes());
 		bytes[24..32].copy_from_slice(&self.end_offset.to_le_bytes());
 		bytes[32..40].copy_from_slice(&self.live_bytes.to_le_bytes());
+		// AUDIT-FIX(D5): persist save identity in formerly reserved footer bytes.
+		bytes[40..48].copy_from_slice(&self.save_counter.to_le_bytes());
+		bytes[48..56].copy_from_slice(&self.saved_at.to_le_bytes());
 		let checksum = crc32fast::hash(&bytes[0..60]);
 		bytes[60..64].copy_from_slice(&checksum.to_le_bytes());
 		bytes
@@ -189,6 +195,8 @@ impl Footer {
 			manifest_len: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
 			end_offset: u64::from_le_bytes(bytes[24..32].try_into().ok()?),
 			live_bytes: u64::from_le_bytes(bytes[32..40].try_into().ok()?),
+			save_counter: u64::from_le_bytes(bytes[40..48].try_into().ok()?),
+			saved_at: u64::from_le_bytes(bytes[48..56].try_into().ok()?),
 		})
 	}
 }
@@ -398,6 +406,35 @@ impl FxdFile {
 		Ok((fxd, footer))
 	}
 
+	// AUDIT-FIX(D5): search strictly before this footer after a manifest/structure failure.
+	pub fn previous(&self) -> Result<Option<Arc<Self>>, IoError> {
+		let end = self.footer.end_offset.saturating_sub(FOOTER_LEN);
+		let previous = find_footer(&self.file, end)?;
+		Ok(previous.map(|(_, footer)| Arc::new(Self { footer, ..self.clone() })))
+	}
+
+	// AUDIT-FIX(D5): uncommitted/damaged tails are visible instead of silently rolling back.
+	pub fn has_newer_tail(&self) -> Result<bool, IoError> {
+		Ok(self.file.metadata()?.len() > self.footer.end_offset)
+	}
+
+	// AUDIT-FIX(D5): lazy open checks tile framing without reading/decompressing tile pixels.
+	pub fn validate_tile_structure(&self, at: ChunkRef) -> Result<(), IoError> {
+		self.validate_chunk(at)?;
+		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
+		read_exact_at(&self.file, &mut header, at.offset)?;
+		let kind = ChunkKind::from_byte(header[0])?;
+		let payload_len = u64::from_le_bytes(header[4..12].try_into().expect("8-byte slice"));
+		if !matches!(kind, ChunkKind::Tile | ChunkKind::PreviewTile)
+			|| header[1] != 0
+			|| payload_len.checked_add(CHUNK_HEADER_LEN) != Some(at.len)
+			|| payload_len < 4
+		{
+			return Err(IoError::Decode("invalid backed tile chunk structure".into()));
+		}
+		Ok(())
+	}
+
 	// AUDIT-FIX(D3): compare OS identity rather than the pathname held by an old handle.
 	pub fn matches_path(&self) -> Result<bool, IoError> {
 		let current = match File::open(&self.path) {
@@ -554,6 +591,8 @@ pub struct FxdWriter {
 	_lease: PathWriteLock,
 	/// Offset of the next chunk / the footer.
 	pos: u64,
+	// AUDIT-FIX(D5): inherited save sequence, incremented only by commit.
+	save_counter: u64,
 }
 
 impl FxdWriter {
@@ -569,6 +608,7 @@ impl FxdWriter {
 			path: path.to_path_buf(),
 			_lease: lease,
 			pos: HEADER_LEN,
+			save_counter: 0,
 		})
 	}
 
@@ -588,6 +628,7 @@ impl FxdWriter {
 			path: file.path,
 			_lease: lease,
 			pos: footer.end_offset,
+			save_counter: footer.save_counter,
 		})
 	}
 
@@ -648,6 +689,8 @@ impl FxdWriter {
 			manifest_len: manifest.len,
 			end_offset: self.pos + FOOTER_LEN,
 			live_bytes,
+			save_counter: self.save_counter.saturating_add(1),
+			saved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
 		};
 		write_all_at(&self.file, &footer.to_bytes(), self.pos)?;
 		self.file.sync_data()?;

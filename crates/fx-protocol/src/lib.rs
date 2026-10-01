@@ -313,6 +313,12 @@ pub struct MemoryStats {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineToUi {
+	// AUDIT-FIX(D5): a recovered save carries a persistent, per-document warning.
+	RecoveredVersion {
+		doc: DocId,
+		saved_at: u64,
+		save_counter: u64,
+	},
 	DocumentOpened {
 		info: DocumentInfo,
 	},

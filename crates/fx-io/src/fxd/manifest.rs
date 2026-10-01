@@ -720,6 +720,8 @@ pub fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileSto
 				SlotEntry::Tile { chunk, .. } => {
 					// AUDIT-FIX(I1): reject forged lazy tile references before inserting them into the store.
 					file.validate_chunk(*chunk)?;
+					// AUDIT-FIX(D5): framing failures trigger previous-footer recovery before any pixels are drawn.
+					file.validate_tile_structure(*chunk)?;
 					let backed = Backed {
 						source: file.clone(),
 						offset: chunk.offset,

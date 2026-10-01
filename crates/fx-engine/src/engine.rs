@@ -2565,13 +2565,23 @@ impl Engine {
 				self.opening_paths.remove(&path);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let OpenAs::Revert(doc) = target {
+					let warning = result.as_ref().ok().filter(|opened| opened.recovered).map(|opened| opened.file.footer());
 					self.finish_revert(doc, &path, result.map(|opened| OpenDoc::from_fxd(doc, &path, *opened)));
+					if let Some(footer) = warning {
+						self.to_ui(&EngineToUi::RecoveredVersion {
+							doc,
+							saved_at: footer.saved_at,
+							save_counter: footer.save_counter,
+						});
+					}
 					return;
 				}
 				match result {
 					Ok(opened) => {
 						self.commit_live_edits();
 						let id = self.docs.allocate_id();
+						// AUDIT-FIX(D5): expose rollback metadata before consuming the opened model.
+						let warning = opened.recovered.then_some(opened.file.footer());
 						let mut doc = OpenDoc::from_fxd(id, &path, *opened);
 						if let Some(viewport) = self.virtual_view.viewport {
 							doc.view.resize(viewport.width, viewport.height);
@@ -2581,6 +2591,13 @@ impl Engine {
 						let info = doc.info();
 						self.docs.add(doc);
 						self.to_ui(&EngineToUi::DocumentOpened { info });
+						if let Some(footer) = warning {
+							self.to_ui(&EngineToUi::RecoveredVersion {
+								doc: id,
+								saved_at: footer.saved_at,
+								save_counter: footer.save_counter,
+							});
+						}
 						self.after_active_change();
 					}
 					Err(IoError::Cancelled) => {}
