@@ -64,6 +64,8 @@ export const ENGINE = Object.freeze({
   STATUS: "status",
   PROGRESS: "progress",
   PROGRESS_DONE: "progress_done",
+  // AUDIT-FIX(P4): task cancellation capability.
+  TASK_CANCELABLE: "task_cancelable",
   TOAST: "toast",
   ERROR: "error",
   COLOR_PICKED: "color_picked",

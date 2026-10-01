@@ -49,9 +49,17 @@ pub fn ensure_mip(image: &mut TiledImage, store: &TileStore, level: usize, tx: u
 /// reads a clean one below it). Evicted tiles are left alone: they are
 /// recomputed when something asks for them.
 pub fn ensure_all_mips(image: &mut TiledImage, store: &TileStore) -> Result<(), TileError> {
+	ensure_all_mips_with_progress(image, store, &mut || true)
+}
+
+// AUDIT-FIX(P4): importer workers may stop between bounded mip-level batches.
+pub fn ensure_all_mips_with_progress(image: &mut TiledImage, store: &TileStore, keep_going: &mut dyn FnMut() -> bool) -> Result<(), TileError> {
 	// Each level is held until the next one has read it (see `compute_levels`).
 	let mut held: Vec<Arc<TileBuffer>> = Vec::new();
 	for level in 1..image.level_count() {
+		if !keep_going() {
+			return Err(TileError::Corrupt("cancelled mip generation".into()));
+		}
 		let tiles: Vec<(u32, u32)> = image.dirty_tiles(level).collect();
 		if tiles.is_empty() {
 			continue;

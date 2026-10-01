@@ -380,6 +380,8 @@ struct Engine {
 	close_after_child: HashMap<DocId, DocId>,
 	// AUDIT-FIX(D3+D11): reserve paths while opens/saves are on workers. Open tabs form the live registry.
 	opening_paths: std::collections::HashSet<PathBuf>,
+	// AUDIT-FIX(P4): per-task cancellation is polled by worker progress callbacks.
+	task_cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
 	saving_paths: HashMap<DocId, PathBuf>,
 	/// Pointer moves since the last traced input (the recorder counts them).
 	trace_moves: u32,
@@ -549,6 +551,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		smart_children: HashMap::new(),
 		close_after_child: HashMap::new(),
 		opening_paths: std::collections::HashSet::new(),
+		task_cancels: HashMap::new(),
 		saving_paths: HashMap::new(),
 		trace_moves: 0,
 		controls: None,
@@ -1237,6 +1240,13 @@ impl Engine {
 
 	fn ui_message(&mut self, message: UiToEngine) -> Changed {
 		match message {
+			UiToEngine::CancelTask { task } => {
+				// AUDIT-FIX(P4): requesting cancel never blocks on the worker.
+				if let Some(cancel) = self.task_cancels.get(&task) {
+					cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+				}
+				Changed::default()
+			}
 			UiToEngine::RecoverDocument { path } => {
 				// AUDIT-FIX(D2): only paths discovered in inactive sessions may be reopened through recovery.
 				if self.recovery_available.contains(&path) {
@@ -1706,6 +1716,14 @@ impl Engine {
 			.or_else(|| self.saving_paths.iter().find(|(_, bound)| same_file(bound, path)).map(|(id, _)| *id))
 	}
 
+	// AUDIT-FIX(P4): only tasks with cooperative callbacks expose a Cancel button.
+	fn cancellable_task(&mut self, task: u64) -> Arc<std::sync::atomic::AtomicBool> {
+		let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		self.task_cancels.insert(task, cancel.clone());
+		self.to_ui(&EngineToUi::TaskCancelable { task });
+		cancel
+	}
+
 	fn open(&mut self, path: PathBuf, target: OpenAs) {
 		// Brush and pattern files go to their libraries (M8-T01/T06).
 		if self.open_resource(&path) {
@@ -1726,6 +1744,7 @@ impl Engine {
 		}
 		self.next_task += 1;
 		let task = self.next_task;
+		let cancel = self.cancellable_task(task);
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Opening {}",
@@ -1750,7 +1769,7 @@ impl Engine {
 						fraction: fraction * 0.9,
 					});
 				}
-				true
+				!cancel.load(std::sync::atomic::Ordering::Relaxed)
 			};
 			// A native `.fxd` opens lazily, reading only the manifest (M3-T05);
 			// every other file imports band by band.
@@ -1762,8 +1781,20 @@ impl Engine {
 					label: format!("{label}: reading the manifest"),
 					fraction: 0.5,
 				});
-				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fxd::open(&path, &store).map(Box::new)))
-					.unwrap_or_else(|panic| Err(panicked(panic)));
+				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+					if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+						Err(IoError::Cancelled)
+					} else {
+						fxd::open(&path, &store).and_then(|opened| {
+							if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+								Err(IoError::Cancelled)
+							} else {
+								Ok(Box::new(opened))
+							}
+						})
+					}
+				}))
+				.unwrap_or_else(|panic| Err(panicked(panic)));
 				if let OpenAs::Place(doc) = target {
 					// Place: the file's composite becomes one layer.
 					let _ = internal.send(Internal::Progress {
@@ -1794,7 +1825,16 @@ impl Engine {
 						label: format!("{label}: building previews"),
 						fraction: 0.9,
 					});
-					mips::ensure_all_mips(&mut imported.image, &store)?;
+					// AUDIT-FIX(P4): mip preview generation checks cancellation between levels.
+					mips::ensure_all_mips_with_progress(&mut imported.image, &store, &mut || !cancel.load(std::sync::atomic::Ordering::Relaxed)).map_err(
+						|e| {
+							if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+								IoError::Cancelled
+							} else {
+								e.into()
+							}
+						},
+					)?;
 					Ok(imported)
 				})
 			}))
@@ -1803,6 +1843,7 @@ impl Engine {
 		});
 		if let Err(error) = spawned {
 			self.opening_paths.remove(&reservation);
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the import: {error}"),
@@ -1831,6 +1872,7 @@ impl Engine {
 		}
 		self.next_task += 1;
 		let task = self.next_task;
+		let cancel = self.cancellable_task(task);
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Exporting {}",
@@ -1849,7 +1891,7 @@ impl Engine {
 					label: label.clone(),
 					fraction,
 				});
-				true
+				!cancel.load(std::sync::atomic::Ordering::Relaxed)
 			};
 			// An opaque document is written without alpha (a quarter smaller for RGB).
 			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1862,6 +1904,7 @@ impl Engine {
 			let _ = internal.send(Internal::Exported { task, path, result });
 		});
 		if let Err(error) = spawned {
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the export: {error}"),
@@ -2409,6 +2452,7 @@ impl Engine {
 			if let Some(open) = self.docs.get_mut(id) {
 				open.busy = None;
 			}
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot start the job: {error}"),
@@ -2418,6 +2462,7 @@ impl Engine {
 
 	/// A pixel job finished: install its document as a history step.
 	fn pixel_job_done(&mut self, task: u64, id: DocId, command: Command, result: Result<(Box<Document>, CommandEffect), CommandError>) {
+		self.task_cancels.remove(&task);
 		self.to_ui(&EngineToUi::ProgressDone { task });
 		if let Some(latest) = self.preview_latest.get(&id) {
 			latest.fetch_add(1, Ordering::Relaxed);
@@ -2538,6 +2583,7 @@ impl Engine {
 				held,
 			} => self.derived_done(job, doc, generation, &computed, &layers, held),
 			Internal::Exported { task, path, result } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(()) => {
@@ -2556,6 +2602,7 @@ impl Engine {
 				}
 			}
 			Internal::Copied { task, result } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(Some(clip)) => self.set_clipboard(clip),
@@ -2566,6 +2613,7 @@ impl Engine {
 				}
 			}
 			Internal::B3Built { task, doc, layers } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				let Some(open) = self.docs.get_mut(doc) else { return };
 				// Built outside the history on purpose (a benchmark setup, not
@@ -2599,6 +2647,7 @@ impl Engine {
 			Internal::Imported { task, path, result, target } => {
 				// AUDIT-FIX(D11): release open reservation on success or failure.
 				self.opening_paths.remove(&path);
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let (OpenAs::Place(doc), Ok(imported)) = (target, &result)
 					&& self.docs.get(doc).is_some()
@@ -2639,6 +2688,7 @@ impl Engine {
 				(self.output)(EngineOutput::ToUi(fx_protocol::encode_binary(&header, &pixels)));
 			}
 			Internal::PlacedFxd { task, path, doc, result } => {
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				match result {
 					Ok(image) if self.docs.get(doc).is_some() => self.place_imported(doc, &path, image),
@@ -2651,6 +2701,7 @@ impl Engine {
 			Internal::OpenedFxd { task, path, result, target } => {
 				// AUDIT-FIX(D11): release open reservation on success or failure.
 				self.opening_paths.remove(&path);
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let OpenAs::Revert(doc) = target {
 					let warning = result.as_ref().ok().filter(|opened| opened.recovered).map(|opened| opened.file.footer());
@@ -2716,6 +2767,7 @@ impl Engine {
 			} => {
 				// AUDIT-FIX(D3): every save completion releases its path reservation.
 				self.saving_paths.remove(&doc);
+				self.task_cancels.remove(&task);
 				self.to_ui(&EngineToUi::ProgressDone { task });
 				if let Some(open) = self.docs.get_mut(doc) {
 					open.saving = false;
@@ -3085,6 +3137,7 @@ impl Engine {
 		self.saving_paths.insert(id, path.clone());
 		self.next_task += 1;
 		let task = self.next_task;
+		let cancel = self.cancellable_task(task);
 		let (store, internal) = (self.store.clone(), self.internal.clone());
 		let label = format!(
 			"Saving {}",
@@ -3103,7 +3156,7 @@ impl Engine {
 					label: label.clone(),
 					fraction,
 				});
-				true
+				!cancel.load(std::sync::atomic::Ordering::Relaxed)
 			};
 			// The composite preview (D-026) needs the engine's compositor; a
 			// later card can render it and pass it here.
@@ -3133,6 +3186,7 @@ impl Engine {
 			if let Some(open) = self.docs.get_mut(id) {
 				open.saving = false;
 			}
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.pending_close = None;
 			self.to_ui(&EngineToUi::Error {
@@ -4177,6 +4231,7 @@ impl Engine {
 			let _ = internal.send(Internal::Copied { task, result });
 		});
 		if let Err(error) = spawned {
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot copy: {error}"),
@@ -4321,6 +4376,7 @@ impl Engine {
 			let _ = internal.send(Internal::B3Built { task, doc: id, layers });
 		});
 		if let Err(error) = spawned {
+			self.task_cancels.remove(&task);
 			self.to_ui(&EngineToUi::ProgressDone { task });
 			self.to_ui(&EngineToUi::Error {
 				text: format!("Cannot build B3: {error}"),

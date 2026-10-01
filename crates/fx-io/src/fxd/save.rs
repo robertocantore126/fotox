@@ -154,7 +154,10 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 		}
 		done += batch.len();
 	}
-	progress(1.0);
+	// AUDIT-FIX(P4): cancellation before commit leaves the prior footer/target authoritative.
+	if !progress(1.0) {
+		return Err(IoError::Cancelled);
+	}
 
 	let mut manifest = manifest::to_manifest(request.doc, |handle| refs.get(&handle.id().get()).copied());
 	if let Some(preview) = request.preview {
@@ -163,6 +166,10 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	let payload = manifest::encode_manifest(&manifest, FRESH_LEVEL)?;
 	let manifest_chunk = writer.manifest(&payload)?;
 	let live = live_bytes(&refs, manifest_chunk.len);
+	// AUDIT-FIX(P4): honor a request that arrived during manifest encoding.
+	if !progress(1.0) {
+		return Err(IoError::Cancelled);
+	}
 	let committed = writer.commit(manifest_chunk, live)?;
 
 	// Fresh: close the `.part` handle, replace the target, reopen it.
