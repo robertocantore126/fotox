@@ -1417,3 +1417,176 @@ fn exfat_compaction_after_close() {
 	assert!(same, "the compacted file does not hold the saved pixels");
 	assert!(after * 2 < before, "the closed file was not compacted");
 }
+
+/// VERIFY (FIX-VERIFY Phase 4.1): Rob's target document. A 16K 8-bit canvas
+/// with `FOTOX_AUDIT_TARGET_LAYERS` (6000) layers, each a gradient (plus light
+/// noise) in a rectangle whose side is log-uniform in 256..=`MAXRECT` (2048):
+/// mostly small, like real art (≈ 1 Mpx average, ≈ 24 GB raw for 6000).
+/// Every 7th masked, 20th drop shadow, 25th + Invert, 50th Smart Object;
+/// groups of 10. Then the interactive and file costs.
+#[test]
+#[ignore = "audit: Rob's 6,000-layer target; long and heavy"]
+fn target_benchmark() {
+	let side: u32 = std::env::var("FOTOX_AUDIT_TARGET_SIDE").ok().and_then(|v| v.parse().ok()).unwrap_or(16384);
+	let n: usize = std::env::var("FOTOX_AUDIT_TARGET_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(6000);
+	let max_rect: f64 = std::env::var("FOTOX_AUDIT_TARGET_MAXRECT").ok().and_then(|v| v.parse().ok()).unwrap_or(2048.0);
+	let noise: f32 = std::env::var("FOTOX_AUDIT_TARGET_NOISE").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+	let dir = TempDir::new("target");
+	let Some(mut p) = Probe::start(&dir.0) else { return };
+	p.tag = format!("[target {side}² 8-bit, {n} layers]");
+	let doc = p.new_document(side, side, 8);
+	let mut rng = 0x5151_2026_u64;
+	let mut next = move || {
+		rng ^= rng << 13;
+		rng ^= rng >> 7;
+		rng ^= rng << 17;
+		rng
+	};
+	let mut unit = move || (next() % 1_000_000) as f64 / 1_000_000.0;
+	let (mut add, mut area) = (Vec::with_capacity(n), 0f64);
+	let build = Instant::now();
+	for i in 0..n {
+		let t = Instant::now();
+		let w = (256f64 * (max_rect / 256.0).powf(unit())).round();
+		let h = (256f64 * (max_rect / 256.0).powf(unit())).round();
+		let x = (unit() * (f64::from(side) - w)).floor();
+		let y = (unit() * (f64::from(side) - h)).floor();
+		area += w * h;
+		let (c0, c1) = ([unit(), unit(), unit()], [unit(), unit(), unit()]);
+		let mut cmds = vec![
+			Command::AddLayer { layer: NewLayer::Pixel, name: None },
+			Command::Select {
+				shape: SelectionShape::Rect { x, y, w, h },
+				mode: SelectMode::Replace,
+				feather: 0.0,
+				anti_alias: false,
+			},
+		];
+		p.step(doc, std::mem::take(&mut cmds));
+		p.job(
+			doc,
+			Command::FillGradient {
+				layer: LayerRef::Active,
+				fill: serde_json::from_value(serde_json::json!({
+					"gradient": {
+						"colors": [
+							{ "color": c0, "location": 0.0, "midpoint": 0.5 },
+							{ "color": c1, "location": 1.0, "midpoint": 0.5 }
+						],
+						"method": "classic",
+						"opacities": []
+					},
+					"kind": "linear",
+					"start": [x, y],
+					"end": [x + w, y + h]
+				}))
+				.expect("gradient fill json"),
+				mode: BlendMode::Normal,
+				opacity: 1.0,
+			},
+		);
+		if noise > 0.0 {
+			p.job(
+				doc,
+				Command::ApplyFilter {
+					layer: LayerRef::Active,
+					filter: FilterParams::AddNoise {
+						amount: noise,
+						gaussian: false,
+						monochromatic: true,
+						seed: i as u32,
+					},
+				},
+			);
+		}
+		cmds.push(Command::Deselect);
+		if i % 7 == 3 {
+			cmds.push(Command::AddMask { layer: LayerRef::Active, fill: MaskFill::RevealAll });
+		}
+		if i % 20 == 5 {
+			let mut styles = fx_core::styles::LayerStyles::default();
+			styles.drop_shadow.push(Default::default());
+			cmds.push(Command::SetLayerStyle { layer: LayerRef::Active, styles: Some(styles) });
+		}
+		if i % 25 == 11 {
+			cmds.push(Command::AddLayer { layer: NewLayer::Adjustment(Adjustment::Invert), name: None });
+		}
+		if i % 50 == 17 {
+			cmds.push(Command::ConvertToSmartObject { layers: vec![LayerRef::Active] });
+		}
+		p.step(doc, cmds);
+		if i % 10 == 9 {
+			let layers = p.layer_list(doc);
+			let top: Vec<LayerRef> = layers.iter().filter(|l| l.depth == 0).take(10).map(|l| LayerRef::Id(l.id)).collect();
+			p.step(doc, vec![Command::GroupLayers { layers: top, name: None }]);
+		}
+		add.push(t.elapsed());
+		if (i + 1) % 500 == 0 {
+			println!("AUDIT {} built {} layers in {:.0} s", p.tag, i + 1, build.elapsed().as_secs_f64());
+			p.memory(&format!("after {} layers", i + 1));
+		}
+	}
+	println!(
+		"AUDIT {} built in {:.0} s; painted area {:.0} Mpx ({:.1} GB raw RGBA8)",
+		p.tag,
+		build.elapsed().as_secs_f64(),
+		area / 1e6,
+		area * 4.0 / 1e9
+	);
+	let tenth = (add.len() / 10).max(1);
+	p.series("add one layer (all steps), first 10 %", &add[..tenth]);
+	p.series("add one layer (all steps), last 10 %", &add[add.len() - tenth..]);
+	p.memory("built");
+	let t = Instant::now();
+	p.rec_settle("view settled after the build (fit)", t);
+	let lat = pan(&mut p, 20);
+	p.series("pan at fit: wheel → frame", &lat);
+	let t = Instant::now();
+	p.zoom(doc, 1.0);
+	p.rec_settle("zoom fit → 100 %", t);
+	let lat = pan(&mut p, 20);
+	p.series("pan at 100 %: wheel → frame", &lat);
+
+	let layers = p.layer_list(doc);
+	let pixel = |l: &&LayerInfo| matches!(l.kind, fx_protocol::LayerInfoKind::Pixel);
+	let top = layers.iter().find(pixel).map(|l| l.id).unwrap();
+	let middle = layers.iter().filter(pixel).nth(layers.iter().filter(pixel).count() / 2).map(|l| l.id).unwrap();
+	for (what, id) in [("top", top), ("middle", middle)] {
+		p.step(doc, vec![Command::SelectLayers { layers: vec![LayerRef::Id(id)] }]);
+		let (lat, up) = stroke(&mut p, doc, 60);
+		p.series(&format!("brush on the {what} layer: pointer → frame"), &lat);
+		p.rec(&format!("brush on the {what} layer: pointer up → history"), up);
+	}
+	let group = layers.iter().find(|l| matches!(l.kind, fx_protocol::LayerInfoKind::Group)).map(|l| l.id).unwrap();
+	for on in [false, true] {
+		let t = Instant::now();
+		p.step(doc, vec![Command::SetLayerProps { layer: LayerRef::Id(group), props: LayerPropsPatch { visible: Some(on), ..Default::default() } }]);
+		p.rec_settle(&format!("group visible={on}"), t);
+	}
+	let d = p.history_action(doc, "hist:undo");
+	p.rec("undo", d);
+	let d = p.history_action(doc, "hist:redo");
+	p.rec("redo", d);
+	let t = Instant::now();
+	p.step(doc, vec![Command::AddLayer { layer: NewLayer::Pixel, name: None }]);
+	p.rec("add one empty layer at the end", t.elapsed());
+
+	let path = dir.0.join("target.fxd");
+	let d = p.save_as(doc, &path);
+	p.rec(&format!("Save As .fxd ({} MiB)", std::fs::metadata(&path).map(|m| m.len() >> 20).unwrap_or(0)), d);
+	p.memory("after Save As");
+	p.step(doc, vec![Command::SelectLayers { layers: vec![LayerRef::Id(middle)] }]);
+	stroke(&mut p, doc, 30);
+	let d = p.save(doc);
+	p.rec("incremental save after a brush stroke", d);
+	p.close(doc);
+	std::thread::sleep(Duration::from_secs(3));
+	p.memory("after closing");
+	let t = Instant::now();
+	p.h.engine.send(EngineInput::Open(vec![path.clone()]));
+	let reopened = p.opened();
+	p.rec("reopen", t.elapsed());
+	p.rec_settle("reopen: first view", t);
+	p.memory("reopened");
+	p.close(reopened);
+}

@@ -74,6 +74,18 @@ pub fn save(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>
 	save_with(request, target, progress, None)
 }
 
+/// VERIFY-FIX(D2): two dedicated threads for background copies.
+fn background_pool() -> &'static rayon::ThreadPool {
+	static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+	POOL.get_or_init(|| {
+		rayon::ThreadPoolBuilder::new()
+			.num_threads(2)
+			.thread_name(|i| format!("fxd-background-{i}"))
+			.build()
+			.expect("background save pool")
+	})
+}
+
 /// VERIFY-FIX(D2): the chunks a detached save's file already holds, by tile
 /// id (ids are never reused within a store, and tiles are immutable).
 #[derive(Default)]
@@ -162,18 +174,25 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		if !progress(done as f32 / total as f32) {
 			return Err(IoError::Cancelled);
 		}
-		let compressed: Vec<Result<Option<Vec<u8>>, IoError>> = batch
-			.par_iter()
-			.map(|tile| match request.store.get(&tile.handle) {
-				Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
-					.map(Some)
-					.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
-				// A mip dropped under memory pressure is simply not stored:
-				// it is rebuilt after opening, like any missing mip.
-				Err(TileError::Evicted) if tile.derived => Ok(None),
-				Err(error) => Err(error.into()),
-			})
-			.collect();
+		let compress = || -> Vec<Result<Option<Vec<u8>>, IoError>> {
+			batch
+				.par_iter()
+				.map(|tile| match request.store.get(&tile.handle) {
+					Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
+						.map(Some)
+						.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
+					// A mip dropped under memory pressure is simply not stored:
+					// it is rebuilt after opening, like any missing mip.
+					Err(TileError::Evicted) if tile.derived => Ok(None),
+					Err(error) => Err(error.into()),
+				})
+				.collect()
+		};
+		// VERIFY-FIX(D2): background copies (recovery snapshots) compress on
+		// their own two threads, not the global pool the engine and the
+		// render loads use: on that pool they made undo at 1,000 layers 2.5×
+		// slower (6.7 ms against 2.7 ms without recovery).
+		let compressed = if detached.is_some() { background_pool().install(compress) } else { compress() };
 		for (tile, result) in batch.iter().zip(compressed) {
 			let Some(bytes) = result? else { continue };
 			let chunk = writer.tile(tile.format, Codec::Zstd, &bytes)?;
