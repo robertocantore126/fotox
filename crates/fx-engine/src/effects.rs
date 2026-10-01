@@ -15,6 +15,68 @@ use fx_core::{Document, LayerId, LayerKind};
 use fx_tiles::{PixelFormat, TILE_SIZE, TileBuffer, TileSlot, TileStore};
 use rayon::prelude::*;
 
+// AUDIT-FIX(FXREGION): retain exact whole-layer fallback behind startup switch.
+pub fn initialise_region_switch() -> bool {
+	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*OLD.get_or_init(|| std::env::var("FOTOX_NO_REGION_EFFECTS").is_ok_and(|v| v == "1"))
+}
+/// Conservative level-zero reach, including the actual renderer's morphology/blur support.
+pub fn apron(styles: &fx_core::styles::LayerStyles) -> u32 {
+	styles
+		.slots()
+		.into_iter()
+		.filter_map(|slot| styles.effect_at(slot, GlobalLight::default()))
+		.map(|p| {
+			let reach = fx_core::styles::LayerStyles::reach(&p) + p.offset.0.hypot(p.offset.1) - p.offset.0.abs().max(p.offset.1.abs());
+			if reach.is_finite() { reach.ceil().max(0.) as u32 } else { u32::MAX }
+		})
+		.max()
+		.unwrap_or(0)
+}
+fn pixel_edit_region(old: &fx_core::Layer, new: &fx_core::Layer) -> Option<[f64; 4]> {
+	// Unknown style/mask/geometry/backdrop dependencies take the whole-layer path.
+	if old.styles != new.styles
+		|| old.mask.is_some()
+		|| new.mask.is_some()
+		|| old.vector_mask.is_some()
+		|| new.vector_mask.is_some()
+		|| (old.visible, old.opacity, old.fill, old.blend, old.clipped) != (new.visible, new.opacity, new.fill, new.blend, new.clipped)
+	{
+		return None;
+	}
+	let styles = new.styles.as_ref()?;
+	if styles
+		.slots()
+		.into_iter()
+		.filter_map(|s| styles.effect_at(s, GlobalLight::default()))
+		.any(|p| p.extra.aligned())
+	{
+		return None;
+	}
+	let (LayerKind::Pixel { image: a, offset: ao }, LayerKind::Pixel { image: b, offset: bo }) = (&old.kind, &new.kind) else {
+		return None;
+	};
+	if ao != bo || (a.width(), a.height(), a.format()) != (b.width(), b.height(), b.format()) {
+		return None;
+	}
+	let mut rect: Option<[f64; 4]> = None;
+	let t = TILE_SIZE as f64;
+	for ty in 0..a.grid(0).rows() {
+		for tx in 0..a.grid(0).cols() {
+			if !a.slot(0, tx, ty).same_as(b.slot(0, tx, ty)) {
+				let q = [
+					tx as f64 * t + ao.0 as f64,
+					ty as f64 * t + ao.1 as f64,
+					(tx + 1) as f64 * t + ao.0 as f64,
+					(ty + 1) as f64 * t + ao.1 as f64,
+				];
+				rect = Some(rect.map_or(q, |r| [r[0].min(q[0]), r[1].min(q[1]), r[2].max(q[2]), r[3].max(q[3])]));
+			}
+		}
+	}
+	rect
+}
+
 /// Mark every effect tile dirty (or rebuild the caches after a canvas size
 /// change, or when the style's list of effects changed). FAST: called on
 /// every content change, whatever layer changed.
@@ -45,6 +107,12 @@ pub fn invalidate(doc: &mut Document, previous: Option<&Document>) {
 	});
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	for id in ids {
+		// AUDIT-FIX(FXREGION): compare authoritative identities before mutating effect cache Arcs.
+		let region = if !global && !initialise_region_switch() {
+			previous.and_then(|p| p.layer(id)).zip(doc.layer(id)).and_then(|(a, b)| pixel_edit_region(a, b))
+		} else {
+			None
+		};
 		let Some(layer) = doc.layer_mut(id) else { continue };
 		let Some(styles) = &layer.styles else { continue };
 		let slots = styles.slots().len();
@@ -52,8 +120,17 @@ pub fn invalidate(doc: &mut Document, previous: Option<&Document>) {
 		if resized {
 			layer.effects = styles.caches(w, h, format);
 		} else {
+			let grown = region.map(|r| {
+				let coarse = 1u64 << fx_tiles::level_count_for(w, h).saturating_sub(1).min(31);
+				let grow = (u64::from(apron(styles)).div_ceil(u64::from(TILE_SIZE)) * u64::from(TILE_SIZE) + coarse) as f64;
+				[r[0] - grow, r[1] - grow, r[2] + grow, r[3] + grow]
+			});
 			for cache in &mut layer.effects {
-				cache.mark_all_dirty();
+				if let Some(rect) = grown {
+					cache.mark_rect_dirty(rect);
+				} else {
+					cache.mark_all_dirty();
+				}
 			}
 		}
 	}

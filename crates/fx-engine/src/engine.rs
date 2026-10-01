@@ -509,6 +509,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		stats,
 		output,
 	} = ctx;
+	let _ = crate::effects::initialise_region_switch(); // AUDIT-FIX(FXREGION): sample environment at startup.
 	crate::text::warm();
 	// AUDIT-FIX(D2): session setup happens before engine ownership moves its shared handles.
 	let recovery = crate::recovery::Recovery::start(store.clone(), internal.clone())
