@@ -345,6 +345,8 @@ struct Engine {
 	recovery: Option<crate::recovery::Recovery>,
 	recovery_pending: std::collections::HashSet<DocId>,
 	recovery_saved: HashMap<DocId, (u64, Instant)>,
+	// AUDIT-FIX(D2): bounded retry cadence after a snapshot failure.
+	recovery_retry: HashMap<DocId, Instant>,
 	recovery_available: Vec<String>,
 	ui_ready: bool,
 	derived_running: bool,
@@ -569,6 +571,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		recovery,
 		recovery_pending: std::collections::HashSet::new(),
 		recovery_saved: HashMap::new(),
+		recovery_retry: HashMap::new(),
 		recovery_available: Vec::new(),
 		ui_ready: false,
 		derived_running: false,
@@ -2600,10 +2603,12 @@ impl Engine {
 				match result {
 					Ok(()) => {
 						if self.docs.get(doc).is_some() {
+							self.recovery_retry.remove(&doc);
 							self.recovery_saved.insert(doc, (generation, Instant::now()));
 						}
 					}
 					Err(error) => {
+						self.recovery_retry.insert(doc, Instant::now() + Duration::from_secs(30));
 						tracing::error!("recovery snapshot failed: {error}");
 						self.to_ui(&EngineToUi::Error {
 							text: format!("Recovery snapshot failed: {error}. Save your document manually."),
@@ -2865,6 +2870,7 @@ impl Engine {
 								recovery.remove(doc);
 							}
 							self.recovery_saved.remove(&doc);
+							self.recovery_retry.remove(&doc);
 						}
 						if let Some((info, _)) = saved {
 							self.to_ui(&EngineToUi::DocumentChanged { info });
@@ -3106,6 +3112,7 @@ impl Engine {
 				recovery.remove(id);
 			}
 			self.recovery_saved.remove(&id);
+			self.recovery_retry.remove(&id);
 			// AUDIT-FIX(D4): discard the closed contents relationship and resume its parent close.
 			self.smart_children.remove(&id);
 			self.layers_sent.remove(&id);
@@ -4567,8 +4574,17 @@ impl Engine {
 			if !open.dirty || self.recovery_pending.contains(&open.id) {
 				continue;
 			}
-			let (saved, at) = self.recovery_saved.entry(open.id).or_insert((0, Instant::now()));
-			if !force && (open.generation == *saved || (open.generation.saturating_sub(*saved) < edits && at.elapsed() < interval)) {
+			// AUDIT-FIX(D2): generation zero may already be dirty (recovered/untitled).
+			if !force && self.recovery_retry.get(&open.id).is_some_and(|until| Instant::now() < *until) {
+				continue;
+			}
+			let (saved, at) = self.recovery_saved.entry(open.id).or_insert((u64::MAX, Instant::now()));
+			let since_saved = if *saved == u64::MAX {
+				open.generation
+			} else {
+				open.generation.saturating_sub(*saved)
+			};
+			if !force && (open.generation == *saved || (since_saved < edits && at.elapsed() < interval)) {
 				continue;
 			}
 			if recovery.snapshot(open.id, open.generation, open.name.clone(), open.doc.clone()) {
