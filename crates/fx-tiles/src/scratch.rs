@@ -127,6 +127,18 @@ impl ScratchFile {
 	/// Reserve space and write `data` there. `None` = the limit is reached.
 	pub fn write(&self, data: &[u8]) -> std::io::Result<Option<Extent>> {
 		let len = u32::try_from(data.len()).map_err(|_| std::io::Error::other("block larger than 4 GiB"))?;
+		// AUDIT-FIX(X1): allocator's logical end may shrink while physical EOF does not.
+		// Conservatively admit every write, including reused extents, against volume reserve.
+		if !crate::health::no_scratch_guards() {
+			if let Some((free, total)) = crate::health::disk_space(self.path.parent().unwrap_or(Path::new(".")))? {
+				let reserve = (5u64 << 30).max(total / 20);
+				let growth = (len as u64).div_ceil(ALIGN).max(1) * ALIGN;
+				if free < reserve.saturating_add(growth) {
+					return Ok(None);
+				}
+			}
+		}
+
 		let Some(extent) = self.allocator.lock().alloc(len) else {
 			return Ok(None);
 		};
