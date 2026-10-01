@@ -3017,7 +3017,18 @@ impl Engine {
 			.smart_children
 			.keys()
 			.filter_map(|id| self.docs.get(*id))
-			.find(|open| open.dirty)
+			.filter(|open| open.dirty)
+			.max_by_key(|open| {
+				// AUDIT-FIX(D4): resolve deepest nested Contents before ancestors.
+				let mut id = open.id;
+				let mut depth = 0;
+				for _ in 0..self.smart_children.len() {
+					let Some((parent, _)) = self.smart_children.get(&id) else { break };
+					id = *parent;
+					depth += 1;
+				}
+				depth
+			})
 			.or_else(|| self.docs.iter().find(|open| open.dirty))
 			.map(|open| (open.id, open.name.clone()));
 		match dirty {
