@@ -251,6 +251,51 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 	Ok(SavedFxd { file, report })
 }
 
+/// VERIFY-FIX(D8): compaction for a file nobody has open. exFAT cannot
+/// replace a file that is open, so `save` skips compaction there and the file
+/// grew without bound; the engine calls this once a document on exFAT is
+/// closed. The newest version is copied to `<path>.compact` with a detached
+/// save (the store's backing is left alone), every handle is released, then
+/// the copy replaces `path`. `Ok(false)`: not needed, or the newest version
+/// is damaged (an older one opened), which compaction would make permanent.
+pub fn compact_closed(path: &Path, store: &TileStore) -> Result<bool, IoError> {
+	{
+		let (file, _) = FxdFile::open(path)?;
+		let footer = file.footer();
+		if !(footer.end_offset > 256 << 20 && needs_compaction(footer.live_bytes, footer.end_offset)) {
+			return Ok(false);
+		}
+	}
+	let mut name = path.as_os_str().to_os_string();
+	name.push(".compact");
+	let compact = PathBuf::from(name);
+	let result = (|| {
+		let opened = super::open(path, store)?;
+		if opened.recovered {
+			return Ok(false);
+		}
+		let mut chunks = DetachedChunks::default();
+		let saved = save_detached(
+			SaveRequest {
+				doc: &opened.document,
+				store,
+				preview: opened.preview.as_ref(),
+			},
+			SaveTarget::Fresh(compact.clone()),
+			&mut chunks,
+			&mut |_| true,
+		)?;
+		drop(saved);
+		drop(opened);
+		crate::fs_util::atomic_replace(&compact, path)?;
+		Ok(true)
+	})();
+	if !matches!(result, Ok(true)) {
+		let _ = std::fs::remove_file(&compact);
+	}
+	result
+}
+
 // AUDIT-FIX(D8): publish a fresh .compact only if the original target still has the checked identity.
 fn compact(request: &SaveRequest<'_>, file: &Arc<FxdFile>, progress: Progress<'_>) -> Result<Option<Arc<FxdFile>>, IoError> {
 	if crate::fs_util::is_exfat(file.path())? {

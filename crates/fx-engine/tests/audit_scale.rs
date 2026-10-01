@@ -728,6 +728,12 @@ fn canvas_size_scaling() {
 			p.close(doc);
 			std::thread::sleep(Duration::from_secs(2));
 			p.memory("after closing");
+			// VERIFY: how memory settles after the close (recovery snapshot in flight?).
+			let polls: u32 = std::env::var("FOTOX_AUDIT_CLOSE_POLLS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+			for k in 0..polls {
+				std::thread::sleep(Duration::from_secs(1));
+				p.memory(&format!("{}s after closing", k + 3));
+			}
 			let t = Instant::now();
 			p.h.engine.send(EngineInput::Open(vec![fxd.clone()]));
 			let doc2 = p.opened();
@@ -1224,4 +1230,190 @@ fn pan_diagnostics() {
 	c.dedup();
 	println!("AUDIT {} a NEW document with a clouds layer, 8 s later at fit: distinct colours sampled {} {:?}", p.tag, c.len(), &c[..c.len().min(3)]);
 	p.h.engine.shutdown();
+}
+
+/// VERIFY(COMPCACHE, FXREGION): the composite cache around the active layer
+/// and region-limited effect invalidation must not change a single pixel.
+/// Run once per configuration (the switches are read at engine start):
+/// default, FOTOX_NO_COMPOSITE_CACHE=1, FOTOX_NO_REGION_EFFECTS=1, and compare
+/// the printed hashes. Deterministic content (fixed seed).
+#[test]
+#[ignore = "audit: compare runs with and without the cache switches"]
+fn cache_switch_pixels() {
+	use std::hash::{Hash, Hasher};
+	let dir = TempDir::new("cache-switch");
+	let Some(mut p) = Probe::start(&dir.0) else { return };
+	p.tag = "[cache-switch]".into();
+	let (cw, ch) = (2048u32, 1536u32);
+	let doc = p.new_document(cw, ch, 8);
+	let mut rng = 0x9e37_79b9_u64;
+	let mut next = move || {
+		rng ^= rng << 13;
+		rng ^= rng >> 7;
+		rng ^= rng << 17;
+		rng
+	};
+	let modes = [
+		BlendMode::Normal,
+		BlendMode::Multiply,
+		BlendMode::Screen,
+		BlendMode::Overlay,
+		BlendMode::Normal,
+		BlendMode::SoftLight,
+		BlendMode::Difference,
+		BlendMode::Normal,
+		BlendMode::ColorDodge,
+		BlendMode::Normal,
+	];
+	for i in 0..40usize {
+		// A smooth gradient patch with a little noise: compressible, like art.
+		let (pw, ph) = (512usize, 384usize);
+		let mut rgba = vec![0u8; pw * ph * 4];
+		let (r0, g0, b0) = ((next() % 200) as u8, (next() % 200) as u8, (next() % 200) as u8);
+		for y in 0..ph {
+			for x in 0..pw {
+				let n = (next() % 16) as u8;
+				let i4 = (y * pw + x) * 4;
+				rgba[i4] = r0.wrapping_add((x / 4) as u8).wrapping_add(n);
+				rgba[i4 + 1] = g0.wrapping_add((y / 3) as u8);
+				rgba[i4 + 2] = b0.wrapping_add(((x + y) / 6) as u8);
+				rgba[i4 + 3] = if (x / 32 + y / 32) % 7 == 0 { 128 } else { 255 };
+			}
+		}
+		p.drain();
+		p.h.engine.send(EngineInput::PasteImage { width: pw as u32, height: ph as u32, rgba8: rgba });
+		p.until("paste", CEILING, |m| match m {
+			EngineToUi::History { doc: d, .. } if *d == doc => Some(()),
+			_ => None,
+		});
+		let dx = (next() % u64::from(cw - 512)) as i32 - (cw as i32 - 512) / 2;
+		let dy = (next() % u64::from(ch - 384)) as i32 - (ch as i32 - 384) / 2;
+		let mut cmds = vec![
+			Command::OffsetLayer { layer: LayerRef::Active, dx, dy },
+			Command::SetLayerProps {
+				layer: LayerRef::Active,
+				props: LayerPropsPatch {
+					blend: Some(modes[i % modes.len()]),
+					opacity: Some(if i % 3 == 0 { 0.7 } else { 1.0 }),
+					clipped: Some(i % 6 == 4),
+					..Default::default()
+				},
+			},
+		];
+		if i % 5 == 2 {
+			let mut styles = fx_core::styles::LayerStyles::default();
+			styles.drop_shadow.push(Default::default());
+			cmds.push(Command::SetLayerStyle { layer: LayerRef::Active, styles: Some(styles) });
+		}
+		if i % 13 == 6 {
+			cmds.push(Command::AddLayer { layer: NewLayer::Adjustment(Adjustment::Invert), name: None });
+		}
+		p.step(doc, cmds);
+		if i % 10 == 9 {
+			let layers = p.layer_list(doc);
+			let top: Vec<LayerRef> = layers.iter().filter(|l| l.depth == 0).take(10).map(|l| LayerRef::Id(l.id)).collect();
+			p.step(doc, vec![Command::GroupLayers { layers: top, name: None }]);
+		}
+	}
+	let frame_hash = |p: &mut Probe, what: &str| {
+		std::thread::sleep(Duration::from_secs(3));
+		let t = Instant::now();
+		let _ = p.settle(t);
+		let px = p.frame_now();
+		let mut h = std::collections::hash_map::DefaultHasher::new();
+		px.hash(&mut h);
+		println!("AUDIT cache-switch {what}: frame {} px, hash {:016x}", px.len(), h.finish());
+		if let Ok(label) = std::env::var("FOTOX_AUDIT_LABEL") {
+			let name = what.replace([' ', ','], "_");
+			let out = std::path::Path::new(&std::env::var("FOTOX_AUDIT_DIR").unwrap_or_else(|_| ".".into())).join(format!("frame-{label}-{name}.raw"));
+			std::fs::write(out, px.iter().flatten().copied().collect::<Vec<u8>>()).unwrap();
+		}
+	};
+	frame_hash(&mut p, "built");
+	// Paint on a pixel layer in the middle of the stack, twice.
+	let layers = p.layer_list(doc);
+	let pixels: Vec<&LayerInfo> = layers.iter().filter(|l| matches!(l.kind, fx_protocol::LayerInfoKind::Pixel)).collect();
+	let middle = pixels[pixels.len() / 2].id;
+	p.step(doc, vec![Command::SelectLayers { layers: vec![LayerRef::Id(middle)] }]);
+	stroke(&mut p, doc, 30);
+	frame_hash(&mut p, "middle layer, stroke 1");
+	stroke(&mut p, doc, 30);
+	frame_hash(&mut p, "middle layer, stroke 2");
+	// Paint on a styled layer: its effect must follow the new pixels.
+	let styled = layers.iter().find(|l| l.styles.is_some() && matches!(l.kind, fx_protocol::LayerInfoKind::Pixel)).map(|l| l.id).unwrap();
+	p.step(doc, vec![Command::SelectLayers { layers: vec![LayerRef::Id(styled)] }]);
+	stroke(&mut p, doc, 30);
+	frame_hash(&mut p, "styled layer, stroke");
+	// Hide and show a layer under the middle one.
+	let below = pixels[pixels.len() * 3 / 4].id;
+	for on in [false, true] {
+		p.step(doc, vec![Command::SetLayerProps { layer: LayerRef::Id(below), props: LayerPropsPatch { visible: Some(on), ..Default::default() } }]);
+	}
+	frame_hash(&mut p, "after hide + show below");
+	let out = dir.0.join("cache-switch.tif");
+	p.export(doc, &out);
+	println!("AUDIT cache-switch export hash {:016x}", file_hash(&out));
+}
+
+/// VERIFY-FIX(D8): on exFAT a document's file cannot be compacted while it is
+/// open, so the engine compacts it after the document closes. Repaint a 4K
+/// layer and save, 10 times (past the 256 MB threshold), close, and watch the file shrink; it must reopen
+/// with the same pixels. `FOTOX_AUDIT_DIR` must be on an exFAT volume.
+#[test]
+#[ignore = "audit: needs FOTOX_AUDIT_DIR on exFAT"]
+fn exfat_compaction_after_close() {
+	let dir = TempDir::new("exfat-compact");
+	let Some(mut p) = Probe::start(&dir.0) else { return };
+	p.tag = "[exfat compaction]".into();
+	let path = dir.0.join("doc.fxd");
+	let doc = p.new_document(4096, 4096, 8);
+	for i in 0..10u32 {
+		p.job(
+			doc,
+			Command::ApplyFilter {
+				layer: LayerRef::Active,
+				filter: FilterParams::AddNoise {
+					amount: 25.0,
+					gaussian: true,
+					monochromatic: false,
+					seed: 100 + i,
+				},
+			},
+		);
+		if i == 0 {
+			p.save_as(doc, &path);
+		} else {
+			p.save(doc);
+		}
+	}
+	let before = std::fs::metadata(&path).unwrap().len();
+	let reference = dir.0.join("before.tif");
+	p.export(doc, &reference);
+	p.close(doc);
+	let t = Instant::now();
+	let mut after = before;
+	while t.elapsed() < Duration::from_secs(60) {
+		std::thread::sleep(Duration::from_millis(250));
+		after = std::fs::metadata(&path).unwrap().len();
+		if after * 2 < before {
+			break;
+		}
+	}
+	println!(
+		"AUDIT exfat compaction: file {} MiB before close, {} MiB {:.1} s after",
+		before >> 20,
+		after >> 20,
+		t.elapsed().as_secs_f64()
+	);
+	p.h.engine.send(EngineInput::Open(vec![path.clone()]));
+	let reopened = p.until("reopen", CEILING, |m| match m {
+		EngineToUi::DocumentOpened { info } => Some(info.doc),
+		_ => None,
+	});
+	let back = dir.0.join("after.tif");
+	p.export(reopened, &back);
+	let same = file_hash(&reference) == file_hash(&back);
+	println!("AUDIT exfat compaction: reopened export identical: {same}");
+	assert!(same, "the compacted file does not hold the saved pixels");
+	assert!(after * 2 < before, "the closed file was not compacted");
 }

@@ -1052,3 +1052,52 @@ fn recovery_snapshots_and_saves_stay_incremental() {
 	assert_eq!(reopen(&x, &dir.join("v1")).unwrap(), Verdict::Exact(versions.clone()));
 	assert_eq!(reopen(&r, &dir.join("v2")).unwrap(), Verdict::Exact(versions));
 }
+
+/// VERIFY-FIX(D8): a document closed on a volume where `save` cannot compact
+/// (exFAT) is compacted by `compact_closed`, exactly.
+#[test]
+#[ignore = "audit: writes ~1.5 GB"]
+fn compact_closed_file() {
+	let dir = fresh_dir("compact-closed");
+	let x = dir.join("doc.fxd");
+	let mut versions = vec![1u64; LAYERS];
+	{
+		let store = make_store(&dir.join("scratch"));
+		let mut doc = versioned_document(&store, &versions);
+		let mut file = save_doc(&doc, &store, SaveTarget::Fresh(x.clone())).unwrap().file;
+		for save in 0..40u64 {
+			let layer = (save as usize) % LAYERS;
+			versions[layer] += 1;
+			doc.layers[layer] = pixel_layer(&store, &mut doc.clone(), layer, versions[layer]);
+			file = save_doc(&doc, &store, SaveTarget::Incremental(file.clone())).unwrap().file;
+		}
+	}
+	let before = std::fs::metadata(&x).unwrap().len();
+	let store = make_store(&dir.join("scratch2"));
+	let t = Instant::now();
+	let done = fxd::compact_closed(&x, &store);
+	let secs = t.elapsed().as_secs_f64();
+	let after = std::fs::metadata(&x).unwrap().len();
+	let leftovers: Vec<String> = std::fs::read_dir(&dir)
+		.unwrap()
+		.filter_map(Result::ok)
+		.map(|e| e.file_name().to_string_lossy().into_owned())
+		.filter(|n| n.contains(".compact") || n.ends_with(".part"))
+		.collect();
+	let verdict = reopen(&x, &dir.join("verify-scratch"));
+	println!(
+		"AUDIT compact-closed on {}: {done:?} in {secs:.2} s, {} MiB → {} MiB; leftovers {leftovers:?}; reopen {verdict:?}",
+		fs_name(&dir),
+		before >> 20,
+		after >> 20
+	);
+	assert_eq!(verdict.unwrap(), Verdict::Exact(versions));
+	assert!(leftovers.is_empty());
+	// On NTFS the saves already compacted the file (nothing to do); on exFAT
+	// they could not, and this must.
+	if done.unwrap() {
+		assert!(after * 2 < before);
+	} else {
+		assert!(before < 512 << 20, "not compacted, yet the file is {} MiB", before >> 20);
+	}
+}

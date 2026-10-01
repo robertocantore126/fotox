@@ -639,6 +639,34 @@ pub(crate) fn run(ctx: EngineContext) {
 	tracing::debug!("engine thread finished");
 }
 
+/// VERIFY-FIX(D8): on exFAT, wait (on a thread) until `file` has no other
+/// user (tiles, history, a queued save), then compact it if it needs it. Not
+/// on NTFS, where `fxd::save` compacts while the document is open.
+fn compact_when_released(file: Arc<fx_io::fxd::FxdFile>, path: PathBuf, store: Arc<TileStore>) {
+	if !fx_io::fs_util::is_exfat(&path).unwrap_or(false) {
+		return;
+	}
+	let footer = file.footer();
+	if !(footer.end_offset > 256 << 20 && fx_io::fxd::needs_compaction(footer.live_bytes, footer.end_offset)) {
+		return;
+	}
+	let _ = std::thread::Builder::new().name("compact-closed".into()).spawn(move || {
+		let deadline = Instant::now() + Duration::from_secs(120);
+		while Arc::strong_count(&file) > 1 {
+			if Instant::now() > deadline {
+				tracing::info!("compaction of {} skipped: the file is still in use", path.display());
+				return;
+			}
+			std::thread::sleep(Duration::from_millis(200));
+		}
+		drop(file);
+		match fx_io::fxd::compact_closed(&path, &store) {
+			Ok(done) => tracing::info!("compaction of closed {}: {done}", path.display()),
+			Err(error) => tracing::warn!("compaction of closed {} failed: {error}", path.display()),
+		}
+	});
+}
+
 impl Engine {
 	/// VERIFY-FIX(P2): run the commands queued while a document was busy, in
 	/// order, until one of them starts another job.
@@ -3164,7 +3192,13 @@ impl Engine {
 		if matches!(self.transform, Some((doc, _)) if doc == id) {
 			self.end_transform(false);
 		}
-		if self.docs.close(id).is_some() {
+		if let Some(closed) = self.docs.close(id) {
+			// VERIFY-FIX(D8): on exFAT `save` cannot compact an open file, so
+			// a closed document's file is compacted once nothing uses it.
+			if let (Some(file), Some(path)) = (closed.file.clone(), closed.path.clone()) {
+				compact_when_released(file, path, self.store.clone());
+			}
+			drop(closed);
 			// AUDIT-FIX(D2): a clean/discarded close removes its recovery entry after queued snapshots.
 			if let Some(recovery) = &self.recovery {
 				recovery.remove(id);
