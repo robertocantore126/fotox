@@ -41,6 +41,8 @@ pub struct OpenDoc {
 	snapshot: Option<Arc<Document>>,
 	/// Derived data (mips) changed without a new revision.
 	snapshot_stale: bool,
+	// AUDIT-FIX(4.1): compare shared layer identities against last edited state.
+	effects_baseline: Option<Document>,
 	/// The open `.fxd` this document was loaded from or last saved to (M3,
 	/// D-027), shared by its backed tiles. `None` for a flat import not yet
 	/// saved: Save then needs a path.
@@ -136,6 +138,7 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			effects_baseline: None,
 			file: None,
 			path: None,
 			source: Some(path.to_path_buf()),
@@ -170,6 +173,7 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			effects_baseline: None,
 			file: None,
 			path: None,
 			source: None,
@@ -242,6 +246,7 @@ impl OpenDoc {
 			hot: None,
 			snapshot: None,
 			snapshot_stale: false,
+			effects_baseline: None,
 			file: Some(opened.file),
 			path: Some(path.to_path_buf()),
 			source: Some(path.to_path_buf()),
@@ -320,7 +325,8 @@ impl OpenDoc {
 	pub fn changed(&mut self) {
 		self.generation += 1;
 		// Layer-style effects follow the content (M6-T08).
-		crate::effects::invalidate(&mut self.doc);
+		crate::effects::invalidate(&mut self.doc, self.effects_baseline.as_ref());
+		self.effects_baseline = Some(self.doc.clone());
 		// Undo can bring back an earlier revision number: never trust it alone.
 		self.snapshot_stale = true;
 	}
