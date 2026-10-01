@@ -90,6 +90,28 @@ impl Audit {
 		common::opened(&self.h)
 	}
 
+	/// VERIFY-FIX(D3/D11): close `doc` (discarding unsaved edits) so the
+	/// next `open` of its file is a real reopen; opening a path that is
+	/// already open now activates its tab instead of opening a second one.
+	fn close_discard(&self, doc: DocId) {
+		self.h.ui(UiToEngine::CloseDocument { doc });
+		let dirty = self.h.wait("the document closed", |s| match s {
+			Seen::Ui(EngineToUi::DocumentClosed { doc: d }) if *d == doc => Some(false),
+			Seen::Ui(EngineToUi::CloseDirtyDocument { doc: d, .. }) if *d == doc => Some(true),
+			_ => None,
+		});
+		if dirty {
+			self.h.ui(UiToEngine::CloseDocumentAnswer {
+				doc,
+				answer: CloseAnswer::DontSave,
+			});
+			self.h.wait("the document closed", |s| match s {
+				Seen::Ui(EngineToUi::DocumentClosed { doc: d }) if *d == doc => Some(()),
+				_ => None,
+			});
+		}
+	}
+
 	fn action(&self, id: &str, args: serde_json::Value) {
 		self.h.ui(UiToEngine::Action { id: id.into(), args });
 	}
@@ -370,10 +392,9 @@ fn placed_picture_keeps_its_resolution() {
 	let big = noise_tiff(&a.dir, "big.tif", 3000, 2400);
 	let doc = a.open(&canvas);
 	a.h.engine.send(EngineInput::Place(vec![big.clone()]));
-	// Paste, name, convert, then the Free Transform box (fit to the canvas).
-	for _ in 0..3 {
-		println!("AUDIT place step → {}", a.next_step(doc));
-	}
+	// VERIFY-FIX(SO1): Place is now one "Place Embedded" step (it was paste,
+	// name, convert), then the Free Transform box (fit to the canvas).
+	println!("AUDIT place step → {}", a.next_step(doc));
 	std::thread::sleep(Duration::from_millis(500));
 	a.h.ui(UiToEngine::Key { key: "Enter".into() });
 	println!("AUDIT place commit → {}", a.next_step(doc));
@@ -508,7 +529,11 @@ fn edit_contents_when_the_parent_goes_away() {
 	let prompt2 = closing.iter().any(|s| s.starts_with("close-dirty"));
 
 	// Case 3: the contents tab is closed with "Save" in the prompt.
-	let doc = a.open(&tif);
+	// VERIFY-FIX(D3/D11): case 2's parent still has noise.tif open, and opening
+	// an open path now activates that tab: use a copy of the file.
+	let tif3 = a.dir.join("noise3.tif");
+	std::fs::copy(&tif, &tif3).unwrap();
+	let doc = a.open(&tif3);
 	a.command(doc, Command::ConvertToSmartObject { layers: vec![LayerRef::Active] });
 	a.action("smart:edit", serde_json::Value::Null);
 	let child = a.opened_doc();
@@ -617,6 +642,7 @@ fn smart_filters_are_reeditable() {
 	let path = a.dir.join("filters.fxd");
 	a.h.engine.send(EngineInput::SaveAs { doc, path: path.clone() });
 	a.dirty(doc);
+	a.close_discard(doc);
 	let reopened = a.open(&path);
 	let back = a.export(reopened);
 	let r_reopen = compare(&back, &redone);
@@ -684,6 +710,7 @@ fn edits_during_a_save_and_failed_saves() {
 	let dirty: Vec<String> = if after_save == Ok(true) { vec!["dirty=true".into()] } else { Vec::new() };
 	assert!(edits_done < saved_at, "the edits waited for the save");
 	assert!(dirty.iter().any(|s| s.contains("dirty=true")), "edits made during the save must keep the document dirty");
+	a.close_discard(doc);
 	let reopened = a.open(&path);
 	let layers = a.h.wait("layers", |s| match s {
 		Seen::Ui(EngineToUi::Layers { doc: d, layers, .. }) if *d == reopened => Some(layers.clone()),
@@ -699,9 +726,13 @@ fn edits_during_a_save_and_failed_saves() {
 
 	// A save that cannot write: a folder that does not exist.
 	let bad = a.dir.join("no-such-folder").join("x.fxd");
+	// VERIFY-FIX(D3/D11): `doc` was closed before the reopen; use the reopened one.
+	let doc = reopened;
 	a.h.engine.send(EngineInput::SaveAs { doc, path: bad });
+	std::thread::sleep(Duration::from_secs(3));
 	let failed = a.drain();
 	println!("AUDIT save to a missing folder → {failed:?}");
+	assert!(failed.iter().any(|s| s.starts_with("error") || s.starts_with("toast")), "a failed save must tell the user");
 	// A save whose target is held open without delete sharing.
 	use std::os::windows::fs::OpenOptionsExt;
 	let held = a.dir.join("held.fxd");
@@ -711,6 +742,7 @@ fn edits_during_a_save_and_failed_saves() {
 	std::thread::sleep(Duration::from_secs(8));
 	let failed = a.drain();
 	drop(guard);
+	assert!(failed.iter().any(|s| s.starts_with("error") || s.starts_with("toast")), "a refused save must tell the user");
 	let parts: Vec<String> = std::fs::read_dir(&a.dir)
 		.unwrap()
 		.filter_map(Result::ok)
