@@ -1,0 +1,9 @@
+extras=smart layers=300: notches without a changed frame 6/6, blank-screen notches 6/6, after close: tiles hot 309 MiB
+extras=smart layers=300: notches without a changed frame 3/6, blank-screen notches 0/6, after close: tiles hot 0 MiB
+extras=smart layers=300: notches without a changed frame 3/6, blank-screen notches 0/6, after close: tiles hot 0 MiB
+extras=smart layers=1000: notches without a changed frame 6/6, blank-screen notches 6/6, after close: tiles hot 721 MiB
+extras=smart layers=1000: notches without a changed frame 6/6, blank-screen notches 6/6, after close: tiles hot 152 MiB
+extras=0 layers=1000: notches without a changed frame 3/6, blank-screen notches 0/6, after close: tiles hot 0 MiB
+extras=0 layers=1000: notches without a changed frame 3/6, blank-screen notches 0/6, after close: tiles hot 0 MiB
+
+[exited with code 0]

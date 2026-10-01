@@ -1,0 +1,58 @@
+test layer_count_scaling ... AUDIT [100 layers, 4000×3000 8-bit] built in 0.4 s: 14 masks, 5 styled, 4 adjustments, 2 Smart Objects, 10 groups
+AUDIT [100 layers, 4000×3000 8-bit] add one layer (paste+move+extras), first 10 % (n=10): p50 3.2 ms, p95 4.0, p99 4.0, max 4.0
+AUDIT [100 layers, 4000×3000 8-bit] add one layer, last 10 % (n=10): p50 3.1 ms, p95 4.7, p99 4.7, max 4.7
+AUDIT [100 layers, 4000×3000 8-bit] mem built: tiles hot 72 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 347 MiB, private 7401 MiB, peak WS 475 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [100 layers, 4000×3000 8-bit] view settled after the build (view settled): 0.0 ms
+AUDIT [100 layers, 4000×3000 8-bit] toggle the bottom group's visibility (settled) (n=4): p50 62.5 ms, p95 67.5, p99 67.5, max 67.5
+AUDIT [100 layers, 4000×3000 8-bit] zoom fit → 100 % (view settled): 31.3 ms
+AUDIT [100 layers, 4000×3000 8-bit] pan at 100 %: wheel → frame (n=30): p50 0.6 ms, p95 1.3, p99 1.7, max 1.7
+AUDIT [100 layers, 4000×3000 8-bit] pan at 100 %: frame intervals (n=36): p50 22.1 ms, p95 24.9, p99 25.3, max 25.3
+AUDIT [100 layers, 4000×3000 8-bit] brush stroke on a new top layer: pointer → frame (n=8): p50 1.3 ms, p95 4.1, p99 4.1, max 4.1
+AUDIT [100 layers, 4000×3000 8-bit] brush stroke: up → history: 2.0 ms
+AUDIT [100 layers, 4000×3000 8-bit] undo (n=5): p50 1.6 ms, p95 1.6, p99 1.6, max 1.6
+AUDIT [100 layers, 4000×3000 8-bit] Save As (21 MiB): 69.1 ms
+AUDIT [100 layers, 4000×3000 8-bit] mem closed: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 273 MiB, private 7260 MiB, peak WS 475 MiB, I/O read 1 MiB write 21 MiB
+AUDIT [100 layers, 4000×3000 8-bit] reopen: 10.4 ms
+AUDIT [100 layers, 4000×3000 8-bit] reopen: first view (view settled): 221.9 ms
+AUDIT [100 layers, 4000×3000 8-bit] reopened layer rows 114 (before 115)
+AUDIT [100 layers, 4000×3000 8-bit] mem reopened: tiles hot 134 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 408 MiB, private 7395 MiB, peak WS 475 MiB, I/O read 23 MiB write 21 MiB
+AUDIT [100 layers, 4000×3000 8-bit] mem closed again: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 274 MiB, private 7264 MiB, peak WS 475 MiB, I/O read 23 MiB write 21 MiB
+AUDIT [1000 layers, 4000×3000 8-bit] built in 5.6 s: 143 masks, 50 styled, 40 adjustments, 20 Smart Objects, 100 groups
+AUDIT [1000 layers, 4000×3000 8-bit] add one layer (paste+move+extras), first 10 % (n=100): p50 3.3 ms, p95 4.9, p99 12.5, max 14.0
+AUDIT [1000 layers, 4000×3000 8-bit] add one layer, last 10 % (n=100): p50 6.5 ms, p95 12.6, p99 16.8, max 18.4
+AUDIT [1000 layers, 4000×3000 8-bit] mem built: tiles hot 1018 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1391 MiB, private 8409 MiB, peak WS 1393 MiB, I/O read 23 MiB write 21 MiB
+AUDIT [1000 layers, 4000×3000 8-bit] view settled after the build (view settled): 1492.0 ms
+AUDIT [1000 layers, 4000×3000 8-bit] toggle the bottom group's visibility (settled) (n=4): p50 10.4 ms, p95 10.8, p99 10.8, max 10.8
+AUDIT [1000 layers, 4000×3000 8-bit] zoom fit → 100 % (view settled): 10.0 ms
+AUDIT [1000 layers, 4000×3000 8-bit] pan at 100 %: wheel → frame: no samples
+AUDIT [1000 layers, 4000×3000 8-bit] pan at 100 %: frame intervals (n=30): p50 10020.2 ms, p95 10023.7, p99 10023.8, max 10023.8
+AUDIT [1000 layers, 4000×3000 8-bit] brush stroke on a new top layer: pointer → frame (n=8): p50 3.7 ms, p95 4.2, p99 4.2, max 4.2
+AUDIT [1000 layers, 4000×3000 8-bit] brush stroke: up → history: 3.2 ms
+AUDIT [1000 layers, 4000×3000 8-bit] undo (n=5): p50 2.3 ms, p95 4.4, p99 4.4, max 4.4
+AUDIT [1000 layers, 4000×3000 8-bit] Save As (218 MiB): 707.8 ms
+AUDIT [1000 layers, 4000×3000 8-bit] mem closed: tiles hot 949 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1266 MiB, private 8262 MiB, peak WS 1407 MiB, I/O read 24 MiB write 239 MiB
+AUDIT [1000 layers, 4000×3000 8-bit] reopen: 31.7 ms
+AUDIT [1000 layers, 4000×3000 8-bit] reopen: first view (view settled): 33.9 ms
+AUDIT [1000 layers, 4000×3000 8-bit] reopened layer rows 1140 (before 1141)
+AUDIT [1000 layers, 4000×3000 8-bit] mem reopened: tiles hot 949 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1271 MiB, private 8269 MiB, peak WS 1407 MiB, I/O read 26 MiB write 239 MiB
+AUDIT [1000 layers, 4000×3000 8-bit] mem closed again: tiles hot 949 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1271 MiB, private 8268 MiB, peak WS 1407 MiB, I/O read 26 MiB write 239 MiB
+AUDIT [5000 layers, 4000×3000 8-bit] built in 115.4 s: 714 masks, 250 styled, 200 adjustments, 100 Smart Objects, 500 groups
+AUDIT [5000 layers, 4000×3000 8-bit] add one layer (paste+move+extras), first 10 % (n=500): p50 3.4 ms, p95 6.5, p99 11.1, max 13.6
+AUDIT [5000 layers, 4000×3000 8-bit] add one layer, last 10 % (n=500): p50 37.1 ms, p95 66.6, p99 74.7, max 114.2
+AUDIT [5000 layers, 4000×3000 8-bit] mem built: tiles hot 1888 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 2378 MiB, private 9384 MiB, peak WS 2603 MiB, I/O read 26 MiB write 239 MiB
+AUDIT [5000 layers, 4000×3000 8-bit] view settled after the build (view settled): 1054.0 ms
+AUDIT [5000 layers, 4000×3000 8-bit] toggle the bottom group's visibility (settled) (n=4): p50 34.9 ms, p95 35.0, p99 35.0, max 35.0
+AUDIT [5000 layers, 4000×3000 8-bit] zoom fit → 100 % (view settled): 22.1 ms
+AUDIT [5000 layers, 4000×3000 8-bit] pan at 100 %: wheel → frame: no samples
+AUDIT [5000 layers, 4000×3000 8-bit] pan at 100 %: frame intervals (n=30): p50 10019.0 ms, p95 10026.8, p99 10028.9, max 10028.9
+AUDIT [5000 layers, 4000×3000 8-bit] brush stroke on a new top layer: pointer → frame (n=8): p50 5.0 ms, p95 19.8, p99 19.8, max 19.8
+AUDIT [5000 layers, 4000×3000 8-bit] brush stroke: up → history: 18.3 ms
+AUDIT [5000 layers, 4000×3000 8-bit] undo (n=5): p50 12.0 ms, p95 30.2, p99 30.2, max 30.2
+AUDIT [5000 layers, 4000×3000 8-bit] Save As (1090 MiB): 3407.6 ms
+AUDIT [5000 layers, 4000×3000 8-bit] mem closed: tiles hot 538 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 566 MiB, private 7905 MiB, peak WS 2603 MiB, I/O read 27 MiB write 1330 MiB
+AUDIT [5000 layers, 4000×3000 8-bit] reopen: 136.2 ms
+AUDIT [5000 layers, 4000×3000 8-bit] reopen: first view (view settled): 151.3 ms
+AUDIT [5000 layers, 4000×3000 8-bit] reopened layer rows 5700 (before 5701)
+AUDIT [5000 layers, 4000×3000 8-bit] mem reopened: tiles hot 539 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 600 MiB, private 7941 MiB, peak WS 2603 MiB, I/O read 28 MiB write 1330 MiB
+AUDIT [5000 layers, 4000×3000 8-bit] mem closed again: tiles hot 538 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 597 MiB, private 7943 MiB, peak WS 2603 MiB, I/O read 28 MiB write 1330 MiB
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 764.00s

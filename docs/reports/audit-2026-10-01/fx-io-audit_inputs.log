@@ -1,0 +1,28 @@
+test canvas_sized_layers_metadata ... AUDIT input fxd: 30000² canvas, 1000 canvas-sized layers, one real tile each: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 1000 layers, 1000 tiles read, 0 tile errors None") in 0.50 s, child peak private 1028 MiB; 0.6 s; peak private ≈ 228 MiB
+AUDIT input fxd: 300000² canvas, 1 canvas-sized layers, one real tile each: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 1 layers, 1 tiles read, 0 tile errors None") in 0.25 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 1 MiB
+AUDIT input fxd: 300000² canvas, 10 canvas-sized layers, one real tile each: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 10 layers, 10 tiles read, 0 tile errors None") in 0.35 s, child peak private 1026 MiB; 0.6 s; peak private ≈ 0 MiB
+test child_open ... ok
+test crafted_fxd_files ... AUDIT input fxd: footer → manifest chunk of 1 TiB: exit Some(-1073740791) (0xC0000409); (no result; stderr: note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace); 0.3 s; peak private ≈ 0 MiB
+AUDIT input fxd: tile chunk reference of 1 TiB: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 1 layers, 1 tiles read, 1 tile errors Some(\"corrupted tile data: decode error: corrupt chunk at 64: header says 34 payload bytes, expected 1099511627760\")") in 0.23 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 0 MiB
+AUDIT input fxd: tile chunk past the end of the file: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 1 layers, 1 tiles read, 1 tile errors Some(\"corrupted tile data: unexpected end of file\")") in 0.23 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 0 MiB
+AUDIT input fxd: 300 000² canvas, 1 layers (each a 512² image): exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 1 layers, 1 tiles read, 0 tile errors None") in 0.22 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 1 MiB
+AUDIT input fxd: 300 000² canvas, 20 layers (each a 512² image): exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 20 layers, 20 tiles read, 0 tile errors None") in 0.23 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 0 MiB
+AUDIT input fxd: 300 000² canvas, 200 layers (each a 512² image): exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 200 layers, 200 tiles read, 0 tile errors None") in 0.25 s, child peak private 1027 MiB; 0.3 s; peak private ≈ 1 MiB
+AUDIT input groups nested 50 deep: save → Ok("ok")
+AUDIT input fxd: groups nested 50 deep: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 51 layers, 0 tiles read, 0 tile errors None") in 0.24 s, child peak private 1028 MiB; 0.3 s; peak private ≈ 1 MiB
+AUDIT input groups nested 60 deep: save → Ok("ok")
+AUDIT input fxd: groups nested 60 deep: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 61 layers, 0 tiles read, 0 tile errors None") in 0.22 s, child peak private 1029 MiB; 0.3 s; peak private ≈ 1 MiB
+AUDIT input groups nested 200 deep: save → Ok("ok")
+AUDIT input fxd: groups nested 200 deep: exit Some(0) (0x0); test child_open ... CHILD-RESULT Err("decode error: manifest JSON: recursion limit exceeded at line 1 column 14638") in 0.23 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 0 MiB
+  (bomb payload 32 KiB → 1 GiB)
+AUDIT input fxd: manifest bomb (64 KiB → 1 GiB): exit Some(0) (0x0); test child_open ... CHILD-RESULT Err("decode error: manifest JSON: EOF while parsing a value at line 1 column 1073741824") in 1.05 s, child peak private 1026 MiB; 1.1 s; peak private ≈ 1026 MiB
+test crafted_image_files ... AUDIT input TIFF 300 000² RGBA16, one strip: exit Some(-1073740791) (0xC0000409); (no result; stderr: note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace); 0.3 s; peak private ≈ 0 MiB
+AUDIT input TIFF 12 000² RGBA16, one strip: exit Some(0) (0x0); test child_open ... CHILD-RESULT Err("failed to fill whole buffer") in 0.23 s, child peak private 2227 MiB; 0.3 s; peak private ≈ 1 MiB
+AUDIT input TIFF 12 000² RGBA16, 64-row strips: exit Some(0) (0x0); test child_open ... CHILD-RESULT Err("failed to fill whole buffer") in 0.24 s, child peak private 86 MiB; 0.3 s; peak private ≈ 2 MiB
+AUDIT input JPEG header 65 535 × 65 535: KILLED by the parent (private 16417 MiB, 0 s); (no result; stderr: ); 0.3 s; peak private ≈ 16417 MiB
+AUDIT input JPEG header 30 000 × 30 000: KILLED by the parent (private 6868 MiB, 8 s); (no result; stderr: ); 8.1 s; peak private ≈ 6868 MiB
+test plain_small_fxd_open_peak ... AUDIT plain manifest: 418 B compressed, frame content size Ok(Some(758))
+AUDIT input fxd: a 512² one-layer file saved by fxd::save: exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("opened: 1 layers, 1 tiles read, 0 tile errors None") in 0.28 s, child peak private 1026 MiB; 0.3 s; peak private ≈ 1 MiB
+test tiff_strip_layout_peak_memory ... AUDIT input TIFF 10 000² RGB16 uncompressed, 64-row strips (572 MiB file): exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("imported 10000×10000") in 0.90 s, child peak private 830 MiB; 1.0 s; peak private ≈ 761 MiB
+AUDIT input TIFF 10 000² RGB16 uncompressed, 10000-row strips (572 MiB file): exit Some(0) (0x0); test child_open ... CHILD-RESULT Ok("imported 10000×10000") in 1.09 s, child peak private 1573 MiB; 1.2 s; peak private ≈ 1359 MiB
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.20s

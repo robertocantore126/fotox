@@ -1,0 +1,37 @@
+test canvas_size_scaling ... AUDIT startup mem engine started, no document: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 0 MiB | process WS 92 MiB, private 276 MiB, peak WS 145 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [16384² 16-bit] new document: 74.4 ms
+AUDIT [16384² 16-bit] first view (view settled): 102.1 ms
+AUDIT [16384² 16-bit] mem new white document (sparse: solid tiles): tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 101 MiB, private 6978 MiB, peak WS 145 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [16384² 16-bit] full-canvas gradient (job): 1675.8 ms
+AUDIT [16384² 16-bit] full-canvas Add Noise 25 % (job): 3978.7 ms
+AUDIT [16384² 16-bit] after noise (view settled): 6075.2 ms
+AUDIT [16384² 16-bit] mem one full noise layer: tiles hot 921 MiB, warm 2278 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 3401 MiB, private 10290 MiB, peak WS 5239 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [16384² 16-bit] zoom fit → 100 % (view settled): 17.7 ms
+AUDIT [16384² 16-bit] pan at 100 %: wheel → frame (n=30): p50 0.8 ms, p95 3.8, p99 4.1, max 4.1
+AUDIT [16384² 16-bit] pan at 100 %: frame intervals (n=33): p50 24.1 ms, p95 29.0, p99 33.7, max 33.7
+AUDIT [16384² 16-bit] zoom 100 % → 3 % (view settled): 7.0 ms
+AUDIT [16384² 16-bit] zoom 3 % → 100 % (view settled): 2.8 ms
+AUDIT [16384² 16-bit] brush stroke 60 moves: pointer → frame (n=12): p50 2.1 ms, p95 3.7, p99 3.8, max 3.8
+AUDIT [16384² 16-bit] brush stroke: pointer up → history: 1.6 ms
+AUDIT [16384² 16-bit] select 50 % rect + fill + deselect: 887.1 ms
+AUDIT [16384² 16-bit] free transform rotate+scale of the noise layer: 8166.7 ms
+AUDIT [16384² 16-bit]   a zoom sent during it answered after: 8166.6 ms
+AUDIT [16384² 16-bit] duplicate layer: 3.1 ms
+AUDIT [16384² 16-bit] hide a full layer (view settled): 66.7 ms
+AUDIT [16384² 16-bit] mem after the edits (history holds the old tiles): tiles hot 1534 MiB, warm 2861 MiB, scratch 1194 MiB, gpu reserved 6656 MiB | process WS 4257 MiB, private 11145 MiB, peak WS 5565 MiB, I/O read 125 MiB write 1300 MiB
+AUDIT [16384² 16-bit] undo (n=3): p50 1.5 ms, p95 1.6, p99 1.6, max 1.6
+AUDIT [16384² 16-bit] redo (n=3): p50 1.5 ms, p95 1.5, p99 1.5, max 1.5
+AUDIT [16384² 16-bit] Save As .fxd (1612 MiB): 3973.0 ms
+AUDIT [16384² 16-bit] mem after saving: tiles hot 921 MiB, warm 978 MiB, scratch 1815 MiB, gpu reserved 6656 MiB | process WS 2105 MiB, private 8995 MiB, peak WS 5565 MiB, I/O read 126 MiB write 3548 MiB
+AUDIT [16384² 16-bit] export TIFF (1536 MiB): 8761.1 ms
+AUDIT [16384² 16-bit] pan during an incremental save: wheel → frame (n=10): p50 0.8 ms, p95 2.4, p99 2.4, max 2.4
+AUDIT [16384² 16-bit] mem after closing: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 195 MiB, private 7079 MiB, peak WS 5565 MiB, I/O read 2059 MiB write 5084 MiB
+AUDIT [16384² 16-bit] reopen: 20.8 ms
+AUDIT [16384² 16-bit] reopen: first view (view settled): 23.3 ms
+AUDIT [16384² 16-bit] mem reopened (lazy): tiles hot 997 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1347 MiB, private 8250 MiB, peak WS 5565 MiB, I/O read 5014 MiB write 5084 MiB
+AUDIT [16384² 16-bit] export after reopen: 8652.5 ms
+AUDIT [16384² 16-bit] reopened export identical to the pre-save export: true
+AUDIT [16384² 16-bit] edit after reopen: 1.1 ms
+AUDIT [16384² 16-bit] incremental save after a property edit (1618 MiB file): 26.0 ms
+AUDIT [16384² 16-bit] mem closed again: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 194 MiB, private 7077 MiB, peak WS 5565 MiB, I/O read 9610 MiB write 6627 MiB
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 54.11s

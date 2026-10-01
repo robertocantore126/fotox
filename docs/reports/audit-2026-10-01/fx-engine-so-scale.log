@@ -1,0 +1,18 @@
+test smart_objects_at_scale ... AUDIT [SO 8192² 8-bit ×20] mem source layer painted: tiles hot 667 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 799 MiB, private 7689 MiB, peak WS 799 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [SO 8192² 8-bit ×20] Convert to Smart Object (engine thread): 674.5 ms
+AUDIT [SO 8192² 8-bit ×20] view after convert (view settled): 677.1 ms
+AUDIT [SO 8192² 8-bit ×20] mem one Smart Object: tiles hot 942 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1052 MiB, private 7944 MiB, peak WS 1080 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [SO 8192² 8-bit ×20] 20 instances duplicated and transformed: 61.3 ms
+AUDIT [SO 8192² 8-bit ×20] view after the instances (view settled): 61.3 ms
+AUDIT [SO 8192² 8-bit ×20] mem instances drawn at fit: tiles hot 942 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1057 MiB, private 7947 MiB, peak WS 1080 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [SO 8192² 8-bit ×20] zoom to 100 % (view settled): 2.1 ms
+AUDIT [SO 8192² 8-bit ×20] mem instances drawn at 100 %: tiles hot 942 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1057 MiB, private 7947 MiB, peak WS 1080 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [SO 8192² 8-bit ×20] pan at 100 % over instances: wheel → changed frame (n=20): p50 0.6 ms, p95 1.1, p99 1.2, max 1.2
+AUDIT [SO 8192² 8-bit ×20] pan: frame intervals (n=19): p50 23.5 ms, p95 29.6, p99 30.7, max 30.7
+AUDIT [SO 8192² 8-bit ×20] 4 smart filters added (jobs): 6.0 ms
+AUDIT [SO 8192² 8-bit ×20] the filter stack never showed within 120 s
+AUDIT [SO 8192² 8-bit ×20] view with the filter stack (view settled): 2006.8 ms
+AUDIT [SO 8192² 8-bit ×20] zoom to 5 % with the stack (view settled): 2.5 ms
+AUDIT [SO 8192² 8-bit ×20] zoom back to 100 % (view settled): 2.3 ms
+AUDIT [SO 8192² 8-bit ×20] mem with the filter stack: tiles hot 942 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1118 MiB, private 8014 MiB, peak WS 1125 MiB, I/O read 0 MiB write 0 MiB
+thread 'smart_objects_at_scale' (641256) panicked at crates\fx-engine\tests\audit_scale.rs:125:13:

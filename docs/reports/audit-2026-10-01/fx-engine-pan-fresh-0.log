@@ -1,0 +1,18 @@
+test pan_diagnostics ... AUDIT [pan diag 1000 layers, extras 0] built; view settled (view settled): 904.7 ms
+AUDIT [pan diag 1000 layers, extras 0] mem built: tiles hot 1250 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 1716 MiB, private 8813 MiB, peak WS 1716 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] at fit: distinct colours sampled 4566 (first [[0, 0, 0, 255], [77, 128, 138, 255], [84, 118, 133, 255]])
+AUDIT [pan diag 1000 layers, extras 0] zoom to 100 %: settled Some(36.9932ms), frames so far 2046
+AUDIT [pan diag 1000 layers, extras 0] notch 0: view after 3.1 ms (View { doc: DocId(1), zoom: 1.0, center_x: 2000.0, center_y: 1500.0, rotation_deg: 0.0 } zoom 1); frames +1; changed frame Some(1.1307ms); distinct colours sampled 4946 [[0, 13, 214, 255], [0, 19, 226, 255]]
+AUDIT [pan diag 1000 layers, extras 0] notch 1: view after 3.0 ms (View { doc: DocId(1), zoom: 1.0, center_x: 2000.0, center_y: 1560.0, rotation_deg: 0.0 } zoom 1); frames +1; changed frame Some(545.3µs); distinct colours sampled 4935 [[0, 15, 162, 255], [0, 36, 200, 255]]
+AUDIT [pan diag 1000 layers, extras 0] notch 2: view after 5013.2 ms (View { doc: DocId(1), zoom: 1.0, center_x: 2000.0, center_y: 1680.0, rotation_deg: 0.0 } zoom 1); frames +1; changed frame None; distinct colours sampled 4931 [[0, 19, 214, 255], [0, 29, 160, 255]]
+AUDIT [pan diag 1000 layers, extras 0] notch 3: view after 5006.9 ms (View { doc: DocId(1), zoom: 1.0, center_x: 2000.0, center_y: 1740.0, rotation_deg: 0.0 } zoom 1); frames +1; changed frame None; distinct colours sampled 4936 [[0, 22, 113, 255], [0, 32, 106, 255]]
+AUDIT [pan diag 1000 layers, extras 0] notch 4: view after 47.2 ms (View { doc: DocId(1), zoom: 1.0, center_x: 2000.0, center_y: 1800.0, rotation_deg: 0.0 } zoom 1); frames +1; changed frame Some(16.6736ms); distinct colours sampled 4935 [[0, 1, 4, 255], [0, 2, 173, 255]]
+AUDIT [pan diag 1000 layers, extras 0] notch 5: view after 5011.5 ms (View { doc: DocId(1), zoom: 1.0, center_x: 2000.0, center_y: 1860.0, rotation_deg: 0.0 } zoom 1); frames +1; changed frame None; distinct colours sampled 4932 [[0, 2, 84, 255], [0, 10, 41, 255]]
+AUDIT [pan diag 1000 layers, extras 0] mem 5s after close: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 420 MiB, private 7420 MiB, peak WS 1791 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] mem 10s after close: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 420 MiB, private 7420 MiB, peak WS 1791 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] mem 15s after close: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 420 MiB, private 7420 MiB, peak WS 1791 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] mem 20s after close: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 420 MiB, private 7420 MiB, peak WS 1791 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] mem 25s after close: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 420 MiB, private 7420 MiB, peak WS 1791 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] mem 30s after close: tiles hot 0 MiB, warm 0 MiB, scratch 0 MiB, gpu reserved 6656 MiB | process WS 420 MiB, private 7420 MiB, peak WS 1791 MiB, I/O read 0 MiB write 0 MiB
+AUDIT [pan diag 1000 layers, extras 0] a NEW document with a clouds layer, 8 s later at fit: distinct colours sampled 494 [[0, 0, 0, 255], [40, 40, 40, 255], [54, 90, 164, 255]]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 65.50s
