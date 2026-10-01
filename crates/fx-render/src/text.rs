@@ -125,6 +125,12 @@ impl TextLayout {
 		self.size
 	}
 
+	/// Actual glyph outline bounds, including warp and overhang, in frame coordinates.
+	pub fn outline_box(&self) -> Option<[f64; 4]> {
+		// AUDIT-FIX(SO1): line rectangles precede warp and miss italic glyph overhang.
+		runs_box(&self.runs)
+	}
+
 	/// Whether the layout drew nothing (empty text, or glyphs with no outline).
 	pub fn is_empty(&self) -> bool {
 		self.glyphs == 0

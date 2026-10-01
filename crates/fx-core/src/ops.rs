@@ -184,6 +184,11 @@ pub trait PixelOps: Send + Sync {
 	/// (Flatten's white). Used by merge, flatten and stamp (M4-T08).
 	fn composite(&self, doc: &Document, layers: &[LayerId], background: Option<[u16; 4]>, store: &TileStore) -> Result<TiledImage, CommandError>;
 
+	// AUDIT-FIX(SO1): engine font geometry must be measured without a clipped raster cache.
+	fn text_bounds(&self, _content: &crate::text::TextContent, _ppi: f32) -> Result<Option<[f64; 4]>, CommandError> {
+		Err(CommandError::NotAllowed("text bounds require the engine font layout".into()))
+	}
+
 	/// `image`'s pixels converted from `from` to `to` (Convert to Profile,
 	/// M4-T03): level 0, alpha untouched.
 	fn convert(&self, image: &TiledImage, conversion: &Conversion<'_>, store: &TileStore) -> Result<TiledImage, CommandError>;

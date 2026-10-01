@@ -82,13 +82,18 @@ pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &Co
 	let ops = pixel_ops(ctx, "Convert to Smart Object")?;
 	// Bottom → top, as a document stores them.
 	let mut order: Vec<LayerId> = doc.panel_order().into_iter().filter(|id| ids.contains(id)).collect();
+	// AUDIT-FIX(SO1): a selected group already owns selected descendants; embed each root once.
+	order.retain(|id| {
+		doc.path_of(*id)
+			.is_none_or(|path| !(1..path.len()).any(|n| id_at_path(doc, &path[..n]).is_some_and(|ancestor| ids.contains(&ancestor))))
+	});
 	order.reverse();
 	let top = *order.last().expect("not empty");
 	// AUDIT-FIX(SO1): retain complete pixel extents, including outside the parent canvas.
 	let mut bounds = None;
 	for id in &order {
 		if let Some(layer) = doc.layer(*id) {
-			union_bounds(layer, doc, &mut bounds)?;
+			union_bounds(layer, doc, &mut bounds, ops)?;
 		}
 	}
 	let [x0, y0, x1, y1] = bounds.unwrap_or([0., 0., doc.width as f64, doc.height as f64]);
@@ -107,6 +112,10 @@ pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &Co
 	nested = nested.with_id_state(next_id, counters);
 	nested.layers = order.iter().filter_map(|id| find_arc(&doc.layers, *id)).collect();
 	nested.selected = vec![top];
+	// AUDIT-FIX(SO1): embedded styles/fills need the parent pattern resources.
+	nested.patterns = doc.patterns.clone();
+	nested.global_light = doc.global_light;
+	nested.global_altitude = doc.global_altitude;
 	shift_offsets(&mut nested, -(x0 as i32), -(y0 as i32), (w, h), ctx.tiles)?;
 	set_canvas(&mut nested, w, h);
 	let composite = ops.composite(&nested, &order, None, ctx.tiles)?;
@@ -135,8 +144,8 @@ pub(super) fn convert_to_smart(doc: &mut Document, layers: &[LayerRef], ctx: &Co
 }
 
 // AUDIT-FIX(SO1): geometry bounds avoid rasterising through the cropped parent canvas.
-fn union_bounds(layer: &Layer, doc: &Document, union: &mut Option<[f64; 4]>) -> Result<(), CommandError> {
-	let b = match &layer.kind {
+fn union_bounds(layer: &Layer, doc: &Document, union: &mut Option<[f64; 4]>, ops: &dyn PixelOps) -> Result<(), CommandError> {
+	let mut b = match &layer.kind {
 		LayerKind::Pixel { image, offset } => [
 			offset.0 as f64,
 			offset.1 as f64,
@@ -161,19 +170,45 @@ fn union_bounds(layer: &Layer, doc: &Document, union: &mut Option<[f64; 4]>) -> 
 			b
 		}
 		LayerKind::Group { children, .. } => {
+			let mut inner = None;
 			for child in children {
-				union_bounds(child, doc, union)?;
+				union_bounds(child, doc, &mut inner, ops)?;
 			}
-			return Ok(());
+			let Some(inner) = inner else {
+				return Ok(());
+			};
+			inner
 		}
-		// FAST: exact font/warp bounds are engine-owned; refuse rather than silently crop.
 		LayerKind::Text { .. } => {
-			return Err(CommandError::NotAllowed(
-				"Convert text separately before converting this selection to a Smart Object".into(),
-			));
+			let Some(content) = layer.kind.text_content() else {
+				return Ok(());
+			};
+			let Some(bounds) = ops.text_bounds(&content, doc.ppi)? else {
+				return Ok(());
+			};
+			bounds
 		}
 		_ => [0., 0., doc.width as f64, doc.height as f64],
 	};
+	// AUDIT-FIX(SO1): include effect support outside the original canvas before compositing.
+	if let Some(styles) = &layer.styles {
+		let light = crate::styles::GlobalLight {
+			angle: doc.global_light,
+			altitude: doc.global_altitude,
+		};
+		let reach = styles
+			.slots()
+			.into_iter()
+			.filter_map(|slot| styles.effect_at(slot, light))
+			.map(|p| crate::styles::LayerStyles::reach(&p) + p.offset.0.hypot(p.offset.1))
+			.fold(0f64, f64::max)
+			.ceil();
+		b[0] -= reach;
+		b[1] -= reach;
+		b[2] += reach;
+		b[3] += reach;
+	}
+
 	*union = Some(union.map_or(b, |a| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]));
 	Ok(())
 }
