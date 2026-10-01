@@ -47,6 +47,8 @@ const K_ADJUST_BW: u32 = 12;
 // M12-T05.
 const K_ADJUST_LUT3D: u32 = 13;
 const K_ADJUST_SELECTIVE: u32 = 14;
+// AUDIT-FIX(COMPCACHE): cached Normal suffix is already premultiplied.
+const K_OVER_SUFFIX: u32 = 15;
 /// Adjustment flag: keep the input's luminance (`composite.wgsl` F_PRESERVE).
 const F_PRESERVE: u32 = 8;
 const K_BEGIN_ISOLATED: u32 = 3;
@@ -439,7 +441,7 @@ impl GpuCompositor {
 					&& layer.styles.is_none()
 					&& matches!(
 						layer.kind,
-						fx_core::LayerKind::Pixel { .. } | fx_core::LayerKind::SolidFill {..} | fx_core::LayerKind::FillLayer { .. }
+						fx_core::LayerKind::Pixel { .. } | fx_core::LayerKind::SolidFill { .. } | fx_core::LayerKind::FillLayer { .. }
 					) {
 					self.above_layers.insert(layer.id);
 				}
@@ -470,6 +472,7 @@ impl GpuCompositor {
 		let mut runnable: Vec<usize> = Vec::new();
 		// AUDIT-FIX(COMPCACHE): pin warm cache before collecting source handles.
 		let mut warm_prefix: Vec<Option<(usize, u32)>> = vec![None; programs.len()];
+		let mut warm_suffix: Vec<Option<(usize, u32)>> = vec![None; programs.len()];
 
 		for (i, program) in programs.iter().enumerate() {
 			check_supported(program)?;
@@ -493,7 +496,12 @@ impl GpuCompositor {
 					warm_prefix[i] = self.atlas.lookup(AtlasKey::Prefix(key)).map(|slot| (split, slot));
 				}
 			}
-			let input_ops = warm_prefix[i].map_or(&program.ops[..], |(split, _)| &program.ops[split..]);
+			if let Some((split, key)) = self.suffix_split(program) {
+				warm_suffix[i] = self.atlas.lookup(AtlasKey::Prefix(key)).map(|slot| (split, slot));
+			}
+			let first = warm_prefix[i].map_or(0, |(split, _)| split);
+			let last = warm_suffix[i].map_or(program.ops.len(), |(split, _)| split);
+			let input_ops = &program.ops[first..last];
 			let mut missing = Vec::new();
 			let mut needed: Vec<(TileId, Arc<TileBuffer>)> = Vec::new();
 			for handle in ops_tiles(input_ops) {
@@ -528,7 +536,9 @@ impl GpuCompositor {
 			// Atlas full this frame: defer every program that needed one of the failed tiles.
 			let failed: HashSet<TileId> = uploads.iter().zip(&slots).filter(|(_, s)| s.is_none()).map(|((id, _), _)| *id).collect();
 			runnable.retain(|&i| {
-				let input_ops = warm_prefix[i].map_or(&programs[i].ops[..], |(split, _)| &programs[i].ops[split..]);
+				let first = warm_prefix[i].map_or(0, |(split, _)| split);
+				let last = warm_suffix[i].map_or(programs[i].ops.len(), |(split, _)| split);
+				let input_ops = &programs[i].ops[first..last];
 				let blocked = ops_tiles(input_ops).iter().any(|h| failed.contains(&h.id()));
 				if blocked {
 					outcomes[i] = Some(TileOutcome::Deferred { missing: Vec::new() });
@@ -559,7 +569,7 @@ impl GpuCompositor {
 		for &i in &runnable {
 			let program = &programs[i];
 			let coord = (program.level, program.tx, program.ty);
-			if jobs.len() + 2 > MAX_JOBS {
+			if jobs.len() + if self.cache_enabled { 3 } else { 2 } > MAX_JOBS {
 				outcomes[i] = Some(TileOutcome::Deferred { missing: Vec::new() });
 				continue;
 			}
@@ -568,7 +578,8 @@ impl GpuCompositor {
 				continue;
 			};
 			let origin = [program.tx * TILE_SIZE, program.ty * TILE_SIZE];
-			let mut main_ops: &[Op] = &program.ops;
+			let main_end = warm_suffix[i].map_or(program.ops.len(), |(split, _)| split);
+			let mut main_ops: &[Op] = &program.ops[..main_end];
 			let mut load_prefix: Option<u32> = None;
 
 			if let Some((split, prefix_key)) = self.prefix_split(program) {
@@ -580,7 +591,7 @@ impl GpuCompositor {
 				if let Some(slot) = cached {
 					self.stats.prefix_hits += 1;
 					load_prefix = Some(slot);
-					main_ops = &program.ops[split..];
+					main_ops = &program.ops[split..main_end];
 				} else if let Some(temp) = self.take_composite_slot()
 					&& let Some(atlas_slot) = self.atlas.allocate(AtlasKey::Prefix(prefix_key))
 				{
@@ -601,6 +612,31 @@ impl GpuCompositor {
 				}
 			}
 
+			// AUDIT-FIX(COMPCACHE): a missing suffix is generated for later frames only.
+			if warm_suffix[i].is_none() {
+				if let Some((split, key)) = self.suffix_split(program) {
+					if let Some(temp) = self.take_composite_slot() {
+						if let Some(atlas_slot) = self.atlas.allocate(AtlasKey::Prefix(key)) {
+							temps.push(temp);
+							let start = gpu_ops.len() as u32;
+							for op in &program.ops[split..] {
+								gpu_ops.push(self.encode(op));
+							}
+							jobs.push(GpuJob {
+								op_start: start,
+								op_count: gpu_ops.len() as u32 - start,
+								out_slot: temp,
+								origin,
+								..Default::default()
+							});
+							prefix_copies.push((temp, atlas_slot));
+						} else {
+							self.composite_free.push(temp);
+						}
+					}
+				}
+			}
+
 			let start = gpu_ops.len() as u32;
 			if let Some(slot) = load_prefix {
 				gpu_ops.push(GpuOp {
@@ -611,6 +647,13 @@ impl GpuCompositor {
 			}
 			for op in main_ops {
 				gpu_ops.push(self.encode(op));
+			}
+			if let Some((_, slot)) = warm_suffix[i] {
+				gpu_ops.push(GpuOp {
+					kind: K_OVER_SUFFIX,
+					src: [slot, EMPTY, EMPTY, EMPTY],
+					..Default::default()
+				});
 			}
 			jobs.push(GpuJob {
 				op_start: start,
@@ -666,6 +709,44 @@ impl GpuCompositor {
 		}
 		crate::program::hash_ops(&program.ops[..split], &mut hasher);
 		Some((split, hasher.finish()))
+	}
+
+	// AUDIT-FIX(COMPCACHE): only independent visible Normal pixel/fill root layers may associate.
+	fn suffix_split(&self, program: &TileProgram) -> Option<(usize, u64)> {
+		if !self.cache_enabled || !self.cache_root || self.cache_context.is_none() {
+			return None;
+		}
+		let hot = self.hot_layer?;
+		let mut depth = 0usize;
+		let mut contains = false;
+		let mut end = None;
+		for (i, op) in program.ops.iter().enumerate() {
+			if depth == 0 {
+				contains = false;
+			}
+			match op {
+				Op::BeginIsolated | Op::BeginPassThrough => depth += 1,
+				Op::EndIsolated { .. } | Op::EndPassThrough { .. } | Op::EndChannels { .. } => depth = depth.checked_sub(1)?,
+				Op::Layer { layer, .. } | Op::Adjust { layer, .. } => contains |= *layer == hot,
+			}
+			if depth == 0 && contains {
+				end = Some(i + 1);
+			}
+		}
+		let end = end?;
+		if program.ops.len().saturating_sub(end) < 2 {
+			return None;
+		}
+		if !program.ops[end..]
+			.iter()
+			.all(|op| matches!(op,Op::Layer {layer,blend:BlendMode::Normal,clip:false,blend_if:None,..} if self.above_layers.contains(layer)))
+		{
+			return None;
+		}
+		let mut h = std::collections::hash_map::DefaultHasher::new();
+		(self.cache_context, program.level, program.tx, program.ty, end, 1u8).hash(&mut h);
+		crate::program::hash_ops(&program.ops[end..], &mut h);
+		Some((end, h.finish()))
 	}
 
 	fn allocate_composite(&mut self, coord: TileCoord, key: u64) -> Option<u32> {

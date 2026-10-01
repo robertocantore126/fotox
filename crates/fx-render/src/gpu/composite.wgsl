@@ -19,6 +19,8 @@ const K_BEGIN_PASS: u32 = 4u;
 const K_END_ISOLATED: u32 = 5u;
 const K_END_PASS: u32 = 6u;
 const K_LOAD_PREFIX: u32 = 7u;
+// AUDIT-FIX(COMPCACHE): suffix cache is premultiplied Normal over.
+const K_OVER_SUFFIX:u32=15u;
 const K_ADJUST_LUMA_LUT: u32 = 8u;
 const K_ADJUST_MATRIX: u32 = 9u;
 const K_ADJUST_BALANCE: u32 = 10u;
@@ -575,6 +577,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 			case K_LOAD_PREFIX: {
 				// premultiplied composite stored in the atlas by an earlier frame
 				stack[sp] = fetch(ops[i].src.x, p);
+			}
+			case K_OVER_SUFFIX: {
+				let suffix=fetch(ops[i].src.x,p);
+				stack[sp]=suffix+(1.0-suffix.a)*stack[sp];
 			}
 			default: {}
 		}
