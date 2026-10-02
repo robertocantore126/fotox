@@ -8,7 +8,7 @@
 # `members`. HOWTO: docs/PLUGINS.md.
 [workspace]
 resolver = "2"
-members = ["sdk", "plain-eraser", "blend-eraser"]
+members = ["sdk", "plain-eraser", "blend-eraser", "feather-eraser"]
 
 [workspace.package]
 version = "0.1.0"

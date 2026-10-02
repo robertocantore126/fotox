@@ -78,6 +78,38 @@ pub fn uses_background(manifest: &Manifest) -> bool {
 	manifest.color == PaintColor::Background
 }
 
+/// The brush with the plugin's overrides (`manifest.brush`): profile,
+/// accumulation, spacing.
+pub fn brush(manifest: &Manifest, mut brush: fx_core::stroke::BrushParams, settings: &ToolSettings, tool: &str) -> fx_core::stroke::BrushParams {
+	fn parse<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
+		serde_json::from_value(serde_json::Value::String(s.to_owned())).ok()
+	}
+	let o = &manifest.brush;
+	if let Some(profile) = o.profile.as_deref().and_then(parse) {
+		brush.profile = profile;
+		brush.tip = 0;
+	}
+	if let Some(accumulate) = o.accumulate.as_deref().and_then(parse) {
+		brush.accumulate = accumulate;
+	}
+	if let Some(spacing) = o.spacing
+		&& settings.number(tool, "Spacing").is_none()
+	{
+		brush.spacing = spacing.clamp(0.01, 10.0);
+	}
+	if let Some(key) = &o.feather_from {
+		let default = field(manifest, key)
+			.and_then(|f| f.get("value"))
+			.and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
+			.unwrap_or(0.0);
+		let feather = settings.number(tool, key).unwrap_or(default).clamp(0.0, 2500.0) as f32;
+		let core = brush.diameter;
+		brush.diameter = (core + 2.0 * feather).min(5000.0);
+		brush.hardness = (core / brush.diameter).clamp(0.0, 1.0);
+	}
+	brush
+}
+
 /// The option-bar field whose key (text without the colon, or `key`) is `key`.
 fn field<'a>(manifest: &'a Manifest, key: &str) -> Option<&'a serde_json::Value> {
 	manifest.options.as_array()?.iter().find(|f| {
@@ -119,4 +151,44 @@ pub fn params(manifest: &Manifest, settings: &ToolSettings, tool: &str) -> [f32;
 		};
 	}
 	out
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn manifest() -> Manifest {
+		serde_json::from_value(serde_json::json!({
+			"id": "f",
+			"name": "F",
+			"brush": { "profile": "feather", "accumulate": "max", "spacing": 0.2, "feather_from": "Feather" },
+			"options": [
+				{ "type": "num", "text": "Feather:", "value": "300" },
+				{ "type": "select", "text": "Tone:", "options": ["A", "B", "C"], "value": "B" }
+			],
+			"params": ["Tone", "Feather"]
+		}))
+		.unwrap()
+	}
+
+	#[test]
+	fn a_feather_widens_the_tip_around_a_solid_core() {
+		let mut settings = ToolSettings::default();
+		let base = fx_core::stroke::BrushParams {
+			diameter: 100.0,
+			tip: 7,
+			..Default::default()
+		};
+		// Not sent yet: the manifest's default feather.
+		let brush = super::brush(&manifest(), base, &settings, "plugin:f");
+		assert_eq!(brush.diameter, 700.0);
+		assert!((brush.hardness - 100.0 / 700.0).abs() < 1e-6);
+		assert_eq!(brush.profile, fx_core::stroke::TipProfile::Feather);
+		assert_eq!(brush.accumulate, fx_core::stroke::Accumulate::Max);
+		assert_eq!(brush.spacing, 0.2);
+		assert_eq!(brush.tip, 0, "a profile forces the round tip");
+		settings.options.insert("plugin:f".into(), serde_json::json!({ "Feather": 50, "Tone": "C" }));
+		assert_eq!(super::brush(&manifest(), base, &settings, "plugin:f").diameter, 200.0);
+		assert_eq!(params(&manifest(), &settings, "plugin:f")[..2], [2.0, 50.0]);
+	}
 }

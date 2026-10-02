@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "feather-eraser"
+version = "0.1.0"
+dependencies = [
+ "fotox-plugin",
+]
+
+[[package]]
 name = "fotox-plugin"
 version = "0.1.0"
 

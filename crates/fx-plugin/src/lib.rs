@@ -68,6 +68,31 @@ pub struct Manifest {
 	/// plugin as params, in order. At most [`MAX_PARAMS`].
 	#[serde(default)]
 	pub params: Vec<String>,
+	/// How the stroke engine paints for this plugin, where it differs from a
+	/// native brush.
+	#[serde(default)]
+	pub brush: BrushOverrides,
+}
+
+/// A plugin's brush settings that the option bar does not show.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrushOverrides {
+	/// The round tip's fall-off: `classic`, `gaussian` or `feather`. Set, it
+	/// also forces the round tip (no sampled tip from Brush Settings).
+	#[serde(default)]
+	pub profile: Option<String>,
+	/// How dabs add up: `build_up` (native) or `max`.
+	#[serde(default)]
+	pub accumulate: Option<String>,
+	/// Dab spacing as a fraction of the diameter, unless the bar has a
+	/// `Spacing` field.
+	#[serde(default)]
+	pub spacing: Option<f32>,
+	/// The option-bar key of a feather width in pixels: the tip becomes
+	/// `Size` of solid core plus that much soft edge on each side (diameter
+	/// `Size + 2 × feather`, hardness `Size / diameter`).
+	#[serde(default)]
+	pub feather_from: Option<String>,
 }
 
 fn default_slot() -> String {

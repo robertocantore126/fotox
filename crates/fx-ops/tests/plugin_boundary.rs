@@ -242,4 +242,162 @@ fn boundary_cost() {
 		report("replay", best(StrokeTool::Eraser), best(plugin));
 		report("live  ", best_live(StrokeTool::Eraser), best_live(plugin));
 	}
+	// The Feather Eraser (swept tip, 8 % spacing) on a 700 px tip, live,
+	// against the native soft eraser of the same outline at 25 %.
+	if let Some(path) = wasm("feather_eraser") {
+		let feather = fx_plugin::load_file(&path).unwrap();
+		let image = varied(4096, &store);
+		let samples = samples(4096);
+		let soft = BrushParams {
+			diameter: 700.0,
+			hardness: 0.0,
+			..Default::default()
+		};
+		let native = (0..3).map(|_| paint_live(&image, StrokeTool::Eraser, soft, &samples, &store)).min().unwrap();
+		let plugin = (0..3)
+			.map(|_| paint_live(&image, feather_tool(feather.key), feather_brush(0.6), &samples, &store))
+			.min()
+			.unwrap();
+		// The same swept-tip coverage through the native Eraser: what the
+		// plugin call adds on top.
+		let swept = (0..3)
+			.map(|_| paint_live(&image, StrokeTool::Eraser, feather_brush(0.6), &samples, &store))
+			.min()
+			.unwrap();
+		eprintln!("  swept coverage with the native Eraser op: {:.0} ms", swept.as_secs_f64() * 1e3);
+		eprintln!(
+			"4096² canvas, 700 px, live: native soft eraser {:.0} ms, feather eraser {:.0} ms ({:.1} ms per pen event)",
+			native.as_secs_f64() * 1e3,
+			plugin.as_secs_f64() * 1e3,
+			plugin.as_secs_f64() * 1e3 / 201.0
+		);
+	}
+}
+
+/// Alpha (0..=255) across a horizontal stroke on an opaque layer, column
+/// `x`, rows `0..h`.
+fn alpha_column(image: &TiledImage, store: &TileStore, x: u32, h: u32) -> Vec<f64> {
+	(0..h)
+		.map(|y| {
+			let tile = bytes(image, store, x / TILE_SIZE, y / TILE_SIZE);
+			f64::from(tile[(((y % TILE_SIZE) * TILE_SIZE + x % TILE_SIZE) * 4 + 3) as usize])
+		})
+		.collect()
+}
+
+/// The feather's width (rows between 5 % and 95 % erased, one side) and its
+/// steepest step (levels per pixel): what makes a seam visible.
+fn feather(column: &[f64]) -> (usize, f64) {
+	let width = column.iter().filter(|a| **a < 255.0 * 0.95 && **a > 255.0 * 0.05).count() / 2;
+	// Over 8 px: a per-pixel step would measure the ±½-level dither.
+	let steepest = column.windows(9).map(|w| (w[8] - w[0]).abs() / 8.0).fold(0.0, f64::max);
+	(width, steepest)
+}
+
+/// An opaque 1024² layer of one colour.
+fn opaque(store: &TileStore) -> TiledImage {
+	let size = 1024;
+	let mut image = TiledImage::new(size, size, PixelFormat::Rgba8);
+	for ty in 0..size / TILE_SIZE {
+		for tx in 0..size / TILE_SIZE {
+			let mut buffer = TileBuffer::zeroed(PixelFormat::Rgba8);
+			buffer.bytes_mut().chunks_exact_mut(4).for_each(|p| p.copy_from_slice(&[200, 180, 160, 255]));
+			image.put_buffer(store, tx, ty, buffer);
+		}
+	}
+	image
+}
+
+fn horizontal(from: f64, to: f64) -> Vec<StrokeSample> {
+	(0..=60)
+		.map(|i| StrokeSample {
+			x: from + (to - from) * f64::from(i) / 60.0,
+			y: 512.0,
+			pressure: 1.0,
+			tilt_x: 0.0,
+			tilt_y: 0.0,
+			time_us: 0,
+		})
+		.collect()
+}
+
+/// The brush the engine builds for the Feather Eraser (its manifest's
+/// `brush`): Size 100 core + Feather 300 each side.
+fn feather_brush(flow: f32) -> BrushParams {
+	BrushParams {
+		diameter: 700.0,
+		hardness: 100.0 / 700.0,
+		flow,
+		profile: fx_core::stroke::TipProfile::Feather,
+		accumulate: fx_core::stroke::Accumulate::Max,
+		spacing: 0.2,
+		..Default::default()
+	}
+}
+
+fn feather_tool(plugin: u64) -> StrokeTool {
+	let mut params = [0.0f32; 16];
+	params[1] = 300.0;
+	StrokeTool::Plugin { id: plugin, params }
+}
+
+#[test]
+fn feather_eraser_fades_long_and_gently_past_its_outline() {
+	let Some(path) = wasm("feather_eraser") else { return };
+	let plugin = fx_plugin::load_file(&path).unwrap();
+	let store = store();
+	let image = opaque(&store);
+	let (out, _) = paint(&image, feather_tool(plugin.key), feather_brush(1.0), &horizontal(100.0, 900.0), &store);
+	let column = alpha_column(&out, &store, 512, 1024);
+	let (width, steepest) = feather(&column);
+	// For comparison only: the native soft eraser of the same outline.
+	let soft = BrushParams {
+		diameter: 700.0,
+		hardness: 0.0,
+		..Default::default()
+	};
+	let (native, _) = paint(&image, StrokeTool::Eraser, soft, &horizontal(100.0, 900.0), &store);
+	let (n_width, n_step) = feather(&alpha_column(&native, &store, 512, 1024));
+	eprintln!("feather eraser: fade {width} px, steepest {steepest:.2} levels/px; native soft eraser, same outline: {n_width} px, {n_step:.2}");
+	assert!(column[512] < 3.0, "the core is erased: alpha {}", column[512]);
+	assert!(column[512 - 50] < 3.0, "the whole 100 px core: alpha {}", column[512 - 50]);
+	assert!(width >= 220, "the fade spans most of the 300 px feather: {width} px");
+	assert!(steepest < 1.6, "no step steeper than 1.6 levels/px: {steepest:.2}");
+	// The tail runs on past the outline (512 − 350) instead of stopping at it.
+	let past = column[512 - 410];
+	assert!(past < 255.0 && past > 240.0, "a faint tail 60 px past the outline: alpha {past}");
+	assert!(fx_plugin::take_errors().is_empty());
+}
+
+#[test]
+fn scrubbing_one_stroke_back_and_forth_leaves_no_blotch() {
+	let Some(path) = wasm("feather_eraser") else { return };
+	let plugin = fx_plugin::load_file(&path).unwrap();
+	let store = store();
+	let image = opaque(&store);
+	let once = horizontal(200.0, 800.0);
+	// Right, back to the middle, right again: the middle is passed three times.
+	let mut scrub = horizontal(200.0, 800.0);
+	scrub.extend(horizontal(800.0, 500.0));
+	scrub.extend(horizontal(500.0, 800.0));
+	let (a, _) = paint(&image, feather_tool(plugin.key), feather_brush(0.6), &once, &store);
+	let (b, _) = paint(&image, feather_tool(plugin.key), feather_brush(0.6), &scrub, &store);
+	// The middle, away from the turn at x = 800 (the path rounds it).
+	let middle = |i: &TiledImage| (300..700).step_by(7).flat_map(|x| alpha_column(i, &store, x, 1024)).collect::<Vec<_>>();
+	let worst = middle(&a).iter().zip(middle(&b)).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+	let (anywhere, _) = compare(&a, &b, &store);
+	eprintln!("scrub vs one pass, feather eraser: {worst} levels in the middle, {anywhere} anywhere");
+	assert!(worst <= 1.0, "Max accumulation: scrubbing changes nothing in the middle ({worst} levels)");
+	// Native flow builds up where the stroke passed again: a blotch.
+	let soft = BrushParams {
+		diameter: 700.0,
+		hardness: 0.0,
+		flow: 0.6,
+		..Default::default()
+	};
+	let (na, _) = paint(&image, StrokeTool::Eraser, soft, &once, &store);
+	let (nb, _) = paint(&image, StrokeTool::Eraser, soft, &scrub, &store);
+	let native_worst = middle(&na).iter().zip(middle(&nb)).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+	eprintln!("scrubbing: feather eraser differs by {worst} levels, native soft eraser by {native_worst}");
+	assert!(native_worst > 20.0, "the native eraser does build up: {native_worst}");
 }

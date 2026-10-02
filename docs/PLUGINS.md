@@ -77,7 +77,14 @@ plugin. So a plugin pays the call cost per rectangle, not per pixel.
      `Pressure for opacity` and `Spacing` drive the brush engine as for the
      native brushes;
    * `params`: the keys of the fields the plugin reads (the field text without
-     the colon), at most 16.
+     the colon), at most 16;
+   * `brush` (optional): how the stroke engine paints for this tool —
+     `profile` (`classic`, `gaussian`, `feather`; forces the round tip),
+     `accumulate` (`build_up` like every native brush, or `max`: the round
+     tip swept along the path, each pixel keeps the strongest coverage, so
+     scrubbing never builds up), `spacing` (fraction of the diameter, unless
+     the bar has `Spacing`), `feather_from` (the key of a px field: the tip
+     becomes `Size` of solid core plus that much fade on each side).
 3. Write `rect` (and `gray`) in `src/lib.rs`.
 4. `cargo xtask plugins --watch`, pick the tool in its slot's flyout.
 
@@ -101,7 +108,9 @@ cargo test --release -p fx-ops --test plugin_boundary -- --ignored --nocapture
 
 It checks that both paint the same pixels and prints both times. On
 2026-10-02 (Rob's PC) the plugin cost +2–10 %, and +23 % for a 1200 px brush
-painted live.
+painted live. The Feather Eraser (Size 100 + Feather 300, 700 px across)
+costs 2.4 ms per pen event live against 0.85 ms for the native soft eraser of
+the same outline: its fade reaches further, so it touches more pixels.
 
 ## Files
 

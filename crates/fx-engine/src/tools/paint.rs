@@ -135,9 +135,17 @@ impl Paint {
 			dynamics: Default::default(),
 			seed: 0,
 			profile: Default::default(),
+			accumulate: Default::default(),
 		}
 		.with_settings(s.options.get(self.id).and_then(|o| o.get("_brush")));
-		self.m8_brush(ctx, brush)
+		let brush = self.m8_brush(ctx, brush);
+		match self.kind {
+			Kind::Plugin(key) => match fx_plugin::get(key) {
+				Some(plugin) => crate::plugins::brush(&plugin.manifest, brush, s, self.id),
+				None => brush,
+			},
+			_ => brush,
+		}
 	}
 
 	/// M8's tools read their strength from their own option-bar fields: the
