@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# Wasmtime runs 128-bit SIMD natively; the pixel loops auto-vectorise.
+rustflags = ["-C", "target-feature=+simd128"]

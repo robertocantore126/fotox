@@ -46,6 +46,27 @@ pub struct BrushParams {
 	/// The round tip's fall-off (ignored by sampled tips).
 	#[serde(default)]
 	pub profile: TipProfile,
+	/// How the dabs of one stroke add up (the Feather Eraser plugin's
+	/// `Max`; every native tool builds up).
+	#[serde(default)]
+	pub accumulate: Accumulate,
+}
+
+/// How a stroke's dabs combine into its coverage `S`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accumulate {
+	/// Photoshop's flow: every dab adds, `S = 1 − (1 − S)(1 − flow·d)`.
+	/// Overlapping dabs saturate the middle of a stroke, so its cross-section
+	/// is a plateau with steeper sides than the tip.
+	#[default]
+	BuildUp,
+	/// The strongest dab wins, `S = max(S, flow·d)`: a stroke's cross-section
+	/// is the tip's own fall-off, however the dabs overlap. With the round
+	/// tip the stroke is the tip swept along the path between dabs (no
+	/// ripple at any spacing). Repeated strokes still build up (each starts
+	/// from the layer the last one left).
+	Max,
 }
 
 /// How a round tip fades from its core to its edge.
@@ -59,6 +80,12 @@ pub enum TipProfile {
 	/// (2026-09-28, docs/reports/BRUSH-MEASUREMENTS.md): an opaque core,
 	/// then a Gaussian that runs past `R`.
 	Gaussian,
+	/// A long feather: 1 inside `hardness × R`, then a Gaussian over the
+	/// soft part, `exp(−(2.5 t)² / 2)` with `t` = 0 at the core and 1 at `R`
+	/// (4 % at the outline), and a tail that runs on to ~1.5 × the soft part
+	/// before it stops at 1/1024: no visible start of the fade, no corner,
+	/// no Mach band. The Feather Eraser plugin's tip.
+	Feather,
 }
 
 /// What drives a dynamic (Photoshop's "Control" drop-downs).
@@ -175,6 +202,7 @@ impl Default for BrushParams {
 			dynamics: Dynamics::default(),
 			seed: 0,
 			profile: TipProfile::Classic,
+			accumulate: Accumulate::BuildUp,
 		}
 	}
 }
@@ -313,6 +341,26 @@ pub enum StrokeTool {
 		#[serde(default)]
 		protect: Option<[u16; 3]>,
 	},
+	/// A brush plugin (D-096): `id` is `fx_plugin::key_of` the plugin's id,
+	/// `params` its option-bar values in the manifest's order. The pixels
+	/// come from the plugin loaded *now*: a replay after the plugin changed
+	/// paints what the new code paints (undo is by snapshot, so history is
+	/// unaffected).
+	Plugin { id: u64, params: [f32; 16] },
+}
+
+/// Plugin tool names for History labels, by `StrokeTool::Plugin` id. Names
+/// are leaked once per distinct name: a handful per session.
+static PLUGIN_LABELS: std::sync::RwLock<Vec<(u64, &'static str)>> = std::sync::RwLock::new(Vec::new());
+
+/// Remember a plugin's name for [`StrokeTool::label`].
+pub fn register_plugin_label(id: u64, name: &str) {
+	let mut labels = PLUGIN_LABELS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+	match labels.iter_mut().find(|(k, _)| *k == id) {
+		Some((_, label)) if *label == name => {}
+		Some((_, label)) => *label = Box::leak(name.to_owned().into_boxed_str()),
+		None => labels.push((id, Box::leak(name.to_owned().into_boxed_str()))),
+	}
 }
 
 impl StrokeTool {
@@ -337,6 +385,12 @@ impl StrokeTool {
 			StrokeTool::Dodge { .. } => "Dodge Tool",
 			StrokeTool::Burn { .. } => "Burn Tool",
 			StrokeTool::Sponge { .. } => "Sponge Tool",
+			StrokeTool::Plugin { id, .. } => PLUGIN_LABELS
+				.read()
+				.unwrap_or_else(std::sync::PoisonError::into_inner)
+				.iter()
+				.find(|(k, _)| k == id)
+				.map_or("Plugin Brush", |(_, label)| label),
 		}
 	}
 }

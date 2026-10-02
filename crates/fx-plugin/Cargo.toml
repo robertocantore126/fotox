@@ -1,0 +1,17 @@
+[package]
+name = "fx-plugin"
+description = "Brush plugins: WebAssembly modules loaded at run time and reloaded when their file changes (D-096)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+wasmtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytemuck = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

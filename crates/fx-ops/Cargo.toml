@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 fx-tiles = { workspace = true }
 fx-core = { workspace = true }
+fx-plugin = { workspace = true }
 rayon = { workspace = true }
 
 [lints]

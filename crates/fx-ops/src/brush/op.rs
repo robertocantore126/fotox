@@ -132,6 +132,21 @@ impl DabOp for Veil {
 	}
 }
 
+/// What a brush plugin's stroke paints when the plugin fails (D-096):
+/// nothing — a broken plugin must not erase or smear the layer; the error
+/// reaches the UI as a toast.
+pub struct Keep;
+
+impl DabOp for Keep {
+	fn pixel(&self, backdrop: [f64; 4], _source: Option<[f32; 4]>, _k: f64, _ctx: &DabContext) -> [f64; 4] {
+		backdrop
+	}
+
+	fn gray(&self, v: f64, _k: f64, _ctx: &DabContext) -> f64 {
+		v
+	}
+}
+
 /// The op of one of M5's stroke tools.
 pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 	match tool {
@@ -162,6 +177,9 @@ pub fn op_for(tool: &StrokeTool) -> Box<dyn DabOp> {
 			tolerance: f64::from(*tolerance),
 			mode: *mode,
 		}),
+		// The plugin paints whole rectangles (`Stroke::recompute_plugin`);
+		// this op only runs when that call failed.
+		StrokeTool::Plugin { .. } => Box::new(Keep),
 		StrokeTool::BgEraser { sample, tolerance, protect } => {
 			let rgb = |c: [u16; 3]| c.map(|v| f64::from(v) / 65535.0);
 			Box::new(super::ops::background_eraser::BackgroundEraser {

@@ -29,6 +29,7 @@ pub mod layers;
 pub mod mips;
 pub mod ops;
 pub mod patterns;
+pub mod plugins;
 pub mod prefs;
 // AUDIT-FIX(D2): recovery snapshots are separate from temporary scratch storage.
 pub mod recovery;

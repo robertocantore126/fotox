@@ -132,6 +132,7 @@ not handle. The engine is the authority for anything that touches a document.
 | `transform_box` | `up` | a Free Transform box went up or down (M6-T04): the UI shows the `_transform` option bar while it is up and sends its values as `tool_options` with `tool: "_transform"` |
 | `progress` / `progress_done` | `task, label, fraction` / `task` | long jobs (import, export, filters) |
 | `toast` / `error` | `text` | |
+| `plugins` | `tools: [{id, name, slot, icon, options}]` | The brush plugins' tools (D-096), after `hello` and on every plugin (re)load or removal; replaces the previous list. `id` is `plugin:<plugin id>`, `slot` the toolbar slot whose flyout shows it, `options` the option bar in `js/data/options.js`'s format. |
 | `cmyk_profiles` | `profiles: [{name, path}]` | after `hello`: the CMYK profiles for Proof Setup and CMYK export (M4-T04) |
 | `proof_state` | `doc, proof_colors, gamut_warning, profile` | Proof Colors / Gamut Warning check marks (actions `view:proof-colors` Ctrl+Y, `view:gamut-warning` Shift+Ctrl+Y) |
 | `close_dirty_document` | `doc, name` | the document has unsaved changes: show *Save / Don't Save / Cancel*, answer with `close_document_answer` (M3-T06). Also sent while the window is closing, once per unsaved document |

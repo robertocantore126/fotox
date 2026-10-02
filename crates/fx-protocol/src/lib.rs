@@ -307,6 +307,19 @@ pub struct FontFamilyInfo {
 	pub styles: Vec<String>,
 }
 
+/// A brush plugin's tool (D-096), for the toolbar and the option bar.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PluginTool {
+	/// The UI tool id, `plugin:<plugin id>`.
+	pub id: String,
+	pub name: String,
+	/// The toolbar slot whose flyout shows it (`eraser`).
+	pub slot: String,
+	pub icon: String,
+	/// The option bar, in `ui/js/data/options.js`'s format.
+	pub options: serde_json::Value,
+}
+
 /// A CMYK profile the UI can offer (M4-T04).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CmykProfileInfo {
@@ -449,6 +462,11 @@ pub enum EngineToUi {
 	},
 	Error {
 		text: String,
+	},
+	/// The brush plugins' tools (D-096): after `hello`, and again whenever a
+	/// plugin is loaded, reloaded or removed. The list replaces the last one.
+	Plugins {
+		tools: Vec<PluginTool>,
 	},
 	/// The eyedropper sampled a colour (M5-T01). `target` is `"fg"` or `"bg"`;
 	/// the UI updates that swatch.

@@ -43,6 +43,21 @@ pub enum Kind {
 	ColorReplace,
 	/// The Mixer Brush (M8-T09).
 	Mixer,
+	/// A brush plugin (D-096), by `fx_plugin::key_of` its id.
+	Plugin(u64),
+}
+
+/// A `'static` copy of a plugin tool id (`Paint` keeps its id as
+/// `&'static str`): leaked once per distinct id, a handful per session.
+pub fn intern(id: &str) -> &'static str {
+	static IDS: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+	let mut ids = IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+	if let Some(known) = ids.iter().find(|known| **known == id) {
+		return known;
+	}
+	let leaked: &'static str = Box::leak(id.to_owned().into_boxed_str());
+	ids.push(leaked);
+	leaked
 }
 
 /// Below this many screen pixels the outline is replaced by a crosshair.
@@ -109,7 +124,7 @@ impl Paint {
 			spacing: percent("Spacing", 25.0).max(0.01),
 			opacity: percent("Opacity", 100.0),
 			flow: percent("Flow", 100.0),
-			mode: if matches!(self.kind, Kind::Eraser | Kind::SpotHeal | Kind::BgEraser | Kind::ColorReplace) {
+			mode: if matches!(self.kind, Kind::Eraser | Kind::SpotHeal | Kind::BgEraser | Kind::ColorReplace | Kind::Plugin(_)) {
 				BlendMode::Normal
 			} else {
 				mode
@@ -120,9 +135,17 @@ impl Paint {
 			dynamics: Default::default(),
 			seed: 0,
 			profile: Default::default(),
+			accumulate: Default::default(),
 		}
 		.with_settings(s.options.get(self.id).and_then(|o| o.get("_brush")));
-		self.m8_brush(ctx, brush)
+		let brush = self.m8_brush(ctx, brush);
+		match self.kind {
+			Kind::Plugin(key) => match fx_plugin::get(key) {
+				Some(plugin) => crate::plugins::brush(&plugin.manifest, brush, s, self.id),
+				None => brush,
+			},
+			_ => brush,
+		}
 	}
 
 	/// M8's tools read their strength from their own option-bar fields: the
@@ -159,6 +182,13 @@ impl Paint {
 			Kind::Pencil => StrokeTool::Pencil,
 			// The eraser's Pencil/Block modes use a hard tip (see `brush`).
 			Kind::Eraser => StrokeTool::Eraser,
+			Kind::Plugin(key) => {
+				let plugin = fx_plugin::get(key).ok_or("This plugin was removed")?;
+				StrokeTool::Plugin {
+					id: key,
+					params: crate::plugins::params(&plugin.manifest, s, self.id),
+				}
+			}
 			Kind::SpotHeal => {
 				if s.string(self.id, "Type").as_deref() != Some("Proximity Match") {
 					StrokeTool::SpotHealContentAware
@@ -322,7 +352,12 @@ impl Paint {
 	/// shows on a mask, or on a layer with locked transparency). A mask gets
 	/// the colour's luminance.
 	fn color(&self, ctx: &ToolContext<'_>, mask: bool) -> [u16; 4] {
-		let base = if self.kind == Kind::Eraser { ctx.settings.bg } else { ctx.settings.fg };
+		let background = match self.kind {
+			Kind::Eraser => true,
+			Kind::Plugin(key) => fx_plugin::get(key).is_some_and(|p| crate::plugins::uses_background(&p.manifest)),
+			_ => false,
+		};
+		let base = if background { ctx.settings.bg } else { ctx.settings.fg };
 		if !mask {
 			return base;
 		}

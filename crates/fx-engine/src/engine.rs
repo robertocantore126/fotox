@@ -111,6 +111,8 @@ pub(crate) enum OpenAs {
 
 /// Work finished on other threads, reported back to the engine thread.
 pub(crate) enum Internal {
+	/// A brush plugin was loaded, reloaded or removed (D-096).
+	PluginsChanged(Vec<fx_plugin::Change>),
 	// AUDIT-FIX(X1): disk validation is asynchronous, never on engine/render.
 	PrefsValidated {
 		request: u64,
@@ -257,6 +259,7 @@ fn control_handles([x0, y0, x1, y1]: [f64; 4]) -> [(f64, f64); 8] {
 fn internal_name(message: &Internal) -> &'static str {
 	match message {
 		Internal::Progress { .. } => "internal progress",
+		Internal::PluginsChanged(_) => "internal plugins changed",
 		Internal::PrefsValidated { .. } => "internal prefs validated",
 		Internal::Imported { .. } => "internal imported",
 		Internal::Exported { .. } => "internal exported",
@@ -518,6 +521,7 @@ pub(crate) fn run(ctx: EngineContext) {
 	let _ = crate::effects::initialise_region_switch(); // AUDIT-FIX(FXREGION): sample environment at startup.
 	let _ = fx_render::gpu::compositor::no_composite_cache(); // AUDIT-FIX(COMPCACHE): freeze switch before any document opens.
 	crate::text::warm();
+	crate::plugins::start(internal.clone());
 	// AUDIT-FIX(D2): session setup happens before engine ownership moves its shared handles.
 	let recovery = crate::recovery::Recovery::start(store.clone(), internal.clone())
 		.map_err(|e| tracing::error!("recovery disabled: {e}"))
@@ -1309,6 +1313,17 @@ impl Engine {
 		} = session;
 		let samples = stroke.samples().to_vec();
 		let finished = stroke.finish();
+		// A brush plugin that failed painted nothing where it failed (D-096);
+		// a stopped one shows "(stopped)" in the toolbar.
+		let plugin_errors = fx_plugin::take_errors();
+		if !plugin_errors.is_empty() {
+			for text in plugin_errors {
+				self.to_ui(&EngineToUi::Error { text });
+			}
+			self.to_ui(&EngineToUi::Plugins {
+				tools: crate::plugins::tools(),
+			});
+		}
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		match finished {
 			Ok((image, offset)) => {
@@ -1384,6 +1399,9 @@ impl Engine {
 					})
 					.collect();
 				self.to_ui(&EngineToUi::CmykProfiles { profiles });
+				self.to_ui(&EngineToUi::Plugins {
+					tools: crate::plugins::tools(),
+				});
 				self.settings.options.insert("_prefs".into(), self.prefs.grid_options());
 				self.send_prefs();
 				self.send_resources();
@@ -1657,6 +1675,18 @@ impl Engine {
 
 	fn action(&mut self, id: &str) -> Changed {
 		match id {
+			// The brush plugins' folder, where a plugin file is dropped (D-098).
+			// Plugins ▸ Reload Plugins: the watcher reloads every file now.
+			"plugins:reload" => {
+				fx_plugin::request_reload();
+				return Changed::default();
+			}
+			"plugins:open-folder" => {
+				if let Err(text) = crate::plugins::open_folder() {
+					self.to_ui(&EngineToUi::Error { text });
+				}
+				return Changed::default();
+			}
 			"tab:close" => {
 				if let Some(active) = self.docs.active_id() {
 					self.close(active);
@@ -2668,6 +2698,25 @@ impl Engine {
 
 	fn internal(&mut self, message: Internal) {
 		match message {
+			Internal::PluginsChanged(changes) => {
+				crate::plugins::note(&changes);
+				// A reloaded plugin's tool is built afresh at its next use.
+				self.tools.forget_plugins();
+				for change in &changes {
+					let text = crate::plugins::describe(change);
+					self.to_ui(&if matches!(change, fx_plugin::Change::Failed(_)) {
+						EngineToUi::Error { text }
+					} else {
+						EngineToUi::Toast { text }
+					});
+				}
+				// "Building…" alone changes no tool.
+				if !changes.iter().all(|c| matches!(c, fx_plugin::Change::Building { .. })) {
+					self.to_ui(&EngineToUi::Plugins {
+						tools: crate::plugins::tools(),
+					});
+				}
+			}
 			Internal::PrefsValidated { request, patch, result } => {
 				if request == self.prefs_validation {
 					match result {

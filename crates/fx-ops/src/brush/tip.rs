@@ -241,6 +241,11 @@ impl Tip {
 			let (core, sigma) = self.gauss;
 			return self.radius * (core + 3.53 * sigma) + 1.0;
 		}
+		if self.feathered() {
+			// Where exp(−(2.5 t)²/2) drops under 1/1024: t = 1.49.
+			let core = self.hardness * self.radius;
+			return core + 1.49 * (self.radius - core) + 1.0;
+		}
 		self.radius + 1.0
 	}
 
@@ -281,6 +286,9 @@ impl Tip {
 		if self.gaussian() {
 			return self.gauss_at(r);
 		}
+		if self.feathered() {
+			return self.feather_at(r);
+		}
 		let radius = self.radius;
 		let core = self.hardness * radius;
 		if self.hardness >= 1.0 || radius - core < 1.0 {
@@ -303,6 +311,9 @@ impl Tip {
 		if self.gaussian() {
 			return self.gauss_at(r);
 		}
+		if self.feathered() {
+			return self.feather_at(r);
+		}
 		let core = self.hardness * self.radius;
 		if r <= core {
 			return 1.0;
@@ -312,6 +323,23 @@ impl Tip {
 		}
 		let t = (r - core) / (self.radius - core).max(f32::EPSILON);
 		1.0 - t * t * (3.0 - 2.0 * t)
+	}
+
+	/// Whether this dab uses the Feather profile (and is not a hard disc).
+	fn feathered(&self) -> bool {
+		self.profile == TipProfile::Feather && self.sample.is_none() && !self.aliased && self.hardness < 1.0
+	}
+
+	/// The Feather profile at distance `r`: 1 in the core, then a Gaussian
+	/// with σ = 40 % of the soft part, cut at 1/1024.
+	fn feather_at(&self, r: f32) -> f32 {
+		let core = self.hardness * self.radius;
+		let t = (r - core) / (self.radius - core).max(f32::EPSILON);
+		if t <= 0.0 {
+			return 1.0;
+		}
+		let v = (-(2.5 * t) * (2.5 * t) / 2.0).exp();
+		if v < 1.0 / 1024.0 { 0.0 } else { v }
 	}
 
 	/// The Gaussian profile at distance `r` (pixels, tip space).

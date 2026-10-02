@@ -8,6 +8,7 @@ members = [
 	"crates/fx-io",
 	"crates/fx-render",
 	"crates/fx-ops",
+	"crates/fx-plugin",
 	"crates/fx-ai",
 	"crates/fx-engine",
 	"crates/fx-cli",
@@ -28,6 +29,7 @@ default-members = [
 	"crates/fx-io",
 	"crates/fx-render",
 	"crates/fx-ops",
+	"crates/fx-plugin",
 	"crates/fx-ai",
 	"crates/fx-engine",
 	"crates/fx-cli",
@@ -70,6 +72,7 @@ fx-color = { path = "crates/fx-color" }
 fx-io = { path = "crates/fx-io" }
 fx-render = { path = "crates/fx-render" }
 fx-ops = { path = "crates/fx-ops" }
+fx-plugin = { path = "crates/fx-plugin" }
 fx-engine = { path = "crates/fx-engine" }
 fx-ai = { path = "crates/fx-ai" }
 graphite-desktop-ui = { path = "vendor/graphite/desktop-ui" }
@@ -142,6 +145,10 @@ criterion = "0.8"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-17"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 sha2 = "0.10"
+
+# Brush plugins (D-096): WebAssembly modules compiled by Cranelift at load,
+# one instance per rayon thread, reloaded when the .wasm changes.
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
 
 [patch.crates-io]
 # Graphite's forks, pinned to the exact revisions its desktop app used at the

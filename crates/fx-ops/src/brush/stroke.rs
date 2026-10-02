@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use fx_core::pixels::{block_coverage, decode, grow_to_canvas};
 use fx_core::selection::TileCoverage;
-use fx_core::stroke::{BrushParams, StrokeSample, StrokeTool};
+use fx_core::stroke::{Accumulate, BrushParams, StrokeSample, StrokeTool};
 use fx_core::{CommandError, Selection};
 use fx_tiles::{PixelFormat, TILE_PIXELS, TILE_SIZE, TileBuffer, TileError, TileSlot, TileStore, TiledImage};
 use rayon::prelude::*;
@@ -139,6 +139,9 @@ pub struct Stroke {
 	samples: Vec<StrokeSample>,
 	/// A tool that reads its own stroke (M8: Smudge, Mixer, Art History).
 	sequence: Option<Box<dyn super::op::DabSequence>>,
+	/// The last dab painted, where the next batch's first segment starts
+	/// (`Accumulate::Max`).
+	last_dab: Option<Dab>,
 }
 
 impl Stroke {
@@ -199,6 +202,7 @@ impl Stroke {
 			source_cache: Mutex::new(HashMap::new()),
 			samples: Vec::new(),
 			sequence: super::ops::sequence_for(&setup.tool, [0, 1, 2].map(|i| f64::from(setup.color[i]) / 65535.0), setup.brush.seed),
+			last_dab: None,
 		})
 	}
 
@@ -227,6 +231,9 @@ impl Stroke {
 		}
 		if self.sequence.is_some() {
 			return self.paint_sequence(dabs);
+		}
+		if self.brush.accumulate == Accumulate::Max && self.brush.tip == 0 {
+			return self.paint_max(dabs);
 		}
 		let tile = i64::from(TILE_SIZE);
 		let (cols, rows) = (i64::from(self.before.grid(0).cols()), i64::from(self.before.grid(0).rows()));
@@ -288,7 +295,10 @@ impl Stroke {
 							if d > 0.0 {
 								let at = (ly * tile + lx) as usize;
 								let s = state.coverage[at];
-								state.coverage[at] = 1.0 - (1.0 - s) * (1.0 - flow * d);
+								state.coverage[at] = match self.brush.accumulate {
+									Accumulate::BuildUp => 1.0 - (1.0 - s) * (1.0 - flow * d),
+									Accumulate::Max => s.max(flow * d),
+								};
 							}
 						}
 					}
@@ -297,6 +307,137 @@ impl Stroke {
 					return Ok(((*tx, *ty), state.working.clone()));
 				}
 				self.recompute(*tx, *ty, state, dirty)?;
+				Ok(((*tx, *ty), state.working.clone()))
+			})
+			.collect();
+		let results = results?;
+		for (key, state, _) in work {
+			self.tiles.insert(key, state);
+		}
+		Ok(results)
+	}
+
+	/// `Accumulate::Max` with the round tip: the stroke is the swept tip, not
+	/// a row of stamps. Each pixel takes the tip's coverage at its distance
+	/// from the path — the segments between consecutive dabs, diameter and
+	/// strength interpolated along each — and `S = max(S, flow·d)`. Exactly
+	/// what infinitely dense dabs would give, so there is no ripple at any
+	/// spacing, and the cost is per pixel, not per dab. The tip is treated as
+	/// round (roundness and angle are ignored). Max is order-free, so live =
+	/// replay whatever the batches.
+	fn paint_max(&mut self, dabs: &[Dab]) -> Result<Vec<ChangedTile>, TileError> {
+		let tile = i64::from(TILE_SIZE);
+		let (cols, rows) = (i64::from(self.before.grid(0).cols()), i64::from(self.before.grid(0).rows()));
+		let pencil = matches!(self.tool, StrokeTool::Pencil);
+		// The path through this batch, from where the last one ended.
+		let mut points: Vec<Dab> = self.last_dab.iter().copied().chain(dabs.iter().copied()).collect();
+		if points.len() == 1 {
+			points.push(points[0]);
+		}
+		self.last_dab = dabs.last().copied();
+		struct Segment {
+			a: (f64, f64),
+			b: (f64, f64),
+			/// Radii and flow·strength at both ends.
+			radius: (f32, f32),
+			flow: (f32, f32),
+			/// The tip at the larger radius; other radii scale the distance.
+			tip: Tip,
+		}
+		let segments: Vec<Segment> = points
+			.windows(2)
+			.map(|w| {
+				let (a, b) = (w[0], w[1]);
+				let tip = Tip::new(a.diameter.max(b.diameter), self.brush.hardness, 1.0, 0.0, pencil).with_profile(self.brush.profile);
+				Segment {
+					a: (a.x, a.y),
+					b: (b.x, b.y),
+					radius: (a.diameter / 2.0, b.diameter / 2.0),
+					flow: (self.brush.flow * a.strength, self.brush.flow * b.strength),
+					tip,
+				}
+			})
+			.collect();
+		// Segments per touched tile, with the layer pixel rectangle each may touch.
+		let mut per_tile: HashMap<(u32, u32), Vec<(usize, [i64; 4])>> = HashMap::new();
+		for (i, s) in segments.iter().enumerate() {
+			let reach = f64::from(s.tip.reach());
+			let x0 = (s.a.0.min(s.b.0) - reach - f64::from(self.offset.0)).floor() as i64;
+			let y0 = (s.a.1.min(s.b.1) - reach - f64::from(self.offset.1)).floor() as i64;
+			let x1 = (s.a.0.max(s.b.0) + reach - f64::from(self.offset.0)).ceil() as i64;
+			let y1 = (s.a.1.max(s.b.1) + reach - f64::from(self.offset.1)).ceil() as i64;
+			for ty in y0.div_euclid(tile).max(0)..=y1.div_euclid(tile).min(rows - 1) {
+				for tx in x0.div_euclid(tile).max(0)..=x1.div_euclid(tile).min(cols - 1) {
+					per_tile.entry((tx as u32, ty as u32)).or_default().push((i, [x0, y0, x1, y1]));
+				}
+			}
+		}
+		let mut work: Vec<((u32, u32), TileState, Vec<(usize, [i64; 4])>)> = Vec::with_capacity(per_tile.len());
+		for (key, list) in per_tile {
+			let state = match self.tiles.remove(&key) {
+				Some(state) => state,
+				None => self.new_tile(key)?,
+			};
+			work.push((key, state, list));
+		}
+		let results: Result<Vec<ChangedTile>, TileError> = work
+			.par_iter_mut()
+			.map(|((tx, ty), state, list)| {
+				let origin = (i64::from(*tx) * tile, i64::from(*ty) * tile);
+				let mut dirty = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+				for &(_, [x0, y0, x1, y1]) in list.iter() {
+					dirty = [
+						dirty[0].min((x0 - origin.0).max(0)),
+						dirty[1].min((y0 - origin.1).max(0)),
+						dirty[2].max((x1 - origin.0).min(tile - 1)),
+						dirty[3].max((y1 - origin.1).min(tile - 1)),
+					];
+				}
+				if dirty[0] > dirty[2] || dirty[1] > dirty[3] {
+					return Ok(((*tx, *ty), state.working.clone()));
+				}
+				// Only pixels whose coverage rises need their result again: the
+				// path already swept most of a new segment's area.
+				let mut changed = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+				for ly in dirty[1]..=dirty[3] {
+					let cy = (origin.1 + ly + i64::from(self.offset.1)) as f64 + 0.5;
+					for lx in dirty[0]..=dirty[2] {
+						let cx = (origin.0 + lx + i64::from(self.offset.0)) as f64 + 0.5;
+						let mut best = 0.0f32;
+						for &(i, _) in list.iter() {
+							let s = &segments[i];
+							let (dx, dy) = (s.b.0 - s.a.0, s.b.1 - s.a.1);
+							let len2 = dx * dx + dy * dy;
+							let u = if len2 > 0.0 {
+								(((cx - s.a.0) * dx + (cy - s.a.1) * dy) / len2).clamp(0.0, 1.0)
+							} else {
+								0.0
+							};
+							let (px, py) = (cx - (s.a.0 + u * dx), cy - (s.a.1 + u * dy));
+							let distance = (px * px + py * py).sqrt() as f32;
+							let u = u as f32;
+							let radius = s.radius.0 + (s.radius.1 - s.radius.0) * u;
+							let flow = s.flow.0 + (s.flow.1 - s.flow.0) * u;
+							if flow <= best {
+								continue;
+							}
+							let scaled = distance * s.tip.radius / radius.max(0.5);
+							if scaled > s.tip.reach() {
+								continue;
+							}
+							best = best.max(flow * s.tip.coverage(scaled, 0.0));
+						}
+						let d = best * state.selection.at(lx as u32, ly as u32);
+						let at = (ly * tile + lx) as usize;
+						if d > state.coverage[at] {
+							state.coverage[at] = d;
+							changed = [changed[0].min(lx), changed[1].min(ly), changed[2].max(lx), changed[3].max(ly)];
+						}
+					}
+				}
+				if changed[0] <= changed[2] {
+					self.recompute(*tx, *ty, state, changed)?;
+				}
 				Ok(((*tx, *ty), state.working.clone()))
 			})
 			.collect();
@@ -445,6 +586,11 @@ impl Stroke {
 		let tile = i64::from(TILE_SIZE);
 		let opacity = f64::from(self.brush.opacity);
 		let gray = matches!(self.format, PixelFormat::Gray8 | PixelFormat::Gray16);
+		if let StrokeTool::Plugin { id, params } = self.tool
+			&& self.recompute_plugin(id, &params, &before, state, (tx, ty), dirty)
+		{
+			return Ok(());
+		}
 		// The per-pixel op (M7-T08) and the source under this tile when it
 		// asks for one (canvas tiles, prefetched).
 		let op = super::op::op_for(&self.tool);
@@ -480,6 +626,49 @@ impl Stroke {
 			}
 		}
 		Ok(())
+	}
+
+	/// A brush plugin's pass over `dirty` (D-096): one call for the whole
+	/// rectangle with the pixels before the stroke and `k` = opacity ×
+	/// coverage, as the per-pixel ops get them. `false` when the plugin failed
+	/// (the caller then runs `op_for`'s fallback, which keeps the pixels).
+	fn recompute_plugin(&self, id: u64, params: &[f32; 16], before: &TileBuffer, state: &mut TileState, (tx, ty): (u32, u32), dirty: [i64; 4]) -> bool {
+		let tile = i64::from(TILE_SIZE);
+		let opacity = f64::from(self.brush.opacity);
+		let gray = matches!(self.format, PixelFormat::Gray8 | PixelFormat::Gray16);
+		let (w, h) = ((dirty[2] - dirty[0] + 1) as usize, (dirty[3] - dirty[1] + 1) as usize);
+		let at = (
+			(i64::from(self.offset.0) + i64::from(tx) * tile + dirty[0]) as i32,
+			(i64::from(self.offset.1) + i64::from(ty) * tile + dirty[1]) as i32,
+		);
+		let index = |i: usize| ((dirty[1] + (i / w) as i64) * tile + dirty[0] + (i % w) as i64) as usize;
+		let k: Vec<f32> = (0..w * h).map(|i| (opacity * f64::from(state.coverage[index(i)])) as f32).collect();
+		let color = [self.color[0] as f32, self.color[1] as f32, self.color[2] as f32, self.color_alpha as f32];
+		let header = fx_plugin::header(params, color, self.lock_alpha);
+		let size = (w as u32, h as u32);
+		if gray {
+			let mut values: Vec<f32> = (0..w * h).map(|i| gray_at(before, self.format, index(i)) as f32).collect();
+			if !matches!(fx_plugin::gray(id, &header, at, size, &mut values, &k), Ok(true)) {
+				return false;
+			}
+			for (i, v) in values.iter().enumerate() {
+				set_gray(&mut state.working, self.format, index(i), f64::from(*v));
+			}
+		} else {
+			let mut pixels: Vec<[f32; 4]> = (0..w * h)
+				.map(|i| {
+					let p = pixel_at(before, self.format, index(i));
+					[p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]
+				})
+				.collect();
+			if fx_plugin::rect(id, &header, at, size, &mut pixels, &k).is_err() {
+				return false;
+			}
+			for (i, p) in pixels.iter().enumerate() {
+				set_pixel(&mut state.working, self.format, index(i), p.map(f64::from));
+			}
+		}
+		true
 	}
 
 	/// The source pixels under `dirty` of layer tile `(tx, ty)`, shifted by

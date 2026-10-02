@@ -70,6 +70,8 @@ export const ENGINE = Object.freeze({
   TASK_CANCELABLE: "task_cancelable",
   TOAST: "toast",
   ERROR: "error",
+  // The brush plugins' tools (D-096): replaces the last list.
+  PLUGINS: "plugins",
   COLOR_PICKED: "color_picked",
   THUMBNAIL: "thumbnail",
   // Navigator, Histogram, Properties, Character (engine/overview.rs).
