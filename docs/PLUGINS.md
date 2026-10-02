@@ -7,7 +7,8 @@ history and the option-bar values stay where they are.
 
 ## A plugin from an AI, in one file
 
-1. Edit ▸ Get More Tools ▸ **Open Plugins Folder**. It holds `AI-PROMPT.md`.
+1. **Plugins ▸ Open Plugins Folder** (the menu next to Other). It holds
+   `AI-PROMPT.md`.
 2. Paste `AI-PROMPT.md` to an AI (ChatGPT, Claude…) and describe the tool.
 3. Save its answer — one `.rs` file — in that folder.
 4. Fotox says "Building plugin …" and, a few seconds later, "Plugin loaded";
@@ -42,6 +43,14 @@ image:
 
 A stopped plugin keeps its tool, named "… (stopped)", and its strokes paint
 nothing; the toast says why. Saving the file again (fixed) loads it fresh.
+
+## Refresh
+
+There is nothing to press: Fotox looks at the folder four times a second,
+and a file that was added, saved or deleted is loaded, reloaded or removed
+by itself, with a toast. **Plugins ▸ Reload Plugins** reloads every file at
+once anyway — to restart a stopped plugin without editing it, or to be
+sure — and says in one toast what is loaded.
 
 ## The loop
 

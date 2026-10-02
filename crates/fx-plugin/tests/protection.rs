@@ -159,3 +159,31 @@ fn a_taken_or_bad_id_is_refused() {
 	let error = fx_plugin::load_file(&script("Bad Id", "")).err().unwrap();
 	assert!(error.contains("must be 1-64 characters"), "{error}");
 }
+
+#[test]
+fn reload_restarts_a_stopped_plugin() {
+	let dir = folder().join("reload");
+	std::fs::create_dir_all(&dir).unwrap();
+	let source = std::fs::read_to_string(script("crashy", "let i = pixels.len(); pixels[i][0] = 1.0;")).unwrap();
+	let path = dir.join("crashy.rs");
+	std::fs::write(&path, source).unwrap();
+	let _ = std::fs::remove_file(folder().join("crashy.rs"));
+	let plugin = fx_plugin::load_file(&path).unwrap();
+	let (mut pixels, k) = grey(4);
+	assert!(fx_plugin::rect(plugin.key, &HEADER(), (0, 0), (2, 2), &mut pixels, &k).is_err());
+	assert!(plugin.stopped().is_some());
+	let (tx, rx) = std::sync::mpsc::channel();
+	fx_plugin::watch(dir, move |changes| {
+		let _ = tx.send(changes);
+	});
+	fx_plugin::request_reload();
+	let changes = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+	assert_eq!(
+		changes,
+		[fx_plugin::Change::Reloaded {
+			names: vec!["Test crashy".into()]
+		}]
+	);
+	let fresh = fx_plugin::get(plugin.key).unwrap();
+	assert!(fresh.stopped().is_none(), "a reload starts it fresh");
+}

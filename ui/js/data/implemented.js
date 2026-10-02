@@ -201,6 +201,7 @@ export const IMPLEMENTED = new Set([
   "pattern:use",
   "plugin:f",
   "plugins:open-folder",
+  "plugins:reload",
   "prefs:set",
   "raster:all",
   "raster:fill",

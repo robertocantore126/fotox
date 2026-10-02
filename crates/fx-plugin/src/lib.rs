@@ -31,7 +31,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -365,16 +365,38 @@ pub fn load_dir(dir: &Path) -> Vec<Arc<Plugin>> {
 		.collect()
 }
 
-type Stamp = (SystemTime, u64);
+/// What tells a file changed: time, length and a hash of the content. The
+/// hash catches an edit that keeps the length within the file system's time
+/// step (exFAT's is coarse); plugin files are a few KB, so reading them
+/// every poll costs nothing.
+type Stamp = (SystemTime, u64, u64);
 
 fn stamp(path: &Path) -> Option<Stamp> {
 	let meta = std::fs::metadata(path).ok()?;
-	Some((meta.modified().ok()?, meta.len()))
+	let bytes = std::fs::read(path).ok()?;
+	let hash = bytes
+		.iter()
+		.fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+	Some((meta.modified().ok()?, meta.len(), hash))
+}
+
+/// Set by [`request_reload`]; the watcher's next poll reloads everything.
+static RELOAD: AtomicBool = AtomicBool::new(false);
+
+/// Reload every plugin at the watcher's next poll (Plugins ▸ Reload
+/// Plugins), changed or not: a stopped plugin starts fresh. Returns at once;
+/// the result arrives as one [`Change::Reloaded`].
+pub fn request_reload() {
+	RELOAD.store(true, Ordering::Relaxed);
 }
 
 /// What the watcher did.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
+	/// Everything was reloaded on request: the names now loaded.
+	Reloaded {
+		names: Vec<String>,
+	},
 	/// A `.rs` plugin is being built (a few seconds).
 	Building {
 		file: String,
@@ -407,6 +429,16 @@ pub fn watch(dir: PathBuf, on_change: impl Fn(Vec<Change>) + Send + 'static) {
 			std::thread::sleep(POLL);
 			let mut changes = Vec::new();
 			let files = plugin_files(&dir);
+			let reload = RELOAD.swap(false, Ordering::Relaxed);
+			if reload {
+				// Every file counts as changed and settled.
+				loaded.clear();
+				for path in &files {
+					if let Some(now) = stamp(path) {
+						seen.insert(path.clone(), now);
+					}
+				}
+			}
 			for path in &files {
 				let Some(now) = stamp(path) else { continue };
 				let stable = seen.get(path) == Some(&now);
@@ -442,6 +474,19 @@ pub fn watch(dir: PathBuf, on_change: impl Fn(Vec<Change>) + Send + 'static) {
 						name: plugin.manifest.name.clone(),
 					});
 				}
+			}
+			if reload {
+				// One summary instead of a toast per plugin; failures stay.
+				let mut names: Vec<String> = changes
+					.iter()
+					.filter_map(|c| match c {
+						Change::Loaded { name, .. } => Some(name.clone()),
+						_ => None,
+					})
+					.collect();
+				names.sort();
+				changes.retain(|c| !matches!(c, Change::Loaded { .. }));
+				changes.insert(0, Change::Reloaded { names });
 			}
 			if !changes.is_empty() {
 				on_change(changes);

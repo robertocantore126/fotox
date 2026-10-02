@@ -1676,6 +1676,11 @@ impl Engine {
 	fn action(&mut self, id: &str) -> Changed {
 		match id {
 			// The brush plugins' folder, where a plugin file is dropped (D-098).
+			// Plugins ▸ Reload Plugins: the watcher reloads every file now.
+			"plugins:reload" => {
+				fx_plugin::request_reload();
+				return Changed::default();
+			}
 			"plugins:open-folder" => {
 				if let Err(text) = crate::plugins::open_folder() {
 					self.to_ui(&EngineToUi::Error { text });

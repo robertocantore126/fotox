@@ -530,3 +530,7 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Checked: `fx-plugin/tests/protection.rs` (7 tests, real cargo builds); `fx-engine/tests/plugin_flow.rs` now also drops the prompt's example `.rs` and paints with it; boundary, edit flow, engine unit tests green; check-data clean.
 - FAST: no UI list of stopped plugins beyond the "(stopped)" name; a plugin cannot see pixels outside its rectangle (no blur-type brushes yet).
 - VERIFY: Rob's first AI-written plugin end to end.
+
+## Plugins menu and Reload (Claude, 2026-10-02)
+- Done: a **Plugins** menu next to Other: Reload Plugins (`plugins:reload` → `fx_plugin::request_reload`: the watcher reloads every file at its next poll, one `Change::Reloaded` summary toast, failures listed again, stopped plugins start fresh) and Open Plugins Folder. The watcher's file stamp now includes a content hash, so a same-length edit within exFAT's coarse time step is seen.
+- Checked: `fx-plugin/tests/protection.rs` `reload_restarts_a_stopped_plugin`; `plugin_flow` reload step, 6/6 runs with TMP on exFAT (it hung 50 % before the hash).

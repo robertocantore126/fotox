@@ -701,6 +701,15 @@ export const menus = [
   },
 
   {
+    // Brush plugins (D-096/D-098): they load and reload by themselves when a
+    // file in the folder changes; Reload forces it and restarts stopped ones.
+    id: "plugins", label: "Plugins", items: [
+      it("Reload Plugins", "", "plugins:reload"),
+      it("Open Plugins Folder", "", "plugins:open-folder"),
+    ],
+  },
+
+  {
     id: "other", label: "Other", items: [
       it("Keyboard Shortcuts...", "", "dlg:shortcuts"),
       it("Preferences...", "Ctrl+K", "dlg:prefs"),

@@ -59,6 +59,8 @@ pub(crate) fn note(changes: &[Change]) {
 pub(crate) fn describe(change: &Change) -> String {
 	match change {
 		Change::Building { file } => format!("Building plugin {file}\u{2026}"),
+		Change::Reloaded { names } if names.is_empty() => "Plugins reloaded: the folder has none that load".into(),
+		Change::Reloaded { names } => format!("Plugins reloaded ({}): {}", names.len(), names.join(", ")),
 		Change::Loaded { name, .. } => format!("Plugin loaded: {name}"),
 		Change::Unloaded { name, .. } => format!("Plugin removed: {name}"),
 		Change::Failed(message) => message.clone(),

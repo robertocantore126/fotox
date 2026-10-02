@@ -113,9 +113,12 @@ fn a_plugin_dropped_in_the_folder_becomes_a_tool_and_reloads_live() {
 	stroke(&harness, 150.0);
 	assert_eq!(last_step(&harness, doc), "Blend Eraser Tool");
 
-	// Rewritten (a rebuild): reloaded, still the same tool, still paints.
-	std::thread::sleep(std::time::Duration::from_millis(50));
-	put(&blend);
+	// Rebuilt (here: a custom section appended, still valid wasm, so the
+	// content changes even within a coarse file-time step): reloaded, still
+	// the same tool, still paints.
+	let mut rebuilt = std::fs::read(&blend).unwrap();
+	rebuilt.extend_from_slice(&[0x00, 0x05, 0x04, b'n', b'o', b't', b'e']);
+	std::fs::write(&file, rebuilt).unwrap();
 	let (tools, notes) = next_tools(&harness);
 	assert_eq!(tools, ["plugin:blend-eraser"]);
 	assert_eq!(notes, ["Plugin loaded: Blend Eraser Tool"]);
@@ -159,6 +162,18 @@ fn a_plugin_dropped_in_the_folder_becomes_a_tool_and_reloads_live() {
 	});
 	stroke(&harness, 300.0);
 	assert_eq!(last_step(&harness, doc), "Shadow Eraser Tool");
+
+	// Plugins ▸ Reload Plugins: one summary, the same tools, and the file
+	// that still does not load says so again.
+	harness.ui(UiToEngine::Action {
+		id: "plugins:reload".into(),
+		args: serde_json::Value::Null,
+	});
+	let (tools, notes) = next_tools(&harness);
+	assert_eq!(tools, ["plugin:shadow-eraser"]);
+	assert_eq!(notes.len(), 2, "{notes:?}");
+	assert_eq!(notes[0], "Plugins reloaded (1): Shadow Eraser Tool");
+	assert!(notes[1].contains("broken.wasm does not compile"), "{notes:?}");
 
 	harness.engine.shutdown();
 	let _ = std::fs::remove_dir_all(&dir);

@@ -3,7 +3,7 @@
 Paste this whole file to an AI, then describe the tool you want, for example
 "an eraser that fades more in the bright areas" or "a brush that paints
 with film grain". The AI answers with **one `.rs` file**; save it in
-Fotox's plugin folder (Edit ▸ Get More Tools ▸ Open Plugins Folder). Fotox
+Fotox's plugin folder (Plugins ▸ Open Plugins Folder). Fotox
 builds it in a few seconds and the tool appears in its toolbar slot. If it
 does not build, Fotox writes `<name>.errors.txt` next to it: paste that file
 back to the AI and ask it to fix the code. Save the fixed file over the old
