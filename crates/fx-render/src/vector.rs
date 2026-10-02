@@ -69,7 +69,17 @@ pub fn render_shape_tile(
 	);
 	let tile_transform = level_to_tile.pre_concat(local_to_doc);
 
-	if let Some(paint) = fill {
+	if let VectorShape::ColoredPaths { parts } = shape {
+		if fill.is_some() {
+			for (elements, color) in parts {
+				if let Some(path) = build_path(elements) {
+					let mut paint = skia_paint(Paint::Solid { rgba: *color });
+					paint.anti_alias = true;
+					pixmap.fill_path(&path, &paint, FillRule::Winding, tile_transform, None);
+				}
+			}
+		}
+	} else if let Some(paint) = fill {
 		let mut skia = skia_paint(*paint);
 		skia.anti_alias = true;
 		pixmap.fill_path(&path, &skia, FillRule::Winding, tile_transform, None);
@@ -99,7 +109,15 @@ fn render_compound_tile(
 	for (i, part) in parts.iter().enumerate() {
 		// The part alone, drawn opaque white: its alpha is its coverage.
 		let white = Paint::Solid { rgba: [65_535; 4] };
-		let alone = render_shape_tile(&part.shape, Some(&white), None, compose(transform, part.transform), level, tile, PixelFormat::Rgba8);
+		let alone = render_shape_tile(
+			&part.shape,
+			Some(&white),
+			None,
+			compose(transform, part.transform),
+			level,
+			tile,
+			PixelFormat::Rgba8,
+		);
 		let bytes = alone.bytes();
 		for (k, c) in coverage.iter_mut().enumerate() {
 			let a = f64::from(bytes[k * 4 + 3]) / 255.0;
@@ -266,9 +284,29 @@ pub const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 /// One tile of a vector mask's coverage (M10-T06): the path (document
 /// coordinates) filled at `level`, `1 − density` outside it, as grey
-/// `format`. FAST: Feather is not applied (Photoshop blurs the coverage).
-pub fn render_vector_mask_tile(elements: &[fx_core::vector::PathEl], density: f32, level: usize, tile: (u32, u32), format: PixelFormat) -> TileBuffer {
-	let shape = VectorShape::Path { elements: elements.to_vec() };
+/// `format`. The engine applies feather through its tiled filter driver.
+pub fn vector_mask_shape(path: &fx_core::path::Path) -> VectorShape {
+	VectorShape::Compound {
+		parts: path
+			.subpaths
+			.iter()
+			.map(|sub| {
+				let mut contour = sub.clone();
+				contour.op = fx_core::path::PathOp::Combine;
+				fx_core::vector::ShapePart {
+					shape: VectorShape::Path {
+						elements: fx_core::path::Path { subpaths: vec![contour] }.to_elements(),
+					},
+					transform: fx_core::vector::IDENTITY,
+					op: sub.op,
+				}
+			})
+			.collect(),
+	}
+}
+
+pub fn render_vector_mask_tile(path: &fx_core::path::Path, density: f32, level: usize, tile: (u32, u32), format: PixelFormat) -> TileBuffer {
+	let shape = vector_mask_shape(path);
 	let white = Paint::Solid { rgba: [65535; 4] };
 	let rgba = render_shape_tile(&shape, Some(&white), None, fx_core::vector::IDENTITY, level, tile, PixelFormat::Rgba8);
 	let mut out = TileBuffer::zeroed(format);

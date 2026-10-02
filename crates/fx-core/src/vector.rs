@@ -50,29 +50,53 @@ pub enum VectorShape {
 	/// A rectangle `w × h` with up to four rounded corners. `radii` is
 	/// Photoshop's order: top-left, top-right, bottom-right, bottom-left, in
 	/// local pixels, each clamped to half of the shorter side.
-	Rect { w: f64, h: f64, radii: [f64; 4] },
+	Rect {
+		w: f64,
+		h: f64,
+		radii: [f64; 4],
+	},
 	/// An ellipse that fills its local box.
-	Ellipse { w: f64, h: f64 },
+	Ellipse {
+		w: f64,
+		h: f64,
+	},
 	/// A regular polygon of `sides` vertices (3..=100), circumradius 1,
 	/// centred in its 2 × 2 local box and pointing up, like Photoshop's tool.
 	/// `star_inset` above 0 makes a star of `2 × sides` vertices: the odd ones
 	/// sit on the circumradius, the even ones at `star_inset` of it (0..=1).
-	Polygon { sides: u32, star_inset: f64 },
+	Polygon {
+		sides: u32,
+		star_inset: f64,
+	},
 	/// A straight line of `length` local pixels and `width` pixels of
 	/// thickness. Fotox keeps the Line tool's outline as a filled bar of
 	/// length × width (butt caps), so a line is an ordinary filled shape;
 	/// Photoshop's arrowheads and rounded caps come later.
-	Line { length: f64, width: f64 },
+	Line {
+		length: f64,
+		width: f64,
+	},
 	/// A free path (PSD import, the Pen tool later).
-	Path { elements: Vec<PathEl> },
+	Path {
+		elements: Vec<PathEl>,
+	},
 	/// An isosceles triangle pointing up in its `w × h` box, corners rounded
 	/// by `radius` local pixels (the Triangle tool, M10-T07).
-	Triangle { w: f64, h: f64, radius: f64 },
+	Triangle {
+		w: f64,
+		h: f64,
+		radius: f64,
+	},
 	/// Several shapes in one layer, combined in order by their shape-area
 	/// operation (Photoshop's Combine / Subtract / Intersect / Exclude). The
 	/// first part's operation is ignored. Parts are placed in this shape's
 	/// local space, normalised so the union's box starts at (0, 0).
-	Compound { parts: Vec<ShapePart> },
+	Compound {
+		parts: Vec<ShapePart>,
+	},
+	ColoredPaths {
+		parts: Vec<(Vec<PathEl>, [u16; 4])>,
+	},
 }
 
 /// One part of a [`VectorShape::Compound`].
@@ -228,6 +252,7 @@ impl VectorShape {
 			VectorShape::Line { length, width } => (length.abs(), width.abs()),
 			VectorShape::Triangle { w, h, .. } => (w.abs(), h.abs()),
 			VectorShape::Path { elements } => path_bounds(elements),
+			VectorShape::ColoredPaths { .. } => path_bounds(&self.outline()),
 			VectorShape::Compound { parts } => {
 				let (mut x1, mut y1) = (0.0f64, 0.0f64);
 				for p in parts {
@@ -251,6 +276,7 @@ impl VectorShape {
 			VectorShape::Line { length, width } => rounded_rect(length.abs(), width.abs(), [0.0; 4]),
 			VectorShape::Triangle { w, h, radius } => triangle(w.abs(), h.abs(), *radius),
 			VectorShape::Path { elements } => elements.clone(),
+			VectorShape::ColoredPaths { parts } => parts.iter().flat_map(|(els, _)| els.iter().copied()).collect(),
 			// Every part's outline (hit tests and paths; the renderer combines
 			// the parts' coverage itself).
 			VectorShape::Compound { parts } => parts.iter().flat_map(|p| transform_elements(&p.shape.outline(), p.transform)).collect(),
@@ -294,6 +320,9 @@ impl VectorShape {
 
 	/// The local box as a rectangle (see [`bounds`](Self::bounds)).
 	fn local_box(&self) -> (f64, f64, f64, f64) {
+		if matches!(self, VectorShape::ColoredPaths { .. }) {
+			return VectorShape::Path { elements: self.outline() }.local_box();
+		}
 		let (w, h) = self.bounds();
 		match self {
 			VectorShape::Path { elements } => {
@@ -334,7 +363,7 @@ impl VectorShape {
 				}
 			}
 			VectorShape::Line { .. } => "Line",
-			VectorShape::Path { .. } | VectorShape::Compound { .. } => "Shape",
+			VectorShape::Path { .. } | VectorShape::Compound { .. } | VectorShape::ColoredPaths { .. } => "Shape",
 			VectorShape::Triangle { .. } => "Triangle",
 		}
 	}

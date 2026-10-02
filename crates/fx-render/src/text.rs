@@ -597,6 +597,32 @@ impl TextLayout {
 		}
 		(out, self.runs.first().map_or([0, 0, 0, 65535], |r| r.color))
 	}
+	pub fn colored_outline_elements(&self, transform: [f64; 6]) -> Vec<(Vec<fx_core::vector::PathEl>, [u16; 4])> {
+		use fx_core::vector::PathEl;
+		use tiny_skia::PathSegment;
+		let m = transform;
+		let t = |pt: tiny_skia::Point| {
+			let (x, y) = (f64::from(pt.x), f64::from(pt.y));
+			[m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+		};
+		let mut parts = Vec::new();
+		for run in &self.runs {
+			let mut out = Vec::new();
+			for g in &run.glyphs {
+				for seg in g.segments() {
+					out.push(match seg {
+						PathSegment::MoveTo(a) => PathEl::MoveTo(t(a)),
+						PathSegment::LineTo(a) => PathEl::LineTo(t(a)),
+						PathSegment::QuadTo(c, a) => PathEl::QuadTo(t(c), t(a)),
+						PathSegment::CubicTo(c1, c2, a) => PathEl::CubicTo(t(c1), t(c2), t(a)),
+						PathSegment::Close => PathEl::Close,
+					});
+				}
+			}
+			parts.push((out, run.color));
+		}
+		parts
+	}
 }
 
 /// The hinting mode an anti-aliasing setting asks for, or `None` for the plain

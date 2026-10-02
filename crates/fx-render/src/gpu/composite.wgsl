@@ -55,6 +55,7 @@ struct Op {
 	src_solid: array<vec4<f32>, 4>,
 	mask_solid: vec4<f32>,
 	params: vec4<f32>,
+	blend_if: vec4<f32>,
 }
 
 struct Job {
@@ -475,6 +476,11 @@ fn adjust_selective(row: u32, cb: vec3<f32>, relative: bool) -> vec3<f32> {
 	return clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn adjustment_blend_if(i: u32, cs: vec3<f32>, backdrop: vec4<f32>) -> f32 {
+	if (ops[i].flags & F_BLEND_IF) == 0u { return 1.0; }
+	return blend_if_factor(ops[i].blend_if, cs, unpremultiply(backdrop));
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 	let job = jobs[gid.z];
@@ -491,7 +497,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 				let src = sample_src(i, p);
 				var alpha_s = src.a * ops[i].alpha * sample_mask(i, p);
 				if (ops[i].flags & F_BLEND_IF) != 0u {
-					alpha_s *= blend_if_factor(ops[i].params, src.rgb, unpremultiply(stack[sp]));
+					alpha_s *= blend_if_factor(ops[i].blend_if, src.rgb, unpremultiply(stack[sp]));
 				}
 				var mode = ops[i].blend;
 				if (ops[i].flags & F_DISSOLVE) != 0u {
@@ -505,43 +511,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 				let cb = unpremultiply(stack[sp]);
 				let row = ops[i].lut_row;
 				let f = vec3<f32>(lut_channel(row, 0u, cb.r), lut_channel(row, 1u, cb.g), lut_channel(row, 2u, cb.b));
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_HUESAT: {
 				let cb = unpremultiply(stack[sp]);
 				let f = hue_saturation(cb, ops[i].params);
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_LUMA_LUT: {
 				let cb = unpremultiply(stack[sp]);
 				let y = luma601(cb);
 				let row = ops[i].lut_row;
 				let f = vec3<f32>(lut_channel(row, 0u, y), lut_channel(row, 1u, y), lut_channel(row, 2u, y));
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_MATRIX: {
 				let f = adjust_matrix(i, unpremultiply(stack[sp]));
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_BALANCE: {
 				let f = adjust_balance(i, unpremultiply(stack[sp]));
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_VIBRANCE: {
 				let f = adjust_vibrance(unpremultiply(stack[sp]), ops[i].params);
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_LUT3D: {
 				let f = adjust_lut3d(ops[i].lut_row, unpremultiply(stack[sp]));
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_SELECTIVE: {
 				let f = adjust_selective(ops[i].lut_row, unpremultiply(stack[sp]), ops[i].params.x > 0.5);
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_ADJUST_BW: {
 				let f = adjust_bw(i, unpremultiply(stack[sp]));
-				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p), true);
+				stack[sp] = composite(ops[i].blend, stack[sp], f, ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, f, stack[sp]), true);
 			}
 			case K_BEGIN_ISOLATED: {
 				sp += 1u;
@@ -554,13 +560,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 			case K_END_ISOLATED: {
 				let g = stack[sp];
 				sp -= 1u;
-				let alpha_s = g.a * ops[i].alpha * sample_mask(i, p);
+				let alpha_s = g.a * ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, unpremultiply(g), stack[sp]);
 				stack[sp] = composite(ops[i].blend, stack[sp], unpremultiply(g), alpha_s, (ops[i].flags & F_CLIP) != 0u);
 			}
 			case K_END_PASS: {
 				let r = stack[sp];
 				sp -= 1u;
-				let t = ops[i].alpha * sample_mask(i, p);
+				let t = ops[i].alpha * sample_mask(i, p) * adjustment_blend_if(i, unpremultiply(r), stack[sp]);
 				stack[sp] = stack[sp] + (r - stack[sp]) * t;
 			}
 			case K_END_CHANNELS: {

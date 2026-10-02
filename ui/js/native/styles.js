@@ -126,11 +126,12 @@ function globalLight() {
   const info = activeDocumentInfo();
   const angle = info && Number.isFinite(info.global_light) ? info.global_light : 120;
   const altitude = info && Number.isFinite(info.global_altitude) ? info.global_altitude : 30;
+  if (lightSent && lightSent.doc !== info?.doc) lightSent = null;
   if (lightSent && Math.abs(angle - lightSent.angle) < 1e-9 && Math.abs(altitude - lightSent.altitude) < 1e-9) lightSent = null;
   return lightSent || { angle, altitude };
 }
 function setGlobalLight(angle, altitude = globalLight().altitude) {
-  lightSent = { angle, altitude };
+  lightSent = { doc: activeDocumentInfo()?.doc, angle, altitude };
   sendCommand({ op: "set_global_light", angle, altitude });
 }
 
@@ -594,6 +595,7 @@ export function openStyleDialog(id) {
   }
   S = {
     layer,
+    light: { angle: globalLight().angle, altitude: globalLight().altitude },
     start: layer.styles ? structuredClone(layer.styles) : null,
     props: { opacity: layer.opacity, fill: layer.fill, blend: layer.blend },
     styles: normalize(layer.styles),
@@ -674,6 +676,7 @@ function revert() {
   if (!S) return;
   sendCommand({ op: "set_layer_style", layer: { id: S.layer.id }, styles: S.start });
   sendCommand({ op: "set_layer_props", layer: { id: S.layer.id }, props: S.props });
+  setGlobalLight(S.light.angle, S.light.altitude);
   S = null;
 }
 

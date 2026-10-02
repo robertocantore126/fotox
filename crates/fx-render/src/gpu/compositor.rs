@@ -88,6 +88,7 @@ struct GpuOp {
 	src_solid: [[f32; 4]; 4],
 	mask_solid: [f32; 4],
 	params: [f32; 4],
+	blend_if: [f32; 4],
 }
 
 #[repr(C)]
@@ -939,6 +940,20 @@ impl GpuCompositor {
 
 	fn encode(&mut self, op: &Op) -> GpuOp {
 		let mut g = GpuOp::default();
+		let range = match op {
+			Op::Layer { blend_if, .. } | Op::Adjust { blend_if, .. } | Op::EndIsolated { blend_if, .. } | Op::EndPassThrough { blend_if, .. } => blend_if,
+			_ => &None,
+		};
+		if let Some(b) = range {
+			g.flags |= F_BLEND_IF;
+			let pack = |a: u8, b: u8| f32::from(a) * 256.0 + f32::from(b);
+			g.blend_if = [
+				pack(b.this_layer[0], b.this_layer[1]),
+				pack(b.this_layer[2], b.this_layer[3]),
+				pack(b.underlying[0], b.underlying[1]),
+				pack(b.underlying[2], b.underlying[3]),
+			];
+		}
 		match op {
 			Op::Layer {
 				layer,
@@ -1053,7 +1068,13 @@ impl GpuCompositor {
 			}
 			Op::BeginIsolated => g.kind = K_BEGIN_ISOLATED,
 			Op::BeginPassThrough => g.kind = K_BEGIN_PASS,
-			Op::EndIsolated { blend, alpha, mask, clip } => {
+			Op::EndIsolated {
+				blend_if: _,
+				blend,
+				alpha,
+				mask,
+				clip,
+			} => {
 				g.kind = K_END_ISOLATED;
 				g.blend = blend.shader_id();
 				g.alpha = *alpha;
@@ -1062,7 +1083,7 @@ impl GpuCompositor {
 				}
 				self.encode_mask(mask, &mut g);
 			}
-			Op::EndPassThrough { alpha, mask } => {
+			Op::EndPassThrough { blend_if: _, alpha, mask } => {
 				g.kind = K_END_PASS;
 				g.alpha = *alpha;
 				self.encode_mask(mask, &mut g);

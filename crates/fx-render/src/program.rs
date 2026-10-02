@@ -128,6 +128,7 @@ pub enum Op {
 	Adjust {
 		layer: LayerId,
 		adjust: AdjustKind,
+		blend_if: Option<fx_core::styles::BlendIf>,
 		blend: BlendMode,
 		alpha: f32,
 		mask: Option<MaskRef>,
@@ -138,13 +139,18 @@ pub enum Op {
 	BeginPassThrough,
 	/// Pop the group result and composite it onto the new top.
 	EndIsolated {
+		blend_if: Option<fx_core::styles::BlendIf>,
 		blend: BlendMode,
 		alpha: f32,
 		mask: Option<MaskRef>,
 		clip: bool,
 	},
 	/// Pop the result `R`; new top = lerp(top, R, alpha × mask).
-	EndPassThrough { alpha: f32, mask: Option<MaskRef> },
+	EndPassThrough {
+		alpha: f32,
+		mask: Option<MaskRef>,
+		blend_if: Option<fx_core::styles::BlendIf>,
+	},
 	/// Blending Options ▸ Channels (after a `BeginPassThrough`): pop the
 	/// result `R`; the new top is `R` with each unticked channel put back to
 	/// the backdrop's value (straight colour, `R`'s alpha).
@@ -395,6 +401,7 @@ fn with_second_mask(op: Op, second: Option<MaskRef>) -> Vec<Op> {
 			Op::BeginPassThrough,
 			adjust,
 			Op::EndPassThrough {
+				blend_if: None,
 				alpha: 1.0,
 				mask: Some(second),
 			},
@@ -457,7 +464,7 @@ impl Builder<'_> {
 						},
 					);
 				}
-				if let Some((alpha, mask, second)) = self.mask(base).apply(1.0) {
+				if let Some((alpha, mask, second)) = self.mask(base).apply(base.fill) {
 					let inner = match second {
 						Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
 						None => inner,
@@ -514,7 +521,8 @@ impl Builder<'_> {
 					// A styled group's shadow or glow can reach tiles its content does not.
 					return self.with_effects(layer, clip, Vec::new());
 				}
-				let Some((alpha, mask, second)) = self.mask(layer).apply(layer.opacity) else {
+				let range = layer.styles.as_ref().and_then(|s| s.blend_if).filter(|b| !b.is_identity());
+				let Some((alpha, mask, second)) = self.mask(layer).apply(layer.opacity * layer.fill) else {
 					return Vec::new();
 				};
 				// Both masks vary: the inner group applies the second (a nested
@@ -525,6 +533,7 @@ impl Builder<'_> {
 						ops.push(Op::BeginPassThrough);
 						ops.extend(inner);
 						ops.push(Op::EndPassThrough {
+							blend_if: None,
 							alpha: 1.0,
 							mask: Some(second),
 						});
@@ -533,20 +542,23 @@ impl Builder<'_> {
 					Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
 					None => inner,
 				};
-				let group = if layer.blend == BlendMode::PassThrough && !clip {
-					if alpha >= 1.0 && mask.is_none() {
+				let mut group = if layer.blend == BlendMode::PassThrough && !clip {
+					if alpha >= 1.0 && mask.is_none() && range.is_none() {
 						inner // exactly equivalent, cheaper
 					} else {
 						let mut ops = Vec::with_capacity(inner.len() + 2);
 						ops.push(Op::BeginPassThrough);
 						ops.extend(inner);
-						ops.push(Op::EndPassThrough { alpha, mask });
+						ops.push(Op::EndPassThrough { blend_if: None, alpha, mask });
 						ops
 					}
 				} else {
 					wrap_isolated(inner, normal_if_pass(layer.blend), alpha, mask, clip)
 				};
 				// A styled group: its effects around its composite, as for a layer.
+				if let Some(Op::EndIsolated { blend_if, .. } | Op::EndPassThrough { blend_if, .. }) = group.last_mut() {
+					*blend_if = range;
+				}
 				self.with_effects(layer, clip, group)
 			}
 			// Blend If shapes the content only (effects keep their own alpha);
@@ -585,10 +597,14 @@ impl Builder<'_> {
 		// Blend If shapes the content only (effects keep their own alpha). A
 		// group's `content` is its children, whose own ops must not inherit it.
 		let blend_if = layer.styles.as_ref().and_then(|s| s.blend_if).filter(|b| !b.is_identity());
-		if !matches!(layer.kind, LayerKind::Group { .. }) {
+		if matches!(layer.kind, LayerKind::Group { .. }) {
+			if let Some(Op::EndIsolated { blend_if: range, .. } | Op::EndPassThrough { blend_if: range, .. }) = content.last_mut() {
+				*range = blend_if;
+			}
+		} else {
 			if let Some(range) = blend_if {
 				for op in &mut content {
-					if let Op::Layer { blend_if, .. } = op {
+					if let Op::Layer { blend_if, .. } | Op::Adjust { blend_if, .. } = op {
 						*blend_if = Some(range);
 					}
 				}
@@ -633,7 +649,7 @@ impl Builder<'_> {
 			let mut built = self.content(layer, BlendMode::Normal, layer.fill, false);
 			if let Some(range) = blend_if {
 				for op in &mut built {
-					if let Op::Layer { blend_if, .. } = op {
+					if let Op::Layer { blend_if, .. } | Op::Adjust { blend_if, .. } = op {
 						*blend_if = Some(range);
 					}
 				}
@@ -643,6 +659,7 @@ impl Builder<'_> {
 			out.extend(extra);
 			out.extend(inside);
 			out.push(Op::EndIsolated {
+				blend_if: None,
 				blend: layer.blend,
 				alpha: layer.opacity,
 				mask: None,
@@ -657,6 +674,7 @@ impl Builder<'_> {
 			out.extend(content);
 			out.extend(extra);
 			out.push(Op::EndIsolated {
+				blend_if: None,
 				blend: BlendMode::Normal,
 				alpha: 1.0,
 				mask: None,
@@ -881,6 +899,7 @@ impl Builder<'_> {
 					other => AdjustKind::Lut((self.luts)(other)),
 				};
 				Op::Adjust {
+					blend_if: None,
 					layer: layer.id,
 					adjust,
 					blend,
@@ -930,10 +949,7 @@ impl Builder<'_> {
 		let Some(mask @ Mask { enabled: true, .. }) = &layer.mask else {
 			return Single::Constant(1.0);
 		};
-		let offset = match (&layer.kind, mask.linked) {
-			(LayerKind::Pixel { offset, .. }, true) => *offset,
-			_ => (0, 0),
-		};
+		let offset = layer.mask_origin();
 		let outside = mask.outside_value as f32 / 65535.0;
 		let Some(quad) = self.quad(&mask.image, offset, layer.id, SourceTile::Mip { mask: true }) else {
 			return Single::Constant(1.0);
@@ -1069,7 +1085,13 @@ fn wrap_isolated(inner: Vec<Op>, blend: BlendMode, alpha: f32, mask: Option<Mask
 	let mut ops = Vec::with_capacity(inner.len() + 2);
 	ops.push(Op::BeginIsolated);
 	ops.extend(inner);
-	ops.push(Op::EndIsolated { blend, alpha, mask, clip });
+	ops.push(Op::EndIsolated {
+		blend_if: None,
+		blend,
+		alpha,
+		mask,
+		clip,
+	});
 	ops
 }
 
@@ -1105,12 +1127,14 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			blend_if.hash(h);
 		}
 		Op::Adjust {
+			blend_if,
 			layer,
 			adjust,
 			blend,
 			alpha,
 			mask,
 		} => {
+			blend_if.hash(h);
 			layer.hash(h);
 			match adjust {
 				AdjustKind::Lut(lut) | AdjustKind::LumaLut(lut) | AdjustKind::Lut3d(lut) => lut.key.hash(h),
@@ -1155,13 +1179,21 @@ fn hash_op(op: &Op, h: &mut impl Hasher) {
 			hash_mask(mask, h);
 		}
 		Op::BeginIsolated | Op::BeginPassThrough => {}
-		Op::EndIsolated { blend, alpha, mask, clip } => {
+		Op::EndIsolated {
+			blend_if,
+			blend,
+			alpha,
+			mask,
+			clip,
+		} => {
+			blend_if.hash(h);
 			blend.hash(h);
 			alpha.to_bits().hash(h);
 			hash_mask(mask, h);
 			clip.hash(h);
 		}
-		Op::EndPassThrough { alpha, mask } => {
+		Op::EndPassThrough { blend_if, alpha, mask } => {
+			blend_if.hash(h);
 			alpha.to_bits().hash(h);
 			hash_mask(mask, h);
 		}

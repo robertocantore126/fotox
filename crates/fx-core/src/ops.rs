@@ -281,6 +281,10 @@ pub trait PixelOps: Send + Sync {
 		Err(CommandError::NotAllowed("text outlines need the engine's text layout".into()))
 	}
 
+	fn text_colored_outline(&self, content: &crate::text::TextContent, ppi: f32) -> Result<Vec<(Vec<crate::vector::PathEl>, [u16; 4])>, CommandError> {
+		self.text_outline(content, ppi).map(|part| vec![part])
+	}
+
 	/// PatchMatch hole filling (M11-T01) over a `w × h` buffer: the `hole`
 	/// pixels rebuilt from patches of the `sampling` pixels.
 	#[allow(clippy::too_many_arguments)]

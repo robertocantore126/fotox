@@ -281,3 +281,54 @@ fn two_varying_masks_equal_their_product() {
 		}
 	}
 }
+
+#[test]
+fn triage_group_fill_and_blend_if_affect_group_result() {
+	use fx_core::styles::{BlendIf, LayerStyles};
+	use fx_core::{Layer, LayerId};
+	let store = store();
+	for blend in [BlendMode::Normal, BlendMode::PassThrough] {
+		let mut doc = doc(32, 32);
+		let child = Arc::new(Layer::new(LayerId(2), "child", LayerKind::SolidFill { rgba: [65535; 4] }));
+		let mut group = Layer::new(
+			LayerId(1),
+			"group",
+			LayerKind::Group {
+				children: vec![child],
+				expanded: true,
+			},
+		);
+		group.blend = blend;
+		group.fill = 0.25;
+		doc.layers.push(Arc::new(group.clone()));
+		assert!((render(&doc, &store, 0, 0)[0][3] - 0.25).abs() < 1e-9);
+		group.styles = Some(LayerStyles {
+			blend_if: Some(BlendIf {
+				this_layer: [0, 0, 100, 100],
+				..Default::default()
+			}),
+			..Default::default()
+		});
+		doc.layers[0] = Arc::new(group);
+		assert_eq!(render(&doc, &store, 0, 0)[0], [0.0; 4]);
+	}
+}
+#[test]
+fn triage_adjustment_blend_if_preserves_backdrop_when_excluded() {
+	use fx_core::styles::{BlendIf, LayerStyles};
+	use fx_core::{Layer, LayerId};
+	let store = store();
+	let mut doc = doc(32, 32);
+	doc.layers
+		.push(Arc::new(Layer::new(LayerId(1), "base", LayerKind::SolidFill { rgba: [0, 0, 0, 65535] })));
+	let mut adjust = Layer::new(LayerId(2), "invert", LayerKind::Adjustment(Adjustment::Invert));
+	adjust.styles = Some(LayerStyles {
+		blend_if: Some(BlendIf {
+			underlying: [100, 100, 255, 255],
+			..Default::default()
+		}),
+		..Default::default()
+	});
+	doc.layers.push(Arc::new(adjust));
+	assert_eq!(render(&doc, &store, 0, 0)[0], [0.0, 0.0, 0.0, 1.0]);
+}

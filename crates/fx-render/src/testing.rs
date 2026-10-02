@@ -103,6 +103,7 @@ pub fn mask(doc: &Document, store: &TileStore, f: &dyn Fn(u32, u32) -> u16) -> M
 		image: image(store, doc.width, doc.height, PixelFormat::Gray16, &|x, y| [f(x, y), 0, 0, 0]),
 		enabled: true,
 		linked: true,
+		offset: (0, 0),
 		outside_value: 0,
 	}
 }

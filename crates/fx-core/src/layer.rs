@@ -14,6 +14,7 @@ pub struct LayerId(pub u64);
 /// document, `0` = hidden, max = visible.
 #[derive(Clone, Debug)]
 pub struct Mask {
+	pub offset: (i32, i32),
 	pub image: TiledImage,
 	pub enabled: bool,
 	/// Mask stays put when the layer moves (Photoshop's unlinked mask).
@@ -368,6 +369,14 @@ pub struct VectorMask {
 }
 
 impl Layer {
+	pub fn mask_origin(&self) -> (i32, i32) {
+		match (&self.kind, &self.mask) {
+			(LayerKind::Pixel { offset, .. }, Some(mask)) if mask.linked => *offset,
+			(_, Some(mask)) => mask.offset,
+			_ => (0, 0),
+		}
+	}
+
 	pub fn new(id: LayerId, name: impl Into<String>, kind: LayerKind) -> Self {
 		let blend = if matches!(kind, LayerKind::Group { .. }) {
 			BlendMode::PassThrough

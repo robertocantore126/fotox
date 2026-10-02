@@ -103,7 +103,15 @@ impl Engine {
 	/// Copy a library pattern into the document before a command or stroke
 	/// reads it (M8-T06). FAST: outside the History (resources only grow).
 	pub(super) fn ensure_pattern(&mut self, doc_id: DocId, pattern: u64) {
-		let Some(p) = self.resources.patterns.get(pattern).cloned() else { return };
+		let Some(p) = self
+			.resources
+			.patterns
+			.get(pattern)
+			.cloned()
+			.or_else(|| self.style_patterns.iter().find(|p| p.id == pattern).cloned())
+		else {
+			return;
+		};
 		if let Some(open) = self.docs.get_mut(doc_id)
 			&& !open.doc.patterns.iter().any(|q| q.id == pattern)
 		{
@@ -229,7 +237,9 @@ impl Engine {
 			"hist:source" => {
 				let Some(doc) = self.docs.active_id() else { return true };
 				let row = args.get("row").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-				self.resources.history_source.insert(doc, row);
+				if let Some(state) = self.docs.get(doc).and_then(|o| o.history.state_id(row)) {
+					self.resources.history_source.insert(doc, state);
+				}
 				self.to_ui(&EngineToUi::HistorySource { doc, state: Some(row) });
 				return true;
 			}
@@ -337,7 +347,7 @@ pub(super) fn history_source(
 		StrokeTool::HistoryBrush { state } | StrokeTool::ArtHistory { state, .. } => *state,
 		_ => return Ok(None),
 	};
-	let Some(state) = open.history.state(row, &open.doc) else {
+	let Some(state) = open.history.state_by_id(row, &open.doc) else {
 		return Err("Could not use the history brush because the source history state is gone".into());
 	};
 	if (state.width, state.height) != (open.doc.width, open.doc.height) {

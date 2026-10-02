@@ -836,6 +836,7 @@ fn rich_document(store: &TileStore, depth: BitDepth, side: u32) -> Document {
 		image: noisy(side, side, gray, &mut rng),
 		enabled: true,
 		linked: true,
+		offset: (0, 0),
 		outside_value: 65535,
 	});
 	layers.push(Arc::new(background));

@@ -76,7 +76,12 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 			*top = composite(mode, *top, cs, alpha_s, *clip);
 		}
 		Op::Adjust {
-			adjust, blend, alpha, mask, ..
+			adjust,
+			blend,
+			alpha,
+			mask,
+			blend_if,
+			..
 		} => {
 			let m = mask.as_ref().map_or(1.0, |m| sample_mask(m, px, py, buffers));
 			let top = stack.last_mut().expect("stack never empty");
@@ -105,24 +110,36 @@ fn execute(op: &Op, px: u32, py: u32, origin: (u32, u32), buffers: &HashMap<Tile
 				AdjustKind::Lut3d(lut) => crate::adjust::lut3d(lut, cb),
 				AdjustKind::Selective { lut, relative } => crate::adjust::selective_color(lut, cb, *relative),
 			};
-			*top = composite(*blend, *top, f, *alpha as f64 * m, true);
+			let factor = blend_if.as_ref().map_or(1.0, |b| blend_if_factor(b, f, cb));
+			*top = composite(*blend, *top, f, *alpha as f64 * m * factor, true);
 		}
 		Op::BeginIsolated => stack.push([0.0; 4]),
 		Op::BeginPassThrough => {
 			let top = *stack.last().expect("stack never empty");
 			stack.push(top);
 		}
-		Op::EndIsolated { blend, alpha, mask, clip } => {
+		Op::EndIsolated {
+			blend_if,
+			blend,
+			alpha,
+			mask,
+			clip,
+		} => {
 			let group = stack.pop().expect("balanced");
 			let m = mask.as_ref().map_or(1.0, |m| sample_mask(m, px, py, buffers));
 			let top = stack.last_mut().expect("stack never empty");
-			*top = composite(*blend, *top, unpremultiply(group), group[3] * *alpha as f64 * m, *clip);
+			let cs = unpremultiply(group);
+			let factor = blend_if.as_ref().map_or(1.0, |b| blend_if_factor(b, cs, unpremultiply(*top)));
+			*top = composite(*blend, *top, cs, group[3] * *alpha as f64 * m * factor, *clip);
 		}
-		Op::EndPassThrough { alpha, mask } => {
+		Op::EndPassThrough { blend_if, alpha, mask } => {
 			let result = stack.pop().expect("balanced");
 			let m = mask.as_ref().map_or(1.0, |m| sample_mask(m, px, py, buffers));
-			let t = *alpha as f64 * m;
 			let top = stack.last_mut().expect("stack never empty");
+			let factor = blend_if
+				.as_ref()
+				.map_or(1.0, |b| blend_if_factor(b, unpremultiply(result), unpremultiply(*top)));
+			let t = *alpha as f64 * m * factor;
 			for i in 0..4 {
 				top[i] += (result[i] - top[i]) * t;
 			}

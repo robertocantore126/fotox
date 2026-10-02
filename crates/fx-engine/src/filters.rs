@@ -56,6 +56,9 @@ impl PreviewJob {
 	/// (without error) when a newer request superseded this one.
 	pub fn run(self, store: &TileStore, send: impl Fn(Vec<((u32, u32), TileBuffer)>)) -> Result<(), TileError> {
 		let current = || self.latest.load(Ordering::Relaxed) == self.request;
+		if !current() {
+			return Ok(());
+		}
 		let mut source_image = self.base.clone();
 		prepare_levels(&mut source_image, store, &self.params, self.level, Some(self.region))?;
 		let source = ImageSource { image: &source_image, store };

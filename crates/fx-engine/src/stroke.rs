@@ -31,13 +31,10 @@ pub fn prepare(doc: &Document, layer: LayerId, target: StrokeTarget, tool: &Stro
 	let (image, offset) = match (target, &found.kind) {
 		(StrokeTarget::Pixels, LayerKind::Pixel { image, offset }) => (image.clone(), *offset),
 		(StrokeTarget::Pixels, _) => return Err(CommandError::NotAllowed("the layer has no pixels; rasterise it first".into())),
-		(StrokeTarget::Mask, kind) => {
+		(StrokeTarget::Mask, _) => {
 			let mask = found.mask.as_ref().ok_or(CommandError::NotAllowed("the layer has no mask".into()))?;
 			// A linked mask sits at the layer's offset, an unlinked one at the origin.
-			let offset = match kind {
-				LayerKind::Pixel { offset, .. } if mask.linked => *offset,
-				_ => (0, 0),
-			};
+			let offset = found.mask_origin();
 			(mask.image.clone(), offset)
 		}
 	};

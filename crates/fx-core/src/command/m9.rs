@@ -147,6 +147,7 @@ pub(super) fn quick_mask(doc: &mut Document, on: bool, ctx: &CommandContext<'_>)
 			image,
 			enabled: true,
 			linked: false,
+			offset: (0, 0),
 			outside_value: 0,
 		});
 		doc.layers.push(Arc::new(layer));
@@ -195,7 +196,7 @@ pub(super) fn select_by(
 		Some(found) => selection::combine(size, doc.selection.as_ref(), &found, mode, ctx.tiles)?,
 		None => match mode {
 			SelectMode::Replace | SelectMode::Intersect => None,
-			SelectMode::Add | SelectMode::Subtract => doc.selection.take(),
+			SelectMode::Add | SelectMode::Subtract | SelectMode::Exclude => doc.selection.take(),
 		},
 	};
 	Ok(selection_effect(op.label()))

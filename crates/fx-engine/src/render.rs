@@ -283,6 +283,7 @@ struct TilePipeline {
 	holes_logged: Option<Instant>,
 	/// Tiles being loaded by rayon jobs.
 	loading: Arc<Mutex<HashSet<TileId>>>,
+	failed_loads: Arc<Mutex<HashSet<TileId>>>,
 	/// Source tiles uploaded by the last frame, and the running total it is
 	/// computed from.
 	frame_uploads: u32,
@@ -311,6 +312,7 @@ impl TilePipeline {
 			mips_sent: HashSet::new(),
 			holes_logged: None,
 			loading: Arc::new(Mutex::new(HashSet::new())),
+			failed_loads: Arc::new(Mutex::new(HashSet::new())),
 			frame_uploads: 0,
 			total_uploads: 0,
 			gpu_bytes,
@@ -325,6 +327,7 @@ impl TilePipeline {
 		self.ready.clear();
 		self.programs.clear();
 		self.mips_sent.clear();
+		self.failed_loads.lock().expect("loader set poisoned").clear();
 	}
 
 	/// Draw one frame of `doc`. Returns whether another frame should follow
@@ -522,13 +525,18 @@ impl TilePipeline {
 	/// thread. Each tile is loaded once, however often it is asked for.
 	fn load(&self, ctx: &RenderContext, handle: fx_tiles::TileHandle) {
 		let id = handle.id();
+		if self.failed_loads.lock().expect("loader set poisoned").contains(&id) {
+			return;
+		}
 		if !self.loading.lock().expect("loader set poisoned").insert(id) {
 			return;
 		}
 		let (store, loading, wake) = (ctx.store.clone(), self.loading.clone(), ctx.wake.clone());
+		let failed = self.failed_loads.clone();
 		rayon::spawn(move || {
 			if let Err(error) = store.get(&handle) {
 				tracing::warn!("loading tile {id:?} failed: {error}");
+				failed.lock().expect("loader set poisoned").insert(id);
 			}
 			loading.lock().expect("loader set poisoned").remove(&id);
 			let _ = wake.send(RenderRequest::Wake);

@@ -249,7 +249,7 @@ pub(super) fn transform_smart(doc: &mut Document, id: LayerId, mapping: Mapping)
 	};
 	let Some(new) = compose(mapping, smart.transform) else {
 		return Err(CommandError::NotAllowed(
-			"this Smart Object is already warped: a second warp cannot be kept on it; rasterise it first".into(),
+			"this transform cannot be kept on a Smart Object; rasterise it first".into(),
 		));
 	};
 	smart.transform = new;
@@ -271,7 +271,12 @@ pub(super) fn new_smart_via_copy(doc: &mut Document, layer: &LayerRef) -> Result
 	};
 	let mut source = smart.source.clone();
 	source.uid = new_uid();
-	let mut copy = (*smart_layer(doc, format!("{} copy", original.name), source, smart.transform)).clone();
+	let mut copy = original.clone();
+	copy.id = doc.allocate_layer_id();
+	copy.name = format!("{} copy", original.name);
+	if let LayerKind::Smart { smart: s, .. } = &mut copy.kind {
+		s.source = source;
+	}
 	if let LayerKind::Smart { smart: s, .. } = &mut copy.kind {
 		s.filters = smart.filters.clone();
 		s.filters_enabled = smart.filters_enabled;

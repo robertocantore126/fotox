@@ -2,7 +2,7 @@
 //! and `.3dl` (Autodesk / Lustre). The result is always a 3D table (red
 //! fastest) of straight RGB `0..=1`: a 1D table becomes a 17³ one.
 //!
-//! FAST: `DOMAIN_MIN` / `DOMAIN_MAX` other than 0 / 1 are ignored; a `.3dl`
+//! Nonstandard `.cube` input domains are rejected. FAST: a `.3dl`
 //! input shaper line is skipped (its outputs are scaled by the largest value).
 
 use crate::IoError;
@@ -39,7 +39,14 @@ pub fn parse_cube(text: &str) -> Result<Lut3d, IoError> {
 		match words.next() {
 			Some("LUT_3D_SIZE") => size3 = words.next().and_then(|v| v.parse().ok()).unwrap_or(0),
 			Some("LUT_1D_SIZE") => size1 = words.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-			Some("TITLE" | "DOMAIN_MIN" | "DOMAIN_MAX" | "LUT_1D_INPUT_RANGE" | "LUT_3D_INPUT_RANGE") => {}
+			Some(key @ ("DOMAIN_MIN" | "DOMAIN_MAX")) => {
+				let expected = if key == "DOMAIN_MIN" { 0.0 } else { 1.0 };
+				let values: Vec<f64> = words.filter_map(|v| v.parse().ok()).collect();
+				if values.len() != 3 || values.iter().any(|v| !v.is_finite() || *v != expected) {
+					return Err(IoError::Unsupported("LUT input domains other than 0..1 are not supported".into()));
+				}
+			}
+			Some("TITLE" | "LUT_1D_INPUT_RANGE" | "LUT_3D_INPUT_RANGE") => {}
 			_ => {
 				if let Some(v) = numbers(line)
 					&& v.len() >= 3

@@ -626,44 +626,74 @@ pub(super) fn content_aware_scale(
 	let mut out = TiledImage::new(width, height, format);
 	let tile = i64::from(TILE_SIZE);
 	let keys: Vec<(u32, u32)> = (0..out.grid(0).rows()).flat_map(|ty| (0..out.grid(0).cols()).map(move |tx| (tx, ty))).collect();
-	let buffers: Vec<((u32, u32), fx_tiles::TileBuffer)> = keys
-		.par_iter()
-		.map(|&(tx, ty)| -> Result<_, CommandError> {
-			let mut cache: HashMap<(i64, i64), Option<Vec<Px>>> = HashMap::new();
-			let mut pixels = vec![[0.0f32; 4]; TILE_PIXELS];
-			for py in 0..tile {
-				let oy = i64::from(ty) * tile + py;
-				if oy >= i64::from(height) {
-					break;
-				}
-				// FAST: nearest neighbour for the plain-scale part.
-				let yc = (((oy as f64 + 0.5) * ch / f64::from(height)) as i64).clamp(0, ch as i64 - 1);
-				for px in 0..tile {
-					let ox = i64::from(tx) * tile + px;
-					if ox >= i64::from(width) {
+	let linked_mask = doc.layer(id).and_then(|l| l.mask.as_ref()).filter(|m| m.linked).cloned();
+	let mut mask_out = linked_mask.as_ref().map(|m| TiledImage::new(width, height, m.image.format()));
+	for batch in keys.chunks(8) {
+		let buffers: Vec<_> = batch
+			.par_iter()
+			.map(|&(tx, ty)| -> Result<_, CommandError> {
+				let mut cache: HashMap<(i64, i64), Option<Vec<Px>>> = HashMap::new();
+				let mut mask_cache = HashMap::new();
+				let mut mask_buffer = linked_mask.as_ref().map(|m| fx_tiles::TileBuffer::zeroed(m.image.format()));
+				let mut pixels = vec![[0.0f32; 4]; TILE_PIXELS];
+				for py in 0..tile {
+					let oy = i64::from(ty) * tile + py;
+					if oy >= i64::from(height) {
 						break;
 					}
-					let xc = (((ox as f64 + 0.5) * cw / f64::from(width)) as i64).clamp(0, cw as i64 - 1);
-					let (sx, sy) = map[(yc / scale) as usize * aw + (xc / scale) as usize];
-					let x = (i64::from(sx) * scale + xc % scale).min(w - 1);
-					let y = (i64::from(sy) * scale + yc % scale).min(h - 1);
-					let key = (x / tile, y / tile);
-					if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(key) {
-						e.insert(layer_tile(&image, key.0, key.1, ctx.tiles)?);
-					}
-					if let Some(t) = &cache[&key] {
-						pixels[(py * tile + px) as usize] = t[((y % tile) * tile + x % tile) as usize];
+					// FAST: nearest neighbour for the plain-scale part.
+					let yc = (((oy as f64 + 0.5) * ch / f64::from(height)) as i64).clamp(0, ch as i64 - 1);
+					for px in 0..tile {
+						let ox = i64::from(tx) * tile + px;
+						if ox >= i64::from(width) {
+							break;
+						}
+						let xc = (((ox as f64 + 0.5) * cw / f64::from(width)) as i64).clamp(0, cw as i64 - 1);
+						let (sx, sy) = map[(yc / scale) as usize * aw + (xc / scale) as usize];
+						let x = (i64::from(sx) * scale + xc % scale).min(w - 1);
+						let y = (i64::from(sy) * scale + yc % scale).min(h - 1);
+						let key = (x / tile, y / tile);
+						if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(key) {
+							e.insert(layer_tile(&image, key.0, key.1, ctx.tiles)?);
+						}
+						if let Some(t) = &cache[&key] {
+							pixels[(py * tile + px) as usize] = t[((y % tile) * tile + x % tile) as usize];
+						}
+						if let (Some(mask), Some(buffer)) = (&linked_mask, &mut mask_buffer) {
+							let value = if x >= i64::from(mask.image.width()) || y >= i64::from(mask.image.height()) {
+								f32::from(mask.outside_value) / 65535.0
+							} else {
+								let key = (key.0 as u32, key.1 as u32);
+								if let std::collections::hash_map::Entry::Vacant(entry) = mask_cache.entry(key) {
+									entry.insert(
+										Selection {
+											image: mask.image.clone(),
+											offset: (0, 0),
+										}
+										.tile_coverage(ctx.tiles, key.0, key.1)?,
+									);
+								}
+								mask_cache[&key].at((x % tile) as u32, (y % tile) as u32)
+							};
+							crate::selection::set_gray(buffer, mask.image.format(), px as u32, py as u32, value);
+						}
 					}
 				}
+				Ok(((tx, ty), crate::pixels::encode(&pixels, format), mask_buffer))
+			})
+			.collect::<Result<_, _>>()?;
+		for ((tx, ty), buffer, mask_buffer) in buffers {
+			out.put_buffer(ctx.tiles, tx, ty, buffer);
+			if let (Some(image), Some(buffer)) = (&mut mask_out, mask_buffer) {
+				image.put_buffer(ctx.tiles, tx, ty, buffer);
 			}
-			Ok(((tx, ty), crate::pixels::encode(&pixels, format)))
-		})
-		.collect::<Result<_, _>>()?;
-	for ((tx, ty), buffer) in buffers {
-		out.put_buffer(ctx.tiles, tx, ty, buffer);
+		}
 	}
-	// FAST: the layer mask is not scaled with the pixels.
 	set_pixels(doc, id, out, offset);
+	if let (Some(mask), Some(image)) = (&mut doc.layer_mut(id).expect("resolved").mask, mask_out) {
+		mask.image = image;
+	}
+
 	Ok(CommandEffect {
 		label: "Content-Aware Scale".into(),
 		pixels_changed: vec![id],

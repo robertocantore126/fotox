@@ -301,6 +301,7 @@ pub(crate) fn keep_layers(
 			let kept = keep_layers(children, wanted);
 			if !kept.is_empty() {
 				let mut group = (**layer).clone();
+				group.effects.clear();
 				group.kind = LayerKind::Group {
 					children: kept,
 					expanded: *expanded,

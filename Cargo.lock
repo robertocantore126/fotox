@@ -1025,6 +1025,7 @@ dependencies = [
  "fx-engine",
  "fx-protocol",
  "graphite-desktop-ui",
+ "png",
  "pollster 1.0.1",
  "rfd",
  "serde",

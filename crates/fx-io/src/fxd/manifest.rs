@@ -186,6 +186,8 @@ pub struct ChannelEntry {
 /// A layer mask.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaskEntry {
+	#[serde(default)]
+	pub offset: (i32, i32),
 	pub enabled: bool,
 	pub linked: bool,
 	pub outside_value: u16,
@@ -359,6 +361,7 @@ fn layer_entry(layer: &Layer, tile_ref: &dyn Fn(&TileHandle) -> Option<ChunkRef>
 		mask: layer.mask.as_ref().map(|mask| MaskEntry {
 			enabled: mask.enabled,
 			linked: mask.linked,
+			offset: mask.offset,
 			outside_value: mask.outside_value,
 			image: image_entry(&mask.image, tile_ref),
 		}),
@@ -634,6 +637,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 			image: image_as(&mask.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?,
 			enabled: mask.enabled,
 			linked: mask.linked,
+			offset: mask.offset,
 			outside_value: mask.outside_value,
 		}),
 		None => None,
@@ -945,6 +949,7 @@ mod tests {
 			image: mask_image,
 			enabled: false,
 			linked: true,
+			offset: (0, 0),
 			outside_value: 1234,
 		});
 
@@ -953,6 +958,7 @@ mod tests {
 			image: TiledImage::new(2048, 2048, PixelFormat::Gray8),
 			enabled: true,
 			linked: false,
+			offset: (0, 0),
 			outside_value: 0,
 		});
 

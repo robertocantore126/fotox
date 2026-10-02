@@ -193,6 +193,7 @@ pub(crate) enum Internal {
 	},
 	/// Free Transform's source is cut out and its mips are valid (M6-T04).
 	TransformPrepared {
+		token: u64,
 		doc: DocId,
 		layer: LayerId,
 		result: Result<Option<Prepared>, TileError>,
@@ -325,6 +326,7 @@ struct Engine {
 	fonts_sent: bool,
 	/// Layer ▸ Layer Style ▸ Copy Layer Style (M6-T08).
 	style_clipboard: Option<fx_core::styles::LayerStyles>,
+	style_patterns: Vec<fx_core::pattern::Pattern>,
 	/// File ▸ New's "Untitled-N" counter (M7-T01).
 	untitled: u32,
 	/// The preferences file (M7-T09).
@@ -382,10 +384,10 @@ struct Engine {
 	transform_refine: Option<Instant>,
 	/// A Place in progress: the document and its history length before the
 	/// place, so cancelling the Free Transform box removes the placed layer.
-	placing: Option<(DocId, usize)>,
+	placing: Option<(DocId, usize, bool)>,
 	/// A filter dialog's live preview over a Smart Object: the document, the
 	/// layer and the history length to undo back to.
-	smart_preview: Option<(DocId, LayerId, usize)>,
+	smart_preview: Option<(DocId, LayerId, usize, bool)>,
 	/// Edit Contents tabs (M12-T02): child document → (parent, Smart Object).
 	smart_children: HashMap<DocId, (DocId, LayerId)>,
 	// AUDIT-FIX(D4): a parent close resumes only after its contents tabs close.
@@ -544,6 +546,7 @@ pub(crate) fn run(ctx: EngineContext) {
 		last_filter: None,
 		fonts_sent: false,
 		style_clipboard: None,
+		style_patterns: Vec::new(),
 		untitled: 0,
 		prefs: crate::prefs::Prefs::load(),
 		prefs_validation: 0,
@@ -2155,6 +2158,9 @@ impl Engine {
 		self.end_stroke();
 		let mut session = free_transform::Session::new(layer_id, rect, mode, filter);
 		session.custom = custom;
+		self.next_task += 1;
+		let token = self.next_task;
+		session.token = token;
 		let status = session.status();
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		open.transform_preview = Some(TransformPreview {
@@ -2169,6 +2175,7 @@ impl Engine {
 		rayon::spawn(move || {
 			let result = Prepared::new(&doc, layer_id, &store);
 			let _ = internal.send(Internal::TransformPrepared {
+				token,
 				doc: doc_id,
 				layer: layer_id,
 				result,
@@ -2253,21 +2260,22 @@ impl Engine {
 	fn cancel_transform(&mut self) {
 		let placing = self.placing.take();
 		self.end_transform(false);
-		if let Some((doc_id, steps)) = placing {
-			self.undo_to(doc_id, steps);
+		if let Some((doc_id, steps, dirty)) = placing {
+			self.undo_to(doc_id, steps, dirty);
 		}
 	}
 
-	/// Undo until `id`'s history has `steps` entries.
-	fn undo_to(&mut self, id: DocId, steps: usize) {
+	/// Undo to a stable state, even when the history has reached its limit.
+	fn undo_to(&mut self, id: DocId, steps: usize, dirty: bool) {
 		let Some(doc) = self.docs.get_mut(id) else { return };
 		let mut stepped = false;
-		while doc.history.labels().count() > steps && doc.history.undo(&mut doc.doc) {
+		while doc.history.current_id() != steps && doc.history.undo(&mut doc.doc) {
 			stepped = true;
 		}
 		if !stepped {
 			return;
 		}
+		doc.dirty = dirty;
 		doc.changed();
 		self.after_edit(id, true);
 		let wanted: Vec<LayerId> = self.thumbs_wanted.keys().filter(|(d, _)| *d == id).map(|(_, l)| *l).collect();
@@ -2297,8 +2305,8 @@ impl Engine {
 	}
 
 	/// The source is ready: show the first preview.
-	fn transform_prepared(&mut self, doc_id: DocId, layer: LayerId, result: Result<Option<Prepared>, TileError>) {
-		let current = matches!(&self.transform, Some((doc, session)) if *doc == doc_id && session.layer == layer);
+	fn transform_prepared(&mut self, token: u64, doc_id: DocId, layer: LayerId, result: Result<Option<Prepared>, TileError>) {
+		let current = matches!(&self.transform, Some((doc, session)) if *doc == doc_id && session.layer == layer && session.token == token);
 		if !current {
 			return;
 		}
@@ -2499,10 +2507,14 @@ impl Engine {
 	/// The live preview of a filter over a Smart Object: the filter added as a
 	/// Smart Filter, undone again before the next change, Cancel or OK.
 	fn smart_filter_preview(&mut self, id: DocId, layer: LayerId, filter: FilterParams) {
-		if let Some((d, _, steps)) = self.smart_preview.take() {
-			self.undo_to(d, steps);
+		// A preview must never be replayed from the edit queue after Cancel.
+		if self.docs.get(id).is_some_and(|o| o.busy.is_some()) {
+			return;
 		}
-		let Some(steps) = self.docs.get(id).map(|o| o.history.labels().count()) else {
+		if let Some((d, _, steps, dirty)) = self.smart_preview.take() {
+			self.undo_to(d, steps, dirty);
+		}
+		let Some((steps, dirty)) = self.docs.get(id).map(|o| (o.history.current_id(), o.dirty)) else {
 			return;
 		};
 		let command = self.smart_filter_rewrite(
@@ -2517,16 +2529,16 @@ impl Engine {
 		}
 		// Not merged into an earlier edit: the step must come off cleanly.
 		self.last_edit = None;
-		self.smart_preview = Some((id, layer, steps));
+		self.smart_preview = Some((id, layer, steps, dirty));
 		self.command(id, command);
 	}
 
 	fn cancel_preview(&mut self, id: DocId) {
-		if let Some((d, _, steps)) = self.smart_preview
+		if let Some((d, _, steps, dirty)) = self.smart_preview
 			&& d == id
 		{
 			self.smart_preview = None;
-			self.undo_to(id, steps);
+			self.undo_to(id, steps, dirty);
 		}
 		if let Some(latest) = self.preview_latest.get(&id) {
 			latest.fetch_add(1, Ordering::Relaxed);
@@ -2625,7 +2637,7 @@ impl Engine {
 				}
 				let Some(open) = self.docs.get_mut(id) else { return };
 				let before = std::mem::replace(&mut open.doc, *after);
-				open.history.record(before, command, effect.label.clone());
+				open.history.record_with_content(before, command, effect.label.clone(), !effect.history_only);
 				// A selection reshape (M5) is a history step, not a content change.
 				let content = !effect.history_only;
 				if content {
@@ -2646,6 +2658,7 @@ impl Engine {
 				self.after_job_m9(id);
 			}
 			Err(error) => {
+				self.clear_output_m9(id);
 				self.to_ui(&EngineToUi::Error { text: error.to_string() });
 				self.request_frame();
 			}
@@ -2739,7 +2752,7 @@ impl Engine {
 			} => self.contents_saved(child, parent, generation, parent_generation, result),
 			Internal::PixelJobDone { task, doc, command, result } => self.pixel_job_done(task, doc, *command, result),
 			Internal::Ai(done) => self.ai_done(*done),
-			Internal::TransformPrepared { doc, layer, result } => self.transform_prepared(doc, layer, result),
+			Internal::TransformPrepared { token, doc, layer, result } => self.transform_prepared(token, doc, layer, result),
 			Internal::TransformShown { doc, request, result } => self.transform_shown(doc, request, result),
 			Internal::Derived {
 				job,
@@ -3447,11 +3460,11 @@ impl Engine {
 		// OK in a filter dialog over a Smart Object: the live preview's step
 		// goes, the real one follows.
 		if matches!(command, Command::ApplyFilter { .. })
-			&& let Some((d, _, steps)) = self.smart_preview
+			&& let Some((d, _, steps, dirty)) = self.smart_preview
 			&& d == id
 		{
 			self.smart_preview = None;
-			self.undo_to(id, steps);
+			self.undo_to(id, steps, dirty);
 		}
 		// A filter on a Smart Object becomes a Smart Filter (M12-T03).
 		let command = self.smart_filter_rewrite(id, command);
@@ -3568,6 +3581,7 @@ impl Engine {
 			self.to_ui(&EngineToUi::Toast { text });
 			return;
 		}
+		let content = doc.history.next_changes_content(redo);
 		let stepped = if redo {
 			doc.history.redo(&mut doc.doc)
 		} else {
@@ -3576,9 +3590,13 @@ impl Engine {
 		if !stepped {
 			return;
 		}
-		doc.dirty = true;
-		doc.changed();
-		self.after_edit(id, true);
+		if content {
+			doc.dirty = true;
+			doc.changed();
+		}
+		self.after_edit(id, content);
+		self.selection_overlay = None;
+		self.request_frame();
 		// Any layer may have changed: refresh every thumbnail on show.
 		let wanted: Vec<LayerId> = self.thumbs_wanted.keys().filter(|(d, _)| *d == id).map(|(_, l)| *l).collect();
 		for layer in wanted {
@@ -3604,6 +3622,9 @@ impl Engine {
 		let info = doc.info();
 		self.send_layer_list(id, false);
 		self.to_ui(&history);
+		let source = self.resources.history_source.get(&id).copied().unwrap_or(0);
+		let row = self.docs.get(id).and_then(|o| o.history.state_row(source));
+		self.to_ui(&EngineToUi::HistorySource { doc: id, state: row });
 		if resized && self.docs.active_id() == Some(id) {
 			self.reactivate_tool();
 		}
@@ -3821,6 +3842,7 @@ impl Engine {
 			// Layer Style ▸ Copy / Paste / Clear (M6-T08).
 			"layer:copy-style" => {
 				let styles = active.and_then(|l| doc.doc.layer(l)).and_then(|l| l.styles.clone());
+				self.style_patterns = doc.doc.patterns.clone();
 				if styles.is_none() {
 					self.to_ui(&EngineToUi::Toast {
 						text: "The layer has no layer style".into(),
@@ -4554,7 +4576,8 @@ impl Engine {
 			return;
 		}
 		let (cw, ch) = (open.doc.width, open.doc.height);
-		let steps_before = open.history.labels().count();
+		let steps_before = open.history.current_id();
+		let dirty_before = open.dirty;
 		let before = open.doc.clone();
 		let name = path.file_stem().map_or("Placed object".into(), |s| s.to_string_lossy().into_owned());
 		fx_core::command::m12::place_source(
@@ -4574,7 +4597,7 @@ impl Engine {
 		}
 		self.start_transform(doc, TransformMode::Free);
 		if matches!(self.transform, Some((d, _)) if d == doc) {
-			self.placing = Some((doc, steps_before));
+			self.placing = Some((doc, steps_before, dirty_before));
 		}
 		let fit = (f64::from(cw) / f64::from(w)).min(f64::from(ch) / f64::from(h));
 		if fit < 1.0
@@ -5390,7 +5413,6 @@ fn is_pixel_job(command: &Command) -> bool {
 			| Command::Patch { .. }
 			| Command::ContentAwareMove { .. }
 			| Command::ContentAwareScale { .. }
-			| Command::SetSmartFilters { .. }
 			// A model's mask refined at full resolution, the generated layers (M13).
 			| Command::MaskFromModel { .. }
 			| Command::GenerativeLayer { .. }

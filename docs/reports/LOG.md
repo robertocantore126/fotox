@@ -504,3 +504,10 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - FAST: existing temporary reproduction file and `.freebuff/` remain untracked; no scratch artifacts committed. Continued on the current `main` checkout because this is a bug-fix pass, not a milestone card.
 - VERIFY: native clipping/style appearance, queued-close and Revert gestures; no Photoshop comparison performed.
 - Try it: rapidly nudge a layer, pause just over 900 ms, nudge again; put a clipping layer over a shadowed layer/group; send edits during a pixel job, then close/save/Revert.
+
+## HARDEN — Bug hunting triage (Codex, 2026-10-02)
+- Done: corrective implementations for the 26 confirmed defects still open at bfbe5d9; stable history/preview cancellation, stale transform rejection, AI completion/cancellation, bounded pixel buffers, Global Light, clipboard transparency, path/vector-mask operations and feather, group/layer property preservation. Concrete known omissions also addressed: existing background masks, linked mask seam scaling, Smart Filter blend modes and LUT domain rejection. See BUG-TRIAGE-2026-10-02.md.
+- Validation: workspace/all-targets check, app build/bundle, JS syntax and diff checks passed. 189 core, 59 IO, 90 renderer, 165 engine/integration and 3 clipboard tests passed (506 distinct tests); 23 opt-in IO audit tests were not run. Native startup reached first UI frame, UI ready and engine connected on RTX 3060/DX12; app closed normally.
+- Skipped: native interaction replay of every triage sequence, thousands-layer stress benchmarks, architectural recommendations, unconfirmed anchor/ID/warp-message findings. No remote push.
+- FAST: large magnetic segments use the existing bounded grid at a reduced resolution; vector coverage stays at the renderer's existing 8-bit precision.
+- VERIFY: live Cancel/Place at 50 history steps, cross-document Global Light, in-flight transform/AI close sequences, external clipboard producers. Implementation and automated tests do not certify every native sequence.

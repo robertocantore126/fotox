@@ -201,6 +201,7 @@ mod tests {
 			image: TiledImage::new(100, 80, PixelFormat::Gray16),
 			enabled: false,
 			linked: true,
+			offset: (0, 0),
 			outside_value: 0,
 		});
 

@@ -105,6 +105,7 @@ pub enum SelectMode {
 	Add,
 	Subtract,
 	Intersect,
+	Exclude,
 }
 
 /// A reshape operation on the current selection (M5-T03). Distances are in
@@ -505,11 +506,11 @@ pub fn combine(size: (u32, u32), old: Option<&Selection>, new: &Selection, mode:
 	let (old, mode) = match old {
 		Some(old) => (old, mode),
 		// Nothing selected: Add = Replace; Subtract/Intersect select nothing.
-		None if matches!(mode, SelectMode::Replace | SelectMode::Add) => (new, SelectMode::Replace),
+		None if matches!(mode, SelectMode::Replace | SelectMode::Add | SelectMode::Exclude) => (new, SelectMode::Replace),
 		None => return Ok(None),
 	};
 	let mut tiles = new.canvas_tiles(size);
-	if matches!(mode, SelectMode::Add | SelectMode::Subtract) {
+	if matches!(mode, SelectMode::Add | SelectMode::Subtract | SelectMode::Exclude) {
 		tiles.extend(old.canvas_tiles(size));
 		tiles.sort_unstable_by_key(|&(x, y)| (y, x));
 		tiles.dedup();
@@ -522,6 +523,7 @@ pub fn combine(size: (u32, u32), old: Option<&Selection>, new: &Selection, mode:
 		SelectMode::Subtract => a.min(1.0 - b),
 		// Not `a * b`: it darkens a soft edge on both sides.
 		SelectMode::Intersect => a.min(b),
+		SelectMode::Exclude => (a - b).abs(),
 	};
 	let results: Result<Vec<_>, TileError> = tiles
 		.par_iter()

@@ -165,7 +165,9 @@ fn blend_if_matches_the_reference() {
 	doc.layers.push(Arc::new(top));
 	let programs = programs(&doc, &mut luts);
 	assert!(
-		programs.iter().any(|p| p.ops.iter().any(|op| matches!(op, crate::program::Op::Layer { blend_if: Some(_), .. }))),
+		programs
+			.iter()
+			.any(|p| p.ops.iter().any(|op| matches!(op, crate::program::Op::Layer { blend_if: Some(_), .. }))),
 		"the programs carry Blend If"
 	);
 	gpu.begin_frame();
@@ -193,7 +195,9 @@ fn channels_match_the_reference() {
 	doc.layers.push(Arc::new(top));
 	let programs = programs(&doc, &mut luts);
 	assert!(
-		programs.iter().any(|p| p.ops.iter().any(|op| matches!(op, crate::program::Op::EndChannels { .. }))),
+		programs
+			.iter()
+			.any(|p| p.ops.iter().any(|op| matches!(op, crate::program::Op::EndChannels { .. }))),
 		"the programs carry Channels"
 	);
 	gpu.begin_frame();
@@ -615,4 +619,43 @@ fn viewport_pass_draws_background_checkerboard_and_tiles() {
 	let c = px(100, 48);
 	assert!(c == [255, 255, 255, 255] || c == [204, 204, 204, 255], "checkerboard, got {c:?}");
 	assert_eq!(px(60, 5), [40, 40, 40, 255], "background above the document");
+}
+
+#[test]
+fn triage_group_and_adjustment_blend_if_match_the_gpu() {
+	let (_gpu, device, queue) = gpu_or_skip!();
+	let store = store();
+	let mut gpu = GpuCompositor::new(&device, &queue, small_config());
+	let mut luts = LutCache::default();
+	for mode in [BlendMode::Normal, BlendMode::PassThrough, BlendMode::Multiply] {
+		let mut doc = doc(512, 256);
+		let bottom = busy_layer(&mut doc, &store, 11);
+		let top = busy_layer(&mut doc, &store, 22);
+		let styles = fx_core::styles::LayerStyles {
+			blend_if: Some(fx_core::styles::BlendIf {
+				this_layer: [30, 90, 180, 240],
+				underlying: [10, 60, 200, 230],
+			}),
+			..Default::default()
+		};
+		let mut group = fx_core::Layer::new(
+			doc.allocate_layer_id(),
+			"group",
+			LayerKind::Group {
+				children: vec![Arc::new(top)],
+				expanded: true,
+			},
+		);
+		group.blend = mode;
+		group.fill = 0.6;
+		group.styles = Some(styles.clone());
+		let mut adjust = fx_core::Layer::new(doc.allocate_layer_id(), "invert", LayerKind::Adjustment(Adjustment::Invert));
+		adjust.styles = Some(styles);
+		doc.layers = vec![Arc::new(bottom), Arc::new(group), Arc::new(adjust)];
+		let programs = programs(&doc, &mut luts);
+		gpu.begin_frame();
+		let outcomes = gpu.composite(&programs, &|h| store.try_get_hot(h)).unwrap();
+		let (max_err, over) = compare(&gpu, &programs, &outcomes, &store);
+		assert!(over < 0.005, "{mode:?}: error {max_err}, fraction {over}");
+	}
 }

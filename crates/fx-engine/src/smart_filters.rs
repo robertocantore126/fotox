@@ -6,8 +6,8 @@
 //! filter's apron and its coarser blur levels are served too). Tiles are
 //! memoised per stage for the duration of one draw.
 //!
-//! FAST: no filter mask; per-filter blending is opacity over Normal only (the
-//! mode is ignored); every draw recomputes the aprons of its tiles.
+//! Each stage mixes by its opacity and blend mode. FAST: no filter mask;
+//! every draw recomputes the aprons of its tiles.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -80,9 +80,9 @@ impl LevelSource for Stage<'_> {
 			return Ok(t.clone());
 		}
 		let mut filtered = filter_tile(self.below, &self.geometry, &self.filter.filter, level, tx as u32, ty as u32)?;
-		if self.filter.opacity < 1.0 {
+		if self.filter.opacity < 1.0 || self.filter.mode != fx_core::BlendMode::Normal {
 			let below = self.below.tile(level, tx, ty)?;
-			mix(&mut filtered, below.as_ref(), self.filter.opacity, self.format());
+			mix(&mut filtered, below.as_ref(), self.filter.opacity, self.filter.mode, self.format());
 		}
 		let t = Some(TileRef::Data(Arc::new(filtered)));
 		self.memo
@@ -94,32 +94,28 @@ impl LevelSource for Stage<'_> {
 }
 
 /// `out = below + (out − below) · opacity`, per 16-bit / 8-bit channel.
-fn mix(out: &mut TileBuffer, below: Option<&TileRef>, opacity: f32, format: PixelFormat) {
-	let k = opacity.clamp(0.0, 1.0);
-	match format {
-		PixelFormat::Rgba16 => {
-			let dst = out.as_u16_mut();
-			for (i, v) in dst.iter_mut().enumerate() {
-				let b = match below {
-					Some(TileRef::Solid(s)) => s[i % 4],
-					Some(TileRef::Data(d)) => d.as_u16()[i],
-					None => 0,
-				};
-				*v = (f32::from(b) + (f32::from(*v) - f32::from(b)) * k).round() as u16;
-			}
-		}
-		_ => {
-			let dst = out.bytes_mut();
-			for (i, v) in dst.iter_mut().enumerate() {
-				let b = match below {
-					Some(TileRef::Solid(s)) => (s[i % 4] >> 8) as u8,
-					Some(TileRef::Data(d)) => d.bytes()[i],
-					None => 0,
-				};
-				*v = (f32::from(b) + (f32::from(*v) - f32::from(b)) * k).round() as u8;
-			}
-		}
-	}
+fn mix(out: &mut TileBuffer, below: Option<&TileRef>, opacity: f32, mode: fx_core::BlendMode, format: PixelFormat) {
+	let filtered = fx_core::pixels::decode(out, format);
+	let backdrop = match below {
+		Some(TileRef::Data(b)) => fx_core::pixels::decode(b, format),
+		Some(TileRef::Solid(v)) => vec![v.map(|c| c as f32 / 65535.0); fx_tiles::TILE_PIXELS],
+		None => vec![[0.0; 4]; fx_tiles::TILE_PIXELS],
+	};
+	let pixels: Vec<[f32; 4]> = filtered
+		.iter()
+		.zip(&backdrop)
+		.map(|(s, b)| {
+			let rgb = fx_render::blend::blend(mode, [b[0] as f64, b[1] as f64, b[2] as f64], [s[0] as f64, s[1] as f64, s[2] as f64]);
+			let k = opacity.clamp(0.0, 1.0);
+			[
+				b[0] + (rgb[0] as f32 - b[0]) * k,
+				b[1] + (rgb[1] as f32 - b[1]) * k,
+				b[2] + (rgb[2] as f32 - b[2]) * k,
+				b[3] + (s[3] - b[3]) * k,
+			]
+		})
+		.collect();
+	*out = fx_core::pixels::encode(&pixels, format);
 }
 
 /// Run `filters` over the requested tiles of one level (their unfiltered

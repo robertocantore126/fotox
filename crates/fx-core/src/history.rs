@@ -9,6 +9,9 @@ use crate::command::{Command, CommandContext, CommandEffect, CommandError};
 use crate::document::Document;
 
 pub struct HistoryEntry {
+	pub before_id: usize,
+	pub after_id: usize,
+	pub content_changed: bool,
 	pub label: String,
 	/// The command that produced the *next* state (kept for macro recording).
 	pub command: Command,
@@ -17,6 +20,8 @@ pub struct HistoryEntry {
 }
 
 pub struct History {
+	current_id: usize,
+	next_id: usize,
 	undo: Vec<HistoryEntry>,
 	redo: Vec<HistoryEntry>,
 	/// Photoshop default is 50 states.
@@ -26,6 +31,8 @@ pub struct History {
 impl Default for History {
 	fn default() -> Self {
 		Self {
+			current_id: 0,
+			next_id: 1,
 			undo: Vec::new(),
 			redo: Vec::new(),
 			limit: 50,
@@ -52,8 +59,14 @@ impl History {
 		};
 		doc.fit_levels();
 		if !effect.selection_only {
+			let before_id = self.current_id;
+			self.current_id = self.next_id;
+			self.next_id += 1;
 			self.redo.clear();
 			self.undo.push(HistoryEntry {
+				before_id,
+				after_id: self.current_id,
+				content_changed: !effect.history_only,
 				label: effect.label.clone(),
 				command,
 				before,
@@ -70,8 +83,22 @@ impl History {
 	/// as it was, the caller has already put the new state in place. Same
 	/// limit and redo rules as [`execute`](Self::execute).
 	pub fn record(&mut self, before: Document, command: Command, label: String) {
+		self.record_with_content(before, command, label, true);
+	}
+
+	pub fn record_with_content(&mut self, before: Document, command: Command, label: String, content_changed: bool) {
+		let before_id = self.current_id;
+		self.current_id = self.next_id;
+		self.next_id += 1;
 		self.redo.clear();
-		self.undo.push(HistoryEntry { label, command, before });
+		self.undo.push(HistoryEntry {
+			label,
+			command,
+			before,
+			before_id,
+			after_id: self.current_id,
+			content_changed,
+		});
 		if self.undo.len() > self.limit {
 			self.undo.remove(0);
 		}
@@ -80,6 +107,7 @@ impl History {
 	/// Returns false if there is nothing to undo.
 	pub fn undo(&mut self, doc: &mut Document) -> bool {
 		let Some(mut entry) = self.undo.pop() else { return false };
+		self.current_id = entry.before_id;
 		std::mem::swap(doc, &mut entry.before);
 		// `entry.before` now holds the state to redo into.
 		self.redo.push(entry);
@@ -88,9 +116,40 @@ impl History {
 
 	pub fn redo(&mut self, doc: &mut Document) -> bool {
 		let Some(mut entry) = self.redo.pop() else { return false };
+		self.current_id = entry.after_id;
 		std::mem::swap(doc, &mut entry.before);
 		self.undo.push(entry);
 		true
+	}
+
+	/// Stable state identity, independent of the retained row count.
+	pub fn current_id(&self) -> usize {
+		self.current_id
+	}
+	pub fn state_id(&self, row: usize) -> Option<usize> {
+		if row < self.undo.len() {
+			Some(self.undo[row].before_id)
+		} else if row == self.undo.len() {
+			Some(self.current_id)
+		} else {
+			self.redo.len().checked_sub(row - self.undo.len()).map(|i| self.redo[i].after_id)
+		}
+	}
+	pub fn state_row(&self, id: usize) -> Option<usize> {
+		(0..=self.undo.len() + self.redo.len()).find(|&row| self.state_id(row) == Some(id))
+	}
+	pub fn state_by_id<'a>(&'a self, id: usize, current: &'a Document) -> Option<&'a Document> {
+		if id == self.current_id {
+			return Some(current);
+		}
+		self.undo
+			.iter()
+			.find(|e| e.before_id == id)
+			.map(|e| &e.before)
+			.or_else(|| self.redo.iter().find(|e| e.after_id == id).map(|e| &e.before))
+	}
+	pub fn next_changes_content(&self, redo: bool) -> bool {
+		(if redo { self.redo.last() } else { self.undo.last() }).is_some_and(|e| e.content_changed)
 	}
 
 	pub fn labels(&self) -> impl Iterator<Item = &str> {
@@ -219,5 +278,55 @@ mod tests {
 		};
 		assert_eq!(*offset, (0, 0), "and the first move is undone with it");
 		assert!(!history.can_undo(), "no step was recorded");
+	}
+}
+
+#[cfg(test)]
+mod triage_tests {
+	use super::*;
+	use crate::{BitDepth, ColorProfile, DocumentColor};
+	#[test]
+	fn capped_history_preserves_cancel_checkpoint_and_source_identity() {
+		let mut doc = Document::new(
+			10,
+			10,
+			DocumentColor {
+				depth: BitDepth::U8,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		let mut history = History::default();
+		for _ in 0..50 {
+			history.record(doc.clone(), Command::SelectAll, "edit".into());
+		}
+		let checkpoint = history.current_id();
+		let source = history.state_id(25).unwrap();
+		history.record(doc.clone(), Command::SelectAll, "preview".into());
+		assert_eq!(history.labels().count(), 50);
+		assert_ne!(history.current_id(), checkpoint);
+		assert_eq!(history.state_id(24), Some(source));
+		assert!(history.state_by_id(source, &doc).is_some());
+		assert!(history.undo(&mut doc));
+		assert_eq!(history.current_id(), checkpoint);
+		assert_eq!(history.state_id(51), None);
+	}
+	#[test]
+	fn selection_history_does_not_change_content_on_undo_or_redo() {
+		let mut doc = Document::new(
+			10,
+			10,
+			DocumentColor {
+				depth: BitDepth::U8,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		let mut history = History::default();
+		history.record_with_content(doc.clone(), Command::SelectAll, "selection".into(), false);
+		assert!(!history.next_changes_content(false));
+		assert!(history.undo(&mut doc));
+		assert!(!history.next_changes_content(true));
+		assert!(history.redo(&mut doc));
 	}
 }

@@ -263,6 +263,10 @@ impl PixelOps for EngineOps {
 		Ok(layout.outline_elements(content.transform))
 	}
 
+	fn text_colored_outline(&self, content: &fx_core::text::TextContent, ppi: f32) -> Result<Vec<(Vec<fx_core::vector::PathEl>, [u16; 4])>, CommandError> {
+		Ok(crate::text::layout_uncached(content, ppi).colored_outline_elements(content.transform))
+	}
+
 	fn select_op(&self, doc: &Document, op: &fx_core::select_ops::SelectOp, store: &TileStore) -> Result<Option<Selection>, CommandError> {
 		self.select(doc, op, store)
 	}

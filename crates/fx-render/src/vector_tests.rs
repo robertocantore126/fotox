@@ -244,3 +244,41 @@ fn a_shape_lands_in_the_right_tile_at_level_one() {
 	let other = render_shape_tile(&shape, Some(&RED), None, at(600.0, 100.0), 1, (0, 0), PixelFormat::Rgba8);
 	assert!((0..256).all(|x| alpha(&other, x, 60) == 0), "and nothing in the tile to its left");
 }
+
+#[test]
+fn triage_vector_mask_intersect_and_exclude_have_distinct_coverage() {
+	use fx_core::path::{Anchor, Path, PathOp, Subpath};
+	let rect = |x: f64, op| Subpath {
+		anchors: vec![(x, 10.0), (x + 30.0, 10.0), (x + 30.0, 40.0), (x, 40.0)]
+			.into_iter()
+			.map(Anchor::corner)
+			.collect(),
+		closed: true,
+		op,
+	};
+	for (op, expected) in [(PathOp::Intersect, [0, 255, 0]), (PathOp::Exclude, [255, 0, 255])] {
+		let path = Path {
+			subpaths: vec![rect(10.0, PathOp::Combine), rect(25.0, op)],
+		};
+		let out = crate::vector::render_vector_mask_tile(&path, 1.0, 0, (0, 0), PixelFormat::Gray8);
+		for (x, v) in [15, 30, 50].into_iter().zip(expected) {
+			assert_eq!(out.bytes()[(20 * TILE_SIZE + x) as usize], v, "{op:?} at {x}");
+		}
+	}
+}
+#[test]
+fn triage_colored_paths_keep_separate_fill_colors() {
+	let a = VectorShape::Rect {
+		w: 10.0,
+		h: 10.0,
+		radii: [0.0; 4],
+	}
+	.outline();
+	let b = fx_core::vector::transform_elements(&a, [1.0, 0.0, 0.0, 1.0, 20.0, 0.0]);
+	let shape = VectorShape::ColoredPaths {
+		parts: vec![(a, RED.rgba()), (b, BLUE.rgba())],
+	};
+	let out = render_shape_tile(&shape, Some(&RED), None, IDENTITY, 0, (0, 0), PixelFormat::Rgba8);
+	assert_eq!(pixel(&out, 5, 5), [255, 0, 0, 255]);
+	assert_eq!(pixel(&out, 25, 5), [0, 0, 255, 255]);
+}

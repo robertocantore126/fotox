@@ -211,7 +211,12 @@ impl Path {
 						s.closed = true;
 						// A closing segment that returns onto the first anchor
 						// carries the first anchor's incoming handle.
-						if s.anchors.len() > 1 && s.anchors.last().map(|a| a.pos) == s.anchors.first().map(|a| a.pos) {
+						if s.anchors.len() > 1
+							&& s.anchors
+								.last()
+								.zip(s.anchors.first())
+								.is_some_and(|(a, b)| (a.pos.0 - b.pos.0).hypot(a.pos.1 - b.pos.1) <= 1e-6)
+						{
 							let last = s.anchors.pop().expect("len > 1");
 							s.anchors[0].inh = last.inh;
 						}

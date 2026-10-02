@@ -1365,7 +1365,15 @@ fn props_label(props: &LayerPropsPatch) -> &'static str {
 		locked_position,
 	} = props;
 	let locks = locked_pixels.is_some() || locked_transparency.is_some() || locked_position.is_some();
-	let fields = [name.is_some(), visible.is_some(), opacity.is_some(), fill.is_some(), blend.is_some(), clipped.is_some(), locks];
+	let fields = [
+		name.is_some(),
+		visible.is_some(),
+		opacity.is_some(),
+		fill.is_some(),
+		blend.is_some(),
+		clipped.is_some(),
+		locks,
+	];
 	if fields.iter().filter(|&&f| f).count() != 1 {
 		return "Layer Properties";
 	}
@@ -1400,6 +1408,10 @@ fn offset_layer(doc: &mut Document, layer: &LayerRef, dx: i32, dy: i32) -> Resul
 	let x = checked_offset(offset.0, dx)?;
 	let y = checked_offset(offset.1, dy)?;
 	*offset = (x, y);
+	if let Some(vm) = &mut target.vector_mask {
+		vm.path = vm.path.map(|(x, y)| (x + f64::from(dx), y + f64::from(dy)));
+		vm.cache.mark_all_dirty();
+	}
 	Ok(CommandEffect {
 		label: "Offset".into(),
 		props_changed: vec![id],
@@ -1440,6 +1452,15 @@ fn offset_layers(doc: &mut Document, layers: &[LayerRef], dx: i32, dy: i32) -> R
 	}
 	for &id in &ids {
 		let Some(target) = doc.layer_mut(id) else { continue };
+		if !matches!(target.kind, LayerKind::Pixel { .. }) {
+			if let Some(mask) = target.mask.as_mut().filter(|m| m.linked) {
+				mask.offset = (checked_offset(mask.offset.0, dx)?, checked_offset(mask.offset.1, dy)?);
+			}
+		}
+		if let Some(vm) = &mut target.vector_mask {
+			vm.path = vm.path.map(|(x, y)| (x + f64::from(dx), y + f64::from(dy)));
+			vm.cache.mark_all_dirty();
+		}
 		match &mut target.kind {
 			LayerKind::Pixel { offset, .. } => {
 				*offset = (checked_offset(offset.0, dx)?, checked_offset(offset.1, dy)?);
@@ -1509,6 +1530,7 @@ fn add_mask(doc: &mut Document, layer: &LayerRef, fill: MaskFill, store: &TileSt
 		linked: true,
 		// Outside the mask image: hidden for a selection mask (nothing outside
 		// the canvas was selected), else the fill's value.
+		offset: (0, 0),
 		outside_value: match (&from_selection, reveal) {
 			(Some((_, hide)), _) => {
 				if *hide {
@@ -1653,6 +1675,12 @@ fn set_shape(
 		*current_shape = shape.clone();
 	}
 	if let Some(fill) = fill {
+		// An explicit fill edit replaces the converted text's individual colors.
+		if matches!(current_shape, VectorShape::ColoredPaths { .. }) {
+			*current_shape = VectorShape::Path {
+				elements: current_shape.outline(),
+			};
+		}
 		*current_fill = *fill;
 	}
 	if let Some(stroke) = stroke {
@@ -1792,7 +1820,11 @@ fn create_effect_layers(doc: &mut Document, layer: &LayerRef, ctx: &CommandConte
 			copy.clipped = false;
 		}
 		let image = ops.composite(&sub, &[id], None, ctx.tiles)?;
-		let mut made = Layer::new(doc.allocate_layer_id(), styles.layer_name(slot, &source.name), LayerKind::Pixel { image, offset: (0, 0) });
+		let mut made = Layer::new(
+			doc.allocate_layer_id(),
+			styles.layer_name(slot, &source.name),
+			LayerKind::Pixel { image, offset: (0, 0) },
+		);
 		made.blend = params.blend;
 		made.opacity = params.opacity;
 		if slot.kind.below_content() {
@@ -2347,7 +2379,16 @@ fn merge_layers(doc: &mut Document, layers: &[LayerRef], ctx: &CommandContext<'_
 	}
 	let panel = doc.panel_order();
 	let bottom = *ids.iter().max_by_key(|id| panel.iter().position(|p| p == *id)).expect("at least two ids");
-	let image = pixel_ops(ctx, "merging")?.composite(doc, &ids, None, ctx.tiles)?;
+	let mut local = doc.clone();
+	let bottom_path = doc.path_of(bottom).expect("selected layer exists");
+	let parent = id_at_path(doc, &bottom_path[..bottom_path.len() - 1]);
+	if let Some(parent) = parent {
+		local.layers = doc.layer(parent).and_then(Layer::children).expect("parent group").to_vec();
+		if !ids.iter().all(|id| local.layer(*id).is_some()) {
+			return Err(CommandError::NotAllowed("merge layers in the same group first".into()));
+		}
+	}
+	let image = pixel_ops(ctx, "merging")?.composite(&local, &ids, None, ctx.tiles)?;
 	// Mutate only now: everything that can fail has run.
 	let name = doc.layer(bottom).expect("resolved id exists").name.clone();
 	for &id in ids.iter().filter(|&&id| id != bottom) {
@@ -2539,7 +2580,23 @@ fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
 	}
 	match &mut layer.kind {
 		LayerKind::SolidFill { rgba } => f(rgba),
-		LayerKind::Shape { fill, stroke, .. } => {
+		LayerKind::Shape { shape, fill, stroke, .. } => {
+			fn shape_colors(shape: &mut VectorShape, f: &mut dyn FnMut(&mut [u16; 4])) {
+				match shape {
+					VectorShape::ColoredPaths { parts } => {
+						for (_, color) in parts {
+							f(color);
+						}
+					}
+					VectorShape::Compound { parts } => {
+						for part in parts {
+							shape_colors(&mut part.shape, f);
+						}
+					}
+					_ => {}
+				}
+			}
+			shape_colors(shape, f);
 			if let Some(Paint::Solid { rgba }) = fill {
 				f(rgba);
 			}
@@ -2570,7 +2627,12 @@ fn visit_layer_colors(layer: &mut Layer, f: &mut dyn FnMut(&mut [u16; 4])) {
 		for e in &mut styles.gradient_overlay {
 			gradient(&mut e.gradient.gradient, f);
 		}
-		let fills = styles.stroke.iter_mut().map(|e| &mut e.fill).chain(styles.outer_glow.iter_mut().map(|e| &mut e.fill)).chain(styles.inner_glow.iter_mut().map(|e| &mut e.fill));
+		let fills = styles
+			.stroke
+			.iter_mut()
+			.map(|e| &mut e.fill)
+			.chain(styles.outer_glow.iter_mut().map(|e| &mut e.fill))
+			.chain(styles.inner_glow.iter_mut().map(|e| &mut e.fill));
 		for fill in fills {
 			if let crate::styles::EffectFill::Gradient { gradient: g, .. } = fill {
 				gradient(&mut g.gradient, f);
@@ -2725,7 +2787,7 @@ fn magic_wand(doc: &mut Document, params: &WandParams, mode: SelectMode, ctx: &m
 		// Subtract keep the current one.
 		None => match mode {
 			SelectMode::Replace | SelectMode::Intersect => None,
-			SelectMode::Add | SelectMode::Subtract => doc.selection.take(),
+			SelectMode::Add | SelectMode::Subtract | SelectMode::Exclude => doc.selection.take(),
 		},
 	};
 	Ok(selection_effect("Magic Wand"))
@@ -2986,10 +3048,7 @@ fn rotate_canvas(doc: &mut Document, quarter_turns: i8, ctx: &CommandContext<'_>
 /// the layer's offset, every other mask at the origin (the renderer's rule,
 /// `fx_render::program`).
 fn mask_origin(layer: &Layer) -> (i32, i32) {
-	match (&layer.kind, layer.mask.as_ref().is_some_and(|m| m.linked)) {
-		(LayerKind::Pixel { offset, .. }, true) => *offset,
-		_ => (0, 0),
-	}
+	layer.mask_origin()
 }
 
 /// A mask's image that a geometry command left at canvas pixel `at`, moved to
@@ -3167,10 +3226,9 @@ fn shift_offsets(doc: &mut Document, dx: i32, dy: i32, new_size: (u32, u32), sto
 			moved.push((id, moved_offset(*offset)?));
 		}
 		if let Some(mask) = &layer.mask
-			&& mask_origin(layer) == (0, 0)
 			&& !(matches!(layer.kind, LayerKind::Pixel { .. }) && mask.linked)
 		{
-			masks.push((id, mask_to(mask.image.clone(), (dx, dy), (0, 0), mask, store)?));
+			masks.push((id, mask_to(mask.image.clone(), moved_offset(mask_origin(layer))?, mask.offset, mask, store)?));
 		}
 	}
 	let selection = match &doc.selection {
@@ -3309,7 +3367,42 @@ fn tight(image: &TiledImage, offset: (i32, i32), store: &TileStore) -> Result<Op
 
 /// Edit ▸ Free Transform and the Transform submenu (M6-T04).
 fn transform_layer(doc: &mut Document, layer: &LayerRef, mapping: Mapping, filter: Filter, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
-	transform_pixels(doc, layer, mapping, filter, false, ctx)
+	let id = resolve(doc, layer)?;
+	let whole = doc.selection.is_none();
+	let original = doc.layer(id).expect("resolved").clone();
+	let nonpixel_mask = whole && !matches!(original.kind, LayerKind::Pixel { .. });
+	let moved_mask = if nonpixel_mask {
+		original
+			.mask
+			.as_ref()
+			.filter(|m| m.linked)
+			.map(|m| {
+				resample_placed(
+					pixel_ops(ctx, "transforming mask")?,
+					&m.image,
+					original.mask_origin(),
+					mapping,
+					filter,
+					ctx.tiles,
+				)
+			})
+			.transpose()?
+	} else {
+		None
+	};
+	let effect = transform_pixels(doc, layer, mapping, filter, false, ctx)?;
+	let target = doc.layer_mut(id).expect("resolved");
+	if let (Some(mask), Some((image, at))) = (&mut target.mask, moved_mask) {
+		mask.image = image;
+		mask.offset = at;
+	}
+	if whole {
+		if let Some(vm) = &mut target.vector_mask {
+			vm.path = vm.path.map(|(x, y)| mapping.forward_point(x, y).unwrap_or((x, y)));
+			vm.cache.mark_all_dirty();
+		}
+	}
+	Ok(effect)
 }
 
 /// The Move tool's pixel move and nudge ([`Command::MovePixels`]).
@@ -5115,9 +5208,7 @@ mod tests {
 		let steps = f.history.labels().count();
 		let duplicate_and_move = || Command::Sequence {
 			commands: vec![
-				Command::DuplicateLayers {
-					layers: vec![LayerRef::Id(a)],
-				},
+				Command::DuplicateLayers { layers: vec![LayerRef::Id(a)] },
 				Command::OffsetLayers {
 					layers: Vec::new(),
 					dx: 5,
@@ -5149,16 +5240,37 @@ mod tests {
 	fn property_steps_say_what_changed() {
 		let mut f = Fixture::new();
 		let a = f.add_pixel("A");
-		let label = |f: &mut Fixture, props: LayerPropsPatch| {
-			f.ok(Command::SetLayerProps {
-				layer: LayerRef::Id(a),
-				props,
-			})
-			.label
-		};
-		assert_eq!(label(&mut f, LayerPropsPatch { blend: Some(BlendMode::Screen), ..Default::default() }), "Blending Change");
-		assert_eq!(label(&mut f, LayerPropsPatch { opacity: Some(0.5), ..Default::default() }), "Opacity Change");
-		assert_eq!(label(&mut f, LayerPropsPatch { visible: Some(false), ..Default::default() }), "Hide Layer");
+		let label = |f: &mut Fixture, props: LayerPropsPatch| f.ok(Command::SetLayerProps { layer: LayerRef::Id(a), props }).label;
+		assert_eq!(
+			label(
+				&mut f,
+				LayerPropsPatch {
+					blend: Some(BlendMode::Screen),
+					..Default::default()
+				}
+			),
+			"Blending Change"
+		);
+		assert_eq!(
+			label(
+				&mut f,
+				LayerPropsPatch {
+					opacity: Some(0.5),
+					..Default::default()
+				}
+			),
+			"Opacity Change"
+		);
+		assert_eq!(
+			label(
+				&mut f,
+				LayerPropsPatch {
+					visible: Some(false),
+					..Default::default()
+				}
+			),
+			"Hide Layer"
+		);
 		let lock_all = LayerPropsPatch {
 			locked_pixels: Some(true),
 			locked_position: Some(true),

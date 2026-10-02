@@ -198,31 +198,34 @@ fn map_layer(
 ) -> Result<TiledImage, TileError> {
 	let format = layer.image.format();
 	let tile = i64::from(TILE_SIZE);
-	let results: Result<Vec<Option<Placement>>, TileError> = tiles
-		.par_iter()
-		.map(|&(lx, ly)| {
-			let x0 = i64::from(layer.offset.0) + i64::from(lx) * tile;
-			let y0 = i64::from(layer.offset.1) + i64::from(ly) * tile;
-			let coverage = block_coverage(selection, store, canvas, x0, y0)?;
-			// Unselected tiles keep their pixels (`extract` drops them after).
-			if matches!(coverage, TileCoverage::Uniform(v) if v <= 0.0) {
-				return Ok(None);
-			}
-			let pixels = read_tile(layer.image.slot(0, lx, ly), format, store)?;
-			if let (Tile::Uniform(p), TileCoverage::Uniform(s)) = (&pixels, &coverage) {
-				return Ok(Some(((lx, ly), Out::Slot(pixel_slot(format, op(*p, *s))))));
-			}
-			let out: Vec<[f32; 4]> = (0..TILE_PIXELS)
-				.map(|i| op(pixels.at(i), coverage.at(i as u32 % TILE_SIZE, i as u32 / TILE_SIZE)))
-				.collect();
-			Ok(Some(((lx, ly), Out::Buffer(encode(&out, format)))))
-		})
-		.collect();
 	let mut image = layer.image.clone();
-	for ((lx, ly), out) in results?.into_iter().flatten() {
-		match out {
-			Out::Slot(slot) => image.set_slot(lx, ly, slot),
-			Out::Buffer(buffer) => image.put_buffer(store, lx, ly, buffer),
+	for batch in tiles.chunks(8) {
+		let results: Result<Vec<Option<Placement>>, TileError> = batch
+			.par_iter()
+			.map(|&(lx, ly)| {
+				let x0 = i64::from(layer.offset.0) + i64::from(lx) * tile;
+				let y0 = i64::from(layer.offset.1) + i64::from(ly) * tile;
+				let coverage = block_coverage(selection, store, canvas, x0, y0)?;
+				// Unselected tiles keep their pixels (`extract` drops them after).
+				if matches!(coverage, TileCoverage::Uniform(v) if v <= 0.0) {
+					return Ok(None);
+				}
+				let pixels = read_tile(layer.image.slot(0, lx, ly), format, store)?;
+				if let (Tile::Uniform(p), TileCoverage::Uniform(s)) = (&pixels, &coverage) {
+					return Ok(Some(((lx, ly), Out::Slot(pixel_slot(format, op(*p, *s))))));
+				}
+				let out: Vec<[f32; 4]> = (0..TILE_PIXELS)
+					.map(|i| op(pixels.at(i), coverage.at(i as u32 % TILE_SIZE, i as u32 / TILE_SIZE)))
+					.collect();
+				Ok(Some(((lx, ly), Out::Buffer(encode(&out, format)))))
+			})
+			.collect();
+
+		for ((lx, ly), out) in results?.into_iter().flatten() {
+			match out {
+				Out::Slot(slot) => image.set_slot(lx, ly, slot),
+				Out::Buffer(buffer) => image.put_buffer(store, lx, ly, buffer),
+			}
 		}
 	}
 	Ok(image)
@@ -357,38 +360,41 @@ pub fn fill_with(
 	let format = grown.format();
 	let tile = i64::from(TILE_SIZE);
 	let opacity = opacity.clamp(0.0, 1.0);
-	let results: Result<Vec<Option<((u32, u32), TileBuffer)>>, TileError> = tiles
-		.par_iter()
-		.map(|&(lx, ly)| {
-			let x0 = i64::from(offset.0) + i64::from(lx) * tile;
-			let y0 = i64::from(offset.1) + i64::from(ly) * tile;
-			let coverage = block_coverage(selection, store, canvas, x0, y0)?;
-			if matches!(coverage, TileCoverage::Uniform(v) if v <= 0.0) {
-				return Ok(None);
-			}
-			let pixels = read_tile(grown.slot(0, lx, ly), format, store)?;
-			let out: Vec<[f32; 4]> = (0..TILE_PIXELS)
-				.map(|i| {
-					let (px, py) = (i as u32 % TILE_SIZE, i as u32 / TILE_SIZE);
-					let p = pixels.at(i);
-					let s = coverage.at(px, py);
-					if s <= 0.0 {
-						return p;
-					}
-					let c = paint(x0 + i64::from(px), y0 + i64::from(py));
-					let a = f64::from(p[3]);
-					let backdrop = [f64::from(p[0]) * a, f64::from(p[1]) * a, f64::from(p[2]) * a, a];
-					let out = composite(mode, backdrop, [c[0], c[1], c[2]], opacity * c[3] * f64::from(s), preserve_transparency);
-					let rgb = unpremultiply(out);
-					[rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, out[3] as f32]
-				})
-				.collect();
-			Ok(Some(((lx, ly), encode(&out, format))))
-		})
-		.collect();
 	let mut image = grown.clone();
-	for ((lx, ly), buffer) in results?.into_iter().flatten() {
-		image.put_buffer(store, lx, ly, buffer);
+	for batch in tiles.chunks(8) {
+		let results: Result<Vec<Option<((u32, u32), TileBuffer)>>, TileError> = batch
+			.par_iter()
+			.map(|&(lx, ly)| {
+				let x0 = i64::from(offset.0) + i64::from(lx) * tile;
+				let y0 = i64::from(offset.1) + i64::from(ly) * tile;
+				let coverage = block_coverage(selection, store, canvas, x0, y0)?;
+				if matches!(coverage, TileCoverage::Uniform(v) if v <= 0.0) {
+					return Ok(None);
+				}
+				let pixels = read_tile(grown.slot(0, lx, ly), format, store)?;
+				let out: Vec<[f32; 4]> = (0..TILE_PIXELS)
+					.map(|i| {
+						let (px, py) = (i as u32 % TILE_SIZE, i as u32 / TILE_SIZE);
+						let p = pixels.at(i);
+						let s = coverage.at(px, py);
+						if s <= 0.0 {
+							return p;
+						}
+						let c = paint(x0 + i64::from(px), y0 + i64::from(py));
+						let a = f64::from(p[3]);
+						let backdrop = [f64::from(p[0]) * a, f64::from(p[1]) * a, f64::from(p[2]) * a, a];
+						let out = composite(mode, backdrop, [c[0], c[1], c[2]], opacity * c[3] * f64::from(s), preserve_transparency);
+						let rgb = unpremultiply(out);
+						[rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, out[3] as f32]
+					})
+					.collect();
+				Ok(Some(((lx, ly), encode(&out, format))))
+			})
+			.collect();
+
+		for ((lx, ly), buffer) in results?.into_iter().flatten() {
+			image.put_buffer(store, lx, ly, buffer);
+		}
 	}
 	Ok((image, offset))
 }

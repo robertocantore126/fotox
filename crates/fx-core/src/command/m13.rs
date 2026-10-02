@@ -49,9 +49,49 @@ fn model_selection(doc: &Document, mask: &ModelMask, ctx: &CommandContext<'_>, w
 pub(super) fn mask_from_model(doc: &mut Document, layer: &LayerRef, mask: &ModelMask, ctx: &CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	let found = model_selection(doc, mask, ctx, "Remove Background")?;
 	let id = resolve(doc, layer)?;
-	if doc.layer(id).is_some_and(|l| l.mask.is_some()) {
-		// FAST: Photoshop intersects with the existing mask; this refuses.
-		return Err(CommandError::NotAllowed("the layer already has a mask".into()));
+	if let Some(layer) = doc.layer(id) {
+		if let Some(mask) = &layer.mask {
+			let origin = layer.mask_origin();
+			let mut image = crate::pixels::mask_from_selection(
+				&found,
+				(doc.width, doc.height),
+				origin,
+				(mask.image.width(), mask.image.height()),
+				false,
+				mask.image.format(),
+				ctx.tiles,
+			)?;
+			for ty in 0..image.grid(0).rows() {
+				for tx in 0..image.grid(0).cols() {
+					let mut buffer = match image.slot(0, tx, ty) {
+						TileSlot::Data(h) => (*ctx.tiles.get(h)?).clone(),
+						TileSlot::Solid(v) => TileBuffer::filled(image.format(), *v),
+						TileSlot::Empty => continue,
+					};
+					let old = Selection {
+						image: mask.image.clone(),
+						offset: (0, 0),
+					}
+					.tile_coverage(ctx.tiles, tx, ty)?;
+					for y in 0..TILE_SIZE {
+						for x in 0..TILE_SIZE {
+							let i = (y * TILE_SIZE + x) as usize;
+							let v = f32::from(gray16_at(&buffer, i)) / 65535.0;
+							crate::selection::set_gray(&mut buffer, image.format(), x, y, v * old.at(x, y));
+						}
+					}
+					image.put_buffer(ctx.tiles, tx, ty, buffer);
+				}
+			}
+			let target = doc.layer_mut(id).expect("resolved").mask.as_mut().expect("mask");
+			target.image = image;
+			target.outside_value = 0;
+			return Ok(CommandEffect {
+				label: "Remove Background".into(),
+				props_changed: vec![id],
+				..Default::default()
+			});
+		}
 	}
 	let kept = doc.selection.replace(found);
 	let result = add_mask(doc, &LayerRef::Id(id), MaskFill::RevealSelection, ctx.tiles);
@@ -144,6 +184,7 @@ pub(super) fn generative_layer(
 			image: mask_image.clone(),
 			enabled: true,
 			linked: true,
+			offset: (0, 0),
 			outside_value: 0,
 		});
 		children.push(Arc::new(layer));

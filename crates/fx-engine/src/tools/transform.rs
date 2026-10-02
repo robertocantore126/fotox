@@ -161,6 +161,7 @@ struct Drag {
 /// A Free Transform in progress.
 #[derive(Clone, Debug)]
 pub struct Session {
+	pub token: u64,
 	/// The layer being transformed.
 	pub layer: LayerId,
 	/// The source rectangle `[x0, y0, x1, y1]` in canvas pixels.
@@ -190,6 +191,7 @@ impl Session {
 	pub fn new(layer: LayerId, rect: [f64; 4], mode: Mode, filter: Filter) -> Self {
 		let quad = corners_of(rect);
 		let mut session = Self {
+			token: 0,
 			layer,
 			rect,
 			quad,

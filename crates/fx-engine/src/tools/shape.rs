@@ -141,8 +141,9 @@ impl Shape {
 					.get("_custom_shapes")
 					.and_then(|lib| lib.get(&name))
 					.and_then(|p| serde_json::from_value::<fx_core::path::Path>(p.clone()).ok())?;
-				let (bw, bh) = path.bounds().map_or((1.0, 1.0), |b| ((b[2]).max(1e-9), (b[3]).max(1e-9)));
-				let scaled = path.map(|(x, y)| (x / bw * w, y / bh * h));
+				let b = path.bounds().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+				let (bw, bh) = ((b[2] - b[0]).max(1e-9), (b[3] - b[1]).max(1e-9));
+				let scaled = path.map(|(x, y)| ((x - b[0]) / bw * w, (y - b[1]) / bh * h));
 				VectorShape::Path {
 					elements: scaled.to_elements(),
 				}
@@ -318,7 +319,11 @@ impl Tool for Shape {
 				};
 				if let Some(op) = op {
 					let active = ctx.doc.active_layer().and_then(|id| ctx.doc.layer(id));
-					if let Some(fx_core::LayerKind::Shape { shape: current, transform: placed, .. }) = active.map(|l| &l.kind)
+					if let Some(fx_core::LayerKind::Shape {
+						shape: current,
+						transform: placed,
+						..
+					}) = active.map(|l| &l.kind)
 						&& let Some((combined, placement)) = current.add_part(*placed, shape.clone(), transform, op)
 					{
 						return ToolResult {

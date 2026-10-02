@@ -113,7 +113,8 @@ fn a_mask_shapes_the_effects_unless_it_hides_them() {
 			image: mask.clone(),
 			enabled: true,
 			linked: true,
-			outside_value: 0,
+			offset: (0, 0),
+		outside_value: 0,
 		});
 		style(
 			&mut doc,

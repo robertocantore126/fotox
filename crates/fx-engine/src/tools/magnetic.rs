@@ -81,13 +81,13 @@ impl MagneticLasso {
 	}
 
 	/// The luminance of a canvas window (edge-replicated).
-	fn window(&mut self, x0: i64, y0: i64, w: usize, h: usize, size: (u32, u32)) -> Vec<f32> {
+	fn window(&mut self, x0: i64, y0: i64, w: usize, h: usize, scale: i64, size: (u32, u32)) -> Vec<f32> {
 		let tile = i64::from(TILE_SIZE);
 		let mut out = vec![0.0f32; w * h];
 		for y in 0..h as i64 {
-			let cy = (y0 + y).clamp(0, i64::from(size.1) - 1);
+			let cy = (y0 + y * scale).clamp(0, i64::from(size.1) - 1);
 			for x in 0..w as i64 {
-				let cx = (x0 + x).clamp(0, i64::from(size.0) - 1);
+				let cx = (x0 + x * scale).clamp(0, i64::from(size.0) - 1);
 				if let Some(t) = self.lum_tile((cx / tile) as u32, (cy / tile) as u32) {
 					out[y as usize * w + x as usize] = t[((cy % tile) * tile + cx % tile) as usize];
 				}
@@ -105,12 +105,13 @@ impl MagneticLasso {
 		let y0 = (a.1.min(p.1) - width - 4.0).floor() as i64;
 		let x1 = (a.0.max(p.0) + width + 4.0).ceil() as i64;
 		let y1 = (a.1.max(p.1) + width + 4.0).ceil() as i64;
-		let (w, h) = ((x1 - x0).clamp(1, 2048) as usize, (y1 - y0).clamp(1, 2048) as usize);
-		let lum = self.window(x0, y0, w, h, size);
+		let scale = ((x1 - x0).max(y1 - y0).max(1) + 2047) / 2048;
+		let (w, h) = (((x1 - x0 + scale - 1) / scale).max(1) as usize, ((y1 - y0 + scale - 1) / scale).max(1) as usize);
+		let lum = self.window(x0, y0, w, h, scale, size);
 		let cost = fx_ops::select::livewire::edge_cost(&lum, w, h, Self::contrast(ctx));
 		// Snap the end to the cheapest (strongest-edge) pixel within Width.
-		let (px, py) = ((p.0 - x0 as f64) as i64, (p.1 - y0 as f64) as i64);
-		let r = width as i64;
+		let (px, py) = (((p.0 - x0 as f64) / scale as f64) as i64, ((p.1 - y0 as f64) / scale as f64) as i64);
+		let r = (width / scale as f64).ceil() as i64;
 		let mut end = (px.clamp(0, w as i64 - 1) as usize, py.clamp(0, h as i64 - 1) as usize);
 		let mut best = f32::INFINITY;
 		for dy in -r..=r {
@@ -127,12 +128,12 @@ impl MagneticLasso {
 			}
 		}
 		let start = (
-			((a.0 - x0 as f64) as i64).clamp(0, w as i64 - 1) as usize,
-			((a.1 - y0 as f64) as i64).clamp(0, h as i64 - 1) as usize,
+			(((a.0 - x0 as f64) / scale as f64) as i64).clamp(0, w as i64 - 1) as usize,
+			(((a.1 - y0 as f64) / scale as f64) as i64).clamp(0, h as i64 - 1) as usize,
 		);
 		fx_ops::select::livewire::live_wire(&cost, w, h, start, end)
 			.into_iter()
-			.map(|(x, y)| (x as f64 + x0 as f64 + 0.5, y as f64 + y0 as f64 + 0.5))
+			.map(|(x, y)| (x as f64 * scale as f64 + x0 as f64 + 0.5, y as f64 * scale as f64 + y0 as f64 + 0.5))
 			.collect()
 	}
 

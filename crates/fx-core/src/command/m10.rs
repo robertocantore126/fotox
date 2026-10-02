@@ -20,6 +20,15 @@ fn no_path() -> CommandError {
 }
 
 pub(super) fn set_path(doc: &mut Document, target: PathTarget, path: &Path, name: Option<&str>, label: &str) -> Result<CommandEffect, CommandError> {
+	if doc.path(target) == Some(path) {
+		doc.active_path = Some(target);
+		return Ok(CommandEffect {
+			label: label.into(),
+			selection_only: true,
+			history_only: true,
+			..Default::default()
+		});
+	}
 	match target {
 		PathTarget::Work => doc.work_path = Some(path.clone()),
 		PathTarget::Saved(i) if i < doc.paths.len() => doc.paths[i].path = path.clone(),
@@ -81,7 +90,8 @@ fn polygons(path: &Path, mode: SelectMode) -> Vec<(Vec<(f64, f64)>, SelectMode)>
 				mode
 			} else {
 				match op {
-					PathOp::Combine | PathOp::Exclude => SelectMode::Add,
+					PathOp::Combine => SelectMode::Add,
+					PathOp::Exclude => SelectMode::Exclude,
 					PathOp::Subtract => SelectMode::Subtract,
 					PathOp::Intersect => SelectMode::Intersect,
 				}
@@ -100,16 +110,20 @@ pub(super) fn path_to_selection(
 	ctx: &mut CommandContext<'_>,
 ) -> Result<CommandEffect, CommandError> {
 	let path = doc.path(target).cloned().ok_or_else(no_path)?;
-	let parts = polygons(&path, mode);
+	let parts = polygons(&path, SelectMode::Replace);
 	if parts.is_empty() {
 		return Err(CommandError::NotAllowed("the path encloses no area".into()));
 	}
 	// All or nothing: work on a copy.
 	let mut work = doc.clone();
+	work.selection = None;
 	for (points, m) in parts {
 		select(&mut work, &SelectionShape::Polygon { points }, m, feather, anti_alias, ctx)?;
 	}
-	doc.selection = work.selection;
+	let area = work
+		.selection
+		.unwrap_or_else(|| crate::selection::Selection::empty((doc.width, doc.height), doc.color.depth));
+	doc.selection = crate::selection::combine((doc.width, doc.height), doc.selection.as_ref(), &area, mode, ctx.tiles)?;
 	Ok(selection_effect("Make Selection"))
 }
 
@@ -335,12 +349,12 @@ pub(super) fn text_to_selection(
 
 pub(super) fn text_to_shape(doc: &mut Document, layer: &LayerRef, ctx: &mut CommandContext<'_>) -> Result<CommandEffect, CommandError> {
 	let (id, content) = text_of(doc, layer)?;
-	let (elements, color) = pixel_ops(ctx, "Convert to Shape")?.text_outline(&content, doc.ppi)?;
+	let parts = pixel_ops(ctx, "Convert to Shape")?.text_colored_outline(&content, doc.ppi)?;
 	let (w, h, format) = (doc.width, doc.height, doc.color.depth.rgba_format());
 	let target = doc.layer_mut(id).expect("resolved id exists");
 	target.kind = LayerKind::Shape {
-		shape: crate::vector::VectorShape::Path { elements },
-		fill: Some(crate::vector::Paint::Solid { rgba: color }),
+		shape: crate::vector::VectorShape::ColoredPaths { parts },
+		fill: Some(crate::vector::Paint::Solid { rgba: [65535; 4] }),
 		stroke: None,
 		transform: crate::vector::IDENTITY,
 		cache: TiledImage::derived(w, h, format),

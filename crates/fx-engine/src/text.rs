@@ -14,10 +14,9 @@ use fx_render::{FontEntry, Fonts, TextLayout};
 use fx_tiles::{TileStore, TiledImage};
 use rayon::prelude::*;
 
-// FAST: one process-wide font stack and layout cache, keyed by layer id only;
-// two documents with the same layer id just re-layout each other's text.
+// Share layouts by content and PPI, with a bounded process-wide cache.
 static FONTS: LazyLock<Mutex<Fonts>> = LazyLock::new(|| Mutex::new(Fonts::new()));
-static LAYOUTS: LazyLock<Mutex<HashMap<LayerId, (TextContent, f32, Arc<TextLayout>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LAYOUTS: LazyLock<Mutex<HashMap<u64, (TextContent, f32, Arc<TextLayout>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static FAMILIES: std::sync::OnceLock<Vec<FontEntry>> = std::sync::OnceLock::new();
 
@@ -41,8 +40,13 @@ pub fn warm() {
 }
 
 /// The layout of `content` at `ppi`, from the cache when the content is the
-/// one laid out last time for this layer.
-pub fn layout_for(id: LayerId, content: &TextContent, ppi: f32) -> Arc<TextLayout> {
+/// same text and PPI, independently of document-local layer IDs.
+pub fn layout_for(_id: LayerId, content: &TextContent, ppi: f32) -> Arc<TextLayout> {
+	use std::hash::{Hash, Hasher};
+	let mut hasher = std::collections::hash_map::DefaultHasher::new();
+	serde_json::to_vec(content).unwrap_or_default().hash(&mut hasher);
+	ppi.to_bits().hash(&mut hasher);
+	let id = hasher.finish();
 	if let Ok(cache) = LAYOUTS.lock()
 		&& let Some((cached, cached_ppi, layout)) = cache.get(&id)
 		&& cached == content
@@ -52,6 +56,9 @@ pub fn layout_for(id: LayerId, content: &TextContent, ppi: f32) -> Arc<TextLayou
 	}
 	let layout = Arc::new(FONTS.lock().expect("font stack poisoned").layout(content, ppi)); // FAST: expect
 	if let Ok(mut cache) = LAYOUTS.lock() {
+		if cache.len() >= 256 && !cache.contains_key(&id) {
+			cache.clear();
+		}
 		cache.insert(id, (content.clone(), ppi, layout.clone()));
 	}
 	layout

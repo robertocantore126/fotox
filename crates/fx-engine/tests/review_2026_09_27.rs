@@ -50,6 +50,7 @@ fn rasterize_does_not_apply_a_mask_twice() {
 		image: mask,
 		enabled: true,
 		linked: true,
+		offset: (0, 0),
 		outside_value: 65535,
 	});
 	d.layers.push(Arc::new(layer));
@@ -108,6 +109,7 @@ fn pixel_and_vector_masks_multiply() {
 		image: mask,
 		enabled: true,
 		linked: true,
+		offset: (0, 0),
 		outside_value: 0,
 	});
 	let mut cache = TiledImage::derived(256, 256, PixelFormat::Gray8);
@@ -603,6 +605,7 @@ fn a_click_picks_the_topmost_layer_that_shows_a_pixel_there() {
 		image: TiledImage::new(512, 512, PixelFormat::Gray8),
 		enabled: true,
 		linked: true,
+		offset: (0, 0),
 		outside_value: 0,
 	});
 	d.layers.push(Arc::new(masked));
@@ -612,4 +615,198 @@ fn a_click_picks_the_topmost_layer_that_shows_a_pixel_there() {
 	assert_eq!(pick(330.0, 330.0), Some(LayerId(3)), "the Smart Object");
 	assert_eq!(pick(10.0, 10.0), Some(LayerId(1)), "below the masked-out layer and the hidden group");
 	assert_eq!(pick(600.0, 10.0), None, "outside the canvas");
+}
+
+#[test]
+fn triage_remove_background_intersects_an_existing_mask() {
+	let store = store("triage-background");
+	let mut d = doc(32, 32);
+	let mut layer = Layer::new(LayerId(1), "fill", LayerKind::SolidFill { rgba: [65535; 4] });
+	let mut image = TiledImage::new(32, 32, PixelFormat::Gray8);
+	image.set_slot(0, 0, TileSlot::Solid(PixelValue::gray16(32768)));
+	layer.mask = Some(fx_core::Mask {
+		image,
+		enabled: true,
+		linked: true,
+		offset: (0, 0),
+		outside_value: 65535,
+	});
+	d.layers.push(Arc::new(layer));
+	apply(
+		&mut d,
+		&store,
+		Command::MaskFromModel {
+			layer: LayerRef::Id(LayerId(1)),
+			mask: fx_core::select_ops::ModelMask {
+				kind: Default::default(),
+				rect: (0, 0, 32, 32),
+				width: 2,
+				height: 2,
+				values: vec![255; 4],
+				refine_radius: 0.0,
+			},
+		},
+	);
+	assert!((composite_pixel(&d, &store, 0)[3] - 0.5).abs() < 0.01);
+}
+#[test]
+fn triage_content_aware_scale_maps_the_linked_mask_with_the_pixels() {
+	let store = store("triage-seams");
+	let mut d = doc(16, 16);
+	let mut image = TiledImage::new(16, 16, PixelFormat::Rgba8);
+	let mut pixels = TileBuffer::zeroed(PixelFormat::Rgba8);
+	let mut mask = TiledImage::new(16, 16, PixelFormat::Gray8);
+	let mut coverage = TileBuffer::zeroed(PixelFormat::Gray8);
+	for y in 0..16 {
+		for x in 0..16 {
+			let v = (x * 10 + y * 3) as u8;
+			let i = (y * 256 + x) as usize;
+			pixels.bytes_mut()[i * 4..i * 4 + 4].copy_from_slice(&[v, v, v, 255]);
+			coverage.bytes_mut()[i] = v;
+		}
+	}
+	image.put_buffer(&store, 0, 0, pixels);
+	mask.put_buffer(&store, 0, 0, coverage);
+	let mut layer = Layer::new(LayerId(1), "pixel", LayerKind::Pixel { image, offset: (0, 0) });
+	layer.mask = Some(fx_core::Mask {
+		image: mask,
+		enabled: true,
+		linked: true,
+		offset: (0, 0),
+		outside_value: 0,
+	});
+	d.layers.push(Arc::new(layer));
+	apply(
+		&mut d,
+		&store,
+		Command::ContentAwareScale {
+			layer: LayerRef::Id(LayerId(1)),
+			width: 12,
+			height: 16,
+			amount: 1.0,
+			protect: None,
+			protect_skin: false,
+		},
+	);
+	let layer = d.layer(LayerId(1)).unwrap();
+	let LayerKind::Pixel { image, .. } = &layer.kind else { panic!() };
+	let mask = &layer.mask.as_ref().unwrap().image;
+	assert_eq!((mask.width(), mask.height()), (12, 16));
+	let read = |image: &TiledImage| match image.slot(0, 0, 0) {
+		TileSlot::Data(h) => (*store.get(h).unwrap()).clone(),
+		TileSlot::Solid(v) => TileBuffer::filled(image.format(), *v),
+		TileSlot::Empty => TileBuffer::zeroed(image.format()),
+	};
+	let pixels = read(image);
+	let mask = read(mask);
+	for y in 0..16 {
+		for x in 0..12 {
+			let i = (y * 256 + x) as usize;
+			assert_eq!(pixels.bytes()[i * 4], mask.bytes()[i]);
+		}
+	}
+}
+#[test]
+fn triage_moving_a_fill_moves_its_linked_mask_and_vector_path() {
+	use fx_core::path::{Anchor, Path, Subpath};
+	let store = store("triage-mask-move");
+	let mut d = doc(32, 32);
+	let mut layer = Layer::new(LayerId(1), "fill", LayerKind::SolidFill { rgba: [65535; 4] });
+	layer.mask = Some(fx_core::Mask {
+		image: TiledImage::new(32, 32, PixelFormat::Gray8),
+		enabled: true,
+		linked: true,
+		offset: (0, 0),
+		outside_value: 0,
+	});
+	layer.vector_mask = Some(fx_core::layer::VectorMask {
+		path: Path {
+			subpaths: vec![Subpath {
+				anchors: vec![Anchor::corner((5.0, 6.0))],
+				..Default::default()
+			}],
+		},
+		enabled: true,
+		feather: 0.0,
+		density: 1.0,
+		cache: TiledImage::derived(32, 32, PixelFormat::Gray8),
+	});
+	d.layers.push(Arc::new(layer));
+	apply(
+		&mut d,
+		&store,
+		Command::OffsetLayers {
+			layers: vec![LayerRef::Id(LayerId(1))],
+			dx: 7,
+			dy: 9,
+		},
+	);
+	let layer = d.layer(LayerId(1)).unwrap();
+	assert_eq!(layer.mask_origin(), (7, 9));
+	assert_eq!(layer.vector_mask.as_ref().unwrap().path.subpaths[0].anchors[0].pos, (12.0, 15.0));
+}
+
+#[test]
+fn triage_vector_mask_feather_crosses_tile_boundaries() {
+	use fx_core::path::{Anchor, Path, Subpath};
+	let store = store("triage-feather");
+	let mut d = doc(512, 64);
+	let mut layer = Layer::new(LayerId(1), "fill", LayerKind::SolidFill { rgba: [65535; 4] });
+	layer.vector_mask = Some(fx_core::layer::VectorMask {
+		path: Path {
+			subpaths: vec![Subpath {
+				anchors: vec![(250.0, 0.0), (262.0, 0.0), (262.0, 64.0), (250.0, 64.0)]
+					.into_iter()
+					.map(Anchor::corner)
+					.collect(),
+				closed: true,
+				..Default::default()
+			}],
+		},
+		enabled: true,
+		feather: 4.0,
+		density: 1.0,
+		cache: TiledImage::derived(512, 64, PixelFormat::Gray8),
+	});
+	d.layers.push(Arc::new(layer));
+	assert_eq!(
+		fx_engine::vector::draw_vector_mask_requests(&mut d, &store, &[(LayerId(1), 0, 0, 0), (LayerId(1), 0, 1, 0)]),
+		2
+	);
+	let image = &d.layer(LayerId(1)).unwrap().vector_mask.as_ref().unwrap().cache;
+	let s = fx_core::selection::Selection {
+		image: image.clone(),
+		offset: (0, 0),
+	};
+	let a = s.tile_coverage(&store, 0, 0).unwrap();
+	let b = s.tile_coverage(&store, 1, 0).unwrap();
+	assert!(a.at(248, 32) > 0.0 && a.at(250, 32) < 1.0);
+	assert!((a.at(255, 32) - b.at(0, 32)).abs() < 0.02, "feather is continuous across tiles");
+}
+#[test]
+fn triage_merge_inside_a_group_applies_parent_opacity_once() {
+	let store = store("triage-merge");
+	let mut d = doc(32, 32);
+	let a = Arc::new(Layer::new(LayerId(1), "bottom", LayerKind::SolidFill { rgba: [65535, 0, 0, 65535] }));
+	let b = Arc::new(Layer::new(LayerId(2), "top", LayerKind::SolidFill { rgba: [0, 65535, 0, 65535] }));
+	let mut group = Layer::new(
+		LayerId(3),
+		"parent",
+		LayerKind::Group {
+			children: vec![a, b],
+			expanded: true,
+		},
+	);
+	group.opacity = 0.5;
+	d.layers.push(Arc::new(group));
+	let before = composite_pixel(&d, &store, 0);
+	apply(
+		&mut d,
+		&store,
+		Command::MergeLayers {
+			layers: vec![LayerRef::Id(LayerId(1)), LayerRef::Id(LayerId(2))],
+		},
+	);
+	let after = composite_pixel(&d, &store, 0);
+	assert!(before.iter().zip(after).all(|(a, b)| (a - b).abs() < 0.01), "{before:?} -> {after:?}");
 }

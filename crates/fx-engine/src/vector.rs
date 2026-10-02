@@ -123,17 +123,44 @@ pub fn draw_vector_mask_requests(doc: &mut fx_core::Document, store: &TileStore,
 	for (id, tiles) in by_layer {
 		let Some(layer) = doc.layer(id) else { continue };
 		let Some(vm) = &layer.vector_mask else { continue };
-		let elements = vm.path.to_elements();
-		let (density, format) = (vm.density, vm.cache.format());
-		let buffers: Vec<((usize, u32, u32), TileBuffer)> = tiles
+		let path = &vm.path;
+		let (density, feather, format) = (vm.density, vm.feather, vm.cache.format());
+		let source = VectorMaskSource {
+			shape: fx_render::vector::vector_mask_shape(path),
+		};
+		let geometry = fx_ops::filter::Geometry {
+			offset: (0, 0),
+			canvas: (doc.width, doc.height),
+			image: (doc.width, doc.height),
+		};
+		let buffers: Result<Vec<((usize, u32, u32), TileBuffer)>, fx_tiles::TileError> = tiles
 			.par_iter()
 			.map(|&(level, tx, ty)| {
-				(
+				Ok((
 					(level, tx, ty),
-					fx_render::vector::render_vector_mask_tile(&elements, density, level, (tx, ty), format),
-				)
+					if feather <= 0.0 {
+						fx_render::vector::render_vector_mask_tile(path, density, level, (tx, ty), format)
+					} else {
+						fx_ops::filter::filter_tile(
+							&source,
+							&geometry,
+							&fx_core::FilterParams::GaussianBlur { radius: feather as f32 },
+							level,
+							tx,
+							ty,
+						)
+						.map(|rgba| mask_from_rgba(&rgba, density, format))?
+					},
+				))
 			})
 			.collect();
+		let buffers = match buffers {
+			Ok(buffers) => buffers,
+			Err(error) => {
+				tracing::warn!("vector mask: {error}");
+				continue;
+			}
+		};
 		let Some(layer) = doc.layer_mut(id) else { continue };
 		let Some(vm) = &mut layer.vector_mask else { continue };
 		for ((level, tx, ty), buffer) in buffers {
@@ -276,4 +303,39 @@ mod tests {
 			other => panic!("not a shape layer: {other:?}"),
 		}
 	}
+}
+
+struct VectorMaskSource {
+	shape: VectorShape,
+}
+impl fx_ops::neighbourhood::LevelSource for VectorMaskSource {
+	fn format(&self) -> PixelFormat {
+		PixelFormat::Rgba8
+	}
+	fn tile(&self, level: usize, tx: i64, ty: i64) -> Result<Option<fx_ops::neighbourhood::TileRef>, fx_tiles::TileError> {
+		if tx < 0 || ty < 0 {
+			return Ok(None);
+		}
+		let white = Paint::Solid { rgba: [65535; 4] };
+		Ok(Some(fx_ops::neighbourhood::TileRef::Data(std::sync::Arc::new(fx_render::render_shape_tile(
+			&self.shape,
+			Some(&white),
+			None,
+			fx_core::vector::IDENTITY,
+			level,
+			(tx as u32, ty as u32),
+			PixelFormat::Rgba8,
+		)))))
+	}
+}
+fn mask_from_rgba(rgba: &TileBuffer, density: f32, format: PixelFormat) -> TileBuffer {
+	let mut out = TileBuffer::zeroed(format);
+	let d = density.clamp(0.0, 1.0);
+	for y in 0..fx_tiles::TILE_SIZE {
+		for x in 0..fx_tiles::TILE_SIZE {
+			let alpha = rgba.bytes()[((y * fx_tiles::TILE_SIZE + x) * 4 + 3) as usize] as f32 / 255.0;
+			fx_core::selection::set_gray(&mut out, format, x, y, 1.0 - d + d * alpha);
+		}
+	}
+	out
 }

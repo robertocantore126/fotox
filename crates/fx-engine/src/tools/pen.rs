@@ -558,6 +558,12 @@ impl Tool for Pen {
 					_ => {
 						self.grab = None;
 						match self.editing.take() {
+							Some((target, path)) if Self::target(ctx, true).is_some_and(|(old_target, old)| old_target == target && old == path) => {
+								ToolResult {
+									redraw: true,
+									..Default::default()
+								}
+							}
 							Some((target, path)) => ToolResult {
 								command: Some(Self::store(
 									target,

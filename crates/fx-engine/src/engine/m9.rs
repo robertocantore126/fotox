@@ -15,7 +15,7 @@ pub(super) struct State {
 	/// rebuilt only when it changes.
 	channels: HashMap<DocId, String>,
 	/// Select and Mask's output, made once its job is done (M9-T05).
-	output: Option<String>,
+	output: Option<(DocId, fx_core::LayerId, String)>,
 }
 
 /// The channel list's signature: names, colours and the first slots.
@@ -23,7 +23,7 @@ fn signature(doc: &Document) -> String {
 	let mut s = String::new();
 	for c in &doc.channels {
 		s.push_str(&format!("{}|{:?}|{}|", c.name, c.color, c.opacity));
-		for (tx, ty, slot) in c.image.grid(0).non_empty().take(16) {
+		for (tx, ty, slot) in c.image.grid(0).non_empty() {
 			s.push_str(&format!("{tx},{ty}:{slot:?};"));
 		}
 	}
@@ -209,7 +209,11 @@ impl Engine {
 				}
 			}
 			"select-mask:output" => {
-				self.m9.output = _args.get("output").and_then(|v| v.as_str()).map(str::to_owned);
+				self.m9.output = self
+					.docs
+					.active_id()
+					.and_then(|id| self.docs.get(id))
+					.and_then(|open| Some((open.id, open.doc.active_layer()?, _args.get("output")?.as_str()?.to_owned())));
 			}
 			_ => return false,
 		}
@@ -218,27 +222,36 @@ impl Engine {
 }
 
 impl Engine {
+	pub(super) fn clear_output_m9(&mut self, doc: DocId) {
+		if self.m9.output.as_ref().is_some_and(|(id, _, _)| *id == doc) {
+			self.m9.output = None;
+		}
+	}
 	/// After a pixel job: Select and Mask's queued output (M9-T05).
 	pub(super) fn after_job_m9(&mut self, doc_id: DocId) {
-		let Some(output) = self.m9.output.take() else { return };
-		let has_selection = self.docs.get(doc_id).is_some_and(|o| o.doc.selection.is_some());
-		if !has_selection {
+		if self.m9.output.as_ref().is_none_or(|(id, _, _)| *id != doc_id) {
 			return;
 		}
+		let Some((_, layer, output)) = self.m9.output.take() else { return };
+		let has_selection = self.docs.get(doc_id).is_some_and(|o| o.doc.selection.is_some());
 		use fx_core::command::MaskFill;
 		if output == "layer" {
 			self.command(
 				doc_id,
 				Command::DuplicateLayers {
-					layers: vec![fx_core::LayerRef::Active],
+					layers: vec![fx_core::LayerRef::Id(layer)],
 				},
 			);
 		}
 		self.command(
 			doc_id,
 			Command::AddMask {
-				layer: fx_core::LayerRef::Active,
-				fill: MaskFill::RevealSelection,
+				layer: if output == "layer" {
+					fx_core::LayerRef::Active
+				} else {
+					fx_core::LayerRef::Id(layer)
+				},
+				fill: if has_selection { MaskFill::RevealSelection } else { MaskFill::HideAll },
 			},
 		);
 	}

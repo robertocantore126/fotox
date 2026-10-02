@@ -243,6 +243,7 @@ impl Engine {
 		let spawned = std::thread::Builder::new().name(format!("ai-{task}")).spawn(move || {
 			let progress_internal = internal.clone();
 			let last = std::sync::Mutex::new(-1.0f32);
+			let finished_cancel = cancel.clone();
 			let progress = move |fraction: f32| {
 				let mut last = last.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 				if fraction - *last >= 0.01 {
@@ -255,8 +256,11 @@ impl Engine {
 				}
 				!cancel.load(Ordering::Relaxed)
 			};
-			let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&progress)))
+			let mut result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&progress)))
 				.unwrap_or_else(|panic| Err(format!("AI operation panicked: {}", super::panic_text(&*panic))));
+			if finished_cancel.load(Ordering::Relaxed) {
+				result = Err(fx_ai::AiError::Cancelled.to_string());
+			}
 			let _ = internal.send(Internal::Ai(Box::new(AiDone { task, doc, result })));
 		});
 		if let Err(error) = spawned {
@@ -272,7 +276,15 @@ impl Engine {
 	}
 
 	/// An AI job finished (`Internal::Ai`).
-	pub(super) fn ai_done(&mut self, done: AiDone) {
+	pub(super) fn ai_done(&mut self, mut done: AiDone) {
+		if self
+			.m13
+			.cancel
+			.as_ref()
+			.is_some_and(|(t, flag)| *t == done.task && flag.load(Ordering::Relaxed))
+		{
+			done.result = Err(fx_ai::AiError::Cancelled.to_string());
+		}
 		self.to_ui(&EngineToUi::ProgressDone { task: done.task });
 		if self.m13.cancel.as_ref().is_some_and(|(t, _)| *t == done.task) {
 			self.m13.cancel = None;
@@ -311,6 +323,7 @@ impl Engine {
 				self.send_prefs();
 			}
 		}
+		self.continue_window_close();
 	}
 
 	/// BiRefNet on the active document, its mask turned into a command.
@@ -422,7 +435,9 @@ impl Engine {
 			return;
 		}
 		let store = self.store.clone();
-		let Some(generation) = self.docs.get(doc_id).map(|open| open.generation) else { return };
+		let Some(generation) = self.docs.get(doc_id).map(|open| open.generation) else {
+			return;
+		};
 		let Some((mut document, layer)) = self.object_source(doc_id) else { return };
 		let area = boxed.map(|b| ai::object_crop(b, (document.width, document.height)));
 		let cached = match &self.m13.embedding {

@@ -7,7 +7,8 @@
 
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-	CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
+	CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
+	SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5};
@@ -110,28 +111,79 @@ pub(crate) fn write_image(hwnd: isize, width: u32, height: u32, rgba8: &[u8]) ->
 /// layout is not 24/32-bit uncompressed.
 pub(crate) fn read_image() -> Option<(u32, u32, Vec<u8>)> {
 	let _open = Open::new(None)?;
-	// SAFETY: the clipboard is open; the handle it returns stays valid until
-	// it closes, and it is only read while locked, within `GlobalSize`.
-	let bytes = unsafe {
-		let format = [CF_DIBV5, CF_DIB].into_iter().find(|f| IsClipboardFormatAvailable(u32::from(f.0)).is_ok())?;
-		let handle = GetClipboardData(u32::from(format.0)).ok()?;
+	// PNG is the interoperable clipboard format with unambiguous alpha.
+	let png = unsafe { RegisterClipboardFormatW(windows::core::w!("PNG")) };
+	if png != 0 {
+		if let Some(bytes) = read_format(png) {
+			if let Some(image) = parse_png(&bytes) {
+				return Some(image);
+			}
+		}
+	}
+	let format = [CF_DIBV5, CF_DIB]
+		.into_iter()
+		.find(|f| unsafe { IsClipboardFormatAvailable(u32::from(f.0)).is_ok() })?;
+	let bytes = read_format(u32::from(format.0))?;
+	parse_dib(&bytes)
+}
+
+fn parse_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+	let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+	decoder.set_limits(png::Limits { bytes: 256 * 1024 * 1024 });
+	decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+	let mut reader = decoder.read_info().ok()?;
+	if reader.info().width > 8192 || reader.info().height > 8192 {
+		return None;
+	}
+	let len = reader.output_buffer_size()?;
+	if len > 256 * 1024 * 1024 {
+		return None;
+	}
+	let mut buffer = Vec::new();
+	buffer.try_reserve_exact(len).ok()?;
+	buffer.resize(len, 0);
+	let info = reader.next_frame(&mut buffer).ok()?;
+	let count = (info.width as usize).checked_mul(info.height as usize)?;
+	let mut rgba = Vec::new();
+	rgba.try_reserve_exact(count.checked_mul(4)?).ok()?;
+	for p in buffer[..info.buffer_size()].chunks_exact(info.color_type.samples()) {
+		match info.color_type {
+			png::ColorType::Rgba => rgba.extend_from_slice(p),
+			png::ColorType::Rgb => rgba.extend_from_slice(&[p[0], p[1], p[2], 255]),
+			png::ColorType::Grayscale => rgba.extend_from_slice(&[p[0], p[0], p[0], 255]),
+			png::ColorType::GrayscaleAlpha => rgba.extend_from_slice(&[p[0], p[0], p[0], p[1]]),
+			png::ColorType::Indexed => return None,
+		}
+	}
+	Some((info.width, info.height, rgba))
+}
+
+fn read_format(format: u32) -> Option<Vec<u8>> {
+	// SAFETY: called only with the clipboard open; copy while the handle is locked.
+	unsafe {
+		let handle = GetClipboardData(format).ok()?;
 		let memory = HGLOBAL(handle.0);
 		let size = GlobalSize(memory);
+		if size == 0 || size > 256 * 1024 * 1024 {
+			return None;
+		}
 		let source = GlobalLock(memory).cast::<u8>();
-		if source.is_null() || size == 0 {
+		if source.is_null() {
 			return None;
 		}
 		let bytes = std::slice::from_raw_parts(source, size).to_vec();
 		let _ = GlobalUnlock(memory);
-		bytes
-	};
-	parse_dib(&bytes)
+		Some(bytes)
+	}
 }
 
 /// A packed DIB (header, optional masks, pixels) as straight RGBA8.
 fn parse_dib(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 	let u32_at = |at: usize| dib.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
 	let header = u32_at(0)? as usize;
+	if header < 40 || header > dib.len() {
+		return None;
+	}
 	let width = u32_at(4)? as i32;
 	let height = u32_at(8)? as i32;
 	let bits = u16::from_le_bytes([*dib.get(14)?, *dib.get(15)?]);
@@ -146,8 +198,9 @@ fn parse_dib(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 		_ => ([0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0], header),
 	};
 	let (w, h) = (width as usize, height.unsigned_abs() as usize);
-	let stride = (w * bits as usize).div_ceil(32) * 4;
-	if dib.len() < data + stride * h {
+	let stride = w.checked_mul(bits as usize)?.checked_add(31)?.checked_div(32)?.checked_mul(4)?;
+	let len = w.checked_mul(h)?.checked_mul(4)?;
+	if len > 256 * 1024 * 1024 || dib.len() < data.checked_add(stride.checked_mul(h)?)? {
 		return None;
 	}
 	let channel = |value: u32, mask: u32| -> u8 {
@@ -156,7 +209,9 @@ fn parse_dib(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 		}
 		((value & mask) >> mask.trailing_zeros()) as u8
 	};
-	let mut out = vec![0u8; w * h * 4];
+	let mut out = Vec::new();
+	out.try_reserve_exact(len).ok()?;
+	out.resize(len, 0);
 	let mut any_alpha = false;
 	for row in 0..h {
 		// Positive height = bottom-up rows.
@@ -205,5 +260,31 @@ mod tests {
 		assert_eq!((w, h), (2, 2));
 		assert_eq!(&rgba[0..8], &[255, 0, 0, 255, 255, 255, 255, 255]);
 		assert_eq!(&rgba[8..16], &[0, 0, 255, 255, 0, 255, 0, 255]);
+	}
+}
+
+#[cfg(test)]
+mod triage_tests {
+	use super::*;
+	#[test]
+	fn clipboard_png_keeps_partial_and_zero_alpha() {
+		let rgba = [255, 0, 0, 128, 0, 0, 0, 0];
+		let mut bytes = Vec::new();
+		{
+			let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+			encoder.set_color(png::ColorType::Rgba);
+			encoder.set_depth(png::BitDepth::Eight);
+			encoder.write_header().unwrap().write_image_data(&rgba).unwrap();
+		}
+		assert_eq!(parse_png(&bytes), Some((2, 1, rgba.to_vec())));
+	}
+	#[test]
+	fn clipboard_rejects_extreme_dib_dimensions_without_allocating() {
+		let mut dib = vec![0; 40];
+		dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+		dib[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
+		dib[8..12].copy_from_slice(&i32::MIN.to_le_bytes());
+		dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+		assert!(parse_dib(&dib).is_none());
 	}
 }

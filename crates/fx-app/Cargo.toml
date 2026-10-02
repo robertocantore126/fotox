@@ -22,6 +22,7 @@ embedded_resources = ["graphite-desktop-ui/embedded_resources"]
 graphite-desktop-ui = { workspace = true }
 wgpu-sync = { workspace = true }
 fx-engine = { workspace = true }
+png = { workspace = true }
 fx-protocol = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
