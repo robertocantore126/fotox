@@ -38,7 +38,7 @@ fn next_tools(harness: &Harness) -> (Vec<String>, Vec<String>) {
 	loop {
 		let seen = harness.wait("a plugins message", |s| match s {
 			Seen::Ui(EngineToUi::Plugins { tools }) => Some(Ok(tools.iter().map(|t| t.id.clone()).collect::<Vec<_>>())),
-			Seen::Ui(EngineToUi::Toast { text }) if text.starts_with("Plugin") => Some(Err(text.clone())),
+			Seen::Ui(EngineToUi::Toast { text }) if text.starts_with("Plugin") || text.starts_with("Building plugin") => Some(Err(text.clone())),
 			Seen::Ui(EngineToUi::Error { text }) if text.contains("plugin") => Some(Err(text.clone())),
 			_ => None,
 		});
@@ -83,6 +83,7 @@ fn a_plugin_dropped_in_the_folder_becomes_a_tool_and_reloads_live() {
 	unsafe {
 		std::env::set_var("FOTOX_PLUGINS", &folder);
 		std::env::set_var("APPDATA", dir.join("appdata"));
+		std::env::set_var("FOTOX_PLUGIN_BUILD", dir.join("build"));
 	}
 	let harness = Harness::start(device, queue, &dir);
 	harness.ui(UiToEngine::Hello { ui_version: "test".into() });
@@ -136,6 +137,28 @@ fn a_plugin_dropped_in_the_folder_becomes_a_tool_and_reloads_live() {
 	let (tools, notes) = next_tools(&harness);
 	assert_eq!(tools, Vec::<String>::new());
 	assert_eq!(notes, ["Plugin removed: Plain Eraser (plugin)"]);
+
+	// The folder holds the AI prompt.
+	assert!(
+		std::fs::read_to_string(folder.join("AI-PROMPT.md"))
+			.unwrap()
+			.contains("Instructions for the AI")
+	);
+	// A single .rs, as an AI writes it: built, announced, a tool.
+	let prompt = std::fs::read_to_string(folder.join("AI-PROMPT.md")).unwrap();
+	let example = &prompt[prompt.find("### Complete example").unwrap()..];
+	let example = &example[example.find("```rust\n").unwrap() + 8..];
+	let example = &example[..example.find("```").unwrap()];
+	std::fs::write(folder.join("shadow-eraser.rs"), example).unwrap();
+	let (tools, notes) = next_tools(&harness);
+	assert_eq!(tools, ["plugin:shadow-eraser"]);
+	assert_eq!(notes, ["Building plugin shadow-eraser.rs\u{2026}", "Plugin loaded: Shadow Eraser Tool"]);
+	harness.ui(UiToEngine::Action {
+		id: "tool:plugin:shadow-eraser".into(),
+		args: serde_json::Value::Null,
+	});
+	stroke(&harness, 300.0);
+	assert_eq!(last_step(&harness, doc), "Shadow Eraser Tool");
 
 	harness.engine.shutdown();
 	let _ = std::fs::remove_dir_all(&dir);

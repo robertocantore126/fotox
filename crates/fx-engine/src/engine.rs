@@ -1313,9 +1313,16 @@ impl Engine {
 		} = session;
 		let samples = stroke.samples().to_vec();
 		let finished = stroke.finish();
-		// A brush plugin that failed painted nothing where it failed (D-096).
-		for text in fx_plugin::take_errors() {
-			self.to_ui(&EngineToUi::Error { text });
+		// A brush plugin that failed painted nothing where it failed (D-096);
+		// a stopped one shows "(stopped)" in the toolbar.
+		let plugin_errors = fx_plugin::take_errors();
+		if !plugin_errors.is_empty() {
+			for text in plugin_errors {
+				self.to_ui(&EngineToUi::Error { text });
+			}
+			self.to_ui(&EngineToUi::Plugins {
+				tools: crate::plugins::tools(),
+			});
 		}
 		let Some(open) = self.docs.get_mut(doc_id) else { return };
 		match finished {
@@ -1668,6 +1675,13 @@ impl Engine {
 
 	fn action(&mut self, id: &str) -> Changed {
 		match id {
+			// The brush plugins' folder, where a plugin file is dropped (D-098).
+			"plugins:open-folder" => {
+				if let Err(text) = crate::plugins::open_folder() {
+					self.to_ui(&EngineToUi::Error { text });
+				}
+				return Changed::default();
+			}
 			"tab:close" => {
 				if let Some(active) = self.docs.active_id() {
 					self.close(active);
@@ -2691,9 +2705,12 @@ impl Engine {
 						EngineToUi::Toast { text }
 					});
 				}
-				self.to_ui(&EngineToUi::Plugins {
-					tools: crate::plugins::tools(),
-				});
+				// "Building…" alone changes no tool.
+				if !changes.iter().all(|c| matches!(c, fx_plugin::Change::Building { .. })) {
+					self.to_ui(&EngineToUi::Plugins {
+						tools: crate::plugins::tools(),
+					});
+				}
 			}
 			Internal::PrefsValidated { request, patch, result } => {
 				if request == self.prefs_validation {

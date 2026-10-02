@@ -524,3 +524,9 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Checked: `fx-ops/tests/plugin_boundary.rs` — core erased, fade 257 px for Feather 300 with no step over 1.4 levels/px and a tail past the outline; scrubbing back and forth changes 0 levels (native soft eraser: 86); release live timing 2.4 ms per pen event at 700 px (native 0.85). `fx-engine` unit test for the brush overrides; fx-ops lib, fx-core lib, engine edit/plugin flows green.
 - FAST: `Max` treats the tip as round (roundness, angle, sampled tips ignored); the stroke trails the pen by up to one dab spacing (20 % of the diameter), as native brushes do at 25 %.
 - VERIFY: feel on Rob's composites; whether Breakup reads as organic.
+
+## Plugins from an AI, and protection (Claude, 2026-10-02)
+- Done: D-098. `fx_plugin::script` builds a dropped `.rs` (cache: an up-to-date build loads at start, a stale one is built by the watcher with a "Building plugin …" toast); `.errors.txt` beside a file that fails. Protection in `fx_plugin`: `StoreLimits` 256 MB, 1 s deadline, `Plugin::stopped` after a trap / hang / >0.5 s call (tool shows "(stopped)"), NaN/inf pixels kept, `validate` + id-collision check. `plugins/AI-PROMPT.md` written into the plugin folder at start; Edit ▸ Get More Tools ▸ Open Plugins Folder (`plugins:open-folder`, implemented.js regenerated).
+- Checked: `fx-plugin/tests/protection.rs` (7 tests, real cargo builds); `fx-engine/tests/plugin_flow.rs` now also drops the prompt's example `.rs` and paints with it; boundary, edit flow, engine unit tests green; check-data clean.
+- FAST: no UI list of stopped plugins beyond the "(stopped)" name; a plugin cannot see pixels outside its rectangle (no blur-type brushes yet).
+- VERIFY: Rob's first AI-written plugin end to end.

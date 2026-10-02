@@ -5,6 +5,44 @@ at start and **reloads it while running** whenever the `.wasm` changes: edit,
 save, and the next stroke uses the new code. The open document, the undo
 history and the option-bar values stay where they are.
 
+## A plugin from an AI, in one file
+
+1. Edit ▸ Get More Tools ▸ **Open Plugins Folder**. It holds `AI-PROMPT.md`.
+2. Paste `AI-PROMPT.md` to an AI (ChatGPT, Claude…) and describe the tool.
+3. Save its answer — one `.rs` file — in that folder.
+4. Fotox says "Building plugin …" and, a few seconds later, "Plugin loaded";
+   the tool is in its slot's flyout. Edit and save the file again to change
+   it.
+5. If it does not build, `<name>.errors.txt` appears beside it: paste that
+   to the AI, save the fixed file over the old one.
+
+Fotox builds the file itself (`fx_plugin::script`): a hidden Cargo project
+per file in `%LOCALAPPDATA%\Fotox\plugin-build` (`FOTOX_PLUGIN_BUILD`
+overrides it), the SDK as the only dependency, no build script, so only the
+compiler runs. A file already built loads at start without building. It
+needs Rust (`cargo`) and the `wasm32-unknown-unknown` target, which this PC
+has.
+
+## When a plugin is buggy
+
+AI-written code will be wrong sometimes. What protects the app and the
+image:
+
+| Problem | What Fotox does |
+| --- | --- |
+| It tries to read files, use the network or the system | Impossible: the plugin is WebAssembly with no imports at all. |
+| It does not compile | Not loaded; the compiler's messages go to `<name>.errors.txt`. |
+| Bad manifest (id not `a-z 0-9 - _`, an id another file uses, more than 16 params) | Not loaded, with the reason. |
+| It panics (bad index, `unwrap` on nothing…) | The call fails, those pixels are kept, the plugin is **stopped**. |
+| It loops forever | Cut off after 1 s, then stopped. |
+| It is very slow (over 0.5 s for one tile) | Stopped. |
+| It eats memory | Capped at 256 MB per instance; over it, it fails and is stopped. |
+| It returns NaN or infinity | Those pixels are ignored (kept as they were), with a warning. |
+| It paints something ugly | Ctrl+Z: every stroke is one undo step. |
+
+A stopped plugin keeps its tool, named "… (stopped)", and its strokes paint
+nothing; the toast says why. Saving the file again (fixed) loads it fresh.
+
 ## The loop
 
 ```text
@@ -123,4 +161,6 @@ the same outline: its fade reaches further, so it touches more pixels.
 | UI | `ENGINE.PLUGINS` in `ui/js/main.js`; `setPluginTools`, `setPluginBars` |
 | SDK (plugin side, the ABI) | `plugins/sdk/src/lib.rs` |
 | Build and watch | `tools/xtask/src/plugins.rs` |
-| Tests | `fx-ops/tests/plugin_boundary.rs`, `fx-engine/tests/plugin_flow.rs` |
+| Single-file build | `crates/fx-plugin/src/script.rs` |
+| The AI's instructions | `plugins/AI-PROMPT.md` (copied into the plugin folder at start) |
+| Tests | `fx-ops/tests/plugin_boundary.rs`, `fx-engine/tests/plugin_flow.rs`, `fx-plugin/tests/protection.rs` |

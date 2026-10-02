@@ -3,7 +3,9 @@
 //! option bar into the plugin's params.
 //!
 //! The folder is `%APPDATA%\Fotox\plugins` (`FOTOX_PLUGINS` overrides it);
-//! `cargo xtask plugins --watch` builds into it on every save.
+//! `cargo xtask plugins --watch` builds into it on every save, and a single
+//! `.rs` dropped there is built by Fotox itself. The folder also gets
+//! `AI-PROMPT.md`: what to paste to an AI to have it write a plugin.
 
 use std::path::PathBuf;
 
@@ -24,10 +26,18 @@ pub fn dir() -> Option<PathBuf> {
 	std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("Fotox").join("plugins"))
 }
 
+/// The instructions for an AI writing a plugin, kept in the plugin folder.
+const AI_PROMPT: &str = include_str!("../../../plugins/AI-PROMPT.md");
+
 /// Load the plugins and watch the folder; changes arrive as
 /// `Internal::PluginsChanged`.
 pub(crate) fn start(internal: Sender<Internal>) {
 	let Some(dir) = dir() else { return };
+	// The folder and the AI prompt, so there is somewhere to drop a file.
+	let prompt = dir.join("AI-PROMPT.md");
+	if std::fs::create_dir_all(&dir).is_ok() && std::fs::read_to_string(&prompt).ok().as_deref() != Some(AI_PROMPT) {
+		let _ = std::fs::write(&prompt, AI_PROMPT);
+	}
 	for plugin in fx_plugin::load_dir(&dir) {
 		fx_core::stroke::register_plugin_label(plugin.key, &plugin.manifest.name);
 	}
@@ -48,6 +58,7 @@ pub(crate) fn note(changes: &[Change]) {
 /// What the toast says about a change.
 pub(crate) fn describe(change: &Change) -> String {
 	match change {
+		Change::Building { file } => format!("Building plugin {file}\u{2026}"),
 		Change::Loaded { name, .. } => format!("Plugin loaded: {name}"),
 		Change::Unloaded { name, .. } => format!("Plugin removed: {name}"),
 		Change::Failed(message) => message.clone(),
@@ -60,12 +71,27 @@ pub(crate) fn tools() -> Vec<fx_protocol::PluginTool> {
 		.iter()
 		.map(|p| fx_protocol::PluginTool {
 			id: format!("{TOOL_PREFIX}{}", p.manifest.id),
-			name: p.manifest.name.clone(),
+			name: match p.stopped() {
+				Some(_) => format!("{} (stopped)", p.manifest.name),
+				None => p.manifest.name.clone(),
+			},
 			slot: p.manifest.slot.clone(),
 			icon: p.manifest.icon.clone(),
 			options: p.manifest.options.clone(),
 		})
 		.collect()
+}
+
+/// Show the plugin folder in Explorer (Edit ▸ Get More Tools ▸ Open Plugins
+/// Folder).
+pub(crate) fn open_folder() -> Result<(), String> {
+	let dir = dir().ok_or("there is no plugin folder (APPDATA is not set)")?;
+	std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+	std::process::Command::new("explorer")
+		.arg(&dir)
+		.spawn()
+		.map(|_| ())
+		.map_err(|e| format!("cannot open {}: {e}", dir.display()))
 }
 
 /// The plugin behind UI tool id `tool`.

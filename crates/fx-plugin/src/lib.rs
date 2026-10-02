@@ -10,19 +10,35 @@
 //!
 //! Each rayon thread keeps its own instance of each plugin (a wasmtime
 //! `Store` is single-threaded), created on first use and replaced when the
-//! module is reloaded. A plugin that traps, loops (2 s epoch deadline) or
-//! returns an error fails that call only: the caller falls back, the message
-//! waits in [`take_errors`] for the UI.
+//! module is reloaded.
+//!
+//! A plugin is a `.wasm`, or a single `.rs` source that Fotox builds itself
+//! ([`script`]): ask an AI for the file (`plugins/AI-PROMPT.md`), drop it in
+//! the folder, and the tool appears.
+//!
+//! Protection against a buggy plugin, which matters for AI-written code:
+//! * it runs sandboxed — no imports at all, so no files, network or system;
+//! * its memory is capped ([`MEMORY_LIMIT`]);
+//! * a trap (panic, bad index), a call stuck past the 1 s deadline, or a call
+//!   slower than [`SLOW_CALL`] **stops** the plugin: its strokes paint
+//!   nothing, the tool says "(stopped)" and why, until the file is saved
+//!   again;
+//! * a pixel it returns with NaN or infinity is ignored (the pixel is kept);
+//! * a manifest with a bad or already used id, or too many params, is
+//!   refused with a message;
+//! * and every stroke is one undo step.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
-use wasmtime::{Config, Engine, Instance, Memory, Module, Store, TypedFunc};
+use wasmtime::{Config, Engine, Instance, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+
+pub mod script;
 
 /// f32 words before the values: params `0..16`, colour `16..20`, flags `20`.
 pub const HEADER_WORDS: usize = 32;
@@ -33,7 +49,12 @@ pub const MAX_PARAMS: usize = 16;
 /// `DEADLINE_TICKS` ticks is stopped (a plugin stuck in a loop must not hang
 /// a rayon worker for good).
 const TICK: Duration = Duration::from_millis(50);
-const DEADLINE_TICKS: u64 = 40;
+const DEADLINE_TICKS: u64 = 20;
+/// The most linear memory one plugin instance may grow to.
+pub const MEMORY_LIMIT: usize = 256 << 20;
+/// A call slower than this stops the plugin: a brush that takes half a
+/// second per tile makes painting unusable (native ops take a few ms).
+pub const SLOW_CALL: Duration = Duration::from_millis(500);
 /// How often the watcher looks at the folder.
 const POLL: Duration = Duration::from_millis(250);
 
@@ -113,6 +134,53 @@ pub struct Plugin {
 	/// Bumped on every load: instances of an older generation are replaced.
 	generation: u64,
 	pub has_gray: bool,
+	/// Why the plugin was stopped (it crashed, hung or was too slow); `None`
+	/// while it works. A reload starts it fresh.
+	stopped: Mutex<Option<String>>,
+}
+
+impl Plugin {
+	/// Why the plugin is stopped, if it is.
+	pub fn stopped(&self) -> Option<String> {
+		self.stopped.lock().unwrap_or_else(PoisonError::into_inner).clone()
+	}
+
+	/// Stop it; `true` the first time.
+	fn stop(&self, reason: String) -> bool {
+		let mut stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
+		if stopped.is_some() {
+			return false;
+		}
+		*stopped = Some(reason);
+		true
+	}
+}
+
+/// What a plugin's manifest must satisfy.
+fn validate(m: &Manifest) -> Result<(), String> {
+	let id_ok = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_';
+	if m.id.is_empty() || m.id.len() > 64 || !m.id.bytes().all(id_ok) {
+		return Err(format!("the id \"{}\" must be 1-64 characters of a-z, 0-9, - or _", m.id));
+	}
+	if m.name.trim().is_empty() {
+		return Err("the manifest has no name".into());
+	}
+	if m.params.len() > MAX_PARAMS {
+		return Err(format!("more than {MAX_PARAMS} params"));
+	}
+	if !(m.options.is_null() || m.options.is_array()) {
+		return Err("options must be a list of option-bar fields".into());
+	}
+	Ok(())
+}
+
+/// A store with the memory cap and the deadline.
+fn new_store(engine: &Engine) -> Store<StoreLimits> {
+	let limits = StoreLimitsBuilder::new().memory_size(MEMORY_LIMIT).instances(1).memories(1).build();
+	let mut store = Store::new(engine, limits);
+	store.limiter(|limits| limits);
+	store.set_epoch_deadline(DEADLINE_TICKS);
+	store
 }
 
 /// The stable 64-bit key of a plugin id (FNV-1a).
@@ -185,13 +253,28 @@ pub fn plugins() -> Vec<Arc<Plugin>> {
 	all
 }
 
-/// Compile and register the plugin in `path` (replacing one with the same
-/// id). Returns it, or why it could not load.
+/// Whether `path` is a single-file source plugin.
+fn is_script(path: &Path) -> bool {
+	path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+}
+
+/// Load the plugin in `path` — a `.wasm`, or a `.rs` built first — and
+/// register it (replacing what the same file held before). Returns it, or
+/// why it could not load.
 pub fn load_file(path: &Path) -> Result<Arc<Plugin>, String> {
+	let bytes = if is_script(path) {
+		script::build(path)?
+	} else {
+		std::fs::read(path).map_err(|e| format!("plugin {}: {e}", path.display()))?
+	};
+	load_bytes(&bytes, path)
+}
+
+/// Register the wasm module `bytes`, loaded from (or built from) `path`.
+fn load_bytes(bytes: &[u8], path: &Path) -> Result<Arc<Plugin>, String> {
 	let file = path.display();
-	let bytes = std::fs::read(path).map_err(|e| format!("plugin {file}: {e}"))?;
 	let registry = registry();
-	let module = Module::new(&registry.engine, &bytes).map_err(|e| format!("plugin {file} does not compile: {e:#}"))?;
+	let module = Module::new(&registry.engine, bytes).map_err(|e| format!("plugin {file} does not compile: {e:#}"))?;
 	if let Some(import) = module.imports().next() {
 		return Err(format!(
 			"plugin {file} imports {}::{} — build it for wasm32-unknown-unknown with the fotox-plugin SDK only",
@@ -200,8 +283,7 @@ pub fn load_file(path: &Path) -> Result<Arc<Plugin>, String> {
 		));
 	}
 	// Read the manifest and check the exports in a throwaway instance.
-	let mut store = Store::new(&registry.engine, ());
-	store.set_epoch_deadline(DEADLINE_TICKS);
+	let mut store = new_store(&registry.engine);
 	let instance = Instance::new(&mut store, &module, &[]).map_err(|e| format!("plugin {file}: {e:#}"))?;
 	let manifest_fn = instance
 		.get_typed_func::<(), u64>(&mut store, "fx_manifest")
@@ -223,8 +305,13 @@ pub fn load_file(path: &Path) -> Result<Arc<Plugin>, String> {
 		.get(ptr..ptr + len)
 		.ok_or_else(|| format!("plugin {file}: the manifest is outside the memory"))?;
 	let manifest: Manifest = serde_json::from_slice(json).map_err(|e| format!("plugin {file}: bad manifest: {e}"))?;
-	if manifest.params.len() > MAX_PARAMS {
-		return Err(format!("plugin {file}: more than {MAX_PARAMS} params"));
+	validate(&manifest).map_err(|e| format!("plugin {file}: {e}"))?;
+	if let Some(other) = get(key_of(&manifest.id)).filter(|other| other.path != path) {
+		return Err(format!(
+			"plugin {file}: the id \"{}\" is already used by {}; give this plugin another id",
+			manifest.id,
+			other.path.display()
+		));
 	}
 	let plugin = Arc::new(Plugin {
 		key: key_of(&manifest.id),
@@ -233,6 +320,7 @@ pub fn load_file(path: &Path) -> Result<Arc<Plugin>, String> {
 		module,
 		generation: registry.generation.fetch_add(1, Ordering::Relaxed),
 		has_gray,
+		stopped: Mutex::new(None),
 	});
 	let mut plugins = registry.plugins.write().unwrap_or_else(PoisonError::into_inner);
 	// The file may now hold a plugin with another id: the old one is gone.
@@ -250,25 +338,31 @@ pub fn unload_path(path: &Path) -> Vec<Arc<Plugin>> {
 	gone.iter().filter_map(|key| plugins.remove(key)).collect()
 }
 
-/// Every `.wasm` in `dir`, sorted.
-fn wasm_files(dir: &Path) -> Vec<PathBuf> {
+/// Every `.wasm` and `.rs` in `dir`, sorted.
+fn plugin_files(dir: &Path) -> Vec<PathBuf> {
+	let wanted = |p: &PathBuf| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("wasm") || e.eq_ignore_ascii_case("rs"));
 	let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-		.map(|entries| {
-			entries
-				.flatten()
-				.map(|e| e.path())
-				.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("wasm")))
-				.collect()
-		})
+		.map(|entries| entries.flatten().map(|e| e.path()).filter(wanted).collect())
 		.unwrap_or_default();
 	files.sort();
 	files
 }
 
-/// Load every plugin in `dir`; a missing folder is no plugins. Failures go
-/// to [`take_errors`].
+/// Whether [`load_dir`] loads `path` at once: a `.wasm`, or a `.rs` whose
+/// build is up to date. A `.rs` that needs building is left to the watcher,
+/// so the app does not wait for a compiler at start.
+fn loads_at_start(path: &Path) -> bool {
+	!is_script(path) || script::cached(path).is_some()
+}
+
+/// Load every plugin in `dir` that is ready; a missing folder is no
+/// plugins. Failures go to [`take_errors`].
 pub fn load_dir(dir: &Path) -> Vec<Arc<Plugin>> {
-	wasm_files(dir).iter().filter_map(|path| load_file(path).map_err(report).ok()).collect()
+	plugin_files(dir)
+		.iter()
+		.filter(|path| loads_at_start(path))
+		.filter_map(|path| load_file(path).map_err(report).ok())
+		.collect()
 }
 
 type Stamp = (SystemTime, u64);
@@ -281,23 +375,38 @@ fn stamp(path: &Path) -> Option<Stamp> {
 /// What the watcher did.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
-	Loaded { id: String, name: String },
-	Unloaded { id: String, name: String },
+	/// A `.rs` plugin is being built (a few seconds).
+	Building {
+		file: String,
+	},
+	Loaded {
+		id: String,
+		name: String,
+	},
+	Unloaded {
+		id: String,
+		name: String,
+	},
 	Failed(String),
 }
 
-/// Watch `dir` from now on (call after [`load_dir`]): a `.wasm` that changed
-/// and then stayed the same for one poll (the build has finished writing it)
-/// is reloaded; a removed one is unloaded. `on_change` runs on the watcher
-/// thread after each scan that changed something.
+/// Watch `dir` from now on (call after [`load_dir`]): a plugin file that
+/// changed and then stayed the same for one poll (its writer has finished)
+/// is reloaded — a `.rs` is built first; a removed one is unloaded.
+/// `on_change` runs on the watcher thread after each scan that changed
+/// something, and before a build starts.
 pub fn watch(dir: PathBuf, on_change: impl Fn(Vec<Change>) + Send + 'static) {
 	let spawned = std::thread::Builder::new().name("fx-plugin watch".into()).spawn(move || {
-		let mut loaded: HashMap<PathBuf, Stamp> = wasm_files(&dir).into_iter().filter_map(|p| Some((p.clone(), stamp(&p)?))).collect();
+		let mut loaded: HashMap<PathBuf, Stamp> = plugin_files(&dir)
+			.into_iter()
+			.filter(|p| loads_at_start(p))
+			.filter_map(|p| Some((p.clone(), stamp(&p)?)))
+			.collect();
 		let mut seen = loaded.clone();
 		loop {
 			std::thread::sleep(POLL);
 			let mut changes = Vec::new();
-			let files = wasm_files(&dir);
+			let files = plugin_files(&dir);
 			for path in &files {
 				let Some(now) = stamp(path) else { continue };
 				let stable = seen.get(path) == Some(&now);
@@ -306,6 +415,10 @@ pub fn watch(dir: PathBuf, on_change: impl Fn(Vec<Change>) + Send + 'static) {
 					continue;
 				}
 				loaded.insert(path.clone(), now);
+				if is_script(path) && script::cached(path).is_none() {
+					let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+					on_change(vec![Change::Building { file }]);
+				}
 				changes.push(match load_file(path) {
 					Ok(plugin) => Change::Loaded {
 						id: plugin.manifest.id.clone(),
@@ -357,7 +470,7 @@ type RectFn = TypedFunc<(u32, u32, u32, i32, i32), i32>;
 /// One plugin instantiated on one thread.
 struct Live {
 	generation: u64,
-	store: Store<()>,
+	store: Store<StoreLimits>,
 	memory: Memory,
 	alloc: TypedFunc<u32, u32>,
 	rect: RectFn,
@@ -367,8 +480,7 @@ struct Live {
 impl Live {
 	fn new(plugin: &Plugin) -> Result<Self, String> {
 		let id = &plugin.manifest.id;
-		let mut store = Store::new(&registry().engine, ());
-		store.set_epoch_deadline(DEADLINE_TICKS);
+		let mut store = new_store(&registry().engine);
 		let instance = Instance::new(&mut store, &plugin.module, &[]).map_err(|e| format!("plugin {id}: {e:#}"))?;
 		let memory = instance
 			.get_memory(&mut store, "memory")
@@ -386,8 +498,10 @@ impl Live {
 		})
 	}
 
-	/// Copy in, call, copy back. `values` has `w·h·channels` floats.
-	fn run(&mut self, gray: bool, header: &[f32; HEADER_WORDS], at: (i32, i32), size: (u32, u32), values: &mut [f32], k: &[f32]) -> Result<(), String> {
+	/// Copy in, call, copy back. `values` has `w·h·channels` floats. A pixel
+	/// the plugin returns with a NaN or an infinity keeps its input; returns
+	/// how many did.
+	fn run(&mut self, gray: bool, header: &[f32; HEADER_WORDS], at: (i32, i32), size: (u32, u32), values: &mut [f32], k: &[f32]) -> Result<usize, String> {
 		let n = size.0 as usize * size.1 as usize;
 		debug_assert_eq!(k.len(), n);
 		let bytes = (HEADER_WORDS + values.len() + n) * 4;
@@ -411,8 +525,21 @@ impl Live {
 		if code != 0 {
 			return Err(format!("returned error {code}"));
 		}
-		bytemuck::cast_slice_mut(values).copy_from_slice(&self.memory.data(&self.store)[v0..k0]);
-		Ok(())
+		let channels = if gray { 1 } else { 4 };
+		let out = &self.memory.data(&self.store)[v0..k0];
+		let mut invalid = 0;
+		for (dst, src) in values.chunks_exact_mut(channels).zip(out.chunks_exact(4 * channels)) {
+			let mut pixel = [0.0f32; 4];
+			for (c, bytes) in pixel.iter_mut().zip(src.chunks_exact(4)) {
+				*c = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+			}
+			if pixel[..channels].iter().all(|c| c.is_finite()) {
+				dst.copy_from_slice(&pixel[..channels]);
+			} else {
+				invalid += 1;
+			}
+		}
+		Ok(invalid)
 	}
 }
 
@@ -420,19 +547,60 @@ thread_local! {
 	static LIVE: RefCell<HashMap<u64, Live>> = RefCell::new(HashMap::new());
 }
 
+/// Stop `plugin` for `why` and say so once.
+fn stop(plugin: &Plugin, why: String) {
+	if plugin.stop(why.clone()) {
+		report(format!(
+			"Plugin \u{201c}{}\u{201d} stopped: {why}. Its strokes paint nothing until its file is saved again.",
+			plugin.manifest.name
+		));
+	}
+}
+
 fn call(plugin: &Plugin, gray: bool, header: &[f32; HEADER_WORDS], at: (i32, i32), size: (u32, u32), values: &mut [f32], k: &[f32]) -> Result<(), String> {
+	if let Some(why) = plugin.stopped() {
+		return Err(why);
+	}
 	LIVE.with(|cell| {
 		let mut live = cell.borrow_mut();
 		if live.get(&plugin.key).is_none_or(|l| l.generation != plugin.generation) {
-			live.insert(plugin.key, Live::new(plugin)?);
+			match Live::new(plugin) {
+				Ok(instance) => live.insert(plugin.key, instance),
+				Err(e) => {
+					stop(plugin, e.clone());
+					return Err(e);
+				}
+			};
 		}
 		let instance = live.get_mut(&plugin.key).expect("inserted above");
+		let started = Instant::now();
 		let result = instance.run(gray, header, at, size, values, k);
-		if result.is_err() {
-			// A trap can leave the instance in any state: start fresh next time.
-			live.remove(&plugin.key);
+		let took = started.elapsed();
+		match result {
+			Ok(invalid) => {
+				if invalid > 0 {
+					report(format!(
+						"Plugin \u{201c}{}\u{201d} returned invalid values (NaN or infinity); those pixels were left unchanged",
+						plugin.manifest.name
+					));
+				}
+				if took > SLOW_CALL {
+					stop(plugin, format!("too slow: {} ms for a {}x{} px area", took.as_millis(), size.0, size.1));
+				}
+				Ok(())
+			}
+			Err(e) => {
+				// A trap can leave the instance in any state: start fresh next time.
+				live.remove(&plugin.key);
+				let why = if e.contains("interrupt") || e.contains("epoch") {
+					"it ran too long (an endless loop?)".to_string()
+				} else {
+					format!("it crashed ({})", e.lines().next().unwrap_or(&e))
+				};
+				stop(plugin, why.clone());
+				Err(why)
+			}
 		}
-		result.map_err(|e| format!("plugin {} failed: {e}", plugin.manifest.id))
 	})
 }
 
@@ -448,12 +616,12 @@ fn loaded(key: u64) -> Result<Arc<Plugin>, String> {
 
 /// Run plugin `key` on a rectangle of premultiplied RGBA `pixels` (row-major,
 /// `size.0 × size.1`, first pixel at canvas `at`) with build-up `k`. On an
-/// error the pixels are unchanged and the message is also kept for
-/// [`take_errors`].
+/// error the pixels are unchanged; a plugin that crashed, hung or was too
+/// slow is stopped, and [`take_errors`] says so once.
 pub fn rect(key: u64, header: &[f32; HEADER_WORDS], at: (i32, i32), size: (u32, u32), pixels: &mut [[f32; 4]], k: &[f32]) -> Result<(), String> {
 	let plugin = loaded(key)?;
 	// `run` copies back only after a successful call.
-	call(&plugin, false, header, at, size, pixels.as_flattened_mut(), k).inspect_err(|e| report(e.clone()))
+	call(&plugin, false, header, at, size, pixels.as_flattened_mut(), k)
 }
 
 /// [`rect`] for a mask's grey values. `Ok(false)` when the plugin has no
@@ -463,7 +631,5 @@ pub fn gray(key: u64, header: &[f32; HEADER_WORDS], at: (i32, i32), size: (u32, 
 	if !plugin.has_gray {
 		return Ok(false);
 	}
-	call(&plugin, true, header, at, size, values, k)
-		.map(|()| true)
-		.inspect_err(|e| report(e.clone()))
+	call(&plugin, true, header, at, size, values, k).map(|()| true)
 }

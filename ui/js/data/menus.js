@@ -730,6 +730,7 @@ export const menus = [
       ]),
       sep,
       sub("Get More Tools", [
+        it("Open Plugins Folder", "", "plugins:open-folder"),
         it("Browse Plugins...", "", "ext:browse-plugins"),
         it("Manage Plugins...", "", "ext:manage-plugins"),
         it("Install from URL...", "", "dlg:install-plugin"),
