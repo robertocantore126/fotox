@@ -438,30 +438,51 @@ impl Builder<'_> {
 		if !base.visible || base.opacity <= 0.0 {
 			return Vec::new();
 		}
-		let base_ops = match &base.kind {
+		let content = match &base.kind {
 			LayerKind::Group { children, .. } => {
-				let inner = self.list(children);
-				if inner.is_empty() {
-					return Vec::new();
+				let mut inner = self.list(children);
+				// A clipping base retains the same artboard background as a
+				// normally drawn group, including when all its children are empty.
+				if let Some(bg) = base.artboard.as_ref().and_then(|a| a.background) {
+					inner.insert(
+						0,
+						Op::Layer {
+							layer: base.id,
+							source: Source::Solid(bg.map(|v| v as f32 / 65535.0)),
+							blend: BlendMode::Normal,
+							alpha: 1.0,
+							mask: None,
+							clip: false,
+							blend_if: None,
+						},
+					);
 				}
-				let Some((alpha, mask, second)) = self.mask(base).apply(1.0) else {
-					return Vec::new();
-				};
-				let inner = match second {
-					Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
-					None => inner,
-				};
-				wrap_isolated(inner, BlendMode::Normal, alpha, mask, false)
+				if let Some((alpha, mask, second)) = self.mask(base).apply(1.0) {
+					let inner = match second {
+						Some(second) => wrap_isolated(inner, BlendMode::Normal, 1.0, Some(second), false),
+						None => inner,
+					};
+					wrap_isolated(inner, BlendMode::Normal, alpha, mask, false)
+				} else {
+					// A mask can hide the content while effects that it does not
+					// hide still reach this tile; keep building those effects below.
+					Vec::new()
+				}
 			}
 			_ => self.content(base, BlendMode::Normal, base.fill, false),
 		};
-		if base_ops.is_empty() {
-			return Vec::new(); // base transparent here → the whole clipping group is invisible
-		}
-		let mut inner = base_ops;
+		let mut extra = Vec::new();
 		for layer in clipped {
-			inner.extend(self.layer(layer, true));
+			extra.extend(self.layer(layer, true));
 		}
+		// The base's own layer styles must still draw (they used to vanish the
+		// moment a clipping mask sat above). They surround the base content plus
+		// the clipped layers, with the base's mode and opacity applied once by
+		// the outer wrap, so the effects are built with opacity 1 here.
+		let mut plain = base.clone();
+		plain.opacity = 1.0;
+		plain.blend = BlendMode::Normal;
+		let inner = self.with_effects_extra(&plain, false, content, extra);
 		wrap_isolated(inner, normal_if_pass(base.blend), base.opacity, None, false)
 	}
 
@@ -528,16 +549,10 @@ impl Builder<'_> {
 				// A styled group: its effects around its composite, as for a layer.
 				self.with_effects(layer, clip, group)
 			}
+			// Blend If shapes the content only (effects keep their own alpha);
+			// `with_effects` applies it to the content it draws.
 			_ => {
-				let mut content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
-				// Blend If shapes the content only (effects keep their own alpha).
-				if let Some(range) = layer.styles.as_ref().and_then(|s| s.blend_if).filter(|b| !b.is_identity()) {
-					for op in &mut content {
-						if let Op::Layer { blend_if, .. } = op {
-							*blend_if = Some(range);
-						}
-					}
-				}
+				let content = self.content(layer, layer.blend, layer.opacity * layer.fill, clip);
 				self.with_effects(layer, clip, content)
 			}
 		}
@@ -559,11 +574,33 @@ impl Builder<'_> {
 	/// A clipped layer keeps its effects, as in Photoshop: each one is drawn
 	/// source-atop like the content, so the base's alpha bounds them too.
 	fn with_effects(&mut self, layer: &Layer, clip: bool, content: Vec<Op>) -> Vec<Op> {
+		self.with_effects_extra(layer, clip, content, Vec::new())
+	}
+
+	/// [`with_effects`] with `extra` drawn as part of the layer's content, just
+	/// after it and before the effects that paint over it. A clipping group uses
+	/// this for the clipped layers: they are isolated with the base's content so
+	/// they clip to the base's own alpha, not to its shadows and glows.
+	fn with_effects_extra(&mut self, layer: &Layer, clip: bool, mut content: Vec<Op>, extra: Vec<Op>) -> Vec<Op> {
+		// Blend If shapes the content only (effects keep their own alpha). A
+		// group's `content` is its children, whose own ops must not inherit it.
+		let blend_if = layer.styles.as_ref().and_then(|s| s.blend_if).filter(|b| !b.is_identity());
+		if !matches!(layer.kind, LayerKind::Group { .. }) {
+			if let Some(range) = blend_if {
+				for op in &mut content {
+					if let Op::Layer { blend_if, .. } = op {
+						*blend_if = Some(range);
+					}
+				}
+			}
+		}
 		let Some(styles) = layer.styles.as_ref() else {
+			content.extend(extra);
 			return content;
 		};
 		let slots = styles.slots();
 		if layer.effects.len() != slots.len() {
+			content.extend(extra);
 			return content;
 		}
 		let grouped = styles.interior_as_group && !matches!(layer.kind, LayerKind::Group { .. });
@@ -593,8 +630,17 @@ impl Builder<'_> {
 		}
 		let mut out = below;
 		if grouped {
+			let mut built = self.content(layer, BlendMode::Normal, layer.fill, false);
+			if let Some(range) = blend_if {
+				for op in &mut built {
+					if let Op::Layer { blend_if, .. } = op {
+						*blend_if = Some(range);
+					}
+				}
+			}
 			out.push(Op::BeginIsolated);
-			out.extend(self.content(layer, BlendMode::Normal, layer.fill, false));
+			out.extend(built);
+			out.extend(extra);
 			out.extend(inside);
 			out.push(Op::EndIsolated {
 				blend: layer.blend,
@@ -602,8 +648,20 @@ impl Builder<'_> {
 				mask: None,
 				clip,
 			});
-		} else {
+		} else if extra.is_empty() {
 			out.extend(content);
+		} else {
+			// Isolate the base content with the clipped layers so the latter
+			// clip to the content alone; the effects stay outside this group.
+			out.push(Op::BeginIsolated);
+			out.extend(content);
+			out.extend(extra);
+			out.push(Op::EndIsolated {
+				blend: BlendMode::Normal,
+				alpha: 1.0,
+				mask: None,
+				clip: false,
+			});
 		}
 		out.extend(above);
 		if styles.channels != [true; 3] && !out.is_empty() {
@@ -616,7 +674,15 @@ impl Builder<'_> {
 	/// The op of one layer-style effect: its cache (`index` into the layer's
 	/// effects), composited like a layer at `alpha` (source-atop when `clip`).
 	#[allow(clippy::too_many_arguments)]
-	fn effect(&mut self, layer: &Layer, index: usize, params: &fx_core::styles::EffectParams, alpha: f32, styles: &fx_core::styles::LayerStyles, clip: bool) -> Vec<Op> {
+	fn effect(
+		&mut self,
+		layer: &Layer,
+		index: usize,
+		params: &fx_core::styles::EffectParams,
+		alpha: f32,
+		styles: &fx_core::styles::LayerStyles,
+		clip: bool,
+	) -> Vec<Op> {
 		if alpha <= 0.0 {
 			return Vec::new();
 		}

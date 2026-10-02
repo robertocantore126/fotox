@@ -624,7 +624,12 @@ pub(crate) fn run(ctx: EngineContext) {
 			},
 			default(timeout) => {}
 		}
-		engine.run_queued_commands();
+		// R05: a queued edit is still an unsaved change. Once the queue drains,
+		// re-check a pending window close (it may have been waiting on a job
+		// whose commands had not run yet).
+		if engine.run_queued_commands() {
+			engine.continue_window_close();
+		}
 		engine.schedule_recovery(false);
 		engine.expire_derived();
 		engine.flush_view_message();
@@ -669,14 +674,28 @@ fn compact_when_released(file: Arc<fx_io::fxd::FxdFile>, path: PathBuf, store: A
 
 impl Engine {
 	/// VERIFY-FIX(P2): run the commands queued while a document was busy, in
-	/// order, until one of them starts another job.
-	fn run_queued_commands(&mut self) {
-		let ready: Vec<DocId> = self.docs.iter().filter(|open| open.busy.is_none() && !open.queued.is_empty()).map(|open| open.id).collect();
+	/// order, until one of them starts another job. Returns whether any command
+	/// ran, so the caller can re-check a pending window close (R05).
+	fn run_queued_commands(&mut self) -> bool {
+		let ready: Vec<DocId> = self
+			.docs
+			.iter()
+			.filter(|open| open.busy.is_none() && !open.queued.is_empty())
+			.map(|open| open.id)
+			.collect();
+		let mut ran = false;
 		for id in ready {
-			while let Some(command) = self.docs.get_mut(id).filter(|open| open.busy.is_none()).and_then(|open| open.queued.pop_front()) {
-				self.command(id, command);
+			while let Some((command, from_tool)) = self
+				.docs
+				.get_mut(id)
+				.filter(|open| open.busy.is_none())
+				.and_then(|open| open.queued.pop_front())
+			{
+				ran = true;
+				self.command_inner(id, command, from_tool);
 			}
 		}
+		ran
 	}
 
 	/// The view of the active document, or of the virtual one.
@@ -1100,10 +1119,11 @@ impl Engine {
 		if let Some(command) = result.command {
 			// A command that changes the canvas hands the tool the new document
 			// when it lands (`after_edit`), which for a job is later than now.
-			self.command(doc_id, command);
+			// R01: from the tool, so its nudge burst survives.
+			self.command_inner(doc_id, command, true);
 		}
 		for command in result.then {
-			self.command(doc_id, command);
+			self.command_inner(doc_id, command, true);
 		}
 		// The Object Selection tool, Generative Expand (M13).
 		if let Some(request) = result.ai {
@@ -2929,7 +2949,7 @@ impl Engine {
 							open.file = Some(file);
 							open.path = Some(path.clone());
 							open.source = Some(path.clone());
-							open.dirty = open.generation != generation;
+							open.dirty = open.generation != generation || !open.queued.is_empty();
 							open.name = path
 								.file_name()
 								.map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -3008,7 +3028,11 @@ impl Engine {
 			self.close(child);
 			return;
 		}
-		let Some((busy, saving, dirty)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving, open.dirty)) else {
+		let Some((busy, saving, dirty, queued)) = self
+			.docs
+			.get_mut(id)
+			.map(|open| (open.busy.clone(), open.saving, open.dirty, !open.queued.is_empty()))
+		else {
 			return;
 		};
 		if let Some(job) = busy {
@@ -3020,6 +3044,12 @@ impl Engine {
 		if saving {
 			self.to_ui(&EngineToUi::Toast {
 				text: "Wait until the save is finished before closing this document".into(),
+			});
+			return;
+		}
+		if queued {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Wait for the queued edits before closing this document".into(),
 			});
 			return;
 		}
@@ -3076,6 +3106,10 @@ impl Engine {
 				Some(format!("{} ({job})", open.name))
 			} else if open.saving {
 				Some(format!("{} (saving)", open.name))
+			} else if !open.queued.is_empty() {
+				// R05: edits are still queued behind the last job; they must land
+				// before the window may close, or they are silently lost.
+				Some(format!("{} ({} edit(s) waiting)", open.name, open.queued.len()))
 			} else {
 				None
 			}
@@ -3128,6 +3162,8 @@ impl Engine {
 			Some(format!("Wait until {job} is finished before reverting"))
 		} else if open.saving {
 			Some("Wait until the save is finished before reverting".into())
+		} else if !open.queued.is_empty() {
+			Some("Wait for the queued edits before reverting".into())
 		} else if open.source.is_none() {
 			Some("This document has never been saved: there is nothing to revert to".into())
 		} else {
@@ -3175,6 +3211,8 @@ impl Engine {
 		new.proof = old.proof.take();
 		new.proof_colors = old.proof_colors;
 		new.gamut_warning = old.gamut_warning;
+		// Commands accepted during the reload belong to the restored document.
+		new.queued = std::mem::take(&mut old.queued);
 		*old = new;
 		self.layers_sent.remove(&id);
 		self.thumbs_wanted.retain(|(d, _), _| *d != id);
@@ -3288,6 +3326,12 @@ impl Engine {
 
 	/// Snapshot the document and save it on a worker thread (recipe R2).
 	fn start_save(&mut self, id: DocId, target: SaveTarget) {
+		if self.docs.get(id).is_some_and(|open| !open.queued.is_empty()) {
+			self.to_ui(&EngineToUi::Toast {
+				text: "Wait for the queued edits before saving".into(),
+			});
+			return;
+		}
 		let Some((busy, saving)) = self.docs.get_mut(id).map(|open| (open.busy.clone(), open.saving)) else {
 			return;
 		};
@@ -3378,6 +3422,28 @@ impl Engine {
 
 	/// Apply a document command through its history (M2).
 	fn command(&mut self, id: DocId, command: Command) {
+		self.command_inner(id, command, false);
+	}
+
+	/// Apply a document command through its history (M2). `from_tool` marks a
+	/// command the active tool produced (R01): the Move tool's arrow-nudge
+	/// accumulation must survive its own command, so the tool is not
+	/// deactivated here (that would reset the burst and collapse rapid presses
+	/// to one pixel).
+	fn command_inner(&mut self, id: DocId, command: Command, from_tool: bool) {
+		// Defer preparation too: deactivating a tool or importing a pattern
+		// while the worker owns its snapshot can discard live state on completion.
+		if let Some(doc) = self.docs.get_mut(id)
+			&& let Some(job) = &doc.busy
+		{
+			if doc.queued.len() < 64 {
+				doc.queued.push_back((command, from_tool));
+			} else {
+				let text = format!("Wait until {job} is finished");
+				self.to_ui(&EngineToUi::Toast { text });
+			}
+			return;
+		}
 		// OK in a filter dialog over a Smart Object: the live preview's step
 		// goes, the real one follows.
 		if matches!(command, Command::ApplyFilter { .. })
@@ -3391,7 +3457,9 @@ impl Engine {
 		let command = self.smart_filter_rewrite(id, command);
 		self.end_stroke();
 		self.before_command(id, &command);
-		self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+		if !from_tool {
+			self.with_active_tool(|tool, ctx| tool.deactivate(ctx));
+		}
 		// A property change on another layer does not invalidate the pixels
 		// being transformed. Keep the box and its preview while that edit lands.
 		let other_layer_props = matches!((&self.transform, &command), (Some((doc, session)), Command::SetLayerProps { layer, .. })
@@ -3404,16 +3472,6 @@ impl Engine {
 			tracing::warn!("command for unknown document {id:?}");
 			return;
 		};
-		if let Some(job) = &doc.busy {
-			// VERIFY-FIX(P2): queue (bounded) instead of dropping the command.
-			if doc.queued.len() < 64 {
-				doc.queued.push_back(command);
-			} else {
-				let text = format!("Wait until {job} is finished");
-				self.to_ui(&EngineToUi::Toast { text });
-			}
-			return;
-		}
 		// Heavy pixel commands run as jobs (recipe R2): the UI stays live.
 		if is_pixel_job(&command) {
 			self.start_pixel_job(id, command);
@@ -3421,10 +3479,17 @@ impl Engine {
 		}
 		let now = Instant::now();
 		let key = EditKey::of(&command);
+		// Move sends an accumulated displacement only within its own burst.
+		// Using the longer property-edit window would undo the preceding burst.
+		let merge_window = if matches!(key, Some(EditKey::Move(_) | EditKey::MovePixels)) {
+			crate::tools::move_tool::NUDGE_BURST
+		} else {
+			MERGE_EDITS_WITHIN
+		};
 		// Merge a repeat of the previous edit into its history step: undo it,
 		// then apply the new value on the state before it.
 		let merge = matches!((&self.last_edit, &key), (Some((d, k, at, steps)), Some(new))
-			if *d == id && k == new && now.saturating_duration_since(*at) <= MERGE_EDITS_WITHIN
+			if *d == id && k == new && now.saturating_duration_since(*at) < merge_window
 				&& *steps == doc.history.labels().count() && !doc.history.can_redo());
 		let before_merge = merge.then(|| doc.doc.clone());
 		if merge {

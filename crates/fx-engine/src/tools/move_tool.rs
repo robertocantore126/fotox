@@ -30,7 +30,7 @@ use crate::{CursorShape, Modifiers, PointerKind};
 
 const TOOL: &str = "move";
 /// Arrow presses closer than this are one history step (the engine's merge window).
-const NUDGE_BURST: Duration = Duration::from_millis(900);
+pub(crate) const NUDGE_BURST: Duration = Duration::from_millis(900);
 /// Auto-Select ignores pixels fainter than this (a soft brush's halo, a
 /// texture's haze), so they do not steal clicks from what is under them.
 /// Photoshop's own threshold is not known; this one is a choice.
@@ -87,7 +87,10 @@ fn refusal(doc: &Document, pixels: bool) -> Option<String> {
 		let id = doc.active_layer()?;
 		let layer = doc.layer(id)?;
 		if !matches!(layer.kind, LayerKind::Pixel { .. }) {
-			return Some(format!("“{}” has no pixels to move: rasterize it, or deselect to move the whole layer", layer.name));
+			return Some(format!(
+				"“{}” has no pixels to move: rasterize it, or deselect to move the whole layer",
+				layer.name
+			));
 		}
 		let locks = doc.locks(id);
 		return (locks.pixels || locks.position).then(|| locked_message(doc, id));
@@ -420,7 +423,15 @@ mod tests {
 
 	fn run(f: &mut Fixture, result: ToolResult) -> fx_core::CommandEffect {
 		let command = result.command.expect("the tool sent a command");
-		command.apply(&mut f.doc, &mut CommandContext { tiles: &f.store, ops: Some(&f.ops) }).expect("the command applies")
+		command
+			.apply(
+				&mut f.doc,
+				&mut CommandContext {
+					tiles: &f.store,
+					ops: Some(&f.ops),
+				},
+			)
+			.expect("the command applies")
 	}
 
 	fn offset(f: &Fixture, id: LayerId) -> (i32, i32) {

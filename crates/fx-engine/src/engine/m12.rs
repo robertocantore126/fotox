@@ -331,10 +331,11 @@ impl Engine {
 			}
 			return;
 		};
-		if [child, parent]
-			.iter()
-			.any(|id| self.docs.get(*id).is_some_and(|open| open.busy.is_some() || open.saving))
-		{
+		if [child, parent].iter().any(|id| {
+			self.docs
+				.get(*id)
+				.is_some_and(|open| open.busy.is_some() || open.saving || !open.queued.is_empty())
+		}) {
 			self.to_ui(&EngineToUi::Toast {
 				text: "Wait for the contents and parent jobs to finish before saving".into(),
 			});
@@ -420,7 +421,7 @@ impl Engine {
 		open.dirty = true;
 		open.changed();
 		if let Some(open) = self.docs.get_mut(child) {
-			open.dirty = open.generation != generation;
+			open.dirty = open.generation != generation || !open.queued.is_empty();
 		}
 		self.after_edit(parent, true);
 		self.after_edit(child, true);

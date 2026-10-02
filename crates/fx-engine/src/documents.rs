@@ -74,7 +74,8 @@ pub struct OpenDoc {
 	/// VERIFY-FIX(P2): commands sent while `busy`, run in order when the job
 	/// ends. P2 made Fill and Free Transform jobs, so "Fill, then Deselect"
 	/// lost the Deselect when such commands were refused.
-	pub queued: std::collections::VecDeque<fx_core::Command>,
+	/// The bool retains tool ownership so replay does not reset a nudge burst.
+	pub queued: std::collections::VecDeque<(fx_core::Command, bool)>,
 	/// `(revision, preview_rev)` of `snapshot`.
 	snapshot_key: (u64, u64),
 	/// View ▸ Proof Setup (M4-T04): the press to simulate.
