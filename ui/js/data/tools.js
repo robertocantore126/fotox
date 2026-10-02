@@ -140,6 +140,20 @@ export const toolSlots = [
 /** Tutti gli strumenti in un unico elenco piatto (slot + flyout). */
 export const allTools = toolSlots.flatMap((s) => [s, ...s.flyout]);
 
+/**
+ * The brush plugins' tools (D-096), from the engine's `plugins` message:
+ * each goes at the end of its slot's flyout (marked `plugin`); the list
+ * replaces the last one.
+ */
+export function setPluginTools(tools) {
+  for (const slot of toolSlots) slot.flyout = slot.flyout.filter((t) => !t.plugin);
+  for (const t of tools) {
+    const slot = toolSlots.find((s) => s.id === t.slot) || toolSlots.find((s) => s.id === "brush");
+    slot.flyout.push({ id: t.id, name: t.name, key: slot.key, icon: t.icon, plugin: true });
+  }
+  allTools.splice(0, allTools.length, ...toolSlots.flatMap((s) => [s, ...s.flyout]));
+}
+
 export function findTool(id) {
   return allTools.find((t) => t.id === id) || toolSlots[0];
 }

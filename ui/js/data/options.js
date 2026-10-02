@@ -186,6 +186,12 @@ export const optionBars = {
   screen: [{ type: "label", text: "Press F repeatedly: Standard · Full Screen with Menu · Full Screen" }],
 };
 
+/** The brush plugins' option bars (D-096), keyed by their `plugin:` tool id. */
+export function setPluginBars(tools) {
+  for (const id of Object.keys(optionBars)) if (id.startsWith("plugin:")) delete optionBars[id];
+  for (const t of tools) if (Array.isArray(t.options)) optionBars[t.id] = t.options;
+}
+
 export function optionsFor(toolId) {
   // gli strumenti raggruppati ereditano la barra del primo della famiglia:
   // si continua a togliere il suffisso finché non si trova una barra vera.

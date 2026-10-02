@@ -5,7 +5,8 @@ import { h, icon, clear } from "./el.js";
 import { loadSprite } from "./icons.js";
 import { state, on, emit, setTool, setColors } from "./state.js";
 import { menus } from "./data/menus.js";
-import { toolSlots, findTool } from "./data/tools.js";
+import { toolSlots, findTool, setPluginTools } from "./data/tools.js";
+import { setPluginBars } from "./data/options.js";
 import { initPopupEngine, openDropdown, openPopup, closeAll, isPopupOpen } from "./popup.js";
 import { buildMenubar, setMenuAction, initMenuKeyboard } from "./menu.js";
 import { initType } from "./native/type.js";
@@ -141,6 +142,12 @@ function sendToolOptions(options) {
   bridge.send({ type: UI.TOOL_OPTIONS, tool: currentBar() || state.tool, options: { ...options, _brush: brushExtras() } });
 }
 
+/** The slot a tool was last picked in (plugin tools live in any slot). */
+function slotCurrentOf(toolId) {
+  for (const [slot, tool] of slotCurrent) if (tool === toolId) return slot;
+  return null;
+}
+
 function pickTool(toolId, slotId) {
   slotCurrent.set(slotId, toolId);
   setTool(toolId);
@@ -165,7 +172,7 @@ function openFlyout(slot, anchor) {
   const content = h("div", { class: "flyout" });
   for (const tool of items) {
     // In the app, a tool the engine does not build yet is dimmed (M8-T10).
-    const planned = bridge.isNative && !IMPLEMENTED.has("tool:" + tool.id) && !UI_TOOLS.has(tool.id);
+    const planned = bridge.isNative && !tool.plugin && !IMPLEMENTED.has("tool:" + tool.id) && !UI_TOOLS.has(tool.id);
     content.append(h("button", {
       class: "flyout-item" + (state.tool === tool.id ? " sel" : "") + (planned ? " planned" : ""), type: "button",
       dataset: { tip: `${tool.name} (${tool.key})` + (planned ? " — planned for a later milestone" : "") },
@@ -269,6 +276,27 @@ async function boot() {
     });
     const tool = findTool(id);
     status(`${tool.name} (${tool.key})`);
+  });
+
+  // The brush plugins' tools (D-096): into their slots' flyouts. On a hot
+  // reload the active plugin tool's bar is rebuilt (its fields may have
+  // changed; the values typed so far are remembered); a removed one hands
+  // over to its slot's first tool.
+  bridge.on(ENGINE.PLUGINS, ({ tools }) => {
+    setPluginTools(tools);
+    setPluginBars(tools);
+    document.querySelectorAll(".toolbtn[data-slot]").forEach((b) => {
+      const slot = toolSlots.find((s) => s.id === b.dataset.slot);
+      if (slot?.flyout.length && !b.querySelector(".flyout-dot")) b.append(h("span", { class: "flyout-dot" }));
+    });
+    if (!state.tool.startsWith("plugin:")) return;
+    if (tools.some((t) => t.id === state.tool)) {
+      renderOptionsBar(shell.optionsbar, state.tool);
+      sendToolOptions(readOptions());
+    } else {
+      const slot = toolSlots.find((s) => s.id === slotCurrentOf(state.tool)) || toolSlots[0];
+      pickTool(slot.id, slot.id);
+    }
   });
 
   // A Free Transform box (M6-T04) swaps in its own option bar while it is up.

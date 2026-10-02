@@ -407,6 +407,12 @@ impl Tools {
 		self.active.clear();
 	}
 
+	/// Drop the brush plugins' tools (a plugin was reloaded or removed):
+	/// the next use builds them from the plugin loaded now.
+	pub fn forget_plugins(&mut self) {
+		self.active.retain(|id, _| !id.starts_with(crate::plugins::TOOL_PREFIX));
+	}
+
 	/// The tool for `id`, created on first use. `None` for a tool id M5 does
 	/// not implement yet: the view still pans and zooms, the pointer is just
 	/// ignored.
@@ -500,6 +506,11 @@ fn new_tool(id: &str) -> Option<Box<dyn Tool>> {
 		// The Magnetic Lasso (M9-T07).
 		"lasso-magnet" => Some(Box::new(magnetic::MagneticLasso::default())),
 		"shape-3d" => Some(Box::new(NotYet { name: not_yet_name(id) })),
+		// Brush plugins (D-096): one Paint per plugin, reading its own bar.
+		other if other.starts_with(crate::plugins::TOOL_PREFIX) => {
+			let plugin = crate::plugins::plugin_of(other)?;
+			Some(Box::new(paint::Paint::new(paint::intern(other), paint::Kind::Plugin(plugin.key))))
+		}
 		// Tools built from a kind (M7-T08, HOWTO R11).
 		other => kinds::registered(other),
 	}

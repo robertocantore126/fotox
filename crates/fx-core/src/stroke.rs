@@ -313,6 +313,26 @@ pub enum StrokeTool {
 		#[serde(default)]
 		protect: Option<[u16; 3]>,
 	},
+	/// A brush plugin (D-096): `id` is `fx_plugin::key_of` the plugin's id,
+	/// `params` its option-bar values in the manifest's order. The pixels
+	/// come from the plugin loaded *now*: a replay after the plugin changed
+	/// paints what the new code paints (undo is by snapshot, so history is
+	/// unaffected).
+	Plugin { id: u64, params: [f32; 16] },
+}
+
+/// Plugin tool names for History labels, by `StrokeTool::Plugin` id. Names
+/// are leaked once per distinct name: a handful per session.
+static PLUGIN_LABELS: std::sync::RwLock<Vec<(u64, &'static str)>> = std::sync::RwLock::new(Vec::new());
+
+/// Remember a plugin's name for [`StrokeTool::label`].
+pub fn register_plugin_label(id: u64, name: &str) {
+	let mut labels = PLUGIN_LABELS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+	match labels.iter_mut().find(|(k, _)| *k == id) {
+		Some((_, label)) if *label == name => {}
+		Some((_, label)) => *label = Box::leak(name.to_owned().into_boxed_str()),
+		None => labels.push((id, Box::leak(name.to_owned().into_boxed_str()))),
+	}
 }
 
 impl StrokeTool {
@@ -337,6 +357,12 @@ impl StrokeTool {
 			StrokeTool::Dodge { .. } => "Dodge Tool",
 			StrokeTool::Burn { .. } => "Burn Tool",
 			StrokeTool::Sponge { .. } => "Sponge Tool",
+			StrokeTool::Plugin { id, .. } => PLUGIN_LABELS
+				.read()
+				.unwrap_or_else(std::sync::PoisonError::into_inner)
+				.iter()
+				.find(|(k, _)| k == id)
+				.map_or("Plugin Brush", |(_, label)| label),
 		}
 	}
 }

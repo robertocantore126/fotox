@@ -6,6 +6,7 @@
 //! ```text
 //! cargo xtask bundle [--release]        # assemble target/<profile>/Fotox/
 //! cargo xtask run [--release] [-- args] # assemble, then launch fotox.exe
+//! cargo xtask plugins [--watch]         # build the brush plugins, copy them
 //! ```
 //!
 //! CEF does not load from a path: `libcef.dll`, its `.pak` resources and the
@@ -16,6 +17,7 @@
 //! §2 and task `M0-T02`).
 
 mod common;
+mod plugins;
 
 #[cfg(target_os = "windows")]
 mod win;
@@ -46,6 +48,12 @@ enum Cmd {
 		#[arg(last = true)]
 		args: Vec<String>,
 	},
+	/// Build the brush plugins (plugins/) and copy them where Fotox loads them
+	Plugins {
+		/// Rebuild and copy on every save; the running app reloads them
+		#[arg(long)]
+		watch: bool,
+	},
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,7 +63,10 @@ fn main() -> anyhow::Result<()> {
 		.with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
 		.init();
 
-	dispatch(Cli::parse().command)
+	match Cli::parse().command {
+		Cmd::Plugins { watch } => plugins::run(watch),
+		command => dispatch(command),
+	}
 }
 
 /// Bundle, then either stop or launch, depending on the subcommand.
@@ -63,14 +74,15 @@ fn main() -> anyhow::Result<()> {
 fn dispatch(command: Cmd) -> anyhow::Result<()> {
 	let release = match &command {
 		Cmd::Bundle { release } | Cmd::Run { release, .. } => *release,
+		Cmd::Plugins { .. } => unreachable!("handled in main"),
 	};
 
 	let exe = win::bundle(common::profile_name(release))?;
 	tracing::info!("bundle ready: {}", exe.display());
 
 	match command {
-		Cmd::Bundle { .. } => Ok(()),
 		Cmd::Run { args, .. } => launch(&exe, &args),
+		Cmd::Bundle { .. } | Cmd::Plugins { .. } => Ok(()),
 	}
 }
 

@@ -445,6 +445,11 @@ impl Stroke {
 		let tile = i64::from(TILE_SIZE);
 		let opacity = f64::from(self.brush.opacity);
 		let gray = matches!(self.format, PixelFormat::Gray8 | PixelFormat::Gray16);
+		if let StrokeTool::Plugin { id, params } = self.tool
+			&& self.recompute_plugin(id, &params, &before, state, (tx, ty), dirty)
+		{
+			return Ok(());
+		}
 		// The per-pixel op (M7-T08) and the source under this tile when it
 		// asks for one (canvas tiles, prefetched).
 		let op = super::op::op_for(&self.tool);
@@ -480,6 +485,49 @@ impl Stroke {
 			}
 		}
 		Ok(())
+	}
+
+	/// A brush plugin's pass over `dirty` (D-096): one call for the whole
+	/// rectangle with the pixels before the stroke and `k` = opacity ×
+	/// coverage, as the per-pixel ops get them. `false` when the plugin failed
+	/// (the caller then runs `op_for`'s fallback, which keeps the pixels).
+	fn recompute_plugin(&self, id: u64, params: &[f32; 16], before: &TileBuffer, state: &mut TileState, (tx, ty): (u32, u32), dirty: [i64; 4]) -> bool {
+		let tile = i64::from(TILE_SIZE);
+		let opacity = f64::from(self.brush.opacity);
+		let gray = matches!(self.format, PixelFormat::Gray8 | PixelFormat::Gray16);
+		let (w, h) = ((dirty[2] - dirty[0] + 1) as usize, (dirty[3] - dirty[1] + 1) as usize);
+		let at = (
+			(i64::from(self.offset.0) + i64::from(tx) * tile + dirty[0]) as i32,
+			(i64::from(self.offset.1) + i64::from(ty) * tile + dirty[1]) as i32,
+		);
+		let index = |i: usize| ((dirty[1] + (i / w) as i64) * tile + dirty[0] + (i % w) as i64) as usize;
+		let k: Vec<f32> = (0..w * h).map(|i| (opacity * f64::from(state.coverage[index(i)])) as f32).collect();
+		let color = [self.color[0] as f32, self.color[1] as f32, self.color[2] as f32, self.color_alpha as f32];
+		let header = fx_plugin::header(params, color, self.lock_alpha);
+		let size = (w as u32, h as u32);
+		if gray {
+			let mut values: Vec<f32> = (0..w * h).map(|i| gray_at(before, self.format, index(i)) as f32).collect();
+			if !matches!(fx_plugin::gray(id, &header, at, size, &mut values, &k), Ok(true)) {
+				return false;
+			}
+			for (i, v) in values.iter().enumerate() {
+				set_gray(&mut state.working, self.format, index(i), f64::from(*v));
+			}
+		} else {
+			let mut pixels: Vec<[f32; 4]> = (0..w * h)
+				.map(|i| {
+					let p = pixel_at(before, self.format, index(i));
+					[p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]
+				})
+				.collect();
+			if fx_plugin::rect(id, &header, at, size, &mut pixels, &k).is_err() {
+				return false;
+			}
+			for (i, p) in pixels.iter().enumerate() {
+				set_pixel(&mut state.working, self.format, index(i), p.map(f64::from));
+			}
+		}
+		true
 	}
 
 	/// The source pixels under `dirty` of layer tile `(tx, ty)`, shifted by
