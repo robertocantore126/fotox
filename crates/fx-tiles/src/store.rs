@@ -799,6 +799,7 @@ impl TileStore {
 		}
 		let tile_bytes = entry.format.tile_bytes();
 		let buffer: Arc<TileBuffer> = if let Some(block) = &copies.warm {
+			crate::readstats::record("warm", entry.class, tile_bytes);
 			let bytes = decompress(block, tile_bytes)?;
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(extent) = copies.cold {
@@ -807,6 +808,7 @@ impl TileStore {
 				.scratch
 				.as_ref()
 				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
+			crate::readstats::record("cold", entry.class, tile_bytes);
 			let block = scratch.read(extent).map_err(|e| {
 				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
 				e
@@ -914,14 +916,15 @@ impl TileStore {
 		// Demoting hot tiles may have pushed warm over budget.
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
 			let mut scratch_full = false;
-			'passes: for pass_class in [TileClass::Derived, TileClass::Authoritative] {
+			// PERF(mips): level-0 pixels first, mips last (see `trim_clock`).
+			'passes: for pass_class in [TileClass::Authoritative, TileClass::Derived] {
 				for entry in entries.iter().filter(|e| e.class == pass_class) {
 					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
 						break 'passes;
 					}
 					if !self.demote_warm(entry) {
 						scratch_full = true;
-						break 'passes;
+						continue 'passes;
 					}
 				}
 			}
@@ -951,9 +954,13 @@ impl TileStore {
 		}
 		let mut full = false;
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
-			// VERIFY-FIX(P1): drop derived warm copies before writing
-			// authoritative tiles to scratch.
-			'passes: for class in [TileClass::Derived, TileClass::Authoritative] {
+			// PERF(mips): level-0 pixels leave warm first, mips last. At fit
+			// every frame reads every layer's mips, while old layers' level-0
+			// tiles are rarely read; and a mip costs one read to bring back but
+			// up to 4^level level-0 reads to recompute. (VERIFY-FIX(P1) dropped
+			// derived tiles first: at 4K × 1,000 layers that made mip
+			// recomputation 96 % of all tile reads, 85 GB per 500 layers added.)
+			'passes: for class in [TileClass::Authoritative, TileClass::Derived] {
 				for _ in 0..scans {
 					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
 						break 'passes;
@@ -961,8 +968,10 @@ impl TileStore {
 					let candidate = { inner.eviction_clock.lock().next() };
 					if let Some((entry, recent)) = candidate {
 						if !recent && entry.class == class && !self.demote_warm(&entry) {
+							// Scratch full: authoritative tiles stay; derived
+							// ones can still be dropped.
 							full = true;
-							break 'passes;
+							continue 'passes;
 						}
 					}
 				}
@@ -1013,23 +1022,32 @@ impl TileStore {
 		inner.account_hot(entry.format, true, false);
 	}
 
+	/// Drop a derived tile's warm copy `block` (it can be recomputed).
+	fn drop_derived_warm(&self, entry: &Arc<TileEntry>, block: &Arc<[u8]>) {
+		let inner = &*self.0;
+		let mut copies = entry.copies.lock();
+		if copies.warm.as_ref().is_some_and(|w| Arc::ptr_eq(w, block)) {
+			copies.warm = None;
+			inner.account_warm(block.len(), false);
+			if copies.is_empty() {
+				inner.stats.evicted_tiles.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+	}
+
 	/// Remove the warm copy of one tile (writing it to scratch first if it is
-	/// the only copy). Returns `false` if the scratch file is full.
+	/// the only copy). Returns `false` if an authoritative tile could not go
+	/// because the scratch file is full.
+	///
+	/// PERF(mips): a derived tile goes to scratch too, and is dropped only
+	/// when there is no room: bringing a mip back is one read, recomputing it
+	/// reads up to 4^level level-0 tiles. (VERIFY-FIX(P1) dropped them.)
 	fn demote_warm(&self, entry: &Arc<TileEntry>) -> bool {
 		let inner = &*self.0;
+		let derived = entry.class == TileClass::Derived;
 		let block = {
 			let mut copies = entry.copies.lock();
 			let Some(block) = copies.warm.clone() else { return true };
-			// VERIFY-FIX(P1): a derived tile leaves the warm tier by being dropped
-			// (it can be recomputed); only authoritative tiles go to scratch.
-			if entry.class == TileClass::Derived {
-				copies.warm = None;
-				inner.account_warm(block.len(), false);
-				if copies.is_empty() {
-					inner.stats.evicted_tiles.fetch_add(1, Ordering::Relaxed);
-				}
-				return true;
-			}
 			if copies.cold.is_some() || copies.backed.is_some() {
 				copies.warm = None;
 				inner.account_warm(block.len(), false);
@@ -1037,12 +1055,26 @@ impl TileStore {
 			}
 			block
 		};
-		let Some(scratch) = &inner.scratch else { return false };
+		let Some(scratch) = &inner.scratch else {
+			if derived {
+				self.drop_derived_warm(entry, &block);
+				return true;
+			}
+			return false;
+		};
 
 		// Write without holding the tile's lock.
 		let extent = match scratch.write(&block) {
 			Ok(Some(extent)) => extent,
+			Ok(None) if derived => {
+				self.drop_derived_warm(entry, &block);
+				return true;
+			}
 			Ok(None) => return false,
+			Err(_) if derived => {
+				self.drop_derived_warm(entry, &block);
+				return true;
+			}
 			Err(e) => {
 				self.report_scratch_error(format!("Scratch write failed in {}: {e}", inner.config.scratch_dir.display()));
 				return false;
@@ -1161,25 +1193,21 @@ mod tests {
 	}
 
 	#[test]
-	fn trim_evicts_derived_and_compresses_authoritative() {
+	fn trim_keeps_every_tile_within_budget() {
 		let store = store(); // hot budget = 4 RGBA16 tiles
 		let keep: Vec<_> = (0..6).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
 		let derived: Vec<_> = (0..6).map(|i| store.insert(noise(PixelFormat::Rgba16, 100 + i), TileClass::Derived)).collect();
 		store.trim();
 		let stats = store.stats();
 		assert!(stats.hot_bytes <= store.config().hot_budget);
-		assert!(stats.evicted_tiles >= 1, "derived tiles go first");
-		// authoritative content always comes back bit-exact
+		// PERF(mips): with room on scratch nothing is dropped.
+		assert_eq!(stats.evicted_tiles, 0, "a derived tile was dropped although scratch had room");
+		// Every tile comes back bit-exact.
 		for (i, handle) in keep.iter().enumerate() {
 			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
 		}
-		// evicted derived tiles report Evicted, never wrong data
 		for (i, handle) in derived.iter().enumerate() {
-			match store.get(handle) {
-				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, 100 + i as u8).bytes()),
-				Err(TileError::Evicted) => {}
-				Err(e) => panic!("unexpected error {e}"),
-			}
+			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, 100 + i as u8).bytes());
 		}
 	}
 
@@ -1208,17 +1236,43 @@ mod tests {
 	// VERIFY-FIX(P1): past the warm budget a derived tile is dropped, never
 	// written to scratch (only authoritative tiles go there).
 	#[test]
-	fn derived_tiles_never_reach_scratch() {
+	fn derived_tiles_spill_to_scratch_and_come_back() {
+		// PERF(mips): a mip past the warm budget goes to scratch like pixels
+		// (one read to bring back, instead of recomputing it from level 0).
 		let store = store();
 		let derived: Vec<_> = (0..12).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Derived)).collect();
 		store.trim();
 		store.trim();
 		let stats = store.stats();
-		assert_eq!(stats.cold_bytes, 0, "a derived tile was written to scratch");
-		assert!(stats.evicted_tiles >= 1, "incompressible derived tiles past the warm budget are dropped");
+		assert!(stats.cold_bytes > 0, "incompressible derived tiles past the warm budget reach scratch");
+		assert_eq!(stats.evicted_tiles, 0);
+		for (i, handle) in derived.iter().enumerate() {
+			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
+		}
+	}
+
+	#[test]
+	fn a_full_scratch_drops_derived_tiles_and_keeps_pixels() {
+		let dir = std::env::temp_dir().join("fx-tiles-tests-full");
+		let store = TileStore::new(TileStoreConfig {
+			// Room on scratch for about two incompressible RGBA16 tiles.
+			scratch_limit: 2 * 512 * 1024 + 4096,
+			..TileStoreConfig::for_tests(dir)
+		})
+		.unwrap();
+		let pixels: Vec<_> = (0..6).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
+		let derived: Vec<_> = (0..10).map(|i| store.insert(noise(PixelFormat::Rgba16, 50 + i), TileClass::Derived)).collect();
+		store.trim();
+		store.trim();
+		let stats = store.stats();
+		assert!(stats.evicted_tiles >= 1, "with scratch full, derived tiles are dropped");
+		// Pixels are never lost; derived tiles are exact or Evicted.
+		for (i, handle) in pixels.iter().enumerate() {
+			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
+		}
 		for (i, handle) in derived.iter().enumerate() {
 			match store.get(handle) {
-				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, i as u8).bytes()),
+				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, 50 + i as u8).bytes()),
 				Err(TileError::Evicted) => {}
 				Err(e) => panic!("unexpected error {e}"),
 			}

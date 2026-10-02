@@ -29,6 +29,7 @@ mod format;
 pub mod health;
 mod image;
 mod mip;
+pub mod readstats;
 mod scratch;
 mod store;
 
