@@ -101,6 +101,47 @@ its two failures (`cancel_at_every_batch_boundary`,
 `compaction_bounds_growth`) fail the same way on the old code (exFAT cannot
 replace an open file).
 
+## Save As: heap contention (2026-10-03, later)
+
+`FOTOX_IO_STATS=1` (`fx_tiles::iostats`) prints a save's breakdown: wall
+steps, thread time per phase, read/write sizes, reads in flight, reads per
+pool handle, store tiers before/after. Two instrumented runs of the
+1,500-layer benchmark put the real baseline at **17.5 / 18.3 s** (the
+11.3 s measured earlier was a lucky run): 85 % in the parallel
+read + decode + compress batches, 13 % in the serial chunk writes, flush
+1.5 %, everything else < 0.3 %. The 12 workers were "busy" ~11 threads on
+average while the process used 3.05 logical CPUs, with no paging, no fault
+storm (~460 faults/s), 150 MB/s read from E: (a Samsung T7 on USB,
+600 MiB/s sequential write) and 6 logical CPUs idle: they were waiting.
+
+The save probe in a fresh process compressed at 175 MiB/s and decoded LZ4
+at 1,300 MiB/s per thread; the real process, with a 7 GB heap, at 91–96 and
+250–290. Every tile allocated a new zstd context (~1 MB,
+`zstd::bulk::compress`) and a worst-case output buffer of ≈ the tile, which
+then travelled to the writer at full size. Now each rayon worker keeps a
+context and an output buffer for the whole save (`save::Workspaces`,
+indexed by `rayon::current_thread_index`, never shared); a tile's output is
+copied out at its real size. Same codec, level and order: the probe's
+files are identical except the footer's time stamp and CRC.
+`FOTOX_ZSTD_PER_TILE=1` restores the old path for A/B runs.
+
+| 4K × 1,500 layers, Save As | per tile (A) | per worker (B) |
+| --- | --- | --- |
+| runs | 17.5, 18.3, 19.4 s | **8.25, 8.68 s** |
+| CPU used by the test | 3.1 cores | 5.1–5.8 cores |
+| E: read | 142–150 MB/s | 317–319 MB/s |
+| zstd per thread | 86–96 MiB/s | 230–234 MiB/s |
+| LZ4 decode per thread (code unchanged) | 250–288 MiB/s | 1,350–1,510 MiB/s |
+| writer freeing compressed buffers | 1.26 s (8.4 GB of capacity) | 0.05 s |
+| contexts created | 33,468 | 12 |
+
+In the fresh-process probe the same change made no difference (median
+9.17 s both): the cost exists only in a process whose heap is large and
+busy, so it must be measured there.
+
+Left after the change: read + decode + compress 6.7–7.2 s (≈ 4 scratch
+reads in flight on average), chunk writes 1.17 s, flush 0.26 s.
+
 ## Open
 
 - **6,000 layers not re-measured** with D-099 (reopen was 32 s, Save As

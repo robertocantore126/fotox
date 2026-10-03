@@ -28,6 +28,7 @@ pub mod budgets;
 mod format;
 pub mod health;
 mod image;
+pub mod iostats;
 mod mip;
 pub mod readpool;
 pub mod readstats;

@@ -815,11 +815,16 @@ impl TileStore {
 	pub fn get_streaming(&self, handle: &TileHandle) -> Result<Arc<TileBuffer>, TileError> {
 		let entry = &handle.0;
 		debug_assert!(entry.store.ptr_eq(&Arc::downgrade(&self.0)), "handle belongs to another store");
+		let t = crate::iostats::start();
 		let copies = entry.copies.lock();
 		if let Some(buffer) = &copies.hot {
+			crate::iostats::record(crate::iostats::Phase::HotHit, 0, 0);
+			t.stop(crate::iostats::Phase::Get, 0);
 			return Ok(buffer.clone());
 		}
-		self.load(entry, &copies)
+		let loaded = self.load(entry, &copies);
+		t.stop(crate::iostats::Phase::Get, entry.format.tile_bytes());
+		loaded
 	}
 
 	/// Decode a tile's pixels from its warm, cold or backed copy.
@@ -827,7 +832,9 @@ impl TileStore {
 		let tile_bytes = entry.format.tile_bytes();
 		let buffer: Arc<TileBuffer> = if let Some(block) = &copies.warm {
 			crate::readstats::record("warm", entry.class, tile_bytes);
+			let t = crate::iostats::start();
 			let bytes = decompress(block, tile_bytes)?;
+			t.stop(crate::iostats::Phase::WarmDecode, tile_bytes);
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(extent) = copies.cold {
 			let scratch = self
@@ -840,13 +847,17 @@ impl TileStore {
 				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
 				e
 			})?;
+			let t = crate::iostats::start();
 			let bytes = decompress(&block, tile_bytes)?;
+			t.stop(crate::iostats::Phase::ColdDecode, tile_bytes);
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(backed) = copies.backed.clone() {
 			// Read from the opened native file (M3). The format is checked by
 			// the source; verify it here too so a bug can never install a
 			// buffer of the wrong format as the hot copy.
+			let t = crate::iostats::start();
 			let buffer = backed.source.read(backed.offset, backed.len, entry.format)?;
+			t.stop(crate::iostats::Phase::BackedRead, tile_bytes);
 			if buffer.format() != entry.format {
 				return Err(TileError::Corrupt(format!(
 					"backed source returned a {:?} tile for a {:?} tile",

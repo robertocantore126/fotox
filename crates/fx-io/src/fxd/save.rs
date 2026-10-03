@@ -30,6 +30,60 @@ pub const FRESH_LEVEL: i32 = 3;
 /// memory of a save (64 × 512 KiB of 16-bit pixels + their compressed copies).
 const IN_FLIGHT: usize = 64;
 
+/// PERF(zstd): what one rayon worker keeps for a whole save: its zstd context
+/// and an output buffer of the worst-case size. `zstd::bulk::compress` built
+/// a new context (~1 MB) and a worst-case output buffer (≈ the tile) for
+/// every tile, and the buffer travelled to the writer at full size although
+/// a tile compresses to ~1/5 of it.
+struct Workspace {
+	compressor: zstd::bulk::Compressor<'static>,
+	out: Vec<u8>,
+}
+
+/// One workspace per worker of the pool the compression runs on, indexed by
+/// the worker's index in that pool (never shared: each lock is uncontended).
+struct Workspaces(Vec<std::sync::Mutex<Option<Workspace>>>);
+
+impl Workspaces {
+	fn new() -> Self {
+		// The global pool, or the 2-thread background pool of detached saves.
+		let workers = rayon::current_num_threads().max(2);
+		Self((0..workers).map(|_| std::sync::Mutex::new(None)).collect())
+	}
+
+	/// Compress one tile with the calling worker's context. Same codec, level
+	/// and bytes as `zstd::bulk::compress`.
+	fn compress(&self, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+		if per_tile_context() {
+			return zstd::bulk::compress(data, level);
+		}
+		let slot = rayon::current_thread_index().unwrap_or(0) % self.0.len();
+		let mut guard = self.0[slot].lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if guard.is_none() {
+			let t = fx_tiles::iostats::start();
+			*guard = Some(Workspace {
+				compressor: zstd::bulk::Compressor::new(level)?,
+				out: Vec::new(),
+			});
+			t.stop(fx_tiles::iostats::Phase::ZstdContext, 0);
+		}
+		let workspace = guard.as_mut().expect("workspace just set");
+		let bound = zstd::zstd_safe::compress_bound(data.len());
+		if workspace.out.capacity() < bound {
+			workspace.out = Vec::with_capacity(bound);
+		}
+		workspace.out.clear();
+		let written = workspace.compressor.compress_to_buffer(data, &mut workspace.out)?;
+		Ok(workspace.out[..written].to_vec())
+	}
+}
+
+/// `FOTOX_ZSTD_PER_TILE=1`: the old new-context-per-tile path, for A/B runs.
+fn per_tile_context() -> bool {
+	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*OLD.get_or_init(|| std::env::var("FOTOX_ZSTD_PER_TILE").is_ok_and(|v| v == "1"))
+}
+
 /// Where a save writes.
 pub enum SaveTarget {
 	/// Append to the file the document is opened from (D-027).
@@ -103,6 +157,16 @@ pub fn save_detached(request: SaveRequest<'_>, target: SaveTarget, chunks: &mut 
 
 fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_>, mut detached: Option<&mut DetachedChunks>) -> Result<SavedFxd, IoError> {
 	let started = Instant::now();
+	// FOTOX_IO_STATS=1: wall-clock steps of this save (fx_tiles::iostats).
+	let stats = fx_tiles::iostats::enabled().then(|| {
+		let _ = fx_tiles::iostats::take_report(1.0); // drop what came before
+		(request.store.stats(), std::time::SystemTime::now())
+	});
+	let lap = std::cell::Cell::new(Instant::now());
+	let step = |name: &str| {
+		fx_tiles::iostats::event(name, lap.get().elapsed().as_secs_f64() * 1e3);
+		lap.set(Instant::now());
+	};
 	// AUDIT-FIX(D3): replacement invalidates chunk reuse; rewrite once and return the new backing file.
 	let target = match target {
 		SaveTarget::Incremental(file) if !file.matches_path()? => SaveTarget::Fresh(file.path().to_path_buf()),
@@ -126,6 +190,7 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		SaveTarget::Incremental(_) => None,
 	};
 	let tiles = collect_tiles(request.doc, request.preview);
+	step("collect tiles (walk + dedup + sort)");
 	// AUDIT-FIX(D10): conservative raw changed bytes plus manifest allowance; never probe on the render thread.
 	let reuse = match &target {
 		SaveTarget::Incremental(file) => Some(file.id()),
@@ -140,6 +205,7 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		SaveTarget::Fresh(path) => path.as_path(),
 	};
 	crate::fs_util::require_space(destination, estimate)?;
+	step("estimate + free-space check");
 	let mut refs: HashMap<u64, ChunkRef> = HashMap::new();
 	let mut written: Vec<(TileHandle, ChunkRef)> = Vec::new();
 	let mut report = SaveReport::default();
@@ -156,6 +222,7 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		SaveTarget::Incremental(file) => (FxdWriter::append_to((**file).clone())?, Some(file.id())),
 		SaveTarget::Fresh(_) => (FxdWriter::create(part.as_ref().expect("fresh part assigned"))?, None),
 	};
+	step("create .part + header");
 
 	let total = tiles.len().max(1);
 	// Tiles already in this file keep their chunk; the others are compressed
@@ -170,17 +237,26 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		}
 	}
 	let mut done = report.tiles_reused as usize;
+	step("split reused / to write");
+	let (mut read_compress, mut write, mut report_progress) = (0.0, 0.0, 0.0);
+	let workspaces = Workspaces::new();
 	for batch in pending.chunks(IN_FLIGHT) {
+		let t = Instant::now();
 		if !progress(done as f32 / total as f32) {
 			return Err(IoError::Cancelled);
 		}
+		report_progress += t.elapsed().as_secs_f64() * 1e3;
+		let t = Instant::now();
 		let compress = || -> Vec<Result<Option<Vec<u8>>, IoError>> {
 			batch
 				.par_iter()
 				.map(|tile| match request.store.get_streaming(&tile.handle) {
-					Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
-						.map(Some)
-						.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
+					Ok(pixels) => {
+						let t = fx_tiles::iostats::start();
+						let compressed = workspaces.compress(pixels.bytes(), level);
+						t.stop(fx_tiles::iostats::Phase::Compress, pixels.bytes().len());
+						compressed.map(Some).map_err(|e| IoError::Decode(format!("zstd tile: {e}")))
+					}
 					// A mip dropped under memory pressure is simply not stored:
 					// it is rebuilt after opening, like any missing mip.
 					Err(TileError::Evicted) if tile.derived => Ok(None),
@@ -193,16 +269,29 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		// render loads use: on that pool they made undo at 1,000 layers 2.5×
 		// slower (6.7 ms against 2.7 ms without recovery).
 		let compressed = if detached.is_some() { background_pool().install(compress) } else { compress() };
+		read_compress += t.elapsed().as_secs_f64() * 1e3;
+		let t = Instant::now();
 		for (tile, result) in batch.iter().zip(compressed) {
 			let Some(bytes) = result? else { continue };
 			let chunk = writer.tile(tile.format, Codec::Zstd, &bytes)?;
+			let t_refs = fx_tiles::iostats::start();
 			refs.insert(tile.handle.id().get(), chunk);
 			written.push((tile.handle.clone(), chunk));
 			report.tiles_written += 1;
 			report.bytes_written += chunk.len;
+			t_refs.stop(fx_tiles::iostats::Phase::WriteRefs, 0);
+			let t_drop = fx_tiles::iostats::start();
+			let len = bytes.capacity();
+			drop(bytes);
+			t_drop.stop(fx_tiles::iostats::Phase::WriteDrop, len);
 		}
+		write += t.elapsed().as_secs_f64() * 1e3;
 		done += batch.len();
 	}
+	fx_tiles::iostats::event("batches: read + compress (parallel)", read_compress);
+	fx_tiles::iostats::event("batches: write chunks (save thread)", write);
+	fx_tiles::iostats::event("batches: progress callbacks", report_progress);
+	lap.set(Instant::now());
 	// AUDIT-FIX(P4): cancellation before commit leaves the prior footer/target authoritative.
 	if !progress(1.0) {
 		return Err(IoError::Cancelled);
@@ -212,14 +301,19 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 	if let Some(preview) = request.preview {
 		manifest.preview = Some(manifest::image_entry(preview, |handle| refs.get(&handle.id().get()).copied()));
 	}
+	step("manifest: build from refs");
 	let payload = manifest::encode_manifest(&manifest, FRESH_LEVEL)?;
+	step(&format!("manifest: JSON + zstd {FRESH_LEVEL} ({} KiB)", payload.len() >> 10));
 	let manifest_chunk = writer.manifest(&payload)?;
+	step("manifest: write chunk");
 	let live = live_bytes(&refs, manifest_chunk.len);
 	// AUDIT-FIX(P4): honor a request that arrived during manifest encoding.
 	if !progress(1.0) {
 		return Err(IoError::Cancelled);
 	}
+	lap.set(Instant::now());
 	let committed = writer.commit(manifest_chunk, live)?;
+	lap.set(Instant::now());
 
 	// Fresh: close the `.part` handle, replace the target, reopen it.
 	let file = if let Some(part) = part {
@@ -228,9 +322,13 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 			SaveTarget::Incremental(_) => unreachable!("part is only set for Fresh"),
 		};
 		drop(committed);
+		step("close .part");
 		// AUDIT-FIX(D6): write-through replacement after the committed part is synced and closed.
 		crate::fs_util::atomic_replace(&part, &target)?;
-		FxdFile::open(&target)?.0
+		step("rename .part -> target (commit point)");
+		let reopened = FxdFile::open(&target)?.0;
+		step("reopen target (header + footer)");
+		reopened
 	} else {
 		Arc::new(committed)
 	};
@@ -242,6 +340,7 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		return Ok(SavedFxd { file, report });
 	}
 	// From now on every tile written is backed by the new file.
+	lap.set(Instant::now());
 	for (handle, chunk) in &written {
 		request.store.attach_backing(
 			handle,
@@ -253,7 +352,41 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		);
 	}
 
+	step("attach tiles to the new file (frees scratch)");
 	report.seconds = started.elapsed().as_secs_f64();
+	if let Some((before, at)) = stats {
+		let wall = report.seconds * 1e3;
+		let after = request.store.stats();
+		let epoch = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+		eprintln!(
+			"IOSTATS save: {:.1} ms wall (epoch {:.3} .. {:.3}), {} tiles collected, {} written, {} reused, {:.1} MiB written, zstd level {level}, {} rayon threads
+{}  store before: hot {} tiles {} MiB, warm {} tiles {} MiB, cold {} tiles {} MiB, evicted {}
+  store after:  hot {} tiles {} MiB, warm {} tiles {} MiB, cold {} tiles {} MiB, evicted {}",
+			wall,
+			epoch(at),
+			epoch(std::time::SystemTime::now()),
+			tiles.len(),
+			report.tiles_written,
+			report.tiles_reused,
+			report.bytes_written as f64 / 1048576.0,
+			rayon::current_num_threads(),
+			fx_tiles::iostats::take_report(wall),
+			before.hot_tiles,
+			before.hot_bytes >> 20,
+			before.warm_tiles,
+			before.warm_bytes >> 20,
+			before.cold_tiles,
+			before.cold_bytes >> 20,
+			before.evicted_tiles,
+			after.hot_tiles,
+			after.hot_bytes >> 20,
+			after.warm_tiles,
+			after.warm_bytes >> 20,
+			after.cold_tiles,
+			after.cold_bytes >> 20,
+			after.evicted_tiles,
+		);
+	}
 	// AUDIT-FIX(D8): save already runs on a worker; compact there without blocking engine/render.
 	let file = if incremental && file.footer().end_offset > 256 << 20 && needs_compaction(file.footer().live_bytes, file.footer().end_offset) {
 		match compact(&request, &file, progress) {
@@ -590,7 +723,10 @@ mod tests {
 		);
 		assert_eq!(saved.report.tiles_written as u32, tiles);
 		drop(saved);
-		let _ = std::fs::remove_file(&out);
+		// FOTOX_SAVE_PROBE_KEEP=1 keeps the file, to compare variants byte by byte.
+		if std::env::var_os("FOTOX_SAVE_PROBE_KEEP").is_none() {
+			let _ = std::fs::remove_file(&out);
+		}
 	}
 
 	// VERIFY-FIX(D2): a detached save (recovery snapshot) must not take the

@@ -37,7 +37,9 @@ impl ReadPool {
 	/// A handle for reading on the calling thread.
 	pub fn reader(&self) -> &File {
 		let extra = self.extra.get_or_init(|| reopen(&self.main));
-		match thread_slot() % (extra.len() + 1) {
+		let slot = thread_slot() % (extra.len() + 1);
+		crate::iostats::pool_read(slot, extra.len() + 1);
+		match slot {
 			0 => &self.main,
 			i => &extra[i - 1],
 		}

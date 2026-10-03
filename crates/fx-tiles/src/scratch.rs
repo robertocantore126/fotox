@@ -170,9 +170,17 @@ impl ScratchFile {
 
 	pub fn read(&self, extent: Extent) -> Result<Vec<u8>, crate::TileError> {
 		let mut buf = vec![0u8; extent.len as usize];
+		crate::iostats::size(0, buf.len());
+		let in_flight = crate::iostats::in_flight();
+		let t = crate::iostats::start();
 		read_exact_at(self.file.reader(), &mut buf, extent.offset)?;
+		t.stop(crate::iostats::Phase::ScratchIo, buf.len());
+		drop(in_flight);
 		// AUDIT-FIX(X1): verify compressed bytes before any LZ4 decode.
-		if !crate::health::no_scratch_guards() && crc32fast::hash(&buf) != extent.crc32 {
+		let t = crate::iostats::start();
+		let corrupt = !crate::health::no_scratch_guards() && crc32fast::hash(&buf) != extent.crc32;
+		t.stop(crate::iostats::Phase::ScratchCrc, buf.len());
+		if corrupt {
 			return Err(crate::TileError::Corrupt(format!("scratch CRC mismatch at offset {}", extent.offset)));
 		}
 		Ok(buf)

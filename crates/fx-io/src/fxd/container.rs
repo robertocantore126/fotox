@@ -21,6 +21,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Instant;
 
 use fx_tiles::{PixelFormat, ReadPool, TileBuffer, TileError, TileSource};
 
@@ -680,12 +681,14 @@ impl FxdWriter {
 	}
 
 	fn tile_chunk(&mut self, kind: ChunkKind, format: PixelFormat, codec: Codec, compressed: &[u8]) -> Result<ChunkRef, IoError> {
+		let t = fx_tiles::iostats::start();
 		let mut payload = Vec::with_capacity(8 + compressed.len());
 		payload.push(format_to_byte(format));
 		payload.push(codec.to_byte());
 		payload.extend_from_slice(&[0u8; 2]); // reserved
 		payload.extend_from_slice(&(format.tile_bytes() as u32).to_le_bytes());
 		payload.extend_from_slice(compressed);
+		t.stop(fx_tiles::iostats::Phase::ChunkBuild, payload.len());
 		self.write_chunk(kind, &payload)
 	}
 
@@ -696,15 +699,20 @@ impl FxdWriter {
 
 	/// Frame and append one chunk, returning its location.
 	fn write_chunk(&mut self, kind: ChunkKind, payload: &[u8]) -> Result<ChunkRef, IoError> {
+		let t = fx_tiles::iostats::start();
 		let checksum = crc32fast::hash(payload);
+		t.stop(fx_tiles::iostats::Phase::ChunkCrc, payload.len());
 		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
 		header[0] = kind as u8;
 		// header[1] flags = 0, header[2..4] reserved = 0.
 		header[4..12].copy_from_slice(&(payload.len() as u64).to_le_bytes());
 		header[12..16].copy_from_slice(&checksum.to_le_bytes());
 		let at = self.pos;
+		fx_tiles::iostats::size(1, payload.len());
+		let t = fx_tiles::iostats::start();
 		write_all_at(&self.file, &header, at)?;
 		write_all_at(&self.file, payload, at + CHUNK_HEADER_LEN)?;
+		t.stop(fx_tiles::iostats::Phase::ChunkWrite, CHUNK_HEADER_LEN as usize + payload.len());
 		self.pos = at + CHUNK_HEADER_LEN + payload.len() as u64;
 		Ok(ChunkRef {
 			offset: at,
@@ -720,7 +728,9 @@ impl FxdWriter {
 	/// Finish a save: `sync_data`, write the footer, `sync_data` again. The
 	/// previous footer stays valid until this returns.
 	pub fn commit(self, manifest: ChunkRef, live_bytes: u64) -> Result<FxdFile, IoError> {
+		let t = Instant::now();
 		self.file.sync_data()?;
+		fx_tiles::iostats::event("commit: flush #1 (chunks)", t.elapsed().as_secs_f64() * 1e3);
 		let footer = Footer {
 			manifest_offset: manifest.offset,
 			manifest_len: manifest.len,
@@ -729,8 +739,12 @@ impl FxdWriter {
 			save_counter: self.save_counter.saturating_add(1),
 			saved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
 		};
+		let t = Instant::now();
 		write_all_at(&self.file, &footer.to_bytes(), self.pos)?;
+		fx_tiles::iostats::event("commit: footer write", t.elapsed().as_secs_f64() * 1e3);
+		let t = Instant::now();
 		self.file.sync_data()?;
+		fx_tiles::iostats::event("commit: flush #2 (footer)", t.elapsed().as_secs_f64() * 1e3);
 		// Bytes past the new footer are the torn tail of an interrupted save:
 		// drop them so no stale data outlives this save.
 		if self.file.metadata()?.len() > footer.end_offset {

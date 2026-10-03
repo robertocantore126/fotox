@@ -540,3 +540,8 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 - Checked: 4K × 1,500 layers reopen 6.8 → 0.45 s, Save As 19.4 → 11.3 s; scratch reads 262 → 853 MiB/s; fx-io and fx-tiles suites, `readpool` test, engine save/recovery/harden/stress/edit flows green; `audit_save` corruption and truncation results identical to the old code (its two exFAT failures are pre-existing).
 - Then: `TileStore::get_streaming` for saves (a tile that is not hot is decoded for the caller only; tiers and LRU untouched); save probe A/B 5.2 → 4.3 s; `a_streaming_read_leaves_the_tiers_alone`.
 - FAST: 6,000 layers not re-run.
+
+## Save As breakdown and zstd context per worker (Claude, 2026-10-03)
+- Done: `fx_tiles::iostats` (`FOTOX_IO_STATS=1`: per-phase thread time, sizes, reads in flight, pool handle use, wall steps of a save, store tiers before/after); `save::Workspaces`: one zstd context + output buffer per rayon worker for a save, output copied at its real size; `FOTOX_ZSTD_PER_TILE=1` for A/B. Samplers `E:/fotox-stress/sampler.ps1`, `sampler2.ps1` (not in the repo).
+- Checked: 4K × 1,500 layers Save As 17.5/18.3/19.4 s (per tile) → 8.25/8.68 s (per worker), CPU 3.1 → 5.5 cores, E: read 145 → 318 MB/s; probe output byte-identical apart from the footer; fx-io and fx-tiles suites green.
+- FAST: the LZ4 decode buffer is still allocated per tile; chunk writes still stop the workers (1.17 s).
