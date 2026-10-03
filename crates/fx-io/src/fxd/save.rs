@@ -38,6 +38,8 @@ const IN_FLIGHT: usize = 64;
 struct Workspace {
 	compressor: zstd::bulk::Compressor<'static>,
 	out: Vec<u8>,
+	/// PERF(lz4): the block read from scratch and the decoded pixels.
+	stream: fx_tiles::StreamBuffers,
 }
 
 /// One workspace per worker of the pool the compression runs on, indexed by
@@ -51,37 +53,61 @@ impl Workspaces {
 		Self((0..workers).map(|_| std::sync::Mutex::new(None)).collect())
 	}
 
-	/// Compress one tile with the calling worker's context. Same codec, level
-	/// and bytes as `zstd::bulk::compress`.
-	fn compress(&self, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
-		if per_tile_context() {
-			return zstd::bulk::compress(data, level);
+	/// Read one tile and compress it with the calling worker's buffers and
+	/// context. Same codec, level and bytes as `zstd::bulk::compress`.
+	/// `Err` = the tile could not be read; `Ok(Err)` = zstd failed.
+	fn read_and_compress(&self, store: &TileStore, handle: &TileHandle, level: i32) -> Result<std::io::Result<Vec<u8>>, TileError> {
+		let timed = |data: &[u8], compress: &mut dyn FnMut(&[u8]) -> std::io::Result<Vec<u8>>| {
+			let t = fx_tiles::iostats::start();
+			let compressed = compress(data);
+			t.stop(fx_tiles::iostats::Phase::Compress, data.len());
+			compressed
+		};
+		if switch(&PER_TILE_CONTEXT, "FOTOX_ZSTD_PER_TILE") {
+			let pixels = store.get_streaming(handle)?;
+			return Ok(timed(pixels.bytes(), &mut |data| zstd::bulk::compress(data, level)));
 		}
 		let slot = rayon::current_thread_index().unwrap_or(0) % self.0.len();
 		let mut guard = self.0[slot].lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		if guard.is_none() {
 			let t = fx_tiles::iostats::start();
+			let compressor = match zstd::bulk::Compressor::new(level) {
+				Ok(compressor) => compressor,
+				Err(error) => return Ok(Err(error)),
+			};
 			*guard = Some(Workspace {
-				compressor: zstd::bulk::Compressor::new(level)?,
+				compressor,
 				out: Vec::new(),
+				stream: fx_tiles::StreamBuffers::default(),
 			});
 			t.stop(fx_tiles::iostats::Phase::ZstdContext, 0);
 		}
-		let workspace = guard.as_mut().expect("workspace just set");
-		let bound = zstd::zstd_safe::compress_bound(data.len());
-		if workspace.out.capacity() < bound {
-			workspace.out = Vec::with_capacity(bound);
+		let Workspace { compressor, out, stream } = guard.as_mut().expect("workspace just set");
+		let mut compress = |data: &[u8]| -> std::io::Result<Vec<u8>> {
+			let bound = zstd::zstd_safe::compress_bound(data.len());
+			if out.capacity() < bound {
+				*out = Vec::with_capacity(bound);
+			}
+			out.clear();
+			let written = compressor.compress_to_buffer(data, out)?;
+			Ok(out[..written].to_vec())
+		};
+		if switch(&PER_TILE_DECODE, "FOTOX_DECODE_PER_TILE") {
+			let pixels = store.get_streaming(handle)?;
+			return Ok(timed(pixels.bytes(), &mut compress));
 		}
-		workspace.out.clear();
-		let written = workspace.compressor.compress_to_buffer(data, &mut workspace.out)?;
-		Ok(workspace.out[..written].to_vec())
+		store.read_streaming(handle, stream, |data| timed(data, &mut compress))
 	}
 }
 
-/// `FOTOX_ZSTD_PER_TILE=1`: the old new-context-per-tile path, for A/B runs.
-fn per_tile_context() -> bool {
-	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-	*OLD.get_or_init(|| std::env::var("FOTOX_ZSTD_PER_TILE").is_ok_and(|v| v == "1"))
+/// A/B switches back to the older paths: `FOTOX_ZSTD_PER_TILE=1` (a zstd
+/// context and buffers per tile), `FOTOX_DECODE_PER_TILE=1` (decoded pixels
+/// allocated per tile).
+static PER_TILE_CONTEXT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static PER_TILE_DECODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn switch(cell: &std::sync::OnceLock<bool>, name: &str) -> bool {
+	*cell.get_or_init(|| std::env::var(name).is_ok_and(|v| v == "1"))
 }
 
 /// Where a save writes.
@@ -250,13 +276,8 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		let compress = || -> Vec<Result<Option<Vec<u8>>, IoError>> {
 			batch
 				.par_iter()
-				.map(|tile| match request.store.get_streaming(&tile.handle) {
-					Ok(pixels) => {
-						let t = fx_tiles::iostats::start();
-						let compressed = workspaces.compress(pixels.bytes(), level);
-						t.stop(fx_tiles::iostats::Phase::Compress, pixels.bytes().len());
-						compressed.map(Some).map_err(|e| IoError::Decode(format!("zstd tile: {e}")))
-					}
+				.map(|tile| match workspaces.read_and_compress(request.store, &tile.handle, level) {
+					Ok(compressed) => compressed.map(Some).map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),
 					// A mip dropped under memory pressure is simply not stored:
 					// it is rebuilt after opening, like any missing mip.
 					Err(TileError::Evicted) if tile.derived => Ok(None),

@@ -827,6 +827,55 @@ impl TileStore {
 		loaded
 	}
 
+	/// [`Self::get_streaming`] without an allocation per tile: a tile that is
+	/// not hot is decoded into `buffers`, which the caller keeps (one per
+	/// worker) and reuses for every tile, and `f` gets its bytes. A one-pass
+	/// reader over a big document allocated two buffers per tile (the block
+	/// read from scratch and the decoded pixels), which contended in the
+	/// allocator of a large process.
+	pub fn read_streaming<R>(&self, handle: &TileHandle, buffers: &mut StreamBuffers, f: impl FnOnce(&[u8]) -> R) -> Result<R, TileError> {
+		let entry = &handle.0;
+		debug_assert!(entry.store.ptr_eq(&Arc::downgrade(&self.0)), "handle belongs to another store");
+		let t = crate::iostats::start();
+		let copies = entry.copies.lock();
+		let tile_bytes = entry.format.tile_bytes();
+		if let Some(buffer) = copies.hot.clone() {
+			drop(copies);
+			crate::iostats::record(crate::iostats::Phase::HotHit, 0, 0);
+			t.stop(crate::iostats::Phase::Get, 0);
+			return Ok(f(buffer.bytes()));
+		}
+		if let Some(block) = &copies.warm {
+			crate::readstats::record("warm", entry.class, tile_bytes);
+			let d = crate::iostats::start();
+			decompress_into(block, &mut buffers.pixels, tile_bytes)?;
+			d.stop(crate::iostats::Phase::WarmDecode, tile_bytes);
+		} else if let Some(extent) = copies.cold {
+			let scratch = self
+				.0
+				.scratch
+				.as_ref()
+				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
+			crate::readstats::record("cold", entry.class, tile_bytes);
+			scratch.read_into(extent, &mut buffers.packed).map_err(|e| {
+				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
+				e
+			})?;
+			let d = crate::iostats::start();
+			decompress_into(&buffers.packed, &mut buffers.pixels, tile_bytes)?;
+			d.stop(crate::iostats::Phase::ColdDecode, tile_bytes);
+		} else {
+			// Backed by an open file (or evicted): the ordinary path.
+			let buffer = self.load(entry, &copies)?;
+			drop(copies);
+			t.stop(crate::iostats::Phase::Get, tile_bytes);
+			return Ok(f(buffer.bytes()));
+		}
+		drop(copies);
+		t.stop(crate::iostats::Phase::Get, tile_bytes);
+		Ok(f(&buffers.pixels))
+	}
+
 	/// Decode a tile's pixels from its warm, cold or backed copy.
 	fn load(&self, entry: &TileEntry, copies: &Copies) -> Result<Arc<TileBuffer>, TileError> {
 		let tile_bytes = entry.format.tile_bytes();
@@ -1150,6 +1199,23 @@ impl TileStore {
 	}
 }
 
+/// [`decompress`] into a reused buffer.
+fn decompress_into(block: &[u8], out: &mut Vec<u8>, tile_bytes: usize) -> Result<(), TileError> {
+	out.resize(tile_bytes, 0);
+	let n = lz4_flex::block::decompress_into(block, out).map_err(|e| TileError::Corrupt(e.to_string()))?;
+	if n != tile_bytes {
+		return Err(TileError::Corrupt(format!("decompressed {n} bytes, expected {tile_bytes}")));
+	}
+	Ok(())
+}
+
+/// Buffers a one-pass reader keeps per worker for [`TileStore::read_streaming`].
+#[derive(Default)]
+pub struct StreamBuffers {
+	packed: Vec<u8>,
+	pixels: Vec<u8>,
+}
+
 fn decompress(block: &[u8], tile_bytes: usize) -> Result<Vec<u8>, TileError> {
 	let out = lz4_flex::block::decompress(block, tile_bytes).map_err(|e| TileError::Corrupt(e.to_string()))?;
 	if out.len() != tile_bytes {
@@ -1348,6 +1414,27 @@ mod tests {
 			(before.hot_tiles, before.warm_tiles, before.cold_tiles),
 			"no tile moved between tiers"
 		);
+	}
+
+	#[test]
+	fn read_streaming_reuses_buffers_and_leaves_the_tiers_alone() {
+		let store = store();
+		let handles: Vec<_> = (0..40).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
+		store.trim();
+		let before = store.stats();
+		assert!(before.hot_tiles > 0 && before.warm_tiles > 0 && before.cold_tiles > 0, "every tier is exercised");
+		let mut buffers = StreamBuffers::default();
+		for (i, handle) in handles.iter().enumerate() {
+			let same = store.read_streaming(handle, &mut buffers, |bytes| bytes == noise(PixelFormat::Rgba16, i as u8).bytes()).unwrap();
+			assert!(same, "tile {i}");
+		}
+		let after = store.stats();
+		assert_eq!(
+			(after.hot_tiles, after.warm_tiles, after.cold_tiles),
+			(before.hot_tiles, before.warm_tiles, before.cold_tiles),
+			"no tile moved between tiers"
+		);
+		assert_eq!(buffers.pixels.len(), PixelFormat::Rgba16.tile_bytes(), "one pixel buffer, reused");
 	}
 
 	#[test]

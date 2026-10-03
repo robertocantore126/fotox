@@ -39,4 +39,4 @@ pub use format::{PixelFormat, PixelValue, TILE_PIXELS, TILE_SIZE};
 pub use image::{TileGrid, TileSlot, TiledImage, level_count_for};
 pub use mip::{ChildPixels, downsample_2x2};
 pub use readpool::ReadPool;
-pub use store::{Backed, ProducerScope, TileBuffer, TileClass, TileError, TileHandle, TileId, TileSource, TileStore, TileStoreConfig, TileStoreStats};
+pub use store::{Backed, ProducerScope, StreamBuffers, TileBuffer, TileClass, TileError, TileHandle, TileId, TileSource, TileStore, TileStoreConfig, TileStoreStats};
