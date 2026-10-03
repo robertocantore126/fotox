@@ -61,10 +61,44 @@ were still thrown away by cause 1.
 | incremental save after a stroke | 202 ms |
 | reopen → first view | 32 s |
 
+## Reads queued on one handle (D-099)
+
+Reopen and Save As were slow for one reason: on Windows every read through
+one synchronous file handle waits for the one before it, and both the
+scratch file and an open `.fxd` had one handle shared by all threads.
+
+- **Reopen** checked each tile's chunk header (the D5 rollback check) with
+  two file-length queries and a 16-byte read, one tile at a time. A cold
+  open at 1,500 layers spent 9.4 s there (0.29 s when the file was in the
+  OS cache); sorting the reads by offset alone changed nothing (9.1 s).
+  Now the checks run in one batch, in file order, from several threads.
+- **Save As** decompresses tiles read back from scratch on 12 threads, which
+  queued on the scratch handle.
+
+`fx_tiles::ReadPool` gives each thread its own handle (`ReOpenFile`, same
+file object target). Probes: `scratch::probe_parallel_reads` (12 threads,
+4 GB of 96 KiB reads on E:), `open::probe_open_time` (`FOTOX_FXD_PROBE`),
+`save::probe_save_as_from_scratch`.
+
+| | before | after |
+| --- | --- | --- |
+| scratch reads, 12 threads | 262 MiB/s | **853 MiB/s** (= a handle opened per thread) |
+| cold `.fxd` open, 1,500 layers (build the document) | 9.4 s | **0.85 s** |
+| same, file in the OS cache | 0.29 s | **0.12 s** |
+| engine reopen → first view, 4K × 1,500 layers | 6.8 s | **0.45 s** |
+| Save As, 4K × 1,500 layers (1.6 GB file) | 19.4 s | **11.3 s** |
+
+Brush, undo and incremental save unchanged within noise. `audit_save`: the
+corruption and truncation classifications are identical before and after;
+its two failures (`cancel_at_every_batch_boundary`,
+`compaction_bounds_growth`) fail the same way on the old code (exFAT cannot
+replace an open file).
+
 ## Open
 
-- **Reopen 32 s and Save As 95 s** at 6,000 layers: not looked at. Save As
-  read 10 GB back from scratch.
+- **6,000 layers not re-measured** with D-099 (reopen was 32 s, Save As
+  95 s). Save As still promotes every tile it reads into the hot tier,
+  evicting the working set; a read that bypasses hot is the next step.
 - **Tiles left after close**: ~1 GB hot (and with this fix ~0.5 GB warm and
   2.5 GB scratch) stay after the document closes in `target_benchmark`, in
   both the old and new code; `close_releases_tiles` (plain pixel layers)

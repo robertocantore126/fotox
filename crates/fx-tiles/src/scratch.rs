@@ -6,12 +6,16 @@
 //!   (best fit, coalescing), else appended at the end, up to `limit` bytes.
 //! * All I/O is positioned (`pread`/`pwrite` style): no shared cursor, no
 //!   lock held during I/O. The allocator lock only guards the free list.
+//! * Reads go through a [`ReadPool`]: one handle per thread, so parallel
+//!   readers (a save, the render loads) do not queue on one handle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
+
+use crate::readpool::ReadPool;
 
 const ALIGN: u64 = 4096;
 
@@ -109,7 +113,7 @@ impl Allocator {
 }
 
 pub(crate) struct ScratchFile {
-	file: File,
+	file: ReadPool,
 	path: PathBuf,
 	allocator: Mutex<Allocator>,
 }
@@ -130,7 +134,7 @@ impl ScratchFile {
 		}
 		let file = options.open(&path)?;
 		Ok(Self {
-			file,
+			file: ReadPool::new(std::sync::Arc::new(file)),
 			path,
 			allocator: Mutex::new(Allocator::new(limit)),
 		})
@@ -154,7 +158,7 @@ impl ScratchFile {
 		let Some(mut extent) = self.allocator.lock().alloc(len) else {
 			return Ok(None);
 		};
-		if let Err(e) = write_all_at(&self.file, data, extent.offset) {
+		if let Err(e) = write_all_at(self.file.main(), data, extent.offset) {
 			self.allocator.lock().free(extent);
 			return Err(e);
 		}
@@ -166,7 +170,7 @@ impl ScratchFile {
 
 	pub fn read(&self, extent: Extent) -> Result<Vec<u8>, crate::TileError> {
 		let mut buf = vec![0u8; extent.len as usize];
-		read_exact_at(&self.file, &mut buf, extent.offset)?;
+		read_exact_at(self.file.reader(), &mut buf, extent.offset)?;
 		// AUDIT-FIX(X1): verify compressed bytes before any LZ4 decode.
 		if !crate::health::no_scratch_guards() && crc32fast::hash(&buf) != extent.crc32 {
 			return Err(crate::TileError::Corrupt(format!("scratch CRC mismatch at offset {}", extent.offset)));
@@ -193,17 +197,17 @@ impl Drop for ScratchFile {
 }
 
 #[cfg(unix)]
-fn write_all_at(file: &File, data: &[u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn write_all_at(file: &File, data: &[u8], offset: u64) -> std::io::Result<()> {
 	std::os::unix::fs::FileExt::write_all_at(file, data, offset)
 }
 
 #[cfg(unix)]
-fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
 	std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
 }
 
 #[cfg(windows)]
-fn write_all_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
+pub(crate) fn write_all_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
 	use std::os::windows::fs::FileExt;
 	while !data.is_empty() {
 		let n = file.seek_write(data, offset)?;
@@ -217,7 +221,7 @@ fn write_all_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Resul
 }
 
 #[cfg(windows)]
-fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
 	use std::os::windows::fs::FileExt;
 	while !buf.is_empty() {
 		let n = file.seek_read(buf, offset)?;
@@ -233,6 +237,66 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::R
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// PERF probe: do parallel reads through the one scratch handle queue up?
+	/// (Windows serialises I/O on a synchronous handle.) Same reads through
+	/// one shared handle, the scratch's [`ReadPool`], and one handle opened
+	/// per thread. `FOTOX_SCRATCH_PROBE` =
+	/// a directory on the real scratch disk; `FOTOX_SCRATCH_PROBE_MB` = data
+	/// written (default 4096, more than the free RAM, so reads reach the disk).
+	#[test]
+	#[ignore = "probe: needs FOTOX_SCRATCH_PROBE"]
+	fn probe_parallel_reads() {
+		let Some(dir) = std::env::var_os("FOTOX_SCRATCH_PROBE").map(PathBuf::from) else { return };
+		let mb: u64 = std::env::var("FOTOX_SCRATCH_PROBE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+		let scratch = ScratchFile::create(&dir, 1 << 40).unwrap();
+		let block = 96 * 1024;
+		let mut data = vec![0u8; block];
+		let mut x = 0x2545_F491_u32;
+		for b in &mut data {
+			x ^= x << 13;
+			x ^= x >> 17;
+			x ^= x << 5;
+			*b = x as u8;
+		}
+		let count = (mb << 20) / block as u64;
+		let extents: Vec<Extent> = (0..count)
+			.map(|i| {
+				data[0] = i as u8;
+				scratch.write(&data).unwrap().unwrap()
+			})
+			.collect();
+		let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
+		let run = |mode: &str| {
+			let t = std::time::Instant::now();
+			std::thread::scope(|s| {
+				for k in 0..threads {
+					let (scratch, extents) = (&scratch, &extents);
+					s.spawn(move || {
+						let own = (mode == "own").then(|| File::open(&scratch.path).unwrap());
+						let file: &File = match mode {
+							"own" => own.as_ref().unwrap(),
+							"pool" => scratch.file.reader(),
+							_ => scratch.file.main(),
+						};
+						let mut buf = vec![0u8; block];
+						// Strided, so neighbouring threads hit far-apart offsets.
+						for e in extents.iter().skip(k).step_by(threads) {
+							read_exact_at(file, &mut buf[..e.len as usize], e.offset).unwrap();
+						}
+					});
+				}
+			});
+			let secs = t.elapsed().as_secs_f64();
+			println!(
+				"PROBE {threads} threads, {mode} handles: {count} reads of 96 KiB in {secs:.2} s = {:.0} MiB/s",
+				(count * block as u64) as f64 / 1048576.0 / secs
+			);
+		};
+		for mode in ["shared", "pool", "own", "shared", "pool", "own"] {
+			run(mode);
+		}
+	}
 
 	#[test]
 	fn alloc_reuses_and_coalesces() {

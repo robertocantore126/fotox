@@ -534,3 +534,8 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 ## Plugins menu and Reload (Claude, 2026-10-02)
 - Done: a **Plugins** menu next to Other: Reload Plugins (`plugins:reload` → `fx_plugin::request_reload`: the watcher reloads every file at its next poll, one `Change::Reloaded` summary toast, failures listed again, stopped plugins start fresh) and Open Plugins Folder. The watcher's file stamp now includes a content hash, so a same-length edit within exFAT's coarse time step is seen.
 - Checked: `fx-plugin/tests/protection.rs` `reload_restarts_a_stopped_plugin`; `plugin_flow` reload step, 6/6 runs with TMP on exFAT (it hung 50 % before the hash).
+
+## Parallel file reads (Claude, 2026-10-03)
+- Done: D-099. `fx_tiles::ReadPool` (one `ReOpenFile` handle per thread) for the scratch file and `FxdFile`; `.fxd` open validates all tile chunk headers in one sorted, parallel batch (`FxdFile::validate_tiles`) after building the document. Probes: `scratch::probe_parallel_reads`, `open::probe_open_time`, `save::probe_save_as_from_scratch` (ignored, env-driven).
+- Checked: 4K × 1,500 layers reopen 6.8 → 0.45 s, Save As 19.4 → 11.3 s; scratch reads 262 → 853 MiB/s; fx-io and fx-tiles suites, `readpool` test, engine save/recovery/harden/stress/edit flows green; `audit_save` corruption and truncation results identical to the old code (its two exFAT failures are pre-existing).
+- FAST: 6,000 layers not re-run; Save As still promotes read tiles to hot.

@@ -509,6 +509,90 @@ mod tests {
 		store.get(handle).unwrap().bytes().to_vec()
 	}
 
+	/// PERF probe: a Save As whose tiles are almost all on scratch, like a
+	/// big document built in one session. `FOTOX_SAVE_PROBE_DIR` (scratch and
+	/// output, on the real disk), `FOTOX_SAVE_PROBE_TILES` (8-bit tiles of
+	/// gradient + light noise, default 8192 = 2 GiB raw). Release build,
+	/// `--ignored --nocapture`.
+	#[test]
+	#[ignore = "probe: needs FOTOX_SAVE_PROBE_DIR"]
+	fn probe_save_as_from_scratch() {
+		let Some(dir) = std::env::var_os("FOTOX_SAVE_PROBE_DIR").map(PathBuf::from) else { return };
+		let tiles: u32 = std::env::var("FOTOX_SAVE_PROBE_TILES").ok().and_then(|v| v.parse().ok()).unwrap_or(8192);
+		let mut config = TileStoreConfig::for_tests(dir.join("scratch"));
+		config.hot_budget = 256 << 20;
+		config.warm_budget = 64 << 20;
+		config.scratch_limit = 200 << 30;
+		config.background_trim = true;
+		let store = TileStore::new(config).unwrap();
+		// Layers of 4096² (256 tiles each).
+		let mut doc = Document::new(
+			4096,
+			4096,
+			DocumentColor {
+				depth: BitDepth::U8,
+				profile: ColorProfile::Srgb,
+			},
+			72.0,
+		);
+		let mut rng = 0x9E37_79B9_u32;
+		let t = std::time::Instant::now();
+		for l in 0..tiles.div_ceil(256) {
+			let id = doc.allocate_layer_id();
+			let mut image = TiledImage::new(4096, 4096, PixelFormat::Rgba8);
+			for i in 0..256.min(tiles - l * 256) {
+				let (tx, ty) = (i % 16, i / 16);
+				let mut buffer = TileBuffer::zeroed(PixelFormat::Rgba8);
+				for (p, px) in buffer.bytes_mut().chunks_exact_mut(4).enumerate() {
+					rng ^= rng << 13;
+					rng ^= rng >> 17;
+					rng ^= rng << 5;
+					let (x, y) = ((p % 256) as u32 + tx * 256, (p / 256) as u32 + ty * 256);
+					let n = (rng % 5) as u8;
+					px.copy_from_slice(&[(x / 16) as u8 ^ l as u8, (y / 16) as u8, ((x + y) / 32) as u8, 255]);
+					px[0] = px[0].wrapping_add(n);
+					px[1] = px[1].wrapping_add(n >> 1);
+				}
+				image.put_buffer(&store, tx, ty, buffer);
+				if i % 32 == 31 {
+					store.trim();
+				}
+			}
+			doc.layers.push(Arc::new(Layer::new(id, format!("L{l}"), LayerKind::Pixel { image, offset: (0, 0) })));
+		}
+		store.trim();
+		let stats = store.stats();
+		println!(
+			"PROBE built {tiles} tiles in {:.1} s: hot {} MiB, warm {} MiB, cold {} MiB",
+			t.elapsed().as_secs_f64(),
+			stats.hot_bytes >> 20,
+			stats.warm_bytes >> 20,
+			stats.cold_bytes >> 20
+		);
+		let out = dir.join("probe-save.fxd");
+		let t = std::time::Instant::now();
+		let saved = save(
+			SaveRequest {
+				doc: &doc,
+				store: &store,
+				preview: None,
+			},
+			SaveTarget::Fresh(out.clone()),
+			&mut |_| true,
+		)
+		.unwrap();
+		let secs = t.elapsed().as_secs_f64();
+		let len = std::fs::metadata(&out).unwrap().len();
+		println!(
+			"PROBE Save As {tiles} tiles: {secs:.1} s, {} MiB file, {:.0} MiB/s raw",
+			len >> 20,
+			f64::from(tiles) * 0.25 / secs
+		);
+		assert_eq!(saved.report.tiles_written as u32, tiles);
+		drop(saved);
+		let _ = std::fs::remove_file(&out);
+	}
+
 	// VERIFY-FIX(D2): a detached save (recovery snapshot) must not take the
 	// tiles' backing: the next ordinary save stays incremental, and so does
 	// the next detached save to the same file.
