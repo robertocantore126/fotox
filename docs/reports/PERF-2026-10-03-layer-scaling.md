@@ -88,6 +88,13 @@ file object target). Probes: `scratch::probe_parallel_reads` (12 threads,
 | engine reopen → first view, 4K × 1,500 layers | 6.8 s | **0.45 s** |
 | Save As, 4K × 1,500 layers (1.6 GB file) | 19.4 s | **11.3 s** |
 
+**Save As reads without promoting.** A save read every tile through
+`TileStore::get`, which installs a hot copy: a Save As of a big document
+pushed all of it through RAM, evicting the tiles being worked on and
+keeping the trim busy. `TileStore::get_streaming` decodes a tile that is
+not hot for the caller only. `save::probe_save_as_from_scratch` (16,384
+tiles, A/B alternated three times): 5.0–5.4 s → 4.2–4.4 s.
+
 Brush, undo and incremental save unchanged within noise. `audit_save`: the
 corruption and truncation classifications are identical before and after;
 its two failures (`cancel_at_every_batch_boundary`,
@@ -97,8 +104,11 @@ replace an open file).
 ## Open
 
 - **6,000 layers not re-measured** with D-099 (reopen was 32 s, Save As
-  95 s). Save As still promotes every tile it reads into the hot tier,
-  evicting the working set; a read that bypasses hot is the next step.
+  95 s).
+- Full benchmark runs are noisy on this PC: with other programs holding
+  most of the RAM, free memory dipped to 250–500 MB during one 1,500-layer
+  run and Save As took 17.7 s, reopen 0.9 s, pan at fit p50 13.5 ms. Compare
+  changes A/B in one sitting (the probes), not across runs.
 - **Tiles left after close**: ~1 GB hot (and with this fix ~0.5 GB warm and
   2.5 GB scratch) stay after the document closes in `target_benchmark`, in
   both the old and new code; `close_releases_tiles` (plain pixel layers)

@@ -177,7 +177,7 @@ fn save_with(request: SaveRequest<'_>, target: SaveTarget, progress: Progress<'_
 		let compress = || -> Vec<Result<Option<Vec<u8>>, IoError>> {
 			batch
 				.par_iter()
-				.map(|tile| match request.store.get(&tile.handle) {
+				.map(|tile| match request.store.get_streaming(&tile.handle) {
 					Ok(pixels) => zstd::bulk::compress(pixels.bytes(), level)
 						.map(Some)
 						.map_err(|e| IoError::Decode(format!("zstd tile: {e}"))),

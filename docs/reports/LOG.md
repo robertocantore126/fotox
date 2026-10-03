@@ -538,4 +538,5 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 ## Parallel file reads (Claude, 2026-10-03)
 - Done: D-099. `fx_tiles::ReadPool` (one `ReOpenFile` handle per thread) for the scratch file and `FxdFile`; `.fxd` open validates all tile chunk headers in one sorted, parallel batch (`FxdFile::validate_tiles`) after building the document. Probes: `scratch::probe_parallel_reads`, `open::probe_open_time`, `save::probe_save_as_from_scratch` (ignored, env-driven).
 - Checked: 4K × 1,500 layers reopen 6.8 → 0.45 s, Save As 19.4 → 11.3 s; scratch reads 262 → 853 MiB/s; fx-io and fx-tiles suites, `readpool` test, engine save/recovery/harden/stress/edit flows green; `audit_save` corruption and truncation results identical to the old code (its two exFAT failures are pre-existing).
-- FAST: 6,000 layers not re-run; Save As still promotes read tiles to hot.
+- Then: `TileStore::get_streaming` for saves (a tile that is not hot is decoded for the caller only; tiers and LRU untouched); save probe A/B 5.2 → 4.3 s; `a_streaming_read_leaves_the_tiers_alone`.
+- FAST: 6,000 layers not re-run.

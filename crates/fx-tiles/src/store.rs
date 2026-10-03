@@ -797,6 +797,33 @@ impl TileStore {
 		if let Some(buffer) = &copies.hot {
 			return Ok(buffer.clone());
 		}
+		let buffer = self.load(entry, &copies)?;
+		copies.hot = Some(buffer.clone());
+		self.0.account_hot(entry.format, true, true);
+		drop(copies);
+		if self.0.over_budget() {
+			self.0.signal.notify();
+		}
+		Ok(buffer)
+	}
+
+	/// [`Self::get`] for a reader that passes over each tile once (a save):
+	/// a tile that is not hot is decoded for the caller only, and the tiers
+	/// and the LRU order are left as they were. Through `get`, a Save As of a
+	/// large document pushed every tile it read into RAM, evicting the tiles
+	/// being worked on and keeping the trim busy for the whole save.
+	pub fn get_streaming(&self, handle: &TileHandle) -> Result<Arc<TileBuffer>, TileError> {
+		let entry = &handle.0;
+		debug_assert!(entry.store.ptr_eq(&Arc::downgrade(&self.0)), "handle belongs to another store");
+		let copies = entry.copies.lock();
+		if let Some(buffer) = &copies.hot {
+			return Ok(buffer.clone());
+		}
+		self.load(entry, &copies)
+	}
+
+	/// Decode a tile's pixels from its warm, cold or backed copy.
+	fn load(&self, entry: &TileEntry, copies: &Copies) -> Result<Arc<TileBuffer>, TileError> {
 		let tile_bytes = entry.format.tile_bytes();
 		let buffer: Arc<TileBuffer> = if let Some(block) = &copies.warm {
 			crate::readstats::record("warm", entry.class, tile_bytes);
@@ -832,12 +859,6 @@ impl TileStore {
 		} else {
 			return Err(TileError::Evicted);
 		};
-		copies.hot = Some(buffer.clone());
-		self.0.account_hot(entry.format, true, true);
-		drop(copies);
-		if self.0.over_budget() {
-			self.0.signal.notify();
-		}
 		Ok(buffer)
 	}
 
@@ -1298,6 +1319,24 @@ mod tests {
 		for (i, handle) in handles.iter().enumerate() {
 			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
 		}
+	}
+
+	#[test]
+	fn a_streaming_read_leaves_the_tiers_alone() {
+		let store = store();
+		let handles: Vec<_> = (0..40).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
+		store.trim();
+		let before = store.stats();
+		assert!(before.cold_tiles > 0 && before.warm_tiles > 0);
+		for (i, handle) in handles.iter().enumerate() {
+			assert_eq!(store.get_streaming(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
+		}
+		let after = store.stats();
+		assert_eq!(
+			(after.hot_tiles, after.warm_tiles, after.cold_tiles),
+			(before.hot_tiles, before.warm_tiles, before.cold_tiles),
+			"no tile moved between tiers"
+		);
 	}
 
 	#[test]
