@@ -21,8 +21,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Instant;
 
-use fx_tiles::{PixelFormat, TileBuffer, TileError, TileSource};
+use fx_tiles::{PixelFormat, ReadPool, TileBuffer, TileError, TileSource};
 
 use crate::IoError;
 
@@ -268,6 +269,17 @@ fn build_header() -> [u8; HEADER_LEN as usize] {
 	bytes
 }
 
+/// A chunk reference must lie inside the saved part of a file of `len` bytes.
+fn check_bounds(at: ChunkRef, len: u64) -> Result<(), IoError> {
+	if at.offset < HEADER_LEN || at.len < CHUNK_HEADER_LEN || at.offset.checked_add(at.len).is_none_or(|end| end > len) {
+		return Err(IoError::Decode(format!(
+			"chunk at {} with length {} exceeds saved file bounds ({len} bytes)",
+			at.offset, at.len
+		)));
+	}
+	Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Positional I/O (SNIPPETS §12)
 // ---------------------------------------------------------------------------
@@ -358,12 +370,13 @@ fn find_footer(file: &File, end: u64) -> io::Result<Option<(u64, Footer)>> {
 // Reader
 // ---------------------------------------------------------------------------
 
-/// An open `.fxd` file. Cheap to clone (it shares one OS handle) and shared by
-/// every backed tile of the document. Holds the handle open read+write; Save
-/// appends to it (D-027).
+/// An open `.fxd` file. Cheap to clone (it shares its OS handles) and shared by
+/// every backed tile of the document. Save appends to it (D-027). Tiles are
+/// read through a [`ReadPool`], one handle per thread: through one shared
+/// handle, Windows queues the reads of every thread one after the other.
 #[derive(Clone)]
 pub struct FxdFile {
-	file: Arc<File>,
+	file: Arc<ReadPool>,
 	id: u64,
 	path: PathBuf,
 	footer: Footer,
@@ -399,7 +412,7 @@ impl FxdFile {
 		}
 		let (_, footer) = find_footer(&file, len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
 		let fxd = Arc::new(FxdFile {
-			file: Arc::new(file),
+			file: Arc::new(ReadPool::new(Arc::new(file))),
 			id: NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed),
 			path: path.to_path_buf(),
 			footer,
@@ -410,30 +423,43 @@ impl FxdFile {
 	// AUDIT-FIX(D5): search strictly before this footer after a manifest/structure failure.
 	pub fn previous(&self) -> Result<Option<Arc<Self>>, IoError> {
 		let end = self.footer.end_offset.saturating_sub(FOOTER_LEN);
-		let previous = find_footer(&self.file, end)?;
+		let previous = find_footer(self.file.main(), end)?;
 		Ok(previous.map(|(_, footer)| Arc::new(Self { footer, ..self.clone() })))
 	}
 
 	// AUDIT-FIX(D5): uncommitted/damaged tails are visible instead of silently rolling back.
 	pub fn has_newer_tail(&self) -> Result<bool, IoError> {
-		Ok(self.file.metadata()?.len() > self.footer.end_offset)
+		Ok(self.file.main().metadata()?.len() > self.footer.end_offset)
 	}
 
 	// AUDIT-FIX(D5): lazy open checks tile framing without reading/decompressing tile pixels.
-	pub fn validate_tile_structure(&self, at: ChunkRef) -> Result<(), IoError> {
-		self.validate_chunk(at)?;
-		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
-		read_exact_at(&self.file, &mut header, at.offset)?;
-		let kind = ChunkKind::from_byte(header[0])?;
-		let payload_len = u64::from_le_bytes(header[4..12].try_into().expect("8-byte slice"));
-		if !matches!(kind, ChunkKind::Tile | ChunkKind::PreviewTile)
-			|| header[1] != 0
-			|| payload_len.checked_add(CHUNK_HEADER_LEN) != Some(at.len)
-			|| payload_len < 4
-		{
-			return Err(IoError::Decode("invalid backed tile chunk structure".into()));
-		}
-		Ok(())
+	// PERF(open): all of a document's tiles at once. One file-length query, and
+	// the headers read in file order: one by one, with two metadata calls each,
+	// they were most of a 6,000-layer reopen.
+	pub fn validate_tiles(&self, chunks: &mut Vec<ChunkRef>) -> Result<(), IoError> {
+		use rayon::prelude::*;
+		let len = self.file.main().metadata()?.len().min(self.footer.end_offset);
+		chunks.sort_unstable_by_key(|at| at.offset);
+		chunks.dedup();
+		// Runs of neighbouring chunks, read by several threads at once.
+		chunks.par_chunks(256).try_for_each(|run| {
+			let file = self.file.reader();
+			let mut header = [0u8; CHUNK_HEADER_LEN as usize];
+			for &at in run {
+				check_bounds(at, len)?;
+				read_exact_at(file, &mut header, at.offset)?;
+				let kind = ChunkKind::from_byte(header[0])?;
+				let payload_len = u64::from_le_bytes(header[4..12].try_into().expect("8-byte slice"));
+				if !matches!(kind, ChunkKind::Tile | ChunkKind::PreviewTile)
+					|| header[1] != 0
+					|| payload_len.checked_add(CHUNK_HEADER_LEN) != Some(at.len)
+					|| payload_len < 4
+				{
+					return Err(IoError::Decode("invalid backed tile chunk structure".into()));
+				}
+			}
+			Ok(())
+		})
 	}
 
 	// AUDIT-FIX(D8): keep the compacted backing id while rebinding its published path.
@@ -455,7 +481,7 @@ impl FxdFile {
 			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
 			Err(error) => return Err(error.into()),
 		};
-		Ok(file_identity(&self.file)? == file_identity(&current)?)
+		Ok(file_identity(self.file.main())? == file_identity(&current)?)
 	}
 
 	/// The newest valid footer.
@@ -475,14 +501,7 @@ impl FxdFile {
 
 	// AUDIT-FIX(I1): validate references before allocating payloads or registering lazy backed tiles.
 	pub fn validate_chunk(&self, at: ChunkRef) -> Result<(), IoError> {
-		let len = self.file.metadata()?.len().min(self.footer.end_offset);
-		if at.offset < HEADER_LEN || at.len < CHUNK_HEADER_LEN || at.offset.checked_add(at.len).is_none_or(|end| end > len) {
-			return Err(IoError::Decode(format!(
-				"chunk at {} with length {} exceeds saved file bounds ({len} bytes)",
-				at.offset, at.len
-			)));
-		}
-		Ok(())
+		check_bounds(at, self.file.main().metadata()?.len().min(self.footer.end_offset))
 	}
 
 	/// Read a chunk at `at`, verifying the payload checksum. Returns its kind
@@ -491,7 +510,8 @@ impl FxdFile {
 		// AUDIT-FIX(I1): footer lengths are untrusted, including apparently consistent headers.
 		self.validate_chunk(at)?;
 		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
-		read_exact_at(&self.file, &mut header, at.offset)?;
+		let file = self.file.reader();
+		read_exact_at(file, &mut header, at.offset)?;
 		let kind = ChunkKind::from_byte(header[0])?;
 		if header[1] != 0 {
 			return Err(IoError::Decode(format!("chunk at {} has unknown flags {}", at.offset, header[1])));
@@ -514,7 +534,7 @@ impl FxdFile {
 			.try_reserve_exact(count)
 			.map_err(|e| IoError::Decode(format!("cannot allocate chunk payload: {e}")))?;
 		payload.resize(count, 0);
-		read_exact_at(&self.file, &mut payload, at.offset + CHUNK_HEADER_LEN)?;
+		read_exact_at(file, &mut payload, at.offset + CHUNK_HEADER_LEN)?;
 		if crc32fast::hash(&payload) != checksum {
 			return Err(IoError::Decode(format!("corrupt chunk at {}", at.offset)));
 		}
@@ -635,11 +655,11 @@ impl FxdWriter {
 		}
 		// AUDIT-FIX(D10): acquire a writable handle lazily and verify it still names the same file.
 		let writable = OpenOptions::new().read(true).write(true).open(&file.path)?;
-		if file_identity(&writable)? != file_identity(&file.file)? {
+		if file_identity(&writable)? != file_identity(file.file.main())? {
 			return Err(IoError::Decode("The target changed while preparing Save; try again".into()));
 		}
-		let len = file.file.metadata()?.len();
-		let (_, footer) = find_footer(&file.file, len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
+		let len = file.file.main().metadata()?.len();
+		let (_, footer) = find_footer(file.file.main(), len)?.ok_or_else(|| IoError::Decode("not a complete .fxd: no valid footer".into()))?;
 		Ok(FxdWriter {
 			file: Arc::new(writable),
 			id: file.id,
@@ -661,12 +681,14 @@ impl FxdWriter {
 	}
 
 	fn tile_chunk(&mut self, kind: ChunkKind, format: PixelFormat, codec: Codec, compressed: &[u8]) -> Result<ChunkRef, IoError> {
+		let t = fx_tiles::iostats::start();
 		let mut payload = Vec::with_capacity(8 + compressed.len());
 		payload.push(format_to_byte(format));
 		payload.push(codec.to_byte());
 		payload.extend_from_slice(&[0u8; 2]); // reserved
 		payload.extend_from_slice(&(format.tile_bytes() as u32).to_le_bytes());
 		payload.extend_from_slice(compressed);
+		t.stop(fx_tiles::iostats::Phase::ChunkBuild, payload.len());
 		self.write_chunk(kind, &payload)
 	}
 
@@ -677,15 +699,20 @@ impl FxdWriter {
 
 	/// Frame and append one chunk, returning its location.
 	fn write_chunk(&mut self, kind: ChunkKind, payload: &[u8]) -> Result<ChunkRef, IoError> {
+		let t = fx_tiles::iostats::start();
 		let checksum = crc32fast::hash(payload);
+		t.stop(fx_tiles::iostats::Phase::ChunkCrc, payload.len());
 		let mut header = [0u8; CHUNK_HEADER_LEN as usize];
 		header[0] = kind as u8;
 		// header[1] flags = 0, header[2..4] reserved = 0.
 		header[4..12].copy_from_slice(&(payload.len() as u64).to_le_bytes());
 		header[12..16].copy_from_slice(&checksum.to_le_bytes());
 		let at = self.pos;
+		fx_tiles::iostats::size(1, payload.len());
+		let t = fx_tiles::iostats::start();
 		write_all_at(&self.file, &header, at)?;
 		write_all_at(&self.file, payload, at + CHUNK_HEADER_LEN)?;
+		t.stop(fx_tiles::iostats::Phase::ChunkWrite, CHUNK_HEADER_LEN as usize + payload.len());
 		self.pos = at + CHUNK_HEADER_LEN + payload.len() as u64;
 		Ok(ChunkRef {
 			offset: at,
@@ -701,7 +728,9 @@ impl FxdWriter {
 	/// Finish a save: `sync_data`, write the footer, `sync_data` again. The
 	/// previous footer stays valid until this returns.
 	pub fn commit(self, manifest: ChunkRef, live_bytes: u64) -> Result<FxdFile, IoError> {
+		let t = Instant::now();
 		self.file.sync_data()?;
+		fx_tiles::iostats::event("commit: flush #1 (chunks)", t.elapsed().as_secs_f64() * 1e3);
 		let footer = Footer {
 			manifest_offset: manifest.offset,
 			manifest_len: manifest.len,
@@ -710,15 +739,19 @@ impl FxdWriter {
 			save_counter: self.save_counter.saturating_add(1),
 			saved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
 		};
+		let t = Instant::now();
 		write_all_at(&self.file, &footer.to_bytes(), self.pos)?;
+		fx_tiles::iostats::event("commit: footer write", t.elapsed().as_secs_f64() * 1e3);
+		let t = Instant::now();
 		self.file.sync_data()?;
+		fx_tiles::iostats::event("commit: flush #2 (footer)", t.elapsed().as_secs_f64() * 1e3);
 		// Bytes past the new footer are the torn tail of an interrupted save:
 		// drop them so no stale data outlives this save.
 		if self.file.metadata()?.len() > footer.end_offset {
 			self.file.set_len(footer.end_offset)?;
 		}
 		Ok(FxdFile {
-			file: self.file,
+			file: Arc::new(ReadPool::new(self.file)),
 			id: self.id,
 			path: self.path,
 			footer,

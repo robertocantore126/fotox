@@ -40,8 +40,10 @@ fn readers_survive_a_trim_thread_dropping_their_inputs() {
 	let mut config = TileStoreConfig::for_tests(dir("evict"));
 	config.background_trim = true;
 	// VERIFY-FIX(P1): mips are now compressed before they are dropped; a small
-	// warm tier keeps this test dropping them.
+	// warm tier keeps this test dropping them. PERF(mips): they also go to
+	// scratch when there is room; none here.
 	config.warm_budget = 64 * 1024;
+	config.scratch_limit = 0;
 	let store = TileStore::new(config).unwrap();
 	let mut d = doc(2048, 2048);
 	let mut image = TiledImage::new(2048, 2048, PixelFormat::Rgba8);

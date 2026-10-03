@@ -117,6 +117,41 @@ mod tests {
 		doc
 	}
 
+	/// PERF probe: open the `.fxd` at `FOTOX_FXD_PROBE` (e.g. one kept by
+	/// `audit_scale::target_benchmark` with `FOTOX_AUDIT_KEEP=1`) and time
+	/// each step. Run with `--ignored --nocapture` on a release build.
+	#[test]
+	#[ignore = "probe: needs FOTOX_FXD_PROBE"]
+	fn probe_open_time() {
+		let Some(path) = std::env::var_os("FOTOX_FXD_PROBE").map(PathBuf::from) else { return };
+		let (store, _) = store();
+		for round in 0..3 {
+			let t = std::time::Instant::now();
+			let (file, _) = FxdFile::open(&path).unwrap();
+			let footer = file.footer();
+			let (_, payload) = file
+				.read_chunk(ChunkRef {
+					offset: footer.manifest_offset,
+					len: footer.manifest_len,
+				})
+				.unwrap();
+			let read = t.elapsed();
+			let manifest = manifest::decode_manifest(&payload).unwrap();
+			let decoded = t.elapsed();
+			let doc = manifest::from_manifest(&manifest, &file, &store).unwrap();
+			let built = t.elapsed();
+			println!(
+				"PROBE round {round}: {} layers, manifest {} KiB; read {:.0} ms, decode {:.0} ms, build {:.0} ms, total {:.0} ms",
+				doc.layers.len(),
+				payload.len() >> 10,
+				read.as_secs_f64() * 1e3,
+				(decoded - read).as_secs_f64() * 1e3,
+				(built - decoded).as_secs_f64() * 1e3,
+				built.as_secs_f64() * 1e3
+			);
+		}
+	}
+
 	#[test]
 	fn open_reads_only_the_manifest() {
 		let (store, dir) = store();

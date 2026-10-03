@@ -347,11 +347,36 @@ fn missing(image: &TiledImage, store: &TileStore, level: usize, tx: u32, ty: u32
 	image.is_dirty(level, tx, ty) || matches!(image.slot(level, tx, ty), TileSlot::Data(h) if store.is_evicted(h))
 }
 
+/// Whether two images hold the same level 0: the same tiles, by identity.
+/// The mips of an ordinary image depend on nothing else.
+fn same_level0(a: &TiledImage, b: &TiledImage) -> bool {
+	let (ga, gb) = (a.grid(0), b.grid(0));
+	if (ga.cols(), ga.rows()) != (gb.cols(), gb.rows()) {
+		return false;
+	}
+	(0..ga.rows()).all(|ty| {
+		(0..ga.cols()).all(|tx| match (a.slot(0, tx, ty), b.slot(0, tx, ty)) {
+			(TileSlot::Empty, TileSlot::Empty) => true,
+			(TileSlot::Solid(x), TileSlot::Solid(y)) => x == y,
+			(TileSlot::Data(x), TileSlot::Data(y)) => x.id() == y.id(),
+			_ => false,
+		})
+	})
+}
+
 /// Install in `live` the derived tiles of `layers` that `computed` — a
-/// worker's copy of the same content generation — has ready and `live` still
-/// lacks. Tiles `live` computed meanwhile are kept. Returns whether anything
-/// was installed.
-pub fn merge(live: &mut Document, computed: &Document, layers: &HashSet<LayerId>, store: &TileStore) -> bool {
+/// worker's copy of the document — has ready and `live` still lacks. Tiles
+/// `live` computed meanwhile are kept. Returns whether anything was
+/// installed.
+///
+/// `same_generation`: `computed` was copied from the content `live` still
+/// has. When it was not (the document was edited while the worker ran),
+/// only the mips of ordinary images whose level 0 is unchanged are taken —
+/// they depend on nothing else — and derived images (effects, caches) are
+/// left to be asked again. PERF(stale): discarding every stale batch made a
+/// document edited faster than its mips compute recompute them for ever
+/// (4K × 1,000 layers: 96 % of tile reads, 85 GB per 500 layers added).
+pub fn merge(live: &mut Document, computed: &Document, layers: &HashSet<LayerId>, store: &TileStore, same_generation: bool) -> bool {
 	let mut installed = false;
 	for &id in layers {
 		let Some(source) = computed.layer(id) else { continue };
@@ -365,6 +390,9 @@ pub fn merge(live: &mut Document, computed: &Document, layers: &HashSet<LayerId>
 		}
 		for (i, (a, b)) in from.iter().zip(&to).enumerate() {
 			if (a.width(), a.height(), a.level_count()) != (b.width(), b.height(), b.level_count()) {
+				continue;
+			}
+			if !same_generation && (a.is_derived() || b.is_derived() || !same_level0(a, b)) {
 				continue;
 			}
 			// Level 0 of an ordinary image is its content, never derived.
@@ -428,8 +456,10 @@ mod tests {
 		let mut config = TileStoreConfig::for_tests(dir);
 		config.hot_budget = 0;
 		// VERIFY-FIX(P1): derived tiles are compressed before being dropped;
-		// no warm room either, so this still exercises a dropped tile.
+		// no warm room either, and (PERF(mips)) no scratch room, so this
+		// still exercises a dropped tile.
 		config.warm_budget = 0;
+		config.scratch_limit = 0;
 		let store = TileStore::new(config).unwrap();
 		let mut d = doc(512, 512);
 		let shape = fx_core::vector::VectorShape::Ellipse { w: 300.0, h: 200.0 };
@@ -486,8 +516,10 @@ mod tests {
 		let mut config = TileStoreConfig::for_tests(dir);
 		config.hot_budget = 0;
 		// VERIFY-FIX(P1): derived tiles are compressed before being dropped;
-		// no warm room either, so this still exercises a dropped tile.
+		// no warm room either, and (PERF(mips)) no scratch room, so this
+		// still exercises a dropped tile.
 		config.warm_budget = 0;
+		config.scratch_limit = 0;
 		let store = TileStore::new(config).unwrap();
 		let mut d = doc(512, 512);
 		let mut image = TiledImage::new(512, 512, PixelFormat::Rgba8);
@@ -546,8 +578,62 @@ mod tests {
 			_ => unreachable!(),
 		};
 		assert!(dirty(&live) && !dirty(&computed));
-		assert!(merge(&mut live, &computed, &HashSet::from([LayerId(1)]), &store));
+		assert!(merge(&mut live, &computed, &HashSet::from([LayerId(1)]), &store, true));
 		assert!(!dirty(&live), "the mip landed in the live document");
-		assert!(!merge(&mut live, &computed, &HashSet::from([LayerId(1)]), &store), "nothing left to install");
+		assert!(
+			!merge(&mut live, &computed, &HashSet::from([LayerId(1)]), &store, true),
+			"nothing left to install"
+		);
+	}
+
+	/// PERF(stale): a batch the document moved past still installs the mips
+	/// of a layer whose pixels are the same tiles, and nothing for a layer
+	/// whose pixels changed meanwhile.
+	#[test]
+	fn a_stale_batch_installs_mips_of_unchanged_layers_only() {
+		let store = store();
+		let pixel = |value: u16| {
+			let mut image = TiledImage::new(512, 512, PixelFormat::Rgba8);
+			let mut tile = TileBuffer::zeroed(PixelFormat::Rgba8);
+			tile.bytes_mut()[..4].copy_from_slice(&[value as u8, 0, 0, 255]);
+			image.set_slot(0, 0, TileSlot::Data(store.insert(tile, fx_tiles::TileClass::Authoritative)));
+			image
+		};
+		let mut live = doc(512, 512);
+		for (id, value) in [(1, 10), (2, 20)] {
+			live.layers.push(Arc::new(Layer::new(
+				LayerId(id),
+				"l",
+				LayerKind::Pixel {
+					image: pixel(value),
+					offset: (0, 0),
+				},
+			)));
+		}
+		let mip = |layer: u64| {
+			TileRequest::Mip(fx_render::MipRequest {
+				layer: LayerId(layer),
+				mask: false,
+				level: 1,
+				x: 0,
+				y: 0,
+			})
+		};
+		let mut computed = live.clone();
+		fulfil(&mut computed, &store, &[mip(1), mip(2)]);
+		// Meanwhile the document was edited: layer 2 got new pixels, layer 1
+		// did not.
+		let edited = pixel(99);
+		match &mut live.layer_mut(LayerId(2)).unwrap().kind {
+			LayerKind::Pixel { image, .. } => *image = edited,
+			_ => unreachable!(),
+		}
+		let dirty = |d: &Document, id: u64| match &d.layer(LayerId(id)).unwrap().kind {
+			LayerKind::Pixel { image, .. } => image.is_dirty(1, 0, 0),
+			_ => unreachable!(),
+		};
+		assert!(merge(&mut live, &computed, &HashSet::from([LayerId(1), LayerId(2)]), &store, false));
+		assert!(!dirty(&live, 1), "the unchanged layer's mip landed");
+		assert!(dirty(&live, 2), "the edited layer keeps asking: the computed mip is of the old pixels");
 	}
 }

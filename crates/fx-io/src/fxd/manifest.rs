@@ -470,6 +470,17 @@ pub fn image_entry(image: &TiledImage, tile_ref: impl Fn(&TileHandle) -> Option<
 /// Levels 1–2 are not in the manifest and are rebuilt lazily when the renderer
 /// asks for them (their ancestors start dirty after the level-0 writes).
 pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore) -> Result<Document, IoError> {
+	let pending = Pending::default();
+	let doc = document_from(manifest, file, store, &pending)?;
+	file.validate_tiles(&mut pending.into_inner())?;
+	Ok(doc)
+}
+
+/// Tile chunks met while a document is built, checked in one batch at the
+/// end ([`FxdFile::validate_tiles`]) before the document is handed out.
+type Pending = std::cell::RefCell<Vec<ChunkRef>>;
+
+fn document_from(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore, pending: &Pending) -> Result<Document, IoError> {
 	if manifest.version != MANIFEST_VERSION {
 		return Err(IoError::Unsupported(format!("fxd manifest version {}", manifest.version)));
 	}
@@ -490,7 +501,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	doc.layers = manifest
 		.layers
 		.iter()
-		.map(|entry| layer_from_entry(entry, file, store, size, format))
+		.map(|entry| layer_from_entry(entry, file, store, pending, size, format))
 		.collect::<Result<Vec<_>, _>>()?;
 	// Layer ids must be unique, the id counter past every one of them and the
 	// selection made of layers that exist (HARDEN BUG-3): a wrong counter
@@ -525,7 +536,7 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	for entry in &manifest.channels {
 		let mut channel = fx_core::channel::Channel::new(
 			entry.name.clone(),
-			image_as(&entry.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?,
+			image_as(&entry.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store, pending)?,
 		);
 		channel.color = entry.color;
 		channel.opacity = entry.opacity;
@@ -538,17 +549,24 @@ pub fn from_manifest(manifest: &Manifest, file: &Arc<FxdFile>, store: &TileStore
 	Ok(doc.with_id_state(next_layer_id, counters))
 }
 
-fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, size: (u32, u32), format: PixelFormat) -> Result<Arc<Layer>, IoError> {
+fn layer_from_entry(
+	entry: &LayerEntry,
+	file: &Arc<FxdFile>,
+	store: &TileStore,
+	pending: &Pending,
+	size: (u32, u32),
+	format: PixelFormat,
+) -> Result<Arc<Layer>, IoError> {
 	let kind = match &entry.kind {
 		LayerKindEntry::Pixel { offset, image } => LayerKind::Pixel {
-			image: image_as(image, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store)?,
+			image: image_as(image, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store, pending)?,
 			offset: *offset,
 		},
 		LayerKindEntry::Group { expanded, children } => LayerKind::Group {
 			expanded: *expanded,
 			children: children
 				.iter()
-				.map(|child| layer_from_entry(child, file, store, size, format))
+				.map(|child| layer_from_entry(child, file, store, pending, size, format))
 				.collect::<Result<_, _>>()?,
 		},
 		LayerKindEntry::Adjustment { adjustment } => LayerKind::Adjustment(adjustment.clone()),
@@ -597,8 +615,8 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 					*transform
 				},
 				source: fx_core::smart::SmartSource {
-					doc: Arc::new(from_manifest(source, file, store)?),
-					composite: image_as(composite, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store)?,
+					doc: Arc::new(document_from(source, file, store, pending)?),
+					composite: image_as(composite, &[PixelFormat::Rgba8, PixelFormat::Rgba16], file, store, pending)?,
 					linked: linked.clone(),
 					linked_mtime: *linked_mtime,
 					uid: *uid,
@@ -634,7 +652,7 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 	}
 	layer.mask = match &entry.mask {
 		Some(mask) => Some(Mask {
-			image: image_as(&mask.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store)?,
+			image: image_as(&mask.image, &[PixelFormat::Gray8, PixelFormat::Gray16], file, store, pending)?,
 			enabled: mask.enabled,
 			linked: mask.linked,
 			offset: mask.offset,
@@ -647,11 +665,11 @@ fn layer_from_entry(entry: &LayerEntry, file: &Arc<FxdFile>, store: &TileStore, 
 
 /// [`image_from_entry`] for an image whose role allows only `formats` (a
 /// layer's pixels are RGBA, a mask or channel grey).
-fn image_as(entry: &ImageEntry, formats: &[PixelFormat], file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
+fn image_as(entry: &ImageEntry, formats: &[PixelFormat], file: &Arc<FxdFile>, store: &TileStore, pending: &Pending) -> Result<TiledImage, IoError> {
 	if !formats.contains(&entry.format) {
 		return Err(IoError::Decode(format!("an image is {:?}, expected one of {formats:?}", entry.format)));
 	}
-	image_from_entry(entry, file, store)
+	image_from(entry, file, store, pending)
 }
 
 /// Check a stored image before anything is built from it: the file is
@@ -710,6 +728,13 @@ fn check_image_entry(entry: &ImageEntry) -> Result<(), IoError> {
 /// Rebuild one `TiledImage` from its manifest entry, with backed tiles.
 /// Public so the opener can rebuild the composite preview the same way.
 pub fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileStore) -> Result<TiledImage, IoError> {
+	let pending = Pending::default();
+	let image = image_from(entry, file, store, &pending)?;
+	file.validate_tiles(&mut pending.into_inner())?;
+	Ok(image)
+}
+
+fn image_from(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileStore, pending: &Pending) -> Result<TiledImage, IoError> {
 	check_image_entry(entry)?;
 	let mut image = TiledImage::new(entry.width, entry.height, entry.format);
 	for level in &entry.levels {
@@ -722,10 +747,11 @@ pub fn image_from_entry(entry: &ImageEntry, file: &Arc<FxdFile>, store: &TileSto
 			let tile_slot = match slot {
 				SlotEntry::Solid { value, .. } => TileSlot::Solid(PixelValue(*value)),
 				SlotEntry::Tile { chunk, .. } => {
-					// AUDIT-FIX(I1): reject forged lazy tile references before inserting them into the store.
-					file.validate_chunk(*chunk)?;
-					// AUDIT-FIX(D5): framing failures trigger previous-footer recovery before any pixels are drawn.
-					file.validate_tile_structure(*chunk)?;
+					// AUDIT-FIX(I1) + AUDIT-FIX(D5): forged references and broken
+					// framing are refused before the document is handed out (so a
+					// damaged save falls back to the previous one); the checks run
+					// in one batch at the end (PERF(open)).
+					pending.borrow_mut().push(*chunk);
 					let backed = Backed {
 						source: file.clone(),
 						offset: chunk.offset,

@@ -345,6 +345,11 @@ impl Probe {
 			mib(p.3),
 			mib(p.4)
 		);
+		// FOTOX_READ_STATS=1: who read tiles back since the last checkpoint.
+		let reads = fx_tiles::readstats::take_report();
+		if !reads.is_empty() {
+			print!("AUDIT {} reads since the last checkpoint:\n{reads}", self.tag);
+		}
 	}
 
 	fn rec(&self, what: &str, d: Duration) {
@@ -1589,4 +1594,79 @@ fn target_benchmark() {
 	p.rec_settle("reopen: first view", t);
 	p.memory("reopened");
 	p.close(reopened);
+}
+
+/// What a closed document leaves in the tile store: build layers, settle
+/// the view, Save As, close, wait. A closed document should leave nothing.
+#[test]
+#[ignore = "audit: tiles left after closing"]
+fn close_releases_tiles() {
+	let layers: usize = std::env::var("FOTOX_AUDIT_CLOSE_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+	let dir = TempDir::new("close");
+	let Some(mut p) = Probe::start(&dir.0) else { return };
+	p.tag = format!("[close {layers} layers]");
+	let doc = p.new_document(2048, 2048, 8);
+	for i in 0..layers {
+		let (x, y) = ((i * 97 % 1500) as f64, (i * 61 % 1500) as f64);
+		p.step(
+			doc,
+			vec![
+				Command::AddLayer { layer: NewLayer::Pixel, name: None },
+				Command::Select {
+					shape: SelectionShape::Rect { x, y, w: 500.0, h: 400.0 },
+					mode: SelectMode::Replace,
+					feather: 0.0,
+					anti_alias: false,
+				},
+			],
+		);
+		let shade = (i % 10) as f64 / 10.0;
+		p.job(
+			doc,
+			Command::FillGradient {
+				layer: LayerRef::Active,
+				fill: serde_json::from_value(serde_json::json!({
+					"gradient": {
+						"colors": [
+							{ "color": [shade, 0.2, 0.8], "location": 0.0, "midpoint": 0.5 },
+							{ "color": [0.9, shade, 0.1], "location": 1.0, "midpoint": 0.5 }
+						],
+						"method": "classic",
+						"opacities": []
+					},
+					"kind": "linear",
+					"start": [x, y],
+					"end": [x + 500.0, y + 400.0]
+				}))
+				.expect("gradient fill json"),
+				mode: BlendMode::Normal,
+				opacity: 1.0,
+			},
+		);
+		p.job(
+			doc,
+			Command::ApplyFilter {
+				layer: LayerRef::Active,
+				filter: FilterParams::AddNoise {
+					amount: 20.0,
+					gaussian: false,
+					monochromatic: false,
+					seed: i as u32,
+				},
+			},
+		);
+		p.step(doc, vec![Command::Deselect]);
+	}
+	let t = Instant::now();
+	let _ = pan(&mut p, 3);
+	p.rec_settle("view", t);
+	p.memory("built");
+	let path = dir.0.join("close.fxd");
+	p.save_as(doc, &path);
+	p.memory("saved");
+	p.close(doc);
+	for wait in [1, 3, 10] {
+		std::thread::sleep(Duration::from_secs(wait));
+		p.memory(&format!("closed + {wait} s"));
+	}
 }

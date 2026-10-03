@@ -534,3 +534,15 @@ M9 note for HARDEN (Claude, 2026-09-26): the same 10 `fx-core` failures as befor
 ## Plugins menu and Reload (Claude, 2026-10-02)
 - Done: a **Plugins** menu next to Other: Reload Plugins (`plugins:reload` → `fx_plugin::request_reload`: the watcher reloads every file at its next poll, one `Change::Reloaded` summary toast, failures listed again, stopped plugins start fresh) and Open Plugins Folder. The watcher's file stamp now includes a content hash, so a same-length edit within exFAT's coarse time step is seen.
 - Checked: `fx-plugin/tests/protection.rs` `reload_restarts_a_stopped_plugin`; `plugin_flow` reload step, 6/6 runs with TMP on exFAT (it hung 50 % before the hash).
+
+## Parallel file reads (Claude, 2026-10-03)
+- Done: D-099. `fx_tiles::ReadPool` (one `ReOpenFile` handle per thread) for the scratch file and `FxdFile`; `.fxd` open validates all tile chunk headers in one sorted, parallel batch (`FxdFile::validate_tiles`) after building the document. Probes: `scratch::probe_parallel_reads`, `open::probe_open_time`, `save::probe_save_as_from_scratch` (ignored, env-driven).
+- Checked: 4K × 1,500 layers reopen 6.8 → 0.45 s, Save As 19.4 → 11.3 s; scratch reads 262 → 853 MiB/s; fx-io and fx-tiles suites, `readpool` test, engine save/recovery/harden/stress/edit flows green; `audit_save` corruption and truncation results identical to the old code (its two exFAT failures are pre-existing).
+- Then: `TileStore::get_streaming` for saves (a tile that is not hot is decoded for the caller only; tiers and LRU untouched); save probe A/B 5.2 → 4.3 s; `a_streaming_read_leaves_the_tiers_alone`.
+- FAST: 6,000 layers not re-run.
+
+## Save As breakdown and zstd context per worker (Claude, 2026-10-03)
+- Done: `fx_tiles::iostats` (`FOTOX_IO_STATS=1`: per-phase thread time, sizes, reads in flight, pool handle use, wall steps of a save, store tiers before/after); `save::Workspaces`: one zstd context + output buffer per rayon worker for a save, output copied at its real size; `FOTOX_ZSTD_PER_TILE=1` for A/B. Samplers `E:/fotox-stress/sampler.ps1`, `sampler2.ps1` (not in the repo).
+- Checked: 4K × 1,500 layers Save As 17.5/18.3/19.4 s (per tile) → 8.25/8.68 s (per worker), CPU 3.1 → 5.5 cores, E: read 145 → 318 MB/s; probe output byte-identical apart from the footer; fx-io and fx-tiles suites green.
+- FAST: the LZ4 decode buffer is still allocated per tile; chunk writes still stop the workers (1.17 s).
+- Then: `TileStore::read_streaming` + `StreamBuffers`: a save decodes into per-worker buffers (scratch block + pixels) instead of allocating two per tile; `FOTOX_DECODE_PER_TILE=1` for A/B. Probe output byte-identical (same hash as the original path); store test `read_streaming_reuses_buffers_and_leaves_the_tiers_alone`; fx-io and fx-tiles suites green. Quick probe A/B 8.7 vs 8.8 s (no change, expected in a fresh process). NOT yet measured in the real 1,500-layer benchmark (where the zstd change halved Save As): run A/B there before relying on it.

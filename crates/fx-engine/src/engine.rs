@@ -4852,12 +4852,11 @@ impl Engine {
 		// content generation and the preview's), not by `generation`: comparing
 		// the two dropped every request after the first edit, so shapes, text
 		// and styles never drew until the document was reopened.
-		if (open.doc.revision, open.render_generation()) != (work.revision, work.generation) {
-			// The document changed meanwhile; the next frame asks again.
-			return;
-		}
+		// PERF(stale): a request from an older snapshot is computed on the
+		// document as it is now (`fulfil` skips what is gone or no longer
+		// missing): dropping it starved every mip while edits kept coming.
 		let mut computed = open.doc.clone();
-		let (doc, generation) = (work.doc, work.generation);
+		let (doc, generation) = (work.doc, open.render_generation());
 		let layers: std::collections::HashSet<LayerId> = work.requests.iter().map(TileRequest::layer).collect();
 		let internal = self.internal.clone();
 		let requests = work.requests;
@@ -4908,8 +4907,10 @@ impl Engine {
 		self.derived_running = false;
 		let store = self.store.clone();
 		if let Some(open) = self.docs.get_mut(doc) {
-			if open.render_generation() == generation {
-				crate::derived::merge(&mut open.doc, computed, layers, &store);
+			// PERF(stale): a batch the document moved past still installs the
+			// mips of layers whose pixels did not change.
+			let same_generation = open.render_generation() == generation;
+			if crate::derived::merge(&mut open.doc, computed, layers, &store, same_generation) || same_generation {
 				// Held until the next batch lands: the frame this one answers
 				// composites them first (the previous batch is let go).
 				open.derived_held = held;

@@ -797,9 +797,93 @@ impl TileStore {
 		if let Some(buffer) = &copies.hot {
 			return Ok(buffer.clone());
 		}
+		let buffer = self.load(entry, &copies)?;
+		copies.hot = Some(buffer.clone());
+		self.0.account_hot(entry.format, true, true);
+		drop(copies);
+		if self.0.over_budget() {
+			self.0.signal.notify();
+		}
+		Ok(buffer)
+	}
+
+	/// [`Self::get`] for a reader that passes over each tile once (a save):
+	/// a tile that is not hot is decoded for the caller only, and the tiers
+	/// and the LRU order are left as they were. Through `get`, a Save As of a
+	/// large document pushed every tile it read into RAM, evicting the tiles
+	/// being worked on and keeping the trim busy for the whole save.
+	pub fn get_streaming(&self, handle: &TileHandle) -> Result<Arc<TileBuffer>, TileError> {
+		let entry = &handle.0;
+		debug_assert!(entry.store.ptr_eq(&Arc::downgrade(&self.0)), "handle belongs to another store");
+		let t = crate::iostats::start();
+		let copies = entry.copies.lock();
+		if let Some(buffer) = &copies.hot {
+			crate::iostats::record(crate::iostats::Phase::HotHit, 0, 0);
+			t.stop(crate::iostats::Phase::Get, 0);
+			return Ok(buffer.clone());
+		}
+		let loaded = self.load(entry, &copies);
+		t.stop(crate::iostats::Phase::Get, entry.format.tile_bytes());
+		loaded
+	}
+
+	/// [`Self::get_streaming`] without an allocation per tile: a tile that is
+	/// not hot is decoded into `buffers`, which the caller keeps (one per
+	/// worker) and reuses for every tile, and `f` gets its bytes. A one-pass
+	/// reader over a big document allocated two buffers per tile (the block
+	/// read from scratch and the decoded pixels), which contended in the
+	/// allocator of a large process.
+	pub fn read_streaming<R>(&self, handle: &TileHandle, buffers: &mut StreamBuffers, f: impl FnOnce(&[u8]) -> R) -> Result<R, TileError> {
+		let entry = &handle.0;
+		debug_assert!(entry.store.ptr_eq(&Arc::downgrade(&self.0)), "handle belongs to another store");
+		let t = crate::iostats::start();
+		let copies = entry.copies.lock();
+		let tile_bytes = entry.format.tile_bytes();
+		if let Some(buffer) = copies.hot.clone() {
+			drop(copies);
+			crate::iostats::record(crate::iostats::Phase::HotHit, 0, 0);
+			t.stop(crate::iostats::Phase::Get, 0);
+			return Ok(f(buffer.bytes()));
+		}
+		if let Some(block) = &copies.warm {
+			crate::readstats::record("warm", entry.class, tile_bytes);
+			let d = crate::iostats::start();
+			decompress_into(block, &mut buffers.pixels, tile_bytes)?;
+			d.stop(crate::iostats::Phase::WarmDecode, tile_bytes);
+		} else if let Some(extent) = copies.cold {
+			let scratch = self
+				.0
+				.scratch
+				.as_ref()
+				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
+			crate::readstats::record("cold", entry.class, tile_bytes);
+			scratch.read_into(extent, &mut buffers.packed).map_err(|e| {
+				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
+				e
+			})?;
+			let d = crate::iostats::start();
+			decompress_into(&buffers.packed, &mut buffers.pixels, tile_bytes)?;
+			d.stop(crate::iostats::Phase::ColdDecode, tile_bytes);
+		} else {
+			// Backed by an open file (or evicted): the ordinary path.
+			let buffer = self.load(entry, &copies)?;
+			drop(copies);
+			t.stop(crate::iostats::Phase::Get, tile_bytes);
+			return Ok(f(buffer.bytes()));
+		}
+		drop(copies);
+		t.stop(crate::iostats::Phase::Get, tile_bytes);
+		Ok(f(&buffers.pixels))
+	}
+
+	/// Decode a tile's pixels from its warm, cold or backed copy.
+	fn load(&self, entry: &TileEntry, copies: &Copies) -> Result<Arc<TileBuffer>, TileError> {
 		let tile_bytes = entry.format.tile_bytes();
 		let buffer: Arc<TileBuffer> = if let Some(block) = &copies.warm {
+			crate::readstats::record("warm", entry.class, tile_bytes);
+			let t = crate::iostats::start();
 			let bytes = decompress(block, tile_bytes)?;
+			t.stop(crate::iostats::Phase::WarmDecode, tile_bytes);
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(extent) = copies.cold {
 			let scratch = self
@@ -807,17 +891,22 @@ impl TileStore {
 				.scratch
 				.as_ref()
 				.ok_or_else(|| TileError::Corrupt("cold tile without scratch file".into()))?;
+			crate::readstats::record("cold", entry.class, tile_bytes);
 			let block = scratch.read(extent).map_err(|e| {
 				self.report_scratch_error(format!("Scratch read failed in {}: {e}", self.0.config.scratch_dir.display()));
 				e
 			})?;
+			let t = crate::iostats::start();
 			let bytes = decompress(&block, tile_bytes)?;
+			t.stop(crate::iostats::Phase::ColdDecode, tile_bytes);
 			Arc::new(TileBuffer::from_bytes(entry.format, bytes.into_boxed_slice())?)
 		} else if let Some(backed) = copies.backed.clone() {
 			// Read from the opened native file (M3). The format is checked by
 			// the source; verify it here too so a bug can never install a
 			// buffer of the wrong format as the hot copy.
+			let t = crate::iostats::start();
 			let buffer = backed.source.read(backed.offset, backed.len, entry.format)?;
+			t.stop(crate::iostats::Phase::BackedRead, tile_bytes);
 			if buffer.format() != entry.format {
 				return Err(TileError::Corrupt(format!(
 					"backed source returned a {:?} tile for a {:?} tile",
@@ -830,12 +919,6 @@ impl TileStore {
 		} else {
 			return Err(TileError::Evicted);
 		};
-		copies.hot = Some(buffer.clone());
-		self.0.account_hot(entry.format, true, true);
-		drop(copies);
-		if self.0.over_budget() {
-			self.0.signal.notify();
-		}
 		Ok(buffer)
 	}
 
@@ -914,14 +997,15 @@ impl TileStore {
 		// Demoting hot tiles may have pushed warm over budget.
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
 			let mut scratch_full = false;
-			'passes: for pass_class in [TileClass::Derived, TileClass::Authoritative] {
+			// PERF(mips): level-0 pixels first, mips last (see `trim_clock`).
+			'passes: for pass_class in [TileClass::Authoritative, TileClass::Derived] {
 				for entry in entries.iter().filter(|e| e.class == pass_class) {
 					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
 						break 'passes;
 					}
 					if !self.demote_warm(entry) {
 						scratch_full = true;
-						break 'passes;
+						continue 'passes;
 					}
 				}
 			}
@@ -951,9 +1035,13 @@ impl TileStore {
 		}
 		let mut full = false;
 		if inner.stats.warm_bytes.load(Ordering::Relaxed) > inner.config.warm_budget {
-			// VERIFY-FIX(P1): drop derived warm copies before writing
-			// authoritative tiles to scratch.
-			'passes: for class in [TileClass::Derived, TileClass::Authoritative] {
+			// PERF(mips): level-0 pixels leave warm first, mips last. At fit
+			// every frame reads every layer's mips, while old layers' level-0
+			// tiles are rarely read; and a mip costs one read to bring back but
+			// up to 4^level level-0 reads to recompute. (VERIFY-FIX(P1) dropped
+			// derived tiles first: at 4K × 1,000 layers that made mip
+			// recomputation 96 % of all tile reads, 85 GB per 500 layers added.)
+			'passes: for class in [TileClass::Authoritative, TileClass::Derived] {
 				for _ in 0..scans {
 					if inner.stats.warm_bytes.load(Ordering::Relaxed) <= warm_target {
 						break 'passes;
@@ -961,8 +1049,10 @@ impl TileStore {
 					let candidate = { inner.eviction_clock.lock().next() };
 					if let Some((entry, recent)) = candidate {
 						if !recent && entry.class == class && !self.demote_warm(&entry) {
+							// Scratch full: authoritative tiles stay; derived
+							// ones can still be dropped.
 							full = true;
-							break 'passes;
+							continue 'passes;
 						}
 					}
 				}
@@ -1013,23 +1103,32 @@ impl TileStore {
 		inner.account_hot(entry.format, true, false);
 	}
 
+	/// Drop a derived tile's warm copy `block` (it can be recomputed).
+	fn drop_derived_warm(&self, entry: &Arc<TileEntry>, block: &Arc<[u8]>) {
+		let inner = &*self.0;
+		let mut copies = entry.copies.lock();
+		if copies.warm.as_ref().is_some_and(|w| Arc::ptr_eq(w, block)) {
+			copies.warm = None;
+			inner.account_warm(block.len(), false);
+			if copies.is_empty() {
+				inner.stats.evicted_tiles.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+	}
+
 	/// Remove the warm copy of one tile (writing it to scratch first if it is
-	/// the only copy). Returns `false` if the scratch file is full.
+	/// the only copy). Returns `false` if an authoritative tile could not go
+	/// because the scratch file is full.
+	///
+	/// PERF(mips): a derived tile goes to scratch too, and is dropped only
+	/// when there is no room: bringing a mip back is one read, recomputing it
+	/// reads up to 4^level level-0 tiles. (VERIFY-FIX(P1) dropped them.)
 	fn demote_warm(&self, entry: &Arc<TileEntry>) -> bool {
 		let inner = &*self.0;
+		let derived = entry.class == TileClass::Derived;
 		let block = {
 			let mut copies = entry.copies.lock();
 			let Some(block) = copies.warm.clone() else { return true };
-			// VERIFY-FIX(P1): a derived tile leaves the warm tier by being dropped
-			// (it can be recomputed); only authoritative tiles go to scratch.
-			if entry.class == TileClass::Derived {
-				copies.warm = None;
-				inner.account_warm(block.len(), false);
-				if copies.is_empty() {
-					inner.stats.evicted_tiles.fetch_add(1, Ordering::Relaxed);
-				}
-				return true;
-			}
 			if copies.cold.is_some() || copies.backed.is_some() {
 				copies.warm = None;
 				inner.account_warm(block.len(), false);
@@ -1037,12 +1136,26 @@ impl TileStore {
 			}
 			block
 		};
-		let Some(scratch) = &inner.scratch else { return false };
+		let Some(scratch) = &inner.scratch else {
+			if derived {
+				self.drop_derived_warm(entry, &block);
+				return true;
+			}
+			return false;
+		};
 
 		// Write without holding the tile's lock.
 		let extent = match scratch.write(&block) {
 			Ok(Some(extent)) => extent,
+			Ok(None) if derived => {
+				self.drop_derived_warm(entry, &block);
+				return true;
+			}
 			Ok(None) => return false,
+			Err(_) if derived => {
+				self.drop_derived_warm(entry, &block);
+				return true;
+			}
 			Err(e) => {
 				self.report_scratch_error(format!("Scratch write failed in {}: {e}", inner.config.scratch_dir.display()));
 				return false;
@@ -1084,6 +1197,23 @@ impl TileStore {
 	pub fn scratch_used(&self) -> u64 {
 		self.0.scratch.as_ref().map_or(0, ScratchFile::used)
 	}
+}
+
+/// [`decompress`] into a reused buffer.
+fn decompress_into(block: &[u8], out: &mut Vec<u8>, tile_bytes: usize) -> Result<(), TileError> {
+	out.resize(tile_bytes, 0);
+	let n = lz4_flex::block::decompress_into(block, out).map_err(|e| TileError::Corrupt(e.to_string()))?;
+	if n != tile_bytes {
+		return Err(TileError::Corrupt(format!("decompressed {n} bytes, expected {tile_bytes}")));
+	}
+	Ok(())
+}
+
+/// Buffers a one-pass reader keeps per worker for [`TileStore::read_streaming`].
+#[derive(Default)]
+pub struct StreamBuffers {
+	packed: Vec<u8>,
+	pixels: Vec<u8>,
 }
 
 fn decompress(block: &[u8], tile_bytes: usize) -> Result<Vec<u8>, TileError> {
@@ -1161,25 +1291,21 @@ mod tests {
 	}
 
 	#[test]
-	fn trim_evicts_derived_and_compresses_authoritative() {
+	fn trim_keeps_every_tile_within_budget() {
 		let store = store(); // hot budget = 4 RGBA16 tiles
 		let keep: Vec<_> = (0..6).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
 		let derived: Vec<_> = (0..6).map(|i| store.insert(noise(PixelFormat::Rgba16, 100 + i), TileClass::Derived)).collect();
 		store.trim();
 		let stats = store.stats();
 		assert!(stats.hot_bytes <= store.config().hot_budget);
-		assert!(stats.evicted_tiles >= 1, "derived tiles go first");
-		// authoritative content always comes back bit-exact
+		// PERF(mips): with room on scratch nothing is dropped.
+		assert_eq!(stats.evicted_tiles, 0, "a derived tile was dropped although scratch had room");
+		// Every tile comes back bit-exact.
 		for (i, handle) in keep.iter().enumerate() {
 			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
 		}
-		// evicted derived tiles report Evicted, never wrong data
 		for (i, handle) in derived.iter().enumerate() {
-			match store.get(handle) {
-				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, 100 + i as u8).bytes()),
-				Err(TileError::Evicted) => {}
-				Err(e) => panic!("unexpected error {e}"),
-			}
+			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, 100 + i as u8).bytes());
 		}
 	}
 
@@ -1208,17 +1334,43 @@ mod tests {
 	// VERIFY-FIX(P1): past the warm budget a derived tile is dropped, never
 	// written to scratch (only authoritative tiles go there).
 	#[test]
-	fn derived_tiles_never_reach_scratch() {
+	fn derived_tiles_spill_to_scratch_and_come_back() {
+		// PERF(mips): a mip past the warm budget goes to scratch like pixels
+		// (one read to bring back, instead of recomputing it from level 0).
 		let store = store();
 		let derived: Vec<_> = (0..12).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Derived)).collect();
 		store.trim();
 		store.trim();
 		let stats = store.stats();
-		assert_eq!(stats.cold_bytes, 0, "a derived tile was written to scratch");
-		assert!(stats.evicted_tiles >= 1, "incompressible derived tiles past the warm budget are dropped");
+		assert!(stats.cold_bytes > 0, "incompressible derived tiles past the warm budget reach scratch");
+		assert_eq!(stats.evicted_tiles, 0);
+		for (i, handle) in derived.iter().enumerate() {
+			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
+		}
+	}
+
+	#[test]
+	fn a_full_scratch_drops_derived_tiles_and_keeps_pixels() {
+		let dir = std::env::temp_dir().join("fx-tiles-tests-full");
+		let store = TileStore::new(TileStoreConfig {
+			// Room on scratch for about two incompressible RGBA16 tiles.
+			scratch_limit: 2 * 512 * 1024 + 4096,
+			..TileStoreConfig::for_tests(dir)
+		})
+		.unwrap();
+		let pixels: Vec<_> = (0..6).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
+		let derived: Vec<_> = (0..10).map(|i| store.insert(noise(PixelFormat::Rgba16, 50 + i), TileClass::Derived)).collect();
+		store.trim();
+		store.trim();
+		let stats = store.stats();
+		assert!(stats.evicted_tiles >= 1, "with scratch full, derived tiles are dropped");
+		// Pixels are never lost; derived tiles are exact or Evicted.
+		for (i, handle) in pixels.iter().enumerate() {
+			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
+		}
 		for (i, handle) in derived.iter().enumerate() {
 			match store.get(handle) {
-				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, i as u8).bytes()),
+				Ok(buffer) => assert_eq!(buffer.bytes(), noise(PixelFormat::Rgba16, 50 + i as u8).bytes()),
 				Err(TileError::Evicted) => {}
 				Err(e) => panic!("unexpected error {e}"),
 			}
@@ -1244,6 +1396,45 @@ mod tests {
 		for (i, handle) in handles.iter().enumerate() {
 			assert_eq!(store.get(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
 		}
+	}
+
+	#[test]
+	fn a_streaming_read_leaves_the_tiers_alone() {
+		let store = store();
+		let handles: Vec<_> = (0..40).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
+		store.trim();
+		let before = store.stats();
+		assert!(before.cold_tiles > 0 && before.warm_tiles > 0);
+		for (i, handle) in handles.iter().enumerate() {
+			assert_eq!(store.get_streaming(handle).unwrap().bytes(), noise(PixelFormat::Rgba16, i as u8).bytes());
+		}
+		let after = store.stats();
+		assert_eq!(
+			(after.hot_tiles, after.warm_tiles, after.cold_tiles),
+			(before.hot_tiles, before.warm_tiles, before.cold_tiles),
+			"no tile moved between tiers"
+		);
+	}
+
+	#[test]
+	fn read_streaming_reuses_buffers_and_leaves_the_tiers_alone() {
+		let store = store();
+		let handles: Vec<_> = (0..40).map(|i| store.insert(noise(PixelFormat::Rgba16, i), TileClass::Authoritative)).collect();
+		store.trim();
+		let before = store.stats();
+		assert!(before.hot_tiles > 0 && before.warm_tiles > 0 && before.cold_tiles > 0, "every tier is exercised");
+		let mut buffers = StreamBuffers::default();
+		for (i, handle) in handles.iter().enumerate() {
+			let same = store.read_streaming(handle, &mut buffers, |bytes| bytes == noise(PixelFormat::Rgba16, i as u8).bytes()).unwrap();
+			assert!(same, "tile {i}");
+		}
+		let after = store.stats();
+		assert_eq!(
+			(after.hot_tiles, after.warm_tiles, after.cold_tiles),
+			(before.hot_tiles, before.warm_tiles, before.cold_tiles),
+			"no tile moved between tiers"
+		);
+		assert_eq!(buffers.pixels.len(), PixelFormat::Rgba16.tile_bytes(), "one pixel buffer, reused");
 	}
 
 	#[test]
